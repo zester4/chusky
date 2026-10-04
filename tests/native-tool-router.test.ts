@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import { JevClient } from "../src/decisions/jev.js";
-import { computeNativeToolRoute, nativeToolManifest, routeNativeToolsForTurn, searchNativeToolManifest } from "../src/decisions/nativeToolRouter.js";
+import { computeNativeToolRoute, nativeToolManifest, routeNativeToolsForTurn, searchComposioGatewayManifest, searchNativeToolManifest } from "../src/decisions/nativeToolRouter.js";
 
 const mutableConfig = config as unknown as Record<string, unknown>;
 
@@ -74,7 +74,7 @@ test("an explicit Jev abstention creates a discovery-only native route", async (
   const restore = withConfig({ nativeToolLoading: "bundle", jevMode: "enforce", jevSurfaces: new Set(["native"]), jevNativeToolRouting: true });
   try {
     const route = await routeNativeToolsForTurn(tools(), "What is the best way to phrase this reply?", { client: new JevClient({ apiKey: "k", fetchImpl: chooseNoTool() }) });
-    assert.equal(route.noTool, true);
+    assert.equal(route.noNativeTool, true);
     assert.deepEqual(route.selected, ["CHUCK_FIND_TOOLS"]);
     assert.equal(route.tools.filter((tool: any) => tool.function.name.startsWith("CHUCK_")).length, 1);
   } finally { restore(); }
@@ -251,4 +251,10 @@ test("native routing falls back when no request signal matches the local catalog
     assert.equal(route.tools, all);
     assert.equal(route.fallbackReason, "no_native_candidate_set");
   } finally { restore(); }
+});
+
+test("native discovery reveals only the allowed Composio gateway entries", () => {
+  const results = searchComposioGatewayManifest("check Gmail and send the report", new Set(["COMPOSIO_SEARCH_TOOL", "COMPOSIO_EXECUTE_TOOL"]));
+  assert.deepEqual(results.map((item) => item.slug), ["COMPOSIO_SEARCH_TOOL", "COMPOSIO_EXECUTE_TOOL"]);
+  assert.deepEqual(searchComposioGatewayManifest("tell me a joke", new Set(["COMPOSIO_SEARCH_TOOL"])), []);
 });

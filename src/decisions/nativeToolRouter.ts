@@ -40,8 +40,9 @@ export type NativeToolRoute = {
   source: "jev" | "fallback";
   candidateCount: number;
   selected: string[];
-  /** Jev explicitly abstained; the agent may expose discovery only. */
-  noTool?: boolean;
+  /** Jev established that no native tool is needed; this says nothing about connected apps. */
+  noNativeTool?: boolean;
+  noNativeToolConfidence?: number;
   fallbackReason?: string;
   telemetry?: {
     latencyMs: number;
@@ -170,13 +171,14 @@ function bundleFallbackRoute(tools: ToolSchema[], query: string, reason: string)
   return { tools: modelToolsForSelection(tools, selected), source: "fallback", candidateCount: tools.filter((tool) => descriptorBySlug.has(toolName(tool))).length, selected: [...selected], fallbackReason: reason };
 }
 
-function noToolRoute(tools: ToolSchema[], reason: string): NativeToolRoute {
+function noNativeToolRoute(tools: ToolSchema[], reason: string, confidence = 1, reduce = true): NativeToolRoute {
   return {
-    tools: modelToolsForSelection(tools, new Set(["CHUCK_FIND_TOOLS"])),
+    tools: reduce ? modelToolsForSelection(tools, new Set(["CHUCK_FIND_TOOLS"])) : tools,
     source: "fallback",
     candidateCount: tools.filter((tool) => descriptorBySlug.has(toolName(tool))).length,
     selected: ["CHUCK_FIND_TOOLS"],
-    noTool: true,
+    noNativeTool: true,
+    noNativeToolConfidence: confidence,
     fallbackReason: reason,
   };
 }
@@ -192,6 +194,18 @@ export function searchNativeToolManifest(query: string, bundle?: NativeToolBundl
     .sort((a, b) => b.score - a.score || a.item.slug.localeCompare(b.item.slug))
     .slice(0, bounded)
     .map(({ item }) => ({ slug: item.slug, description: item.description, bundle: item.bundle, risk: item.risk }));
+}
+
+export function searchComposioGatewayManifest(query: string, allowed?: ReadonlySet<string>): NativeToolSearchResult[] {
+  if (!/\b(?:email|gmail|outlook|slack|notion|calendar|github|crm|message|send|post|publish|app|connected|account)\b/i.test(query)) return [];
+  const entries: NativeToolSearchResult[] = [
+    { slug: "COMPOSIO_SEARCH_TOOL", description: "Search connected-app actions by capability.", bundle: "workspace", risk: "read" },
+    { slug: "COMPOSIO_GET_TOOL_SCHEMAS", description: "Load the exact schema for a connected-app action.", bundle: "workspace", risk: "read" },
+    { slug: "COMPOSIO_EXECUTE_TOOL", description: "Execute one verified connected-app action.", bundle: "workspace", risk: "write" },
+    { slug: "COMPOSIO_MULTI_EXECUTE_TOOL", description: "Execute bounded connected-app actions with verification.", bundle: "workspace", risk: "write" },
+    { slug: "COMPOSIO_MANAGE_CONNECTIONS", description: "Inspect or manage the owner’s connected-app authorization.", bundle: "workspace", risk: "high_impact" },
+  ];
+  return entries.filter((item) => !allowed || allowed.has(item.slug));
 }
 
 function candidateSet(tools: ToolSchema[], query: string): { candidates: NativeToolDescriptor[]; matched: boolean } {
@@ -264,13 +278,13 @@ export async function computeNativeToolRoute(query: string, tools: ToolSchema[],
   const baseline = baselineRoute(tools);
   if (config.nativeToolLoading === "bundle" && !options.preserveAll) {
     const quick = candidateSet(tools, [query, options.recentContext].filter(Boolean).join("\n"));
-    if (!quick.matched || quick.candidates.length < 2) return bundleFallbackRoute(tools, query, "bundle_no_native_candidate_set");
+    if (!quick.matched || quick.candidates.length < 2) return noNativeToolRoute(tools, "no_native_candidate_set", 1, false);
   }
   const availableNative = tools.filter((tool) => descriptorBySlug.has(toolName(tool)));
   if (!availableNative.length) return baseline;
   const routingContext = [query, options.recentContext].filter(Boolean).join("\n");
   const candidates = candidateSet(tools, routingContext);
-  if (!candidates.matched || candidates.candidates.length < 2) return config.nativeToolLoading === "bundle" && !options.preserveAll ? bundleFallbackRoute(tools, routingContext, "bundle_no_native_candidate_set") : { ...baseline, fallbackReason: "no_native_candidate_set" };
+  if (!candidates.matched || candidates.candidates.length < 2) return noNativeToolRoute(tools, "no_native_candidate_set", 1, false);
   const client = options.client ?? jevClient();
   const state = {
     request: jevText(query, 3_000),
@@ -283,7 +297,7 @@ export async function computeNativeToolRoute(query: string, tools: ToolSchema[],
       id: item.slug,
       description: `${item.bundle} ${item.risk} tool: ${item.description}`,
     })),
-    noneDescription: "No native tool is needed: answer conversationally or use another already-routed capability.",
+    noneDescription: "None of these native Chusky tools is needed for this request.",
     signal: options.signal,
     maxPerQuestion: Math.max(8, config.jevNativeToolMaxCandidates),
     sessionId: options.sessionId,
@@ -292,7 +306,7 @@ export async function computeNativeToolRoute(query: string, tools: ToolSchema[],
   if (!best || ranking.confidence < config.jevNativeToolMinConfidence || ranking.none >= ranking.confidence) {
     if (ranking.none >= ranking.confidence && !options.preserveAll) {
       return {
-        ...noToolRoute(tools, "jev_no_tool_needed"),
+        ...noNativeToolRoute(tools, "jev_no_native_tool_needed", ranking.none),
         candidateCount: candidates.candidates.length,
         telemetry: { latencyMs: ranking.latencyMs, costUsd: ranking.costUsd, ranked: ranking.ranked },
       };
@@ -371,7 +385,7 @@ export async function routeNativeToolsForTurn(tools: ToolSchema[], query: string
       route
       && config.nativeToolLoading === "bundle"
       && !options.preserveAll
-      && (route.noTool || route.fallbackReason?.startsWith("bundle_"))
+      && (route.noNativeTool || route.fallbackReason?.startsWith("bundle_"))
       && route.tools.length < tools.length,
     );
     recordDecision({
@@ -387,7 +401,7 @@ export async function routeNativeToolsForTurn(tools: ToolSchema[], query: string
       exposedTools: route?.tools.length,
       baselineTools: tools.length,
       loading: config.nativeToolLoading,
-      noTool: route?.noTool,
+      noNativeTool: route?.noNativeTool,
     });
   };
   if (mode === "shadow") {
