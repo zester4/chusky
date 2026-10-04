@@ -673,6 +673,7 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   durableStateEnabled: optional("DURABLE_STATE_ENABLED", "false") === "true",
   durableStateDatabaseUrl: optional("DURABLE_STATE_DATABASE_URL", ""),
   durableStateMigrationDatabaseUrl: optional("DURABLE_STATE_MIGRATION_DATABASE_URL", ""),
+  durableStorageMetricsEnabled: optional("DURABLE_STORAGE_METRICS_ENABLED", "false") === "true",
   // Per-run SDK records require migration 0002; cut over independently after it is applied.
   durableStateSdkRunsEnabled: optional("DURABLE_STATE_SDK_RUNS_ENABLED", "false") === "true",
   // Neon is canonical per owner only after that owner's mission backfill marker exists.

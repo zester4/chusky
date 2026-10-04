@@ -154,9 +154,15 @@ export class RedisCommandMetrics {
     return Object.fromEntries(REDIS_METRIC_FAMILIES.map((family) => [family, { ...this.values[family] }])) as RedisCommandMetricsSnapshot;
   }
 
-  flatten(): Record<string, number> {
+  takeSnapshot(): RedisCommandMetricsSnapshot {
+    const snapshot = this.snapshot();
+    for (const family of REDIS_METRIC_FAMILIES) this.values[family] = EMPTY_METRICS();
+    return snapshot;
+  }
+
+  flatten(snapshot: RedisCommandMetricsSnapshot = this.values): Record<string, number> {
     return Object.fromEntries(REDIS_METRIC_FAMILIES.flatMap((family) =>
-      Object.entries(this.values[family]).map(([metric, value]) => [`redis.${family}.${metric}`, value]),
+      Object.entries(snapshot[family]).map(([metric, value]) => [`redis.${family}.${metric}`, value]),
     ));
   }
 }

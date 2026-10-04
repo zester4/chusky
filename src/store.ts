@@ -11,6 +11,7 @@ import { HOT_CONVERSATION_MESSAGES, joinSessionDomains, sessionUsesNeonDomains, 
 import { normalizeVoiceCallProfile, type VoiceCallProfile } from "./calls/voiceProfile.js";
 import { logger } from "./logger.js";
 import { instrumentRedisClient, RedisCommandMetrics } from "./redisMetrics.js";
+import { flattenStorageMetricTotals, RedisMetricsPublisher } from "./redisMetricsPublisher.js";
 import { recordFailure, recordVectorFailure } from "./monitoring.js";
 import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channels/contracts.js";
 import type { ApprovalPolicy, HandoffRecord, WorkerDuration } from "./subagents/contracts.js";
@@ -1617,6 +1618,7 @@ export interface ChannelInboundEventRecord {
 
 interface Backend {
   close(): Promise<void>;
+  flushStorageMetrics?(): Promise<void>;
   getSession(userId: number): Promise<UserSession>;
   saveSession(userId: number, s: UserSession): Promise<void>;
   readConversationBefore(userId: number, before: { createdAt: number; id: string }, limit: number): Promise<DurableConversationMessage[] | undefined>;
@@ -1945,10 +1947,13 @@ function boundedAgentRun(record: AgentRunRecord): AgentRunRecord {
 // ── Redis ─────────────────────────────────────────────────────────────────────
 class RedisBackend implements Backend {
   private readonly durableStorageMetrics = { redisSessionCommands: 0, redisSessionBytesRead: 0, redisSessionBytesWritten: 0, redisDomainCacheHits: 0, redisDomainCacheMisses: 0, redisSessionCoreBytes: 0, redisDomainCacheBytes: 0 };
-  constructor(private r: Redis, private readonly durableState?: NeonDurableState, private readonly durableSdkRunsEnabled = false, private readonly durableStateMissionsEnabled = false, private readonly redisCommandMetrics = new RedisCommandMetrics()) {}
+  constructor(private r: Redis, private readonly durableState?: NeonDurableState, private readonly durableSdkRunsEnabled = false, private readonly durableStateMissionsEnabled = false, private readonly redisCommandMetrics = new RedisCommandMetrics(), private readonly redisMetricsPublisher?: RedisMetricsPublisher) {}
 
   private async missionOwnerUsesNeon(userId: number): Promise<boolean> {
     return this.durableStateMissionsEnabled && Boolean(this.durableState) && await this.durableState!.isMissionOwnerMigrated(userId);
+  }
+  async flushStorageMetrics(): Promise<void> {
+    await this.redisMetricsPublisher?.flush();
   }
   async close(): Promise<void> {
     try { await this.r.quit(); }
@@ -1965,7 +1970,21 @@ class RedisBackend implements Backend {
   async getDurableStorageMetrics(): Promise<Record<string, number>> {
     const { redisDomainCacheHits, redisDomainCacheMisses, ...redis } = this.durableStorageMetrics;
     const attempts = redisDomainCacheHits + redisDomainCacheMisses;
-    return { ...this.redisCommandMetrics.flatten(), ...redis, redisDomainCacheHits, redisDomainCacheMisses, redisDomainCacheHitRatio: attempts ? redisDomainCacheHits / attempts : 0, ...(this.durableState?.getMetrics() ?? {}) };
+    let persisted: Record<string, number> = {};
+    if (this.redisMetricsPublisher) {
+      try {
+        const totals1d = await this.redisMetricsPublisher.totals(1);
+        const totals30d = await this.redisMetricsPublisher.totals(30);
+        if (totals1d) Object.assign(persisted, flattenStorageMetricTotals(totals1d, "1d"));
+        if (totals30d) Object.assign(persisted, flattenStorageMetricTotals(totals30d, "30d"));
+        persisted["redis.persisted.available"] = 1;
+      } catch {
+        persisted["redis.persisted.available"] = 0;
+        persisted["redis.persisted.query_errors"] = 1;
+      }
+    }
+    const localSnapshot = this.redisMetricsPublisher?.unflushedSnapshot() ?? this.redisCommandMetrics.snapshot();
+    return { ...this.redisCommandMetrics.flatten(localSnapshot), ...persisted, ...redis, redisDomainCacheHits, redisDomainCacheMisses, redisDomainCacheHitRatio: attempts ? redisDomainCacheHits / attempts : 0, ...(this.durableState?.getMetrics() ?? {}) };
   }
   getObjectMetadata(userId: number, objectId: string): Promise<DurableObjectMetadata | undefined> {
     return this.durableState?.getObjectMetadata(userId, objectId) ?? Promise.resolve(undefined);
@@ -4418,6 +4437,7 @@ function fresh(): UserSession {
 }
 
 let backend: Backend;
+let redisMetricsFlushTimer: NodeJS.Timeout | undefined;
 const memoryVectorBackfillUsers = new Set<number>();
 const memoryVectorBackfillRetryAt = new Map<number, number>();
 
@@ -4430,6 +4450,9 @@ function deferMemoryVectorBackfill(uid: number): void {
 }
 
 export async function initStore(options: { memoryOnly?: boolean } = {}): Promise<void> {
+  if (redisMetricsFlushTimer) clearInterval(redisMetricsFlushTimer);
+  redisMetricsFlushTimer = undefined;
+  await backend?.flushStorageMetrics?.();
   const production = process.env.NODE_ENV === "production";
   if ((config.webhookUrl || production) && !config.redisUrl && !options.memoryOnly) {
     const error = new Error("REDIS_URL is required in webhook/production mode; refusing in-memory persistence");
@@ -4453,10 +4476,17 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
   if (!options.memoryOnly && config.durableStateMissionsEnabled && !config.durableStateEnabled) {
     throw new Error("DURABLE_STATE_ENABLED=true is required when DURABLE_STATE_MISSIONS_ENABLED=true.");
   }
+  if (!options.memoryOnly && config.durableStorageMetricsEnabled && !config.durableStateEnabled) {
+    throw new Error("DURABLE_STATE_ENABLED=true is required when DURABLE_STORAGE_METRICS_ENABLED=true.");
+  }
+  if (!options.memoryOnly && config.durableStorageMetricsEnabled && !config.redisUrl) {
+    throw new Error("REDIS_URL is required when DURABLE_STORAGE_METRICS_ENABLED=true.");
+  }
   if (!options.memoryOnly && config.durableStateEnabled) await durableState!.assertSessionSchema();
   if (!options.memoryOnly && config.durableStateSdkRunsEnabled) await durableState!.assertSdkRunSchema();
   if (!options.memoryOnly && config.durableObjectCatalogEnabled) await durableState!.assertObjectMetadataSchema();
   if (!options.memoryOnly && config.durableStateMissionsEnabled) await durableState!.assertMissionSchema();
+  if (!options.memoryOnly && config.durableStorageMetricsEnabled) await durableState!.assertStorageMetricsSchema();
   if (config.redisUrl && !options.memoryOnly) {
     try {
       const r = new Redis(config.redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
@@ -4475,7 +4505,21 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
       await r.ping();
       const redisCommandMetrics = new RedisCommandMetrics();
       instrumentRedisClient(r as unknown as Parameters<typeof instrumentRedisClient>[0], redisCommandMetrics);
-      backend = new RedisBackend(r, durableState, config.durableStateSdkRunsEnabled, config.durableStateMissionsEnabled, redisCommandMetrics);
+      const redisMetricsPublisher = !options.memoryOnly && config.durableStorageMetricsEnabled && durableState
+        ? new RedisMetricsPublisher(redisCommandMetrics,
+          (instanceId, batchId, observedAt, samples) => durableState.recordStorageMetricBatch(instanceId, batchId, observedAt, samples),
+          {
+            readTotals: (sinceMs, windowDays) => durableState.storageMetricTotals(sinceMs, windowDays),
+            prune: (beforeMs, limit) => durableState.pruneStorageMetrics(beforeMs, limit),
+            onError: (error, phase) => logger.warn({ phase, errorType: error instanceof Error ? error.name : "StorageMetricsError" }, "Durable storage metrics persistence failed"),
+          })
+        : undefined;
+      backend = new RedisBackend(r, durableState, config.durableStateSdkRunsEnabled, config.durableStateMissionsEnabled, redisCommandMetrics, redisMetricsPublisher);
+      if (redisMetricsPublisher) {
+        redisMetricsFlushTimer = setInterval(() => { void redisMetricsPublisher.flush(); }, 60_000);
+        redisMetricsFlushTimer.unref();
+        void redisMetricsPublisher.flush();
+      }
       logger.info("Store: Redis connected");
       return;
     } catch (e) {
@@ -4493,8 +4537,18 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
 }
 
 export async function closeStore(): Promise<void> {
-  await backend.close();
-  backend = new MemoryBackend();
+  if (redisMetricsFlushTimer) clearInterval(redisMetricsFlushTimer);
+  redisMetricsFlushTimer = undefined;
+  const currentBackend = backend;
+  try {
+    await currentBackend.flushStorageMetrics?.();
+  } finally {
+    try {
+      await currentBackend.close();
+    } finally {
+      backend = new MemoryBackend();
+    }
+  }
 }
 
 export function isDurableStore(): boolean {
