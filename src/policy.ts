@@ -133,8 +133,7 @@ const AUTONOMOUS_CONTROL_TOOLS = new Set([
 
 const PRIVATE_COMPOSIO_META_TOOLS = new Set([
   "COMPOSIO_MANAGE_CONNECTIONS", "COMPOSIO_REMOTE_BASH_TOOL",
-  "COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_SEARCH_TOOL",
-  "COMPOSIO_SEARCH_TOOLS", "COMPOSIO_SEARCH_WEB",
+  "COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_SEARCH_TOOLS", "COMPOSIO_SEARCH_WEB",
   "COMPOSIO_SEARCH_FETCH_URL_CONTENT", "COMPOSIO_GET_TOOL_SCHEMAS",
 ]);
 
@@ -243,7 +242,6 @@ const STATUSES: Record<string, string> = {
   COMPOSIO_MANAGE_CONNECTIONS: "🔗 I’m opening the connection screen…",
   COMPOSIO_REMOTE_BASH_TOOL: "🖥️ I’m running that command…",
   COMPOSIO_REMOTE_WORKBENCH: "🛠️ I’m working in my remote workspace…",
-  COMPOSIO_SEARCH_TOOL: "🔎 I’m finding the right connected capability…",
   COMPOSIO_SEARCH_TOOLS: "🔎 I’m finding the right connected capability…",
   COMPOSIO_SEARCH_WEB: "🌐 I’m searching the live web…",
   COMPOSIO_SEARCH_FETCH_URL_CONTENT: "🔗 I’m reading that URL…",

@@ -2235,7 +2235,7 @@ export async function runAgent(
   // Composio sessions expose discovery and execution meta-tools by default.
   // Keep the model context bounded: direct actions explicitly allowlisted for
   // this run remain available, while the model can discover any other action
-  // through COMPOSIO_SEARCH_TOOL and execute it through the session.
+  // through COMPOSIO_SEARCH_TOOLS and execute it through the session.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fullComposioTools: any[] = sessionObj ? await sessionObj.tools() : [];
   fullComposioTools.forEach((tool: unknown) => registerComposioToolMetadata(tool));
@@ -2766,7 +2766,7 @@ export async function runAgent(
       imageComposioDirectActionGuidanceAdded = true;
     }
     const revealed = availableTools.filter((tool) => revealedNativeTools.has(toolSchemaName(tool)));
-    const composioGateway = new Set(["COMPOSIO_SEARCH_TOOL", "COMPOSIO_SEARCH_TOOLS", "COMPOSIO_EXECUTE_TOOL", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_MANAGE_CONNECTIONS"]);
+    const composioGateway = new Set(["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_EXECUTE_TOOL", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_MANAGE_CONNECTIONS"]);
     const missionPreloadNames = new Set(options?.missionToolHints ?? []);
     const preloadedMissionTools = missionPreloadNames.size
       ? availableTools.filter((tool) => missionPreloadNames.has(toolSchemaName(tool)))

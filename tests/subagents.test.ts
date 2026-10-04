@@ -112,7 +112,6 @@ test("gives Nora only scoped Composio research-provider families", () => {
     assert.equal(isComposioToolAllowedForWorker("nora", tool), false, `${tool} can escape Nora's exact action scope`);
   }
   assert.equal(isComposioToolAllowedForWorker("nora", "COMPOSIO_SEARCH_TOOLS"), false, "Nora must request tool discovery from Chusky");
-  assert.equal(isComposioToolAllowedForWorker("nora", "COMPOSIO_SEARCH_TOOL"), false, "Nora must not use the legacy search alias");
   for (const tool of ["GITHUB_CREATE_PULL_REQUEST"]) {
     assert.equal(isComposioToolAllowedForWorker("nora", tool), false, `${tool} must not be available to Nora`);
   }

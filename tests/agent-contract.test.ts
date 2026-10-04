@@ -102,7 +102,7 @@ test("mission provider allowlists receive the routed direct action schema", asyn
     additionalProperties: false,
   };
   const sessionTools = [
-    { type: "function", function: { name: "COMPOSIO_SEARCH_TOOL", parameters: { type: "object" } } },
+    { type: "function", function: { name: "COMPOSIO_SEARCH_TOOLS", parameters: { type: "object" } } },
     ...Array.from({ length: 85 }, (_, index) => ({ type: "function", function: { name: `COMPOSIO_TEST_META_${index}`, parameters: { type: "object" } } })),
   ];
   const session = {
@@ -176,7 +176,7 @@ test("mission provider allowlists resolve an exact schema when the session expos
     additionalProperties: false,
   };
   const sessionTools = [
-    { type: "function", function: { name: "COMPOSIO_SEARCH_TOOL", parameters: { type: "object" } } },
+    { type: "function", function: { name: "COMPOSIO_SEARCH_TOOLS", parameters: { type: "object" } } },
     ...Array.from({ length: 85 }, (_, index) => ({ type: "function", function: { name: `COMPOSIO_TEST_META_${index}`, parameters: { type: "object" } } })),
   ];
   const session = {
