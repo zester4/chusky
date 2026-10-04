@@ -12,7 +12,7 @@ import { addRecallMeeting, authenticateCliToken, completeMissionStep, createAppr
 import { redeemLinkCode } from "../src/channels/identity.js";
 import { appendTraceEvent, queueCompensation, saveOutcomeVerification } from "../src/reliability/persistence.js";
 import { resetTriggerCatalogueForTests } from "../src/triggerCatalog.js";
-import { acquireUserLock, releaseUserLock } from "../src/store.js";
+import { acquireUserLock, mutateSession, releaseUserLock } from "../src/store.js";
 
 beforeEach(async () => {
   (config as { apiKey: string }).apiKey = "sdk-test-key";
@@ -1235,6 +1235,18 @@ test("root key provisions hash-only project keys with isolated SDK users and rev
   assert.equal(denied.status, 401);
   const projects = await api.fetch(new Request("http://local/v1/admin/projects", { headers: root }));
   assert.equal(JSON.stringify(await projects.json()).includes(project.key), false);
+});
+
+test("concurrent SDK audit-style session mutations retain every appended record", async () => {
+  const ownerId = 831_999;
+  await Promise.all(Array.from({ length: 20 }, (_, index) => mutateSession(ownerId, (session) => {
+    session.sdkAudit ??= [];
+    session.sdkAudit.push({ id: `audit_test_${index}`, action: "POST /test", requestId: `request_${index}`, status: 200, at: index });
+  })));
+
+  const audit = (await getSession(ownerId)).sdkAudit ?? [];
+  assert.equal(audit.length, 20);
+  assert.deepEqual(new Set(audit.map((entry) => entry.id)), new Set(Array.from({ length: 20 }, (_, index) => `audit_test_${index}`)));
 });
 
 test("root-only admin routes never require an SDK end-user header", async () => {
