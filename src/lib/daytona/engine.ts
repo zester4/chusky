@@ -1248,6 +1248,56 @@ function presentationImageMime(path: string): string {
   return "image/png";
 }
 
+type PresentationImageDimensions = { width: number; height: number };
+
+function presentationImageDimensions(bytes: Buffer): PresentationImageDimensions | undefined {
+  if (bytes.length >= 24 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    const width = bytes.readUInt32BE(16);
+    const height = bytes.readUInt32BE(20);
+    return width > 0 && height > 0 ? { width, height } : undefined;
+  }
+  if (bytes.length >= 10 && (bytes.subarray(0, 6).toString("ascii") === "GIF87a" || bytes.subarray(0, 6).toString("ascii") === "GIF89a")) {
+    const width = bytes.readUInt16LE(6);
+    const height = bytes.readUInt16LE(8);
+    return width > 0 && height > 0 ? { width, height } : undefined;
+  }
+  if (bytes.length >= 24 && bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") {
+    if (bytes.subarray(12, 16).toString("ascii") === "VP8X" && bytes.length >= 30) {
+      const width = 1 + bytes[24]! + (bytes[25]! << 8) + (bytes[26]! << 16);
+      const height = 1 + bytes[27]! + (bytes[28]! << 8) + (bytes[29]! << 16);
+      return width > 0 && height > 0 ? { width, height } : undefined;
+    }
+  }
+  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    let offset = 2;
+    while (offset + 9 < bytes.length) {
+      if (bytes[offset] !== 0xff) { offset += 1; continue; }
+      const marker = bytes[offset + 1]!;
+      offset += 2;
+      if (marker === 0xd8 || marker === 0xd9) continue;
+      if (offset + 2 > bytes.length) break;
+      const segmentLength = bytes.readUInt16BE(offset);
+      if (segmentLength < 2 || offset + segmentLength > bytes.length) break;
+      const isStartOfFrame = marker >= 0xc0 && marker <= 0xc3 || marker >= 0xc5 && marker <= 0xc7 || marker >= 0xc9 && marker <= 0xcb || marker >= 0xcd && marker <= 0xcf;
+      if (isStartOfFrame && segmentLength >= 7) {
+        const height = bytes.readUInt16BE(offset + 3);
+        const width = bytes.readUInt16BE(offset + 5);
+        return width > 0 && height > 0 ? { width, height } : undefined;
+      }
+      offset += segmentLength;
+    }
+  }
+  return undefined;
+}
+
+function presentationImagePlacement(dimensions: PresentationImageDimensions | undefined, x: number, y: number, w: number, h: number, fit: "contain" | "cover"): { x: number; y: number; w: number; h: number; sizing?: { type: "cover"; x: number; y: number; w: number; h: number } } {
+  if (fit === "cover" || !dimensions) return { x, y, w, h, sizing: fit === "cover" ? { type: "cover", x, y, w, h } : undefined };
+  const scale = Math.min(w / dimensions.width, h / dimensions.height);
+  const fittedWidth = dimensions.width * scale;
+  const fittedHeight = dimensions.height * scale;
+  return { x: x + (w - fittedWidth) / 2, y: y + (h - fittedHeight) / 2, w: fittedWidth, h: fittedHeight };
+}
+
 function presentationChosenLayout(spec: PresentationSlideInput): PresentationLayout {
   if (spec.layout && spec.layout !== "auto") return spec.layout;
   if (spec.metrics?.length) return "metrics";
@@ -1319,6 +1369,7 @@ async function presentationBytes(sandbox: Sandbox, title: string, slides: Presen
   });
 
   const imageData = new Map<string, string>();
+  const imageDimensions = new Map<string, PresentationImageDimensions | undefined>();
   const loadImage = async (imagePath: string): Promise<string> => {
     const cached = imageData.get(imagePath);
     if (cached) return cached;
@@ -1331,6 +1382,7 @@ async function presentationBytes(sandbox: Sandbox, title: string, slides: Presen
     if (!bytes.length) throw new DaytonaInputError(`Slide image is empty: ${imagePath}`);
     const data = `data:${presentationImageMime(imagePath)};base64,${bytes.toString("base64")}`;
     imageData.set(imagePath, data);
+    imageDimensions.set(imagePath, presentationImageDimensions(bytes));
     return data;
   };
 
@@ -1435,7 +1487,9 @@ async function presentationBytes(sandbox: Sandbox, title: string, slides: Presen
       const w = imageFocus ? 5.15 : 4.3;
       const h = imageFocus ? Math.max(1.25, 4.6 / Math.max(1, images.length)) : Math.max(1.1, 4.8 / Math.max(1, images.length));
       const fit = spec.imageFit ?? (imageFocus ? "cover" : "contain");
-      slide.addImage({ data: await loadImage(imagePath), x, y, w, h, sizing: { type: fit, x, y, w, h }, altText: spec.imageAltTexts?.[index] ?? `Image ${index + 1} for ${spec.title}` });
+      const image = await loadImage(imagePath);
+      const placement = presentationImagePlacement(imageDimensions.get(imagePath), x, y, w, h, fit);
+      slide.addImage({ data: image, ...placement, altText: spec.imageAltTexts?.[index] ?? `Image ${index + 1} for ${spec.title}` });
     }
     if (spec.notes) slide.addNotes(spec.notes);
   }
@@ -2305,6 +2359,7 @@ export class DaytonaEngine {
         { name: "lint", command: "npm run lint --if-present", required: false },
         { name: "test", command: "npm run test --if-present -- --run", required: false },
         { name: "build", command: "npm run build", required: true },
+        { name: "ui-contract", command: "grep -R -q 'data-state-contract' src app 2>/dev/null && grep -R -q 'state-loading' src app 2>/dev/null && grep -R -q 'state-empty' src app 2>/dev/null && grep -R -q 'state-error' src app 2>/dev/null && grep -R -q 'state-success' src app 2>/dev/null && grep -R -q 'composition-' src app 2>/dev/null && grep -R -q 'prefers-reduced-motion' src app 2>/dev/null && grep -R -q 'focus-visible' src app 2>/dev/null && grep -R -q '@media' src app 2>/dev/null", required: true },
       ];
       const checks: DaytonaAppCheck[] = [];
       for (const check of commands) {
@@ -2317,6 +2372,12 @@ export class DaytonaEngine {
           completedAt: Date.now(),
         });
       }
+      const customizationCheck = await this.execute(userId, "git status --porcelain --untracked-files=all", app.path, 60);
+      const customization = {
+        status: customizationCheck.exitCode === 0 && customizationCheck.output.trim().length > 0 ? "detected" as const : "pending" as const,
+        ...(customizationCheck.output.trim() ? { output: customizationCheck.output.slice(-2000) } : {}),
+        checkedAt: Date.now(),
+      };
       const passed = checks.every((check) => check.status !== "failed");
       const verification: DaytonaAppVerification = {
         status: passed ? "passed" : "failed",
@@ -2326,6 +2387,7 @@ export class DaytonaEngine {
       return update(index, {
         ...app,
         status: passed ? "verified" : "failed",
+        customization,
         verification,
         release: { status: "not_requested" },
         updatedAt: Date.now(),
@@ -2353,7 +2415,11 @@ export class DaytonaEngine {
       const scaffold = appScaffoldCommand(framework, id);
       const run = await this.execute(userId, scaffold, undefined, 900);
       if (run.exitCode !== 0) throw new DaytonaInputError(appScaffoldFailure(run.output));
-      const files = buildAppTemplateFiles(framework, archetype, style, id);
+      const productName = args.productName === undefined ? id : boundedText(args.productName, "productName", 80);
+      const brief = args.brief === undefined ? undefined : boundedText(args.brief, "brief", 500);
+      const audience = args.audience === undefined ? undefined : boundedText(args.audience, "audience", 120);
+      const primaryAction = args.primaryAction === undefined ? undefined : boundedText(args.primaryAction, "primaryAction", 80);
+      const files = buildAppTemplateFiles(framework, archetype, style, id, { projectName: productName, brief, audience, primaryAction });
       for (const [relativePath, content] of Object.entries(files)) await this.writeFile(userId, `${path}/${relativePath}`, content);
       const resolvedStyle = resolveAppDesign(archetype, style).style;
       // Keep generated work isolated from the outset. It is local-only: remote
@@ -2361,12 +2427,16 @@ export class DaytonaEngine {
       const gitSetup = await this.execute(userId, `git init -b main && git add -A && git -c user.name=Chusky -c user.email=chusky@localhost commit -m "chore: scaffold ${id}" && git checkout -b ${branch}`, path, 120);
       if (gitSetup.exitCode !== 0) throw new DaytonaInputError(`App scaffold completed but local project branch setup failed: ${gitSetup.output.slice(-800)}`);
       const app: DaytonaAppRecord = {
-        id, framework, archetype, style: resolvedStyle, path, branch, port: framework === "vite-react" ? 5173 : 3000,
-        status: "scaffolded", verification: { status: "pending", checks: [] }, release: { status: "not_requested" },
+        id, framework, productName, ...(brief ? { brief } : {}), ...(audience ? { audience } : {}), ...(primaryAction ? { primaryAction } : {}), archetype, style: resolvedStyle, path, branch, port: framework === "vite-react" ? 5173 : 3000,
+        status: "scaffolded", customization: { status: "pending", checkedAt: Date.now() }, verification: { status: "pending", checks: [] }, release: { status: "not_requested" },
         createdAt: Date.now(), updatedAt: Date.now(),
       };
       await saveApps([...apps, app]);
-      return result(app, `${run.output}\n${gitSetup.output}`.slice(-DAYTONA_MAX_OUTPUT_CHARS));
+      return result(app, [
+        run.output,
+        gitSetup.output,
+        "Starter scaffold created. This is a foundation, not a finished deliverable: customize the copy, information hierarchy, sample data, interactions, and visual assets for the user's brief before sharing a preview.",
+      ].filter(Boolean).join("\n").slice(-DAYTONA_MAX_OUTPUT_CHARS));
     }
     if (!existing) throw new DaytonaInputError(`App '${id}' was not found in this workspace`);
 
@@ -2407,7 +2477,7 @@ export class DaytonaEngine {
       const passed = args.passed === true;
       const verification: DaytonaAppVerification = {
         ...(existing.verification ?? { status: "pending", checks: [] }),
-        visual: { status: passed ? "passed" : "failed", summary, capturedAt: visual.capturedAt, reviewedAt: Date.now() },
+        visual: { status: passed ? "passed" : "failed", summary, capturedAt: visual.capturedAt, reviewedAt: Date.now(), ...(visual.qa ? { qa: visual.qa } : {}) },
       };
       return result(await update(index, { ...existing, status: passed ? "ready_for_review" : "failed", verification, release: { status: "not_requested" }, updatedAt: Date.now() }));
     }
@@ -2415,6 +2485,9 @@ export class DaytonaEngine {
       const verification = existing.verification;
       if (verification?.status !== "passed" || verification.visual?.status !== "passed") {
         throw new DaytonaInputError("Release handoff requires a passing current verification and an honest passing visual review.");
+      }
+      if (existing.customization?.status !== "detected") {
+        throw new DaytonaInputError("Customize the scaffold before release. The source check found no changes beyond the starter foundation.");
       }
       const target = args.target ? boundedText(args.target, "target", 200) : "external deployment";
       return result(await update(index, { ...existing, status: "ready_to_publish", release: { status: "awaiting_approval", target, requestedAt: Date.now() }, updatedAt: Date.now() }));
@@ -2426,6 +2499,7 @@ export class DaytonaEngine {
       // check. Preview is a verification outcome, never a substitute for it.
       app = await verify(index, existing);
       if (app.verification?.status !== "passed") throw new DaytonaInputError("App verification failed. Fix the recorded check output before starting a preview.");
+      if (app.customization?.status !== "detected") throw new DaytonaInputError("Customize the scaffold before starting a preview. Edit the copy, hierarchy, interactions, or visual treatment, then run verify again.");
       // A reviewed or release-ready project can still have its already-checked
       // preview server running. Do not create a duplicate server/port merely
       // because its lifecycle status is more specific than "running".
@@ -2466,7 +2540,17 @@ export class DaytonaEngine {
       throw new DaytonaInputError("E2B did not return a verified app preview screenshot.");
     }
     const screenshot = visual as unknown as DaytonaScreenshotResult & { __browserScreenshot: true };
-    app = await update(index, { ...app, status: "running", previewUrl: url, previewExpiresAt: Date.now() + expiry * 1000, verification: { ...(app.verification as DaytonaAppVerification), visual: { status: "captured", capturedAt: Date.now() } }, updatedAt: Date.now() });
+    const snapshot = await e2bBrowserEngine.browser(userId, { action: "snapshot" }) as any;
+    const accessibleNodes = Array.isArray(snapshot?.accessibility?.children) ? snapshot.accessibility.children.length : 0;
+    const screenshotBytes = Number((screenshot as any).sizeBytes ?? 0);
+    const visualChecks = [
+      screenshotBytes >= 1 ? "screenshot-bytes" : "screenshot-missing",
+      accessibleNodes >= 3 ? "accessible-content" : "accessible-content-missing",
+      /^https:\/\//i.test(url) ? "signed-https-preview" : "signed-preview-missing",
+    ];
+    const visualQaPassed = visualChecks.every((check) => !check.endsWith("missing"));
+    if (!visualQaPassed) throw new DaytonaInputError(`Automated visual preflight failed: ${visualChecks.filter((check) => check.endsWith("missing")).join(", ")}`);
+    app = await update(index, { ...app, status: "running", previewUrl: url, previewExpiresAt: Date.now() + expiry * 1000, verification: { ...(app.verification as DaytonaAppVerification), visual: { status: "captured", capturedAt: Date.now(), qa: { status: "passed", checks: visualChecks } } }, updatedAt: Date.now() });
     return { ...screenshot, app, url, expiresAt: app.previewExpiresAt! };
   }
 

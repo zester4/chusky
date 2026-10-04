@@ -835,7 +835,7 @@ export type DaytonaAppFramework = "vite-react" | "nextjs";
  */
 export type DaytonaAppStatus = "scaffolded" | "verified" | "running" | "ready_for_review" | "ready_to_publish" | "stopped" | "failed";
 export interface DaytonaAppCheck {
-  name: "typecheck" | "lint" | "test" | "build" | "health";
+  name: "typecheck" | "lint" | "test" | "build" | "health" | "ui-contract";
   status: "passed" | "failed" | "skipped";
   output: string;
   completedAt: number;
@@ -844,11 +844,15 @@ export interface DaytonaAppVerification {
   status: "passed" | "failed" | "pending";
   checks: DaytonaAppCheck[];
   verifiedAt?: number;
-  visual?: { status: "captured" | "passed" | "failed"; summary?: string; capturedAt: number; reviewedAt?: number };
+  visual?: { status: "captured" | "passed" | "failed"; summary?: string; capturedAt: number; reviewedAt?: number; qa?: { status: "passed" | "failed"; checks: string[] } };
 }
 export interface DaytonaAppRecord {
   id: string;
   framework: DaytonaAppFramework;
+  productName?: string;
+  brief?: string;
+  audience?: string;
+  primaryAction?: string;
   archetype?: import("./lib/daytona/appTemplates.js").DaytonaAppArchetype;
   style?: import("./lib/daytona/appTemplates.js").ResolvedDaytonaAppStyle;
   path: string;
@@ -856,6 +860,8 @@ export interface DaytonaAppRecord {
   status: DaytonaAppStatus;
   /** Isolated local Git branch; remote push remains an approval-gated action. */
   branch?: string;
+  /** Source-level evidence that the scaffold was changed before preview handoff. */
+  customization?: { status: "pending" | "detected"; output?: string; checkedAt: number };
   verification?: DaytonaAppVerification;
   release?: { status: "not_requested" | "awaiting_approval" | "published"; requestedAt?: number; target?: string };
   ptySessionId?: string;
