@@ -50,6 +50,13 @@ export interface Message {
   createdAt?: number;
   /** Server-only idempotency marker for imported or SDK-run history. */
   sourceId?: string;
+  /** Optional durable scope metadata for bounded conversation retrieval. */
+  scope?: "personal" | "conversation" | "organization" | "project" | "meeting" | "channel";
+  scopeId?: string;
+  conversationId?: string;
+  organizationId?: string;
+  projectId?: string;
+  meetingId?: string;
 }
 
 // Session history is stored in one Redis value. Count-only limits are not
@@ -84,6 +91,12 @@ function compactPersistedMessage(value: unknown, maxChars = PERSISTED_MESSAGE_MA
     content: boundPersistedText(item.content, maxChars),
     ...(typeof item.createdAt === "number" && Number.isFinite(item.createdAt) && item.createdAt >= 0 ? { createdAt: item.createdAt } : {}),
     ...(typeof item.sourceId === "string" && item.sourceId.length <= 160 ? { sourceId: item.sourceId } : {}),
+    ...(item.scope && ["personal", "conversation", "organization", "project", "meeting", "channel"].includes(item.scope) ? { scope: item.scope } : {}),
+    ...(typeof item.scopeId === "string" && item.scopeId.length <= 180 ? { scopeId: item.scopeId } : {}),
+    ...(typeof item.conversationId === "string" && item.conversationId.length <= 180 ? { conversationId: item.conversationId } : {}),
+    ...(typeof item.organizationId === "string" && item.organizationId.length <= 180 ? { organizationId: item.organizationId } : {}),
+    ...(typeof item.projectId === "string" && item.projectId.length <= 180 ? { projectId: item.projectId } : {}),
+    ...(typeof item.meetingId === "string" && item.meetingId.length <= 180 ? { meetingId: item.meetingId } : {}),
   };
 }
 
@@ -8426,6 +8439,71 @@ export async function updateMemory(uid: number, target: { id?: string; key?: str
     ...(updated.reviewAt !== undefined ? { reviewAt: updated.reviewAt } : {}),
     ...(updated.expiresAt !== undefined ? { expiresAt: updated.expiresAt } : {}),
   })).memory;
+}
+
+export type ConversationSearchScope = "personal" | "conversation" | "organization" | "project" | "meeting" | "channel";
+
+export type ConversationSearchResult = {
+  messageId: string;
+  timestamp?: number;
+  conversationId?: string;
+  speaker: Message["role"];
+  snippet: string;
+  score: number;
+};
+
+function conversationMessageId(userId: number, message: Message, index: number): string {
+  return message.id ?? `msg_${createHash("sha256").update(`${userId}:${index}:${message.createdAt ?? 0}:${message.content}`).digest("hex").slice(0, 48)}`;
+}
+
+function conversationScopeMatches(message: Message, scope: ConversationSearchScope, scopeId?: string): boolean {
+  if (scope === "personal") return !message.scope || message.scope === "personal";
+  if (!scopeId) return false;
+  if (message.scope !== scope) return false;
+  if (scope === "conversation") return message.conversationId === scopeId;
+  if (scope === "organization") return message.organizationId === scopeId || message.scopeId === scopeId;
+  if (scope === "project") return message.projectId === scopeId || message.scopeId === scopeId;
+  if (scope === "meeting") return message.meetingId === scopeId || message.scopeId === scopeId;
+  return message.scopeId === scopeId || message.conversationId === scopeId;
+}
+
+function conversationTerms(query: string): string[] {
+  return [...new Set(query.toLowerCase().replace(/[^a-z0-9@._ -]+/g, " ").split(/\s+/).filter((term) => term.length >= 2))].slice(0, 24);
+}
+
+export async function searchConversationMessages(userId: number, query: string, options: { scope?: ConversationSearchScope; scopeId?: string; after?: number; before?: number; limit?: number } = {}): Promise<ConversationSearchResult[]> {
+  const terms = conversationTerms(query.trim());
+  if (!terms.length) return [];
+  const scope = options.scope ?? "personal";
+  const history = (await getSession(userId)).history ?? [];
+  return history.map((message, index) => {
+    if (!conversationScopeMatches(message, scope, options.scopeId)) return undefined;
+    if (options.after !== undefined && (message.createdAt ?? 0) < options.after) return undefined;
+    if (options.before !== undefined && (message.createdAt ?? Number.MAX_SAFE_INTEGER) > options.before) return undefined;
+    const lower = message.content.toLowerCase();
+    const matched = terms.filter((term) => lower.includes(term));
+    if (!matched.length) return undefined;
+    const phraseBoost = lower.includes(query.trim().toLowerCase()) ? 3 : 0;
+    return {
+      messageId: conversationMessageId(userId, message, index),
+      ...(message.createdAt !== undefined ? { timestamp: message.createdAt } : {}),
+      ...(message.conversationId ? { conversationId: message.conversationId } : {}),
+      speaker: message.role,
+      snippet: boundPersistedText(message.content.replace(/\s+/g, " ").trim(), 1_200),
+      score: matched.length + phraseBoost,
+    } satisfies ConversationSearchResult;
+  }).filter((item): item is ConversationSearchResult => Boolean(item)).sort((a, b) => b.score - a.score || (b.timestamp ?? 0) - (a.timestamp ?? 0)).slice(0, Math.max(1, Math.min(20, Math.floor(options.limit ?? 8))));
+}
+
+export async function getConversationMessage(userId: number, messageId: string, options: { scope?: ConversationSearchScope; scopeId?: string } = {}): Promise<(ConversationSearchResult & { content: string }) | undefined> {
+  const scope = options.scope ?? "personal";
+  const history = (await getSession(userId)).history ?? [];
+  for (const [index, message] of history.entries()) {
+    if (!conversationScopeMatches(message, scope, options.scopeId)) continue;
+    if (conversationMessageId(userId, message, index) !== messageId) continue;
+    return { messageId, ...(message.createdAt !== undefined ? { timestamp: message.createdAt } : {}), ...(message.conversationId ? { conversationId: message.conversationId } : {}), speaker: message.role, snippet: boundPersistedText(message.content.replace(/\s+/g, " ").trim(), 1_200), content: message.content, score: 1 };
+  }
+  return undefined;
 }
 
 export async function searchMemories(uid: number, query?: string, options: { category?: MemoryFact["category"]; projectId?: string; organizationId?: string; personKey?: string; sensitivity?: MemoryFact["sensitivity"]; limit?: number } = {}): Promise<MemoryFact[]> {

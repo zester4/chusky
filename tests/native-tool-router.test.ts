@@ -254,7 +254,7 @@ test("native routing falls back when no request signal matches the local catalog
 });
 
 test("native discovery reveals only the allowed Composio gateway entries", () => {
-  const results = searchComposioGatewayManifest("check Gmail and send the report", new Set(["COMPOSIO_SEARCH_TOOL", "COMPOSIO_EXECUTE_TOOL"]));
-  assert.deepEqual(results.map((item) => item.slug), ["COMPOSIO_SEARCH_TOOL", "COMPOSIO_EXECUTE_TOOL"]);
+  const results = searchComposioGatewayManifest("check Gmail and send the report", new Set(["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_EXECUTE_TOOL"]));
+  assert.deepEqual(results.map((item) => item.slug), ["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_EXECUTE_TOOL"]);
   assert.deepEqual(searchComposioGatewayManifest("tell me a joke", new Set(["COMPOSIO_SEARCH_TOOL"])), []);
 });

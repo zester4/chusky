@@ -13,7 +13,7 @@ import { assertPublicHttpUrl, createTinyFishClient } from "./tinyfish.js";
 import { receiveTinyFishMonitorWebhook, tinyFishMonitorSignature, tinyFishMonitorSnapshotHash, validateTinyFishMonitorSchedule } from "./tinyfishMonitors.js";
 import { reconcileTinyFishResearchRun } from "./tinyfishResearch.js";
 import {
-  addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, listJobs, listReminders, claimHandoffBudget,
+  addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, listJobs, listReminders, claimHandoffBudget, searchConversationMessages, getConversationMessage,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
   upsertMeetingContact, listMeetingContacts, deleteMeetingContact, getMeetingContact, updateMeetingContact,
   readScratchpad, updateJob, updateReminder, transitionReminderStatus, writeScratchpad,
@@ -134,6 +134,8 @@ export interface NativeToolRuntime {
   delegationDepth?: number;
   /** Present only for an authenticated Recall meeting run. */
   meetingId?: string;
+  /** Current authenticated channel conversation, used for scope checks. */
+  conversationId?: string;
   /** Private relationship preparation must never run from a shared channel. */
   sharedConversation?: boolean;
   /** Authenticated owner-private interactive run; broadens context/tools while preserving high-impact approval checks. */
@@ -2073,6 +2075,22 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_CONTEXT_SEARCH": {
       const selection = { query: args.query ? text(args.query) : undefined, scope: args.scope as never, scopeId: args.scopeId ? text(args.scopeId) : undefined, purpose: args.purpose as never, limit: args.limit === undefined ? undefined : Number(args.limit) };
       return { nodes: await selectContext(userId, selection), prompt: await contextPrompt(userId, selection) };
+    }
+    case "CHUCK_CONVERSATION_SEARCH": {
+      if (runtime.sharedConversation) throw new Error("Conversation search is unavailable in shared conversations; use shared-scope context instead.");
+      const scope = (args.scope ? text(args.scope) : "personal") as "personal" | "conversation" | "organization" | "project" | "meeting" | "channel";
+      const scopeId = args.scopeId ? text(args.scopeId, 180) : undefined;
+      if (scope === "conversation" && scopeId && runtime.conversationId && scopeId !== runtime.conversationId) throw new Error("Conversation scope does not match the authenticated conversation.");
+      if (scope === "organization" && scopeId && runtime.organizationId && scopeId !== runtime.organizationId) throw new Error("Organization scope does not match the authenticated organization.");
+      if (scope === "meeting" && scopeId && runtime.meetingId && scopeId !== runtime.meetingId) throw new Error("Meeting scope does not match the authenticated meeting.");
+      return { results: await searchConversationMessages(userId, text(args.query, 500), { scope, scopeId, after: args.after === undefined ? undefined : Number(args.after), before: args.before === undefined ? undefined : Number(args.before), limit: args.limit === undefined ? 8 : Number(args.limit) }) };
+    }
+    case "CHUCK_CONVERSATION_GET": {
+      if (runtime.sharedConversation) throw new Error("Conversation retrieval is unavailable in shared conversations; use shared-scope context instead.");
+      const scope = (args.scope ? text(args.scope) : "personal") as "personal" | "conversation" | "organization" | "project" | "meeting" | "channel";
+      const scopeId = args.scopeId ? text(args.scopeId, 180) : undefined;
+      const message = await getConversationMessage(userId, text(args.messageId, 180), { scope, scopeId });
+      return message ? { message } : { message: undefined, notFound: true };
     }
     case "CHUCK_CONTEXT_SAVE": {
       return upsertContextNode(userId, { scope: text(args.scope) as never, scopeId: args.scopeId ? text(args.scopeId) : undefined, kind: text(args.kind) as never, key: text(args.key), value: text(args.value), source: args.source ? text(args.source) : undefined, sourceRef: args.sourceRef ? text(args.sourceRef) : undefined, sensitivity: text(args.sensitivity) as "normal" | "sensitive", confidence: args.confidence === undefined ? undefined : Number(args.confidence), tags: Array.isArray(args.tags) ? args.tags.filter((value: unknown): value is string => typeof value === "string") : undefined, reviewAt: args.reviewAt === undefined ? undefined : Number(args.reviewAt), expiresAt: args.expiresAt === undefined ? undefined : Number(args.expiresAt) });
