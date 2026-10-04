@@ -5,6 +5,7 @@
 import Redis from "ioredis";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { config } from "./config.js";
+import { withDistributedLease } from "./distributedLease.js";
 import { createNeonDurableState, durableSdkRunHash, type DurableConversationMessage, type DurableMissionEvent, type DurableMissionRecord, type DurableObjectMetadata, type DurableSessionDocument, type DurableSessionDomain, type DurableStateStatus, type NeonDurableState } from "./neonDurableState.js";
 import { archiveRecallTranscriptSegment, deleteRecallTranscriptArchive, getArchivedRecallTranscriptSegment, listArchivedRecallTranscriptSegments, recallTranscriptMeetingHash, updateRecallTranscriptArchiveExpiry as updateArchivedRecallExpiry, type RecallTranscriptArchiveDependencies } from "./recallTranscriptArchive.js";
 import { backfillMissionSnapshotToNeon } from "./missionBackfill.js";
@@ -2220,6 +2221,24 @@ class RedisBackend implements Backend {
   }
 
   async saveSession(userId: number, s: UserSession): Promise<void> {
+    if (!this.durableState || userId === 0) return this.saveSessionUnlocked(userId, s);
+
+    // Session backfills and live writers must not interleave their Neon domain
+    // writes and Redis promotion. The Redis lease is owner-scoped so unrelated
+    // calls remain independent; bounded acquisition keeps overload visible.
+    const lockKey = `session-domain:${userId}`;
+    const lockToken = randomUUID();
+    return withDistributedLease({
+      acquire: async () => this.acquireKeyLock(lockKey, lockToken, 30),
+      renew: async () => this.renewKeyLock(lockKey, lockToken, 30),
+      release: async () => this.releaseKeyLock(lockKey, lockToken),
+    }, () => this.saveSessionUnlocked(userId, s), {
+      busyMessage: "Owner session is being migrated or saved concurrently; retry shortly.",
+      lostMessage: "Owner session write lost its coordination lease; verify the session before retrying.",
+    });
+  }
+
+  private async saveSessionUnlocked(userId: number, s: UserSession): Promise<void> {
     let persisted = s;
     if (this.durableState && userId !== 0) {
       const withMessageIds = { ...s, history: (s.history ?? []).map((message) => ({ ...message, id: message.id ?? (message.sourceId ? `msg_${createHash("sha256").update(message.sourceId).digest("hex").slice(0, 48)}` : `msg_${randomUUID()}`) })) } as UserSession & DurableSessionMetadata;
