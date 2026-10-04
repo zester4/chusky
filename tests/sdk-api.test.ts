@@ -4,7 +4,7 @@ import { createHash, createHmac } from "node:crypto";
 import { Readable } from "node:stream";
 import { Hono } from "hono";
 import { config } from "../src/config.js";
-import { browserFileDownloadResponse, persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, sdkRunImages, setOrganizationAccessResolverForTests, setSdkAuditWriterForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
+import { browserFileDownloadResponse, persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, sdkRunImages, setOrganizationAccessResolverForTests, setSdkAuditWriterForTests, setSdkMemoryWriterForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
@@ -30,6 +30,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   setSdkAuditWriterForTests();
+  setSdkMemoryWriterForTests();
   setPhoneCallLauncherForTests();
   (config as { providerSmokeSigningSecret: string }).providerSmokeSigningSecret = "";
 });
@@ -1836,6 +1837,22 @@ test("dashboard onboarding completion uses an exact owner-scoped memory key", as
   assert.match(body.data[0]!.value, /Seyyid/);
   const unrelated = await api.fetch(new Request("http://local/v1/memory?key=chusky_onboarding_profile_other", { headers }));
   assert.deepEqual((await unrelated.json() as { data: unknown[] }).data, []);
+});
+
+test("memory persistence conflicts return a retryable sanitized error instead of a client or auth error", async () => {
+  setSdkMemoryWriterForTests(async () => { throw new Error("Durable session domain version conflict: profile"); });
+  const response = await app().fetch(new Request("http://local/v1/memory", {
+    method: "POST",
+    headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "onboarding-owner", "Content-Type": "application/json" },
+    body: JSON.stringify({ category: "profile", key: "chusky_onboarding_profile", value: "{}", sensitivity: "normal" }),
+  }));
+
+  const body = await response.json() as { error?: { code?: string; message?: string; requestId?: string } };
+  assert.equal(response.status, 503);
+  assert.equal(body.error?.code, "memory_save_unavailable");
+  assert.match(body.error?.message ?? "", /try again/i);
+  assert.doesNotMatch(body.error?.message ?? "", /session domain version conflict/i);
+  assert.ok(body.error?.requestId);
 });
 
 test("dashboard devices are revocable by opaque owner-scoped IDs, without exposing token hashes", async () => {

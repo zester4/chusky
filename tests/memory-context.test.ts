@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { forgetMemory, initStore, searchMemories, updateMemory, upsertMemoryAndContext } from "../src/store.js";
+import { forgetMemory, getSession, initStore, mutateSession, searchMemories, updateMemory, upsertMemoryAndContext } from "../src/store.js";
 import { selectContext } from "../src/contextGraph.js";
 
 test("a saved memory and its searchable context projection remain in sync", async () => {
@@ -57,4 +57,19 @@ test("forgetting a memory removes its linked context projection in the same owne
   assert.equal(await forgetMemory(userId, saved.memory.id), true);
   assert.equal((await searchMemories(userId, "temporary_fact")).length, 0);
   assert.equal((await selectContext(userId, { query: "temporary_fact" })).length, 0);
+});
+
+test("memory projection writes preserve a concurrent profile-domain update", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 991207;
+  await Promise.all([
+    upsertMemoryAndContext(userId, {
+      category: "profile", key: "onboarding", value: "completed", confidence: 1, source: "test", sensitivity: "normal",
+    }, { scope: "user", kind: "memory", key: "onboarding", value: "completed", source: "test", sensitivity: "normal" }),
+    mutateSession(userId, (session) => { session.model = "profile-update-during-memory-save"; }),
+  ]);
+
+  const session = await getSession(userId);
+  assert.equal(session.model, "profile-update-during-memory-save");
+  assert.equal((await searchMemories(userId, "onboarding"))[0]?.value, "completed");
 });

@@ -8596,29 +8596,37 @@ export async function upsertMemoryAndContext(
   // Prefer the memory's stable source reference when updating it. Its key,
   // category, or project scope may have changed, so matching only on the new
   // context identity would leave the old projection searchable.
-  const previousContext = session.contextNodes?.find((item) => item.sourceRef === existingMemory?.id)
-    ?? session.contextNodes?.find((item) => `${item.scope}:${item.scopeId ?? ""}:${item.kind}:${item.key}` === contextIdentity);
-  if (previousContext) {
-    savedContext.id = previousContext.id;
-    savedContext.createdAt = previousContext.createdAt;
-  }
   savedContext.sourceRef = savedMemory.id;
-  session.memories = [...session.memories.filter((item) => item.id !== savedMemory.id && !(item.category === savedMemory.category && item.key === savedMemory.key)), savedMemory].slice(-200);
-  session.contextNodes = previousContext
-    ? (session.contextNodes ?? []).map((item) => item.id === previousContext.id ? savedContext : item)
-    : [savedContext, ...(session.contextNodes ?? [])].slice(0, 1000);
   if (durableMemoryConfigured()) {
     const entity = savedMemory.personKey ? await saveMemoryEntity({ ownerUserId: uid, type: "person", canonicalName: savedMemory.personKey }) : savedMemory.projectId ? await saveMemoryEntity({ ownerUserId: uid, type: "project", canonicalName: savedMemory.projectId }) : undefined;
-    const persisted = await saveDurableMemory({ ownerUserId: uid, scope: { kind: savedMemory.organizationId ? "organization" : savedMemory.projectId ? "project" : "personal", externalId: savedMemory.organizationId ?? savedMemory.projectId ?? String(uid) }, category: savedMemory.category as never, key: savedMemory.key, value: savedMemory.value, confidence: savedMemory.confidence, sensitivity: savedMemory.sensitivity, source: { type: savedMemory.source, ref: savedMemory.id }, entityId: entity?.id, reviewAt: savedMemory.reviewAt, expiresAt: savedMemory.expiresAt, id: savedMemory.id, metadata: { contextNodeId: savedContext.id } });
+    const persisted = await saveDurableMemory({ ownerUserId: uid, scope: { kind: savedMemory.organizationId ? "organization" : savedMemory.projectId ? "project" : "personal", externalId: savedMemory.organizationId ?? savedMemory.projectId ?? String(uid) }, category: savedMemory.category as never, key: savedMemory.key, value: savedMemory.value, confidence: savedMemory.confidence, sensitivity: savedMemory.sensitivity, source: { type: savedMemory.source, ref: savedMemory.id }, entityId: entity?.id, reviewAt: savedMemory.reviewAt, expiresAt: savedMemory.expiresAt, id: savedMemory.id });
     savedMemory.id = persisted.id;
     savedContext.sourceRef = persisted.id;
   }
-  await saveSession(uid, session);
+  // Re-read the owner session under its mutation lease before writing the
+  // projection. The durable-memory transaction above can take long enough
+  // for a concurrent profile update to make the initial snapshot stale.
+  let latestExistingMemory = existingMemory;
+  await mutateSession(uid, (latestSession) => {
+    latestExistingMemory = latestSession.memories.find((item) =>
+      (memory.id && item.id === memory.id) || (!memory.id && item.category === memory.category && item.key === memory.key),
+    );
+    const latestContext = latestSession.contextNodes?.find((item) => item.sourceRef === latestExistingMemory?.id)
+      ?? latestSession.contextNodes?.find((item) => `${item.scope}:${item.scopeId ?? ""}:${item.kind}:${item.key}` === contextIdentity);
+    if (latestContext) {
+      savedContext.id = latestContext.id;
+      savedContext.createdAt = latestContext.createdAt;
+    }
+    latestSession.memories = [...latestSession.memories.filter((item) => item.id !== savedMemory.id && !(item.category === savedMemory.category && item.key === savedMemory.key)), savedMemory].slice(-200);
+    latestSession.contextNodes = latestContext
+      ? (latestSession.contextNodes ?? []).map((item) => item.id === latestContext.id ? savedContext : item)
+      : [savedContext, ...(latestSession.contextNodes ?? [])].slice(0, 1000);
+  });
 
   if (vectorConfigured()) {
     const vector = new UpstashKnowledgeStore();
     void vector.upsertMemory({ userId: String(uid), id: savedMemory.id, category: savedMemory.category, key: savedMemory.key, value: savedMemory.value, projectId: savedMemory.projectId, personKey: savedMemory.personKey }).then(async () => {
-      if (existingMemory?.projectId && existingMemory.projectId !== savedMemory.projectId) await vector.deleteMemory(String(uid), existingMemory.id, existingMemory.projectId);
+      if (latestExistingMemory?.projectId && latestExistingMemory.projectId !== savedMemory.projectId) await vector.deleteMemory(String(uid), latestExistingMemory.id, latestExistingMemory.projectId);
     }).catch((error) => { recordVectorFailure(error, { phase: "memory_index", errorClass: "vector_indexing" }); logger.warn({ err: error, userId: uid }, "Memory vector indexing unavailable; structured memory retained"); });
   }
   return { memory: savedMemory, context: savedContext };
