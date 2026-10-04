@@ -1,10 +1,53 @@
 import type { ImageAsset, MemoryFact, Message, SdkFileRecord, SdkThreadRecord, ArtifactRecord, UserSession } from "./store.js";
 import { DURABLE_SESSION_DOMAINS, type DurableSessionDomain } from "./neonDurableState.js";
+import { isDeepStrictEqual } from "node:util";
 
 export const DURABLE_SESSION_FORMAT = 1;
 export const HOT_CONVERSATION_MESSAGES = 20;
 
 export type DurableSessionPayloads = Map<DurableSessionDomain, unknown>;
+
+const MISSING = Symbol("missing durable domain value");
+
+/** Merge non-overlapping edits without allowing a stale session to erase a newer one. */
+export function mergeDurableSessionDomain(base: unknown, current: unknown, desired: unknown, domain: DurableSessionDomain): unknown {
+  let visited = 0;
+  const maxDepth = 32;
+  const maxNodes = 50_000;
+
+  const merge = (before: unknown, latest: unknown, next: unknown, path: string[], depth: number): unknown => {
+    visited += 1;
+    if (visited > maxNodes || depth > maxDepth) throw new Error(`Durable session domain merge exceeded safe bounds: ${domain}.`);
+    if (isDeepStrictEqual(next, before)) return latest;
+    if (isDeepStrictEqual(latest, before)) return next;
+    if (isDeepStrictEqual(latest, next)) return latest;
+
+    if (domain === "profile" && (path.join(".") === "totalMessages" || path.join(".") === "totalCost") &&
+      [before, latest, next].every((value) => typeof value === "number" && Number.isFinite(value))) {
+      const combined = Number(latest) + (Number(next) - Number(before));
+      if (combined >= 0 && Number.isFinite(combined)) return combined;
+    }
+
+    const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
+    if (isRecord(before) && isRecord(latest) && isRecord(next)) {
+      const output: Record<string, unknown> = {};
+      const keys = new Set([...Object.keys(before), ...Object.keys(latest), ...Object.keys(next)]);
+      for (const key of keys) {
+        const merged = merge(
+          Object.hasOwn(before, key) ? before[key] : MISSING,
+          Object.hasOwn(latest, key) ? latest[key] : MISSING,
+          Object.hasOwn(next, key) ? next[key] : MISSING,
+          [...path, key], depth + 1,
+        );
+        if (merged !== MISSING) output[key] = merged;
+      }
+      return output;
+    }
+    throw new Error(`Durable session domain has overlapping concurrent changes: ${domain}${path.length ? `.${path.join(".")}` : ""}.`);
+  };
+
+  return merge(base, current, desired, [], 0);
+}
 
 type SessionWithDurableMarker = UserSession & { durableSessionFormat?: number };
 
@@ -14,6 +57,7 @@ export function sessionUsesNeonDomains(session: UserSession): boolean {
 
 /** Separate high-growth fields without changing the UserSession API used by callers. */
 export function splitSessionDomains(session: UserSession, separateSdkRuns = false): { core: UserSession; domains: DurableSessionPayloads; sdkRuns: Array<{ threadId: string; run: SdkThreadRecord["runs"][number] }> } {
+  const { durableDomainSnapshots: _snapshots, ...sessionCore } = session as UserSession & { durableDomainSnapshots?: Partial<Record<DurableSessionDomain, unknown>> };
   const sdkRuns = separateSdkRuns ? (session.sdkThreads ?? []).flatMap((thread) => thread.runs.map((run) => ({ threadId: thread.id, run }))) : [];
   const sdkThreads = separateSdkRuns ? (session.sdkThreads ?? []).map((thread) => ({ ...thread, runs: [] })) : session.sdkThreads ?? [];
   const domains: DurableSessionPayloads = new Map([
@@ -26,7 +70,7 @@ export function splitSessionDomains(session: UserSession, separateSdkRuns = fals
     ["sdk", { sdkThreads, sdkIdempotency: session.sdkIdempotency ?? {}, sdkAudit: session.sdkAudit ?? [], sdkWebhooks: session.sdkWebhooks ?? [], sdkProjects: session.sdkProjects ?? [] }],
   ]);
   const core = {
-    ...session,
+    ...sessionCore,
     history: (session.history ?? []).slice(-HOT_CONVERSATION_MESSAGES), summaries: [], memories: [], imageAssets: [], sdkFiles: [], artifacts: [], sdkThreads: [], sdkIdempotency: {}, sdkAudit: [], sdkWebhooks: [], sdkProjects: [],
     durableSessionFormat: DURABLE_SESSION_FORMAT,
   } as SessionWithDurableMarker;
