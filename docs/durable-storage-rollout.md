@@ -65,8 +65,9 @@ Using the configured local `.env` without printing connection values:
   `0008`-`0010` schemas. On 2026-10-04, migration `0011` was then applied
   through the configured migration URL (`1` applied, `10` already applied).
   It adds only the aggregate Redis-metric sample table and index; it does not
-  enable metric collection or insert telemetry rows. The runtime URL has not
-  yet been independently checked for migration `0011` visibility.
+  enable metric collection or insert telemetry rows. A read-only
+  `assertStorageMetricsSchema()` query against the separately configured
+  runtime Neon URL then succeeded. Metric collection remains disabled.
 - `npm run durable-state:live-smoke` passed against configured Neon and Redis:
   all five session domains round-tripped, one SDK run was stored separately,
   embedded SDK run arrays were empty, a no-op repeat save left versions
