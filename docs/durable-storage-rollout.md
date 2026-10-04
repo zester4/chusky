@@ -62,8 +62,11 @@ Using the configured local `.env` without printing connection values:
   session, conversation, SDK-run, and memory tables, but not object-catalog or
   mission tables. A subsequent application startup with mission/catalog
   assertions enabled succeeded, proving the runtime URL sees the newly applied
-  `0008`-`0010` schemas. The migration runner recorded all 10 file checksums;
-  a second invocation skipped all 10 without replaying DDL.
+  `0008`-`0010` schemas. On 2026-10-04, migration `0011` was then applied
+  through the configured migration URL (`1` applied, `10` already applied).
+  It adds only the aggregate Redis-metric sample table and index; it does not
+  enable metric collection or insert telemetry rows. The runtime URL has not
+  yet been independently checked for migration `0011` visibility.
 - `npm run durable-state:live-smoke` passed against configured Neon and Redis:
   all five session domains round-tripped, one SDK run was stored separately,
   embedded SDK run arrays were empty, a no-op repeat save left versions
