@@ -314,7 +314,13 @@ function streamA2ATask(c: any, id: A2AJsonRpcId, owner: A2AOwner, taskId: string
     }
   });
 }
-async function audit(userId: number, action: string, requestId: string, status: number): Promise<void> { const session = await getSession(userId); session.sdkAudit!.push({ id: `audit_${randomUUID()}`, action: action.slice(0, 120), requestId, status, at: Date.now() }); session.sdkAudit = session.sdkAudit!.slice(-500); await saveSession(userId, session); }
+async function audit(userId: number, action: string, requestId: string, status: number): Promise<void> {
+  await mutateSession(userId, (session) => {
+    session.sdkAudit ??= [];
+    session.sdkAudit.push({ id: `audit_${randomUUID()}`, action: action.slice(0, 120), requestId, status, at: Date.now() });
+    session.sdkAudit = session.sdkAudit.slice(-500);
+  });
+}
 async function companyAudit(projectId: string, action: string, requestId: string, status: number): Promise<void> {
   await appendCompanyAuditEvent(projectId, { id: `audit_${randomUUID()}`, action: action.slice(0, 120), requestId, status, at: Date.now() });
 }
