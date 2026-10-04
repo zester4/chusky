@@ -35,6 +35,18 @@ function chooseRequestedTool(requestedSlug = "CHUCK_CREATE_PDF"): typeof fetch {
   }) as typeof fetch;
 }
 
+function chooseNoTool(): typeof fetch {
+  return (async (_url: string | URL, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { questions: Record<string, any> };
+    const answers = Object.fromEntries(Object.entries(body.questions).map(([key, question]) => [key,
+      question.type === "choice"
+        ? { type: "choice", choice: "__none__", confidence: 0.96, probabilities: Object.fromEntries(Object.keys(question.criteria).map((id) => [id, id === "__none__" ? 0.96 : 0.04 / Math.max(1, Object.keys(question.criteria).length - 1)])) }
+        : { type: "noul", noul: 0.02 },
+    ]));
+    return new Response(JSON.stringify({ model: body, answers }), { status: 200 });
+  }) as typeof fetch;
+}
+
 test("native routing is inert when Jev native routing is disabled", async () => {
   const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["native"]), jevNativeToolRouting: false });
   try {
@@ -55,6 +67,16 @@ test("bundle loading exposes core plus the matched bundle instead of the full na
     assert.ok(names.includes("CHUCK_TOOL_PREFLIGHT"));
     assert.ok(!names.includes("CHUCK_BROWSER"));
     assert.ok(route.tools.length < tools().length);
+  } finally { restore(); }
+});
+
+test("an explicit Jev abstention creates a discovery-only native route", async () => {
+  const restore = withConfig({ nativeToolLoading: "bundle", jevMode: "enforce", jevSurfaces: new Set(["native"]), jevNativeToolRouting: true });
+  try {
+    const route = await routeNativeToolsForTurn(tools(), "What is the best way to phrase this reply?", { client: new JevClient({ apiKey: "k", fetchImpl: chooseNoTool() }) });
+    assert.equal(route.noTool, true);
+    assert.deepEqual(route.selected, ["CHUCK_FIND_TOOLS"]);
+    assert.equal(route.tools.filter((tool: any) => tool.function.name.startsWith("CHUCK_")).length, 1);
   } finally { restore(); }
 });
 

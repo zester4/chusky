@@ -69,7 +69,7 @@ import { resolveComposioRoute } from "./composioRouting.js";
 import { buildArtifactEmailArguments, type ArtifactEmailFile } from "./artifactEmail.js";
 import { buildArtifactUploadArguments } from "./artifactBridge.js";
 import { compactModelMessages } from "./agentContext.js";
-import { composeSystemPrompt } from "./prompt.js";
+import { compactConversationalCustomization, composeSystemPrompt } from "./prompt.js";
 import { contextPrompt } from "./contextGraph.js";
 import { AUTONOMY_OPERATING_KERNEL, needsAutonomyCloseoutNudge } from "./autonomy/operatingLoop.js";
 import { createComposioOutcomeReadAdapter } from "./reliability/composioReadAdapter.js";
@@ -94,6 +94,10 @@ const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
 const MAX_TOOL_RESULT_CHARS = 20_000;
 const MAX_IMAGE_TRANSFER_BYTES = 25 * 1024 * 1024;
 const MAX_BROWSER_FILE_TRANSFER_BYTES = 100 * 1024 * 1024;
+
+function likelyNeedsActionRouting(query: string): boolean {
+  return /\b(?:call|send|email|message|post|publish|create|make|build|generate|edit|upload|download|search|find|look up|research|check|review|open|visit|browse|click|fill|book|schedule|remind|remember|save|update|delete|cancel|run|execute|deploy|push|commit|meeting|calendar|invoice|order|buy|purchase|image|video|file|pdf|spreadsheet|presentation|code|github|slack|gmail|notion|crm|browser|website|company|person|seo|mission|task)\b/i.test(query);
+}
 
 function providerReceiptId(value: unknown): string | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
@@ -2425,25 +2429,30 @@ export async function runAgent(
     .map((message) => `${message.role}: ${typeof message.content === "string" ? message.content.slice(0, 400) : ""}`)
     .join("\n");
   const routingDeadline = createRoutingDeadline(config.jevTurnBudgetMs, signal);
-  const skillsRoutable = (!options?.ephemeral || ownerPrivateRun) && !voiceTurn;
+  // Native Jev routing is the single classifier for simple conversational
+  // turns. Do not spend three more Jev calls on skills, Treg, and Composio
+  // when the request contains no action/data signal.
+  const actionRoutingLikely = likelyNeedsActionRouting(routingQuery)
+    || Boolean(options?.taskId || options?.missionId || options?.meetingId || options?.toolAllow?.length);
+  const skillsRoutable = actionRoutingLikely && (!options?.ephemeral || ownerPrivateRun) && !voiceTurn;
   const skillRoutePromise = skillsRoutable
     ? routeSkillsForTurn(routingQuery, { signal, deadline: routingDeadline, recentContext: routingRecentContext, sessionId: durableRunId }).catch((error) => {
       logger.warn({ err: error }, "Skill routing unavailable; continuing with keyword routing");
       return undefined;
     })
     : Promise.resolve(undefined);
-  const tregRoutePromise = !sharedScope && !voiceTurn && !toolsDisabled
+  const tregRoutePromise = actionRoutingLikely && !sharedScope && !voiceTurn && !toolsDisabled
     ? routeTregForTurn(routingQuery, { signal, deadline: routingDeadline, sessionId: durableRunId }).catch(() => undefined)
     : Promise.resolve(undefined);
   // Connected-account metadata is private context. Never expose a user's
   // account aliases or tool access to a shared channel conversation.
-  const accountsPromise: Promise<ConnectedComposioAccount[] | undefined> = sharedScope
+  const accountsPromise: Promise<ConnectedComposioAccount[] | undefined> = !actionRoutingLikely || sharedScope
     ? Promise.resolve(undefined)
     : listConnectedAccounts(userId).catch((error) => {
       logger.debug({ err: error, userId }, "Connected-account metadata unavailable for this run");
       return undefined;
     });
-  const composioRoutePromise = accountsPromise.then((accounts) => accounts
+  const composioRoutePromise = accountsPromise.then((accounts) => actionRoutingLikely && accounts
     ? routeComposioForTurn(routingQuery, {
       accounts,
       listActions: listComposioToolkitActions,
@@ -2496,6 +2505,12 @@ export async function runAgent(
     sessionId: durableRunId,
     preserveAll: Boolean(options?.taskId || options?.missionId || options?.toolAllow?.length),
   });
+  const noToolTurn = Boolean(
+    !options?.taskId
+    && !options?.missionId
+    && !options?.toolAllow?.length
+    && (nativeToolRoute.noTool || (!actionRoutingLikely && nativeToolRoute.source === "fallback")),
+  );
   const revealedNativeTools = new Set<string>();
   routingDeadline.dispose();
   // Project skills are trusted, versioned operating guidance. Select a small
@@ -2519,12 +2534,14 @@ export async function runAgent(
     : "";
   const temporalContext = buildTemporalContext(history, { ...options?.temporalContext, timezone: options?.temporalContext?.timezone ?? config.timezone });
   const triggerAutonomy = triggerAutonomyInstructions(channelContext?.triggerEventId);
+  const shoppingPromptRelevant = /\b(?:shop|shopping|retailer|cart|checkout|order|purchase|buy|restock|delivery)\b/i.test(routingQuery);
+  const meetingPromptRelevant = Boolean(options?.meetingId) || /\b(?:meeting|zoom|teams|webex|call|interview|participant|transcript)\b/i.test(routingQuery);
   const staticSystemPrompt = composeSystemPrompt({
-    customizablePrompt: config.chuckSystemPrompt,
-    mandatorySections: ownerPrivateRun
-      ? [AUTONOMY_OPERATING_KERNEL, SHOPPING_AGENT_PLAYBOOK, ...(options?.meetingId ? [MEETING_MISSION_PLAYBOOK] : []), ...(triggerAutonomy ? [triggerAutonomy] : [])]
+    customizablePrompt: noToolTurn ? compactConversationalCustomization(config.chuckSystemPrompt) : config.chuckSystemPrompt,
+    mandatorySections: noToolTurn ? [] : ownerPrivateRun
+      ? [AUTONOMY_OPERATING_KERNEL, ...(shoppingPromptRelevant ? [SHOPPING_AGENT_PLAYBOOK] : []), ...(meetingPromptRelevant ? [MEETING_MISSION_PLAYBOOK] : []), ...(triggerAutonomy ? [triggerAutonomy] : [])]
       : !voiceTurn && !sharedScope
-        ? [AUTONOMY_OPERATING_KERNEL, SHOPPING_AGENT_PLAYBOOK, MEETING_MISSION_PLAYBOOK, ...(triggerAutonomy ? [triggerAutonomy] : [])]
+        ? [AUTONOMY_OPERATING_KERNEL, ...(shoppingPromptRelevant ? [SHOPPING_AGENT_PLAYBOOK] : []), ...(meetingPromptRelevant ? [MEETING_MISSION_PLAYBOOK] : []), ...(triggerAutonomy ? [triggerAutonomy] : [])]
       : [],
     developerInstructions: options?.instructions ? `Developer instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : undefined,
   });
@@ -2619,7 +2636,10 @@ export async function runAgent(
       imageComposioDirectActionGuidanceAdded = true;
     }
     const revealed = availableTools.filter((tool) => revealedNativeTools.has(toolSchemaName(tool)));
-    const routedTools = [...nativeToolRoute.tools, ...revealed].filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index);
+    const routedTools = (noToolTurn
+      ? availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || revealedNativeTools.has(toolSchemaName(tool)))
+      : [...nativeToolRoute.tools, ...revealed])
+      .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index);
     const imageSafeTools = roundMediaSelection
       ? routedTools.filter((tool) => toolSchemaName(tool) !== "COMPOSIO_MULTI_EXECUTE_TOOL")
       : routedTools;

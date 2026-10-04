@@ -40,6 +40,8 @@ export type NativeToolRoute = {
   source: "jev" | "fallback";
   candidateCount: number;
   selected: string[];
+  /** Jev explicitly abstained; the agent may expose discovery only. */
+  noTool?: boolean;
   fallbackReason?: string;
   telemetry?: {
     latencyMs: number;
@@ -168,6 +170,17 @@ function bundleFallbackRoute(tools: ToolSchema[], query: string, reason: string)
   return { tools: modelToolsForSelection(tools, selected), source: "fallback", candidateCount: tools.filter((tool) => descriptorBySlug.has(toolName(tool))).length, selected: [...selected], fallbackReason: reason };
 }
 
+function noToolRoute(tools: ToolSchema[], reason: string): NativeToolRoute {
+  return {
+    tools: modelToolsForSelection(tools, new Set(["CHUCK_FIND_TOOLS"])),
+    source: "fallback",
+    candidateCount: tools.filter((tool) => descriptorBySlug.has(toolName(tool))).length,
+    selected: ["CHUCK_FIND_TOOLS"],
+    noTool: true,
+    fallbackReason: reason,
+  };
+}
+
 export function searchNativeToolManifest(query: string, bundle?: NativeToolBundle, limit = 5, allowed?: ReadonlySet<string>): NativeToolSearchResult[] {
   const bounded = Math.max(1, Math.min(10, Math.floor(limit) || 5));
   const queryText = query.trim();
@@ -277,6 +290,13 @@ export async function computeNativeToolRoute(query: string, tools: ToolSchema[],
   });
   const best = ranking.ranked[0];
   if (!best || ranking.confidence < config.jevNativeToolMinConfidence || ranking.none >= ranking.confidence) {
+    if (ranking.none >= ranking.confidence && !options.preserveAll) {
+      return {
+        ...noToolRoute(tools, "jev_no_tool_needed"),
+        candidateCount: candidates.candidates.length,
+        telemetry: { latencyMs: ranking.latencyMs, costUsd: ranking.costUsd, ranked: ranking.ranked },
+      };
+    }
     const fallbackReason = config.nativeToolLoading === "bundle" && !options.preserveAll
       ? "bundle_low_confidence_or_none"
       : "low_confidence_or_none";
@@ -351,7 +371,7 @@ export async function routeNativeToolsForTurn(tools: ToolSchema[], query: string
       route
       && config.nativeToolLoading === "bundle"
       && !options.preserveAll
-      && route.fallbackReason?.startsWith("bundle_")
+      && (route.noTool || route.fallbackReason?.startsWith("bundle_"))
       && route.tools.length < tools.length,
     );
     recordDecision({
@@ -367,6 +387,7 @@ export async function routeNativeToolsForTurn(tools: ToolSchema[], query: string
       exposedTools: route?.tools.length,
       baselineTools: tools.length,
       loading: config.nativeToolLoading,
+      noTool: route?.noTool,
     });
   };
   if (mode === "shadow") {

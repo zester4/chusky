@@ -30,6 +30,7 @@ export function recordDecision(input: {
   exposedTools?: number;
   baselineTools?: number;
   loading?: "full" | "bundle";
+  noTool?: boolean;
 }): void {
   const current = bucket(input.surface);
   current.decisions += 1;
@@ -61,6 +62,7 @@ export function recordDecision(input: {
     ...(input.exposedTools === undefined ? {} : { exposedTools: input.exposedTools }),
     ...(input.baselineTools === undefined ? {} : { baselineTools: input.baselineTools }),
     ...(input.loading ? { loading: input.loading } : {}),
+    ...(input.noTool === undefined ? {} : { noTool: input.noTool }),
   }, "Jev routing decision");
 }
 

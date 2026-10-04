@@ -202,7 +202,7 @@ export async function computeJevComposioDecision(objective: string, input: {
     candidateSlugs.length
       ? rankOptions(client, {
         state,
-        instructions: "Which app should the assistant use to complete `request`? Prefer a CONNECTED app that can do the job. Choose a not-connected app when the user names it or when no connected app can do the job.",
+        instructions: "Which app should Chusky use to complete `request`? Prefer a CONNECTED app that can do the job. Choose a not-connected app when the user names it or when no connected app can do the job.",
         options: candidateSlugs.map((slug) => ({ id: slug, description: toolkitDescription(slug, connectedSet.has(toolkitKey(slug)), infoByKey.get(toolkitKey(slug))) })),
         noneDescription: "No app is needed for this request.",
         signal: input.signal,
@@ -260,7 +260,7 @@ export async function computeJevComposioDecision(objective: string, input: {
   const bySlug = new Map(actions.map((action) => [action.slug, action]));
   const ranking = await rankOptions(client, {
     state,
-    instructions: "Which app action should the assistant execute first to make real progress on `request`? Prefer the most specific action that directly performs or reads what is asked.",
+    instructions: "Which app action should Chusky execute first to make real progress on `request`? Prefer the most specific action that directly performs or reads what is asked.",
     options: actions.map((action) => ({ id: action.slug, description: `${action.name}: ${action.description}` })),
     noneDescription: "None of these actions fits the request.",
     signal: input.signal,
@@ -272,7 +272,7 @@ export async function computeJevComposioDecision(objective: string, input: {
     ? await verifyCandidates(client, {
       state,
       candidates: candidates.map((item) => ({ id: item.id, description: `${bySlug.get(item.id)?.name ?? item.id}: ${bySlug.get(item.id)?.description ?? ""}` })),
-      question: () => "Will the assistant need to call `candidate` at some step to complete `request`?",
+      question: () => "Will Chusky need to call `candidate` at some step to complete `request`?",
       criteria: { true: "This action is a required read or step for the request.", false: "This action is unrelated or unnecessary for the request." },
       signal: input.signal,
       sessionId: input.sessionId,

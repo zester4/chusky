@@ -33,7 +33,7 @@ export async function computeTregTurnRoute(objective: string, options: { client?
   const result = await client.evaluate({ request: jevText(objective, 3_000) }, {
     tool: {
       type: "choice",
-      instructions: "Which live external-data tool should the assistant use first for `request`?",
+      instructions: "Which live external-data tool should Chusky use first for `request`?",
       criteria: { ...TREG_TOOL_CRITERIA, [NONE_OPTION]: "No external live-data provider is needed; use connected apps, memory, or general knowledge." },
     },
     live_data: {
