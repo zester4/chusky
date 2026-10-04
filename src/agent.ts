@@ -38,7 +38,7 @@ import { isReadOnlyToolSlug, isRiskyToolSlug, requiresToolApproval, humanProgres
 import { registerComposioToolMetadata } from "./composioRisk.js";
 import { canonicalNativeToolSlug, chuckTools, modelFacingChuckTools, validateNativeToolArguments, validateToolArgumentsAgainstSchema } from "./agentTools.js";
 import type { ApiMessage, ContentPart, TaskWaitRequest, ToolCall } from "./types.js";
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { buildTemporalContext, type TemporalContext } from "./temporal.js";
 import { daytonaEngine, safeDaytonaPath, DaytonaInputError } from "./lib/daytona/index.js";
 import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestination } from "./video.js";
@@ -52,6 +52,9 @@ import { hasValidImageEnvelope, sniffImageMime } from "./channels/imageMedia.js"
 import { ROUTED_SKILL_REFERENCES, readSkillFile, routedSkillContext, skillContextForBinding } from "./skills/catalog.js";
 import { routeSkillsForTurn } from "./decisions/skillRouter.js";
 import { composioDecisionContext, routeComposioForTurn, toComposioAction, toComposioToolkitInfo, type ComposioAction, type ComposioToolkitInfo } from "./decisions/composioRouter.js";
+import { recordTurnMode } from "./decisions/telemetry.js";
+import { isClearlyConversational } from "./decisions/actionGate.js";
+import type { MissionRoutingCache } from "./decisions/missionRoutingCache.js";
 import { routeTregForTurn, tregTurnContext } from "./decisions/tregRouter.js";
 import { createRoutingDeadline } from "./decisions/jev.js";
 import { routeNativeToolsForTurn } from "./decisions/nativeToolRouter.js";
@@ -97,6 +100,24 @@ const MAX_BROWSER_FILE_TRANSFER_BYTES = 100 * 1024 * 1024;
 
 function likelyNeedsActionRouting(query: string): boolean {
   return /\b(?:call|send|email|message|post|publish|create|make|build|generate|edit|upload|download|search|find|look up|research|check|review|open|visit|browse|click|fill|book|schedule|remind|remember|save|update|delete|cancel|run|execute|deploy|push|commit|meeting|calendar|invoice|order|buy|purchase|image|video|file|pdf|spreadsheet|presentation|code|github|slack|gmail|notion|crm|browser|website|company|person|seo|mission|task|accounts?)\b/i.test(query);
+}
+
+type MissionRoutingSnapshot = {
+  at: number;
+  skillRoute: Awaited<ReturnType<typeof routeSkillsForTurn>> | undefined;
+  tregRoute: Awaited<ReturnType<typeof routeTregForTurn>> | undefined;
+  routedAccounts: ConnectedComposioAccount[] | undefined;
+  composioDecision: Awaited<ReturnType<typeof routeComposioForTurn>> | undefined;
+};
+const missionRoutingCache = new Map<string, MissionRoutingSnapshot>();
+const missionRoutingCacheTtlMs = 10 * 60_000;
+
+function missionObjectiveHash(objective: string | undefined): string {
+  return createHash("sha256").update((objective ?? "").trim().replace(/\s+/g, " ")).digest("hex").slice(0, 32);
+}
+
+function isCapabilityFailureReply(text: string): boolean {
+  return /\b(?:can't|cannot|do not|don't)\s+(?:access|use|reach|connect)|\b(?:no|without)\s+(?:tool|access|connected app)|\bI (?:don't|do not) have access\b/i.test(text);
 }
 
 function isMediaGenerationRequest(query: string): "image" | "video" | undefined {
@@ -1838,6 +1859,7 @@ export interface AgentResult {
   taskWait?: TaskWaitRequest;
   /** Internal durable continuation request for an exact provider callback. */
   missionWait?: MissionWaitRequest;
+  missionRoutingCache?: MissionRoutingCache;
 }
 
 type MissionStartHandoff = {
@@ -1934,6 +1956,8 @@ export interface AgentRunOptions {
   voiceSessionId?: string;
   /** Tools in this list always create an approval request, even if normally low-risk. */
   toolRequireApproval?: string[];
+  /** Persisted per-step routing result used to avoid repeating Jev on mission slices. */
+  missionRoutingCache?: MissionRoutingCache;
   maxToolCalls?: number;
   maxCost?: number;
   temporalContext?: TemporalContext;
@@ -1962,6 +1986,8 @@ export interface AgentRunOptions {
   organizationId?: string;
   /** Bind trusted external-action receipts to the exact mission step. */
   missionStepId?: string;
+  /** Current step objective, used to invalidate persisted routing after replans. */
+  missionStepObjective?: string;
   /** Link approval recovery to the exact autonomous reminder/job occurrence. */
   autonomyResume?: { kind: "reminder" | "job"; sourceId: string; occurrenceId?: string };
 }
@@ -2310,7 +2336,9 @@ export async function runAgent(
   logger.debug({ toolCount: composioTools.length, mcpToolCount: mcpTools.length, fullToolCount: fullComposioTools.length, discoveryOnly: fullComposioTools.length > 80 }, "Agent tools loaded");
 
   // Build message array for OpenRouter
-  const durable = options?.ephemeral && !ownerPrivateRun ? { summaries: [], imageAssets: [], history: [] as Message[] } : await getSession(userId);
+  const durable = options?.ephemeral && !ownerPrivateRun
+    ? { summaries: [], imageAssets: [], history: [] as Message[], approvals: [] as Awaited<ReturnType<typeof getSession>>["approvals"] }
+    : await getSession(userId);
   const ownerMeetingHistory = ownerPrivateRun && options?.meetingId
     ? durable.history.slice(-8).map((message) => {
       const content = typeof message.content === "string" ? message.content : "[previous attachment omitted]";
@@ -2438,33 +2466,61 @@ export async function runAgent(
   const routingRecentContext = sharedScope ? undefined : history.slice(-4)
     .map((message) => `${message.role}: ${typeof message.content === "string" ? message.content.slice(0, 400) : ""}`)
     .join("\n");
+  const pendingApproval = !sharedScope && !options?.ephemeral
+    && durable.approvals.some((approval) => approval.status === "pending" && approval.expiresAt > Date.now());
+  const pendingContinuation = /\b(?:waiting for (?:the )?(?:task|provider|approval)|resume when|awaiting (?:input|approval)|pending task)\b/i.test(routingRecentContext ?? "");
   const routingDeadline = createRoutingDeadline(config.jevTurnBudgetMs, signal);
+  const missionRoutingKey = options?.missionStepId && (options.taskId || options.missionId)
+    ? `${userId}:${options.missionStepId}`
+    : undefined;
+  const cachedMissionRouting = missionRoutingKey ? missionRoutingCache.get(missionRoutingKey) : undefined;
+  const reusableMissionRouting = cachedMissionRouting && Date.now() - cachedMissionRouting.at < missionRoutingCacheTtlMs
+    ? cachedMissionRouting
+    : undefined;
+  const persistedMissionRouting = options?.missionRoutingCache
+    && options.missionRoutingCache.stepId === options.missionStepId
+    && options.missionRoutingCache.objectiveHash === missionObjectiveHash(options.missionStepObjective)
+    ? options.missionRoutingCache
+    : undefined;
   // Native Jev routing is the single classifier for simple conversational
   // turns. Do not spend three more Jev calls on skills, Treg, and Composio
   // when the request contains no action/data signal.
-  const actionRoutingLikely = likelyNeedsActionRouting(routingQuery)
-    || Boolean(options?.taskId || options?.missionId || options?.meetingId || options?.toolAllow?.length);
+  const clearlyConversational = isClearlyConversational(routingQuery, routingRecentContext);
+  const actionRoutingLikely = !clearlyConversational
+    || pendingApproval
+    || pendingContinuation
+    || Boolean(options?.taskId || options?.missionId || options?.meetingId || options?.toolAllow?.length || approvedApprovalId);
   // Media uses a tiny local skill preflight below. Do not run the broad skill
   // router or inject the full creative manual before the generation turn.
   const skillsRoutable = actionRoutingLikely && !mediaRequest && (!options?.ephemeral || ownerPrivateRun) && !voiceTurn;
-  const skillRoutePromise = skillsRoutable
+  const skillRoutePromise = persistedMissionRouting || reusableMissionRouting
+    ? Promise.resolve(reusableMissionRouting?.skillRoute)
+    : skillsRoutable
     ? routeSkillsForTurn(routingQuery, { signal, deadline: routingDeadline, recentContext: routingRecentContext, sessionId: durableRunId }).catch((error) => {
       logger.warn({ err: error }, "Skill routing unavailable; continuing with keyword routing");
       return undefined;
     })
     : Promise.resolve(undefined);
-  const tregRoutePromise = actionRoutingLikely && !sharedScope && !voiceTurn && !toolsDisabled
+  const tregRoutePromise = persistedMissionRouting || reusableMissionRouting
+    ? Promise.resolve(reusableMissionRouting?.tregRoute)
+    : actionRoutingLikely && !sharedScope && !voiceTurn && !toolsDisabled
     ? routeTregForTurn(routingQuery, { signal, deadline: routingDeadline, sessionId: durableRunId }).catch(() => undefined)
     : Promise.resolve(undefined);
   // Connected-account metadata is private context. Never expose a user's
   // account aliases or tool access to a shared channel conversation.
-  const accountsPromise: Promise<ConnectedComposioAccount[] | undefined> = !actionRoutingLikely || sharedScope
+  const accountsPromise: Promise<ConnectedComposioAccount[] | undefined> = persistedMissionRouting
+    ? Promise.resolve(persistedMissionRouting.connectedAccounts as ConnectedComposioAccount[])
+    : reusableMissionRouting
+    ? Promise.resolve(reusableMissionRouting.routedAccounts)
+    : !actionRoutingLikely || sharedScope
     ? Promise.resolve(undefined)
     : listConnectedAccounts(userId).catch((error) => {
       logger.debug({ err: error, userId }, "Connected-account metadata unavailable for this run");
       return undefined;
     });
-  const composioRoutePromise = accountsPromise.then((accounts) => actionRoutingLikely && accounts
+  const composioRoutePromise = persistedMissionRouting || reusableMissionRouting
+    ? Promise.resolve(reusableMissionRouting?.composioDecision)
+    : accountsPromise.then((accounts) => actionRoutingLikely && accounts
     ? routeComposioForTurn(routingQuery, {
       accounts,
       listActions: listComposioToolkitActions,
@@ -2479,6 +2535,10 @@ export async function runAgent(
     return undefined;
   });
   const [skillRoute, tregRoute, routedAccounts, composioDecision] = await Promise.all([skillRoutePromise, tregRoutePromise, accountsPromise, composioRoutePromise]);
+  if (missionRoutingKey && !persistedMissionRouting && !reusableMissionRouting) {
+    missionRoutingCache.set(missionRoutingKey, { at: Date.now(), skillRoute, tregRoute, routedAccounts, composioDecision });
+    while (missionRoutingCache.size > 128) missionRoutingCache.delete(missionRoutingCache.keys().next().value as string);
+  }
   let accountContext = "";
   let composioRouteContext = "";
   let connectedAccountSnapshot: ConnectedComposioAccount[] | undefined;
@@ -2506,6 +2566,15 @@ export async function runAgent(
       }
     }
   }
+  if (persistedMissionRouting && !sharedScope && !routedAccounts?.length && persistedMissionRouting.connectedAccounts.length) {
+    connectedAccountSnapshot = persistedMissionRouting.connectedAccounts as ConnectedComposioAccount[];
+    accountContext = `Connected Composio accounts (cached for mission step):\n${persistedMissionRouting.connectedAccounts.map((account) => `- ${account.toolkit}: ${account.alias ?? account.id ?? "connected"} (${account.status ?? "ACTIVE"})`).join("\n")}`;
+  }
+  if (persistedMissionRouting) {
+    if (persistedMissionRouting.composioToolkits.length || persistedMissionRouting.composioActions.length) {
+      composioRouteContext = `Cached connected-app route for this mission step: ${[...persistedMissionRouting.composioToolkits, ...persistedMissionRouting.composioActions].join(", ")}. Use the gateway and verify the exact schema before execution.`;
+    }
+  }
   // Native schemas are routed after Composio's direct actions have been added
   // so the model receives the right local tools plus any exact connected-app
   // actions. The same deadline is reused; native routing can never add another
@@ -2515,14 +2584,25 @@ export async function runAgent(
     deadline: routingDeadline,
     recentContext: routingRecentContext,
     sessionId: durableRunId,
-    preserveAll: Boolean(options?.taskId || options?.missionId || options?.toolAllow?.length),
+    // Mission workers keep their lifecycle closure, but must still use bundle
+    // loading for the rest of the catalog. Explicit non-mission allowlists
+    // retain the exact historical full-surface behavior.
+    preserveAll: Boolean(options?.toolAllow?.length && !options?.taskId && !options?.missionId),
   });
   const noToolTurn = Boolean(
+    config.conversationalFastPath
+    && clearlyConversational
+    &&
     !options?.taskId
     && !options?.missionId
     && !options?.toolAllow?.length
-    && (nativeToolRoute.noTool || (!actionRoutingLikely && nativeToolRoute.source === "fallback")),
+    && nativeToolRoute.noNativeTool
+    && (nativeToolRoute.noNativeToolConfidence ?? 0) >= 0.85
+    && !skillRoute
+    && !tregRoute
+    && !composioDecision
   );
+  recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: noToolTurn ? "jev_no_native_tool" : clearlyConversational ? "conversational_gate_requires_capability_check" : "action_gate", noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision) });
   const revealedNativeTools = new Set<string>();
   routingDeadline.dispose();
   // Project skills are trusted, versioned operating guidance. Select a small
@@ -2547,9 +2627,31 @@ export async function runAgent(
     } catch (error) {
       logger.warn({ err: error }, "Project skill discovery unavailable; continuing without skill context");
     }
+  } else if (persistedMissionRouting?.skillNames.length) {
+    try {
+      skillContext = await skillContextForBinding({ primary: persistedMissionRouting.skillNames, supporting: [], requiredReferences: ROUTED_SKILL_REFERENCES }, "");
+    } catch (error) {
+      logger.debug({ err: error }, "Persisted mission skill context unavailable");
+    }
   }
   const tregRouteContext = tregTurnContext(tregRoute);
   if (tregRouteContext) composioRouteContext = composioRouteContext ? `${composioRouteContext}\n\n${tregRouteContext}` : tregRouteContext;
+  if (persistedMissionRouting?.tregTools.length) {
+    const cachedTreg = `Cached Treg route for this mission step: ${persistedMissionRouting.tregTools.join(", ")}. Use it only when the current step still requires live external data.`;
+    composioRouteContext = composioRouteContext ? `${composioRouteContext}\n\n${cachedTreg}` : cachedTreg;
+  }
+  const missionRoutingResult: MissionRoutingCache | undefined = options?.missionStepId
+    ? persistedMissionRouting ?? {
+      stepId: options.missionStepId,
+      objectiveHash: missionObjectiveHash(options.missionStepObjective),
+      updatedAt: Date.now(),
+      skillNames: [...new Set([...(skillRoute?.binding.primary ?? []), ...(skillRoute?.binding.supporting ?? [])])].slice(0, 8),
+      tregTools: tregRoute?.tool ? [tregRoute.tool] : [],
+      composioToolkits: (composioDecision?.toolkits ?? []).slice(0, 8).map((item) => item.id),
+      composioActions: (composioDecision?.actions ?? []).slice(0, 12).map((item) => item.id),
+      connectedAccounts: (routedAccounts ?? []).slice(0, 20).map((item) => ({ toolkit: item.toolkit, status: item.status, alias: item.alias, id: item.id })),
+    }
+    : undefined;
   const upgradeContext = pendingUpgrade
     ? `\n\n${formatAgentReleaseContext(pendingUpgrade, announceUpgrade)}`
     : "";
@@ -2657,9 +2759,13 @@ export async function runAgent(
       imageComposioDirectActionGuidanceAdded = true;
     }
     const revealed = availableTools.filter((tool) => revealedNativeTools.has(toolSchemaName(tool)));
+    const composioGateway = new Set(["COMPOSIO_SEARCH_TOOL", "COMPOSIO_EXECUTE_TOOL", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_MANAGE_CONNECTIONS"]);
+    const requiredWorkerTools = (options?.taskId || options?.missionId) && options.toolAllow?.length
+      ? availableTools.filter((tool) => options.toolAllow!.includes(toolSchemaName(tool)))
+      : [];
     const routedTools = (noToolTurn
-      ? availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || revealedNativeTools.has(toolSchemaName(tool)))
-      : [...nativeToolRoute.tools, ...revealed])
+      ? availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || composioGateway.has(toolSchemaName(tool)) || revealedNativeTools.has(toolSchemaName(tool)))
+      : [...nativeToolRoute.tools, ...requiredWorkerTools, ...revealed])
       .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index);
     const imageSafeTools = roundMediaSelection
       ? routedTools.filter((tool) => toolSchemaName(tool) !== "COMPOSIO_MULTI_EXECUTE_TOOL")
@@ -2715,7 +2821,8 @@ export async function runAgent(
           const assetIds = generatedImages.map((image) => image.assetId).filter((value): value is string => Boolean(value));
           const fallback = `The image was generated and saved successfully, but OpenRouter interrupted my final response stream. ${assetIds.length ? `Saved asset${assetIds.length === 1 ? "" : "s"}: ${assetIds.join(", ")}.` : "The generated image is available in this turn."}${models.length ? ` Model used: ${models.join(", ")}.` : ""}`;
           await persistRun("completed", "run.completed_with_media", fallback, { mediaCount: generatedImages.length, assetIds, models, streamError: message.slice(0, 500) });
-          return { text: fallback, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
+          recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: "media_receipt", noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision), capabilityFailureReply: false });
+          return { text: fallback, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionRoutingCache: missionRoutingResult, ...(privateLinks.length ? { privateLinks } : {}) };
         }
         await persistRun("failed", "run.failed", undefined, { error: message.slice(0, 1000), model: requestModel, round });
         throw e;
@@ -2724,6 +2831,7 @@ export async function runAgent(
     if (response.usage?.cost) totalCost += response.usage.cost;
     if (response.usage?.prompt_tokens || response.usage?.completion_tokens) {
       logger.info({ model: requestModel, round, promptTokens: response.usage.prompt_tokens, completionTokens: response.usage.completion_tokens, totalTokens: response.usage.total_tokens, cachedTokens: response.usage.prompt_tokens_details?.cached_tokens, costUsd: response.usage.cost }, "OpenRouter token usage");
+      if (noToolTurn) recordTurnMode({ mode: "conversational", reason: "jev_no_native_tool", noNativeTool: true, skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision), promptTokens: response.usage.prompt_tokens, findToolsCalled: toolsUsed.includes("CHUCK_FIND_TOOLS") });
     }
 
     const choice = response.choices[0];
@@ -2786,7 +2894,8 @@ export async function runAgent(
       posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: round + 1, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
       const finalText = await addUpgradeNotice(appendPreviewLinks(rawText, previewLinks));
       await persistRun("completed", "run.completed", finalText, { finishReason: finish_reason ?? "unknown" });
-      return { text: finalText, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
+      recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: noToolTurn ? "jev_no_native_tool" : "completed", noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision), capabilityFailureReply: isCapabilityFailureReply(finalText) });
+      return { text: finalText, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionRoutingCache: missionRoutingResult, ...(privateLinks.length ? { privateLinks } : {}) };
     }
 
     // ── Tool calls: execute via Composio session ───────────────────────
@@ -3504,17 +3613,17 @@ execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, ge
     if (taskWaitRequest) {
       const message = "I’m waiting for the external task to finish, then I’ll check its status and continue.";
       await persistRun("paused", "run.waiting_for_task", message, { runAt: taskWaitRequest.runAt, checkpoint: taskWaitRequest.checkpoint, nextAction: taskWaitRequest.nextAction });
-      return { text: message, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, taskWait: taskWaitRequest, ...(privateLinks.length ? { privateLinks } : {}) };
+      return { text: message, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, taskWait: taskWaitRequest, missionRoutingCache: missionRoutingResult, ...(privateLinks.length ? { privateLinks } : {}) };
     }
     if (missionWaitRequest) {
       const message = "I’m waiting for the provider event recorded in this mission, then I’ll continue from the saved checkpoint.";
       await persistRun("paused", "run.waiting_for_provider_event", message, { provider: missionWaitRequest.provider, providerEventId: missionWaitRequest.providerEventId, checkpoint: missionWaitRequest.checkpoint, nextAction: missionWaitRequest.nextAction });
-      return { text: message, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionWait: missionWaitRequest, ...(privateLinks.length ? { privateLinks } : {}) };
+      return { text: message, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionWait: missionWaitRequest, missionRoutingCache: missionRoutingResult, ...(privateLinks.length ? { privateLinks } : {}) };
     }
     if (missionStartHandoff) {
       const message = `Mission ${missionStartHandoff.id} has started and is running in its durable worker. I will not execute its steps in this chat turn; the worker owns the mission and will continue from its persisted state.`;
       await persistRun("completed", "run.mission_started", message, { missionId: missionStartHandoff.id, status: missionStartHandoff.status, ...(missionStartHandoff.rootTaskId ? { rootTaskId: missionStartHandoff.rootTaskId } : {}) });
-      return { text: await addUpgradeNotice(message), toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
+      return { text: await addUpgradeNotice(message), toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionRoutingCache: missionRoutingResult, ...(privateLinks.length ? { privateLinks } : {}) };
     }
   }
 
@@ -3534,7 +3643,8 @@ execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, ge
   const closeout = typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks);
   const finalText = `${await addUpgradeNotice(closeout)}\n\nI reached the ${config.maxToolRounds}-round tool limit, so this run may be incomplete. Verify the results above before treating it as done.`.trim();
   await persistRun("completed", "run.completed_after_round_limit", finalText);
-  return { text: finalText, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
+  recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: noToolTurn ? "jev_no_native_tool" : "round_limit", noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision), capabilityFailureReply: isCapabilityFailureReply(finalText) });
+  return { text: finalText, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionRoutingCache: missionRoutingResult, ...(privateLinks.length ? { privateLinks } : {}) };
 }
 
 // ── Get connection URL for a toolkit (for the /connect command) ───────────────

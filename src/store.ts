@@ -19,6 +19,8 @@ import type { ApprovalPolicy, HandoffRecord, WorkerDuration } from "./subagents/
 import type { CapabilityWorkerName } from "./memory/types.js";
 import { durableMemoryConfigured, forgetDurableMemory, saveDurableMemory, saveMemoryEntity, searchDurableMemory } from "./memory/durable.js";
 import { queueConversationReflection } from "./memory/reflection.js";
+import { deriveMissionAllowedTools } from "./missionWorker.js";
+import type { MissionRoutingCache } from "./decisions/missionRoutingCache.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { deleteR2Object, inspectR2Object, putR2Object, r2Configured, readR2ObjectBounded, signR2Download } from "./lib/storage/r2.js";
 import { deleteDurableImageAsset, durableImageObjectId, isAuthorizedDurableImage, registerDurableImageAsset } from "./durableImageCatalog.js";
@@ -1120,6 +1122,8 @@ export interface TaskRecord {
   missionAllowedTools?: string[];
   /** One approved tool execution may be replayed when a durable mission resumes. */
   approvedApprovalId?: string;
+  /** Compact per-step routing result reused across mission slices and restarts. */
+  missionRoutingCache?: MissionRoutingCache;
 }
 
 export type ComposerStageStatus = "pending" | "running" | "completed" | "blocked" | "failed" | "cancelled";
@@ -6460,6 +6464,18 @@ function normalizeTask(task: TaskRecord): TaskRecord {
     ...(typeof task.missionId === "string" && /^mis_[A-Za-z0-9_-]{1,160}$/.test(task.missionId) ? { missionId: task.missionId } : { missionId: undefined }),
     ...(typeof task.missionStepId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(task.missionStepId) ? { missionStepId: task.missionStepId } : { missionStepId: undefined }),
     ...(Array.isArray(task.missionAllowedTools) ? { missionAllowedTools: [...new Set(task.missionAllowedTools.filter((tool): tool is string => typeof tool === "string" && /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(tool)))].slice(0, 100) } : { missionAllowedTools: undefined }),
+    ...(task.missionRoutingCache && typeof task.missionRoutingCache === "object" && typeof task.missionRoutingCache.stepId === "string" ? {
+      missionRoutingCache: {
+        stepId: task.missionRoutingCache.stepId.slice(0, 160),
+        objectiveHash: typeof task.missionRoutingCache.objectiveHash === "string" && /^[a-f0-9]{32}$/.test(task.missionRoutingCache.objectiveHash) ? task.missionRoutingCache.objectiveHash : "",
+        updatedAt: Number(task.missionRoutingCache.updatedAt) || Date.now(),
+        skillNames: Array.isArray(task.missionRoutingCache.skillNames) ? task.missionRoutingCache.skillNames.filter((item): item is string => typeof item === "string").slice(0, 8) : [],
+        tregTools: Array.isArray(task.missionRoutingCache.tregTools) ? task.missionRoutingCache.tregTools.filter((item): item is string => typeof item === "string").slice(0, 8) : [],
+        composioToolkits: Array.isArray(task.missionRoutingCache.composioToolkits) ? task.missionRoutingCache.composioToolkits.filter((item): item is string => typeof item === "string").slice(0, 8) : [],
+        composioActions: Array.isArray(task.missionRoutingCache.composioActions) ? task.missionRoutingCache.composioActions.filter((item): item is string => typeof item === "string").slice(0, 12) : [],
+        connectedAccounts: Array.isArray(task.missionRoutingCache.connectedAccounts) ? task.missionRoutingCache.connectedAccounts.slice(0, 20).flatMap((item) => item && typeof item === "object" && typeof item.toolkit === "string" ? [{ toolkit: item.toolkit.slice(0, 80), ...(typeof item.status === "string" ? { status: item.status.slice(0, 40) } : {}), ...(typeof item.alias === "string" ? { alias: item.alias.slice(0, 120) } : {}), ...(typeof item.id === "string" ? { id: item.id.slice(0, 160) } : {}) }] : []) : [],
+      },
+    } : { missionRoutingCache: undefined }),
     ...(typeof task.quotaReservationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(task.quotaReservationId) ? { quotaReservationId: task.quotaReservationId } : { quotaReservationId: undefined }),
     ...(typeof task.sdkOrganizationId === "string" && /^org_[A-Za-z0-9_-]{1,120}$/.test(task.sdkOrganizationId) ? { sdkOrganizationId: task.sdkOrganizationId } : { sdkOrganizationId: undefined }),
     ...(task.enqueueClaim && typeof task.enqueueClaim === "object" && typeof task.enqueueClaim.token === "string" && Number.isFinite(task.enqueueClaim.expiresAt)
@@ -6751,8 +6767,8 @@ export async function createMission(userId: number, input: MissionCreateInput): 
     const dependencies = step.dependsOn ?? [];
     if (!Array.isArray(dependencies) || dependencies.some((dependency) => typeof dependency !== "string")) throw new Error(`Mission step ${stepIds[index]} has invalid dependencies`);
     const dependsOn = [...new Set(dependencies.map((dependency) => dependency.trim()))];
-    const allowedTools = normalizeMissionStepAllowedTools(step.allowedTools, `Mission step ${stepIds[index]}`);
-    return { id: stepIds[index], title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn, attempts: 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? 2))), updatedAt: now, ...(step.input ? { input: structuredClone(step.input) } : {}), ...(step.outputSchema ? { outputSchema: structuredClone(step.outputSchema) } : {}), ...(step.evidenceRequired ? { evidenceRequired: step.evidenceRequired.slice(0, 20) } : {}), ...(step.compensationObjective ? { compensationObjective: step.compensationObjective.slice(0, 4000) } : {}), ...(step.retryBackoffSeconds !== undefined ? { retryBackoffSeconds: Math.max(0, Math.min(86400, Math.floor(step.retryBackoffSeconds))) } : {}), ...(step.parallelGroup ? { parallelGroup: step.parallelGroup.slice(0, 120) } : {}), ...(allowedTools !== undefined ? { allowedTools } : {}) };
+    const allowedTools = normalizeMissionStepAllowedTools(step.allowedTools, `Mission step ${stepIds[index]}`) ?? deriveMissionAllowedTools(step.objective);
+    return { id: stepIds[index], title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn, attempts: 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? 2))), updatedAt: now, ...(step.input ? { input: structuredClone(step.input) } : {}), ...(step.outputSchema ? { outputSchema: structuredClone(step.outputSchema) } : {}), ...(step.evidenceRequired ? { evidenceRequired: step.evidenceRequired.slice(0, 20) } : {}), ...(step.compensationObjective ? { compensationObjective: step.compensationObjective.slice(0, 4000) } : {}), ...(step.retryBackoffSeconds !== undefined ? { retryBackoffSeconds: Math.max(0, Math.min(86400, Math.floor(step.retryBackoffSeconds))) } : {}), ...(step.parallelGroup ? { parallelGroup: step.parallelGroup.slice(0, 120) } : {}), allowedTools };
   });
   validateMissionStepGraph(steps);
   const ready = steps.find((step) => step.dependsOn.length === 0);
@@ -6946,8 +6962,8 @@ export async function replanMission(userId: number, id: string, rawSteps: Array<
       if (!step.objective?.trim() || step.objective.length > 4000) throw new Error(`Mission step ${stepId} objective is required and must be 4000 characters or fewer`);
       const dependencies = step.dependsOn ?? [];
       if (!Array.isArray(dependencies) || dependencies.some((dependency) => typeof dependency !== "string")) throw new Error(`Mission step ${stepId} has invalid dependencies`);
-      const allowedTools = normalizeMissionStepAllowedTools(step.allowedTools, `Replanned mission step ${stepId}`);
-      return { ...previous, id: stepId, title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn: [...new Set(dependencies.map((dependency) => dependency.trim()))], taskId: previous?.taskId, attempts: previous?.attempts ?? 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? previous?.retryLimit ?? 2))), updatedAt: now, result: previous?.result, ...(allowedTools !== undefined ? { allowedTools } : {}) };
+      const allowedTools = normalizeMissionStepAllowedTools(step.allowedTools, `Replanned mission step ${stepId}`) ?? previous?.allowedTools ?? deriveMissionAllowedTools(step.objective);
+      return { ...previous, id: stepId, title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn: [...new Set(dependencies.map((dependency) => dependency.trim()))], taskId: previous?.taskId, attempts: previous?.attempts ?? 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? previous?.retryLimit ?? 2))), updatedAt: now, result: previous?.result, allowedTools };
     });
     const completedIds = new Set(mission.steps.filter((step) => step.status === "completed").map((step) => step.id));
     const removedCompletedIds = [...completedIds].filter((stepId) => !steps.some((step) => step.id === stepId && step.status === "completed"));

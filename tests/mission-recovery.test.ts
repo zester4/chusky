@@ -68,6 +68,7 @@ test("sweeper quarantines an expired in-flight lease instead of replaying uncert
   const userId = 981003;
   const mission = await runningMission(userId, "expired-lease");
   const task = (await listTasks(userId)).find((item) => item.missionId === mission.id)!;
+  await updateTask(userId, task.id, { missionAllowedTools: ["GMAIL_SEND_EMAIL"] });
   const claimed = await claimTask(userId, task.id, "recovery-proof-worker", 1_000);
   assert.ok(claimed?.lease);
   await updateTask(userId, task.id, { lease: { ...claimed!.lease!, expiresAt: Date.now() - 1 } });

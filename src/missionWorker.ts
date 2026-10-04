@@ -46,6 +46,22 @@ export const MISSION_WORKER_CONTROL_TOOLS = [
   "CHUCK_MISSION_CONTROL",
 ] as const;
 
+/** Persist a small capability fence when a planner did not provide exact tools. */
+export function deriveMissionAllowedTools(objective: string): string[] {
+  const text = objective.toLowerCase();
+  const selected = new Set<string>(["CHUCK_FIND_TOOLS"]);
+  if (/email|gmail|outlook|slack|notion|calendar|github|crm|message|post|send|publish|app|connected/.test(text)) {
+    for (const tool of ["COMPOSIO_SEARCH_TOOL", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_EXECUTE_TOOL", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_MANAGE_CONNECTIONS"]) selected.add(tool);
+  }
+  if (/browser|website|web page|click|form|login/.test(text)) selected.add("CHUCK_BROWSER");
+  if (/image|photo|logo|poster|flyer|illustration/.test(text)) selected.add("CHUCK_GENERATE_IMAGE");
+  if (/video|clip|film|animation/.test(text)) selected.add("CHUCK_GENERATE_VIDEO");
+  if (/pdf|report|document|spreadsheet|presentation|slide/.test(text)) selected.add("CHUCK_CREATE_PDF");
+  if (/memory|remember|profile|preference/.test(text)) selected.add("CHUCK_MEMORY_BRIEF");
+  if (/research|search|latest|current|company|person|seo/.test(text)) selected.add("CHUCK_TREG_SEARCH");
+  return [...selected];
+}
+
 export function missionWorkerToolAllowlist(stepTools?: string[], inheritedTools?: string[]): string[] | undefined {
   if (stepTools === undefined) return inheritedTools;
   const inherited = inheritedTools ? new Set(inheritedTools) : undefined;
