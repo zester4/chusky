@@ -418,6 +418,30 @@ test("computer-use actions start the desktop and return screenshots or structure
   assert.equal(screenshot.mediaType, "image/jpeg");
 });
 
+test("reports lifecycle capabilities and rejects unsupported container actions", async () => {
+  const userId = 820090;
+  const instance = engine();
+  await instance.workspace(userId, "create");
+  const sandbox = sandboxes.get("sandbox-1")!;
+  sandbox.sandboxClass = "linux-vm";
+  const info = await instance.workspace(userId, "status") as any;
+  assert.equal(info.lifecycle.canPause, true);
+  assert.equal(info.lifecycle.canArchive, false);
+  await assert.rejects(() => instance.sandbox(userId, { action: "lifecycle", autoStopMinutes: 10 }), /does not support autoStop/);
+});
+
+test("serializes owner desktop leases and releases them durably", async () => {
+  const userId = 820091;
+  const instance = engine();
+  const first = await instance.computer(userId, { action: "lease_acquire", ttlSeconds: 60 }) as { leaseId: string };
+  await assert.rejects(() => instance.computer(userId, { action: "lease_acquire", ttlSeconds: 60 }), /leased by another active run/);
+  const released = await instance.computer(userId, { action: "lease_release", leaseId: first.leaseId }) as { released: boolean };
+  assert.equal(released.released, true);
+  const second = await instance.computer(userId, { action: "lease_acquire", ttlSeconds: 60 }) as { leaseId: string };
+  assert.notEqual(second.leaseId, first.leaseId);
+  await instance.computer(userId, { action: "lease_release", leaseId: second.leaseId });
+});
+
 test("reuses one Computer Use startup handshake for a sandbox", async () => {
   const e = engine();
   const sandbox = await e.getOrCreateWorkspace(8200061) as any;

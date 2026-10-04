@@ -831,6 +831,7 @@ export interface DaytonaWorkspaceRecord {
   apps?: DaytonaAppRecord[];
   /** Safe browser evidence only; never persist page bodies, cookies, or credentials. */
   browser?: { lastUrl?: string; requestedUrl?: string; sessionId?: string; observedAt?: number; observationMethod?: "address_bar" | "requested_only"; updatedAt: number };
+  computerLease?: { leaseId: string; runId?: string; acquiredAt: number; expiresAt: number };
 }
 
 export type DaytonaAppFramework = "vite-react" | "nextjs";
@@ -7915,6 +7916,14 @@ export async function renewUserLock(uid: number, token: string, leaseSeconds = 1
 
 export async function releaseUserLock(uid: number, token: string): Promise<void> {
   return backend.releaseLock(uid, token);
+}
+
+export async function acquireDaytonaComputerLeaseLock(uid: number, token: string, leaseSeconds: number): Promise<boolean> {
+  return backend.acquireKeyLock(`daytona-computer:${uid}`, token, leaseSeconds);
+}
+
+export async function releaseDaytonaComputerLeaseLock(uid: number, token: string): Promise<void> {
+  return backend.releaseKeyLock(`daytona-computer:${uid}`, token);
 }
 
 export async function acquireMcpCredentialRefreshLock(userId: number, serverId: string, token: string, leaseSeconds = 30): Promise<boolean> {
