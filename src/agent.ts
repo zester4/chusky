@@ -2787,7 +2787,8 @@ export async function runAgent(
       : routedTools;
     const modelMessages = compactModelMessages(messages);
     if (modelMessages.length !== messages.length || modelMessages.some((message, index) => message.content !== messages[index]?.content)) {
-      logger.info({ round, originalMessages: messages.length, modelMessages: modelMessages.length }, "Compacted agent context for model round");
+      const contextChars = (items: ApiMessage[]) => items.reduce((total, message) => total + (typeof message.content === "string" ? message.content.length : JSON.stringify(message.content ?? "").length), 0);
+      logger.info({ round, originalMessages: messages.length, modelMessages: modelMessages.length, originalContextChars: contextChars(messages), modelContextChars: contextChars(modelMessages) }, "Compacted agent context for model round");
     }
     let response: ChatResponse;
     try {
