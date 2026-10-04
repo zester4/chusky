@@ -72,7 +72,7 @@ import { resolveComposioRoute } from "./composioRouting.js";
 import { buildArtifactEmailArguments, type ArtifactEmailFile } from "./artifactEmail.js";
 import { buildArtifactUploadArguments } from "./artifactBridge.js";
 import { compactModelMessages } from "./agentContext.js";
-import { compactConversationalCustomization, composeSystemPrompt } from "./prompt.js";
+import { compactConversationalCustomization, compactMissionCustomization, composeSystemPrompt } from "./prompt.js";
 import { contextPrompt } from "./contextGraph.js";
 import { AUTONOMY_OPERATING_KERNEL, needsAutonomyCloseoutNudge } from "./autonomy/operatingLoop.js";
 import { createComposioOutcomeReadAdapter } from "./reliability/composioReadAdapter.js";
@@ -2668,7 +2668,11 @@ export async function runAgent(
   const shoppingPromptRelevant = /\b(?:shop|shopping|retailer|cart|checkout|order|purchase|buy|restock|delivery)\b/i.test(routingQuery);
   const meetingPromptRelevant = Boolean(options?.meetingId) || /\b(?:meeting|zoom|teams|webex|call|interview|participant|transcript)\b/i.test(routingQuery);
   const staticSystemPrompt = composeSystemPrompt({
-    customizablePrompt: noToolTurn ? compactConversationalCustomization(config.chuckSystemPrompt) : config.chuckSystemPrompt,
+    customizablePrompt: noToolTurn
+      ? compactConversationalCustomization(config.chuckSystemPrompt)
+      : options?.missionId
+        ? compactMissionCustomization(config.chuckSystemPrompt)
+        : config.chuckSystemPrompt,
     mandatorySections: noToolTurn ? [] : ownerPrivateRun
       ? [AUTONOMY_OPERATING_KERNEL, ...(shoppingPromptRelevant ? [SHOPPING_AGENT_PLAYBOOK] : []), ...(meetingPromptRelevant ? [MEETING_MISSION_PLAYBOOK] : []), ...(triggerAutonomy ? [triggerAutonomy] : [])]
       : !voiceTurn && !sharedScope
@@ -2772,6 +2776,11 @@ export async function runAgent(
     const preloadedMissionTools = missionPreloadNames.size
       ? availableTools.filter((tool) => missionPreloadNames.has(toolSchemaName(tool)))
       : [];
+    const missionHintPreload = Boolean(options?.missionId && !options.toolAllow?.length && options.missionToolHints);
+    const missionRoutedNativeTools = missionHintPreload && nativeToolRoute.source !== "jev" ? [] : nativeToolRoute.tools;
+    const missionDiscoveryTools = missionHintPreload
+      ? availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || composioGateway.has(toolSchemaName(tool)))
+      : [];
     const routedComposioNames = new Set((composioDecision?.directTools ?? []).map((tool) => toolName(tool)).filter(Boolean));
     const routedComposioTools = routedComposioNames.size
       ? availableTools.filter((tool) => routedComposioNames.has(toolSchemaName(tool)))
@@ -2784,7 +2793,9 @@ export async function runAgent(
       : [];
     const routedTools = (noToolTurn
       ? availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || composioGateway.has(toolSchemaName(tool)) || revealedNativeTools.has(toolSchemaName(tool)))
-      : [...nativeToolRoute.tools, ...preloadedMissionTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed])
+      : missionHintPreload
+        ? [...missionRoutedNativeTools, ...preloadedMissionTools, ...missionDiscoveryTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed]
+        : [...nativeToolRoute.tools, ...preloadedMissionTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed])
       .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index);
     const imageSafeTools = roundMediaSelection
       ? routedTools.filter((tool) => toolSchemaName(tool) !== "COMPOSIO_MULTI_EXECUTE_TOOL")

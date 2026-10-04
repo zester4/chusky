@@ -6,7 +6,7 @@ import { createMission, getMission, getTask, initStore, listTasks, startMission,
 import { reconcileMissionExecution } from "../src/missionScheduler.js";
 import { executeDurableTask } from "../src/taskRunner.js";
 import { executeTaskSlice } from "../src/taskSlice.js";
-import { captureMissionSliceState, missionWorkerToolAllowlist } from "../src/missionWorker.js";
+import { captureMissionSliceState, missionWorkerToolAllowlist, MISSION_WORKER_CONTROL_TOOLS } from "../src/missionWorker.js";
 import { settleMissionSlice } from "../src/missionSlice.js";
 import { MissionFakeQStash } from "./helpers/missionKernelHarness.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -20,7 +20,7 @@ function completion(content: string | null, call?: { id: string; name: string; a
 }
 
 /** Script the inference/transport boundary, not native dispatch or settlement. */
-async function scriptedAgent(task: TaskRecord, queue: MissionFakeQStash, script: (round: number) => Response) {
+async function scriptedAgent(task: TaskRecord, queue: MissionFakeQStash, script: (round: number) => Response, testOptions: { omitToolAllow?: boolean; capturedTools?: string[] } = {}) {
   const originalFetch = globalThis.fetch;
   const originalVectorUrl = config.upstashVectorRestUrl;
   const originalVectorToken = config.upstashVectorRestToken;
@@ -30,16 +30,23 @@ async function scriptedAgent(task: TaskRecord, queue: MissionFakeQStash, script:
   config.upstashVectorRestUrl = "";
   config.upstashVectorRestToken = "";
   let round = 0;
-  globalThis.fetch = (async (input) => {
+  globalThis.fetch = (async (input, init) => {
     const url = String(input);
-    if (url.includes("/chat/completions")) return script(round++);
+    if (url.includes("/chat/completions")) {
+      if (testOptions.capturedTools) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { tools?: Array<{ function?: { name?: string } }> };
+        testOptions.capturedTools.push(...(body.tools ?? []).map((tool) => tool.function?.name ?? "").filter(Boolean));
+      }
+      return script(round++);
+    }
     if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }));
     return new Response("{}", { headers: { "content-type": "application/json" } });
   }) as typeof fetch;
   try {
     return await runAgent(task.userId, `Execute and verify mission ${task.missionId} step ${task.missionStepId}.`, [], "test/model", undefined, undefined, undefined, undefined, undefined, {
       taskId: task.id, missionId: task.missionId, missionStepId: task.missionStepId,
-      toolAllow: missionWorkerToolAllowlist([]), enqueueMissionTask: queue.enqueue,
+      ...(testOptions.omitToolAllow ? {} : { toolAllow: missionWorkerToolAllowlist([]) }),
+      enqueueMissionTask: queue.enqueue,
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -47,6 +54,19 @@ async function scriptedAgent(task: TaskRecord, queue: MissionFakeQStash, script:
     config.upstashVectorRestToken = originalVectorToken;
   }
 }
+
+test("every mission model request retains all lifecycle controls after routing", async () => {
+  const userId = 981000;
+  const queue = new MissionFakeQStash();
+  const created = await createMission(userId, { title: "Lifecycle tool surface", objective: "Analyze the sales CSV", definitionOfDone: "The analysis is verified", steps: [{ id: "unit", title: "Analyze CSV", objective: "Analyze the sales CSV" }] });
+  await startMission(userId, created.id);
+  await reconcileMissionExecution(userId, created.id, queue.enqueue);
+  const task = (await listTasks(userId)).find((candidate) => candidate.missionId === created.id && candidate.status === "queued");
+  assert.ok(task);
+  const capturedTools: string[] = [];
+  await scriptedAgent(task, queue, () => completion("The step remains in progress."), { omitToolAllow: true, capturedTools });
+  for (const control of MISSION_WORKER_CONTROL_TOOLS) assert.ok(capturedTools.includes(control), `missing mission lifecycle tool ${control}`);
+});
 
 test("real agent dispatch advances a three-step mission through durable handoffs", async () => {
   const userId = 981001;

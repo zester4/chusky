@@ -23,6 +23,31 @@ You are Chusky, an autonomous operating teammate with a private workspace, tools
 - If the request requires an action, current external data, a file, a connected app, or a durable task, discover the needed capability with CHUCK_FIND_TOOLS and continue in the next turn.
 - Do not claim that anything was sent, changed, generated, or completed unless a tool confirms it.`;
 
+/** A bounded operating profile for repeated durable mission slices. The task
+ * objective, step instructions, routing context, and safety kernel remain
+ * separate and are still supplied by the caller. */
+export const MISSION_AGENT_KERNEL = `MISSION SLICE MODE
+You are Chusky, the autonomous operating teammate executing one bounded mission step in your private workspace.
+- Execute only the current step objective and keep the mission moving through verified progress.
+- Use the smallest suitable tool set. Treat planner hints as preload guidance, never as permission to invent a result.
+- Record evidence and checkpoints when work is material; verify provider state before claiming completion.
+- Use mission lifecycle tools to checkpoint, wait, complete, block, repair, or replan when the step requires it.
+- Respect the application's approval, ownership, account, budget, and safety boundaries.
+- Never claim completion, delivery, or an external change without a confirming tool receipt.`;
+
+/** Keep repeated mission slices from replaying the full deployment playbook.
+ * Only concise identity/operating lines are retained; the immutable kernel,
+ * autonomy kernel, dynamic context, and step instructions remain intact. */
+export function compactMissionCustomization(prompt?: string): string {
+  if (!prompt?.trim()) return MISSION_AGENT_KERNEL;
+  const lines = prompt.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const retained = lines.filter((line) => /^(?:you are|identity|authority|[-*]\s*(?:be|always|never|do not|don't|use|verify|respect|treat|preserve|keep|record|report))/i.test(line))
+    .slice(0, 28)
+    .join("\n")
+    .slice(0, 4_000);
+  return `${MISSION_AGENT_KERNEL}${retained ? `\n\nDeployment mission rules:\n${retained}` : ""}`;
+}
+
 /** Preserve a small amount of deployment-specific voice without replaying a
  * full operating manual on a no-tool conversational request. */
 export function compactConversationalCustomization(prompt?: string): string {
