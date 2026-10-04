@@ -4548,10 +4548,10 @@ function deferMemoryVectorBackfill(uid: number): void {
   memoryVectorBackfillRetryAt.set(uid, now + 60_000);
 }
 
-export async function initStore(options: { memoryOnly?: boolean } = {}): Promise<void> {
+export async function initStore(options: { memoryOnly?: boolean; suppressStorageMetrics?: boolean } = {}): Promise<void> {
   if (redisMetricsFlushTimer) clearInterval(redisMetricsFlushTimer);
   redisMetricsFlushTimer = undefined;
-  await backend?.flushStorageMetrics?.();
+  if (!options.suppressStorageMetrics) await backend?.flushStorageMetrics?.();
   const production = process.env.NODE_ENV === "production";
   if ((config.webhookUrl || production) && !config.redisUrl && !options.memoryOnly) {
     const error = new Error("REDIS_URL is required in webhook/production mode; refusing in-memory persistence");
@@ -4615,7 +4615,7 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
       await r.ping();
       const redisCommandMetrics = new RedisCommandMetrics();
       instrumentRedisClient(r as unknown as Parameters<typeof instrumentRedisClient>[0], redisCommandMetrics);
-      const redisMetricsPublisher = !options.memoryOnly && config.durableStorageMetricsEnabled && durableState
+      const redisMetricsPublisher = !options.memoryOnly && !options.suppressStorageMetrics && config.durableStorageMetricsEnabled && durableState
         ? new RedisMetricsPublisher(redisCommandMetrics,
           (instanceId, batchId, observedAt, samples) => durableState.recordStorageMetricBatch(instanceId, batchId, observedAt, samples),
           {
