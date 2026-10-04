@@ -26,6 +26,10 @@ export function recordDecision(input: {
   latencyMs?: number;
   costUsd?: number;
   model?: string;
+  routeSource?: "jev" | "fallback";
+  exposedTools?: number;
+  baselineTools?: number;
+  loading?: "full" | "bundle";
 }): void {
   const current = bucket(input.surface);
   current.decisions += 1;
@@ -53,6 +57,10 @@ export function recordDecision(input: {
     ...(input.latencyMs === undefined ? {} : { latencyMs: input.latencyMs }),
     ...(input.costUsd === undefined ? {} : { costUsd: input.costUsd }),
     ...(input.model ? { model: input.model } : {}),
+    ...(input.routeSource ? { routeSource: input.routeSource } : {}),
+    ...(input.exposedTools === undefined ? {} : { exposedTools: input.exposedTools }),
+    ...(input.baselineTools === undefined ? {} : { baselineTools: input.baselineTools }),
+    ...(input.loading ? { loading: input.loading } : {}),
   }, "Jev routing decision");
 }
 

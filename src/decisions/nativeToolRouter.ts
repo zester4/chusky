@@ -277,10 +277,13 @@ export async function computeNativeToolRoute(query: string, tools: ToolSchema[],
   });
   const best = ranking.ranked[0];
   if (!best || ranking.confidence < config.jevNativeToolMinConfidence || ranking.none >= ranking.confidence) {
+    const fallbackReason = config.nativeToolLoading === "bundle" && !options.preserveAll
+      ? "bundle_low_confidence_or_none"
+      : "low_confidence_or_none";
     return {
-      ...(config.nativeToolLoading === "bundle" && !options.preserveAll ? bundleFallbackRoute(tools, routingContext, "bundle_low_confidence_or_none") : baseline),
+      ...(config.nativeToolLoading === "bundle" && !options.preserveAll ? bundleFallbackRoute(tools, routingContext, fallbackReason) : baseline),
       candidateCount: candidates.candidates.length,
-      fallbackReason: "low_confidence_or_none",
+      fallbackReason,
       telemetry: { latencyMs: ranking.latencyMs, costUsd: ranking.costUsd, ranked: ranking.ranked },
     };
   }
@@ -289,10 +292,13 @@ export async function computeNativeToolRoute(query: string, tools: ToolSchema[],
     .slice(0, Math.min(12, config.jevNativeToolMaxCandidates))
     .map((item) => item.id);
   if (!selected.length) {
+    const fallbackReason = config.nativeToolLoading === "bundle" && !options.preserveAll
+      ? "bundle_no_selected_native_tool"
+      : "no_selected_native_tool";
     return {
-      ...(config.nativeToolLoading === "bundle" && !options.preserveAll ? bundleFallbackRoute(tools, routingContext, "bundle_no_selected_native_tool") : baseline),
+      ...(config.nativeToolLoading === "bundle" && !options.preserveAll ? bundleFallbackRoute(tools, routingContext, fallbackReason) : baseline),
       candidateCount: candidates.candidates.length,
-      fallbackReason: "no_selected_native_tool",
+      fallbackReason,
       telemetry: { latencyMs: ranking.latencyMs, costUsd: ranking.costUsd, ranked: ranking.ranked },
     };
   }
@@ -341,15 +347,26 @@ export async function routeNativeToolsForTurn(tools: ToolSchema[], query: string
   });
   const log = (route: NativeToolRoute | undefined, applied: boolean, reason?: string) => {
     const telemetry = route?.telemetry;
+    const reducedBundleApplied = Boolean(
+      route
+      && config.nativeToolLoading === "bundle"
+      && !options.preserveAll
+      && route.fallbackReason?.startsWith("bundle_")
+      && route.tools.length < tools.length,
+    );
     recordDecision({
       surface: "native_tool",
       mode: mode === "enforce" ? "enforce" : "shadow",
-      applied,
+      applied: applied || reducedBundleApplied,
       ...(reason ? { fallbackReason: reason } : {}),
       ...(telemetry?.ranked ? { jev: telemetry.ranked.map((item) => ({ id: item.id, p: item.probability })) } : {}),
       baseline: baseline.selected.slice(0, 6),
       ...(telemetry ?? {}),
       model: client.modelId,
+      routeSource: route?.source,
+      exposedTools: route?.tools.length,
+      baselineTools: tools.length,
+      loading: config.nativeToolLoading,
     });
   };
   if (mode === "shadow") {
@@ -358,8 +375,11 @@ export async function routeNativeToolsForTurn(tools: ToolSchema[], query: string
   }
   const { value, failure } = await awaitRoute(run, options.deadline ? options.deadline.remaining() : config.jevTurnBudgetMs);
   if (!value || value.source !== "jev") {
-    log(value, false, failure ?? value?.fallbackReason ?? "fallback");
-    return config.nativeToolLoading === "bundle" && !options.preserveAll ? bundleFallbackRoute(tools, query, failure ?? value?.fallbackReason ?? "bundle_fallback") : { ...baseline, ...(failure ? { fallbackReason: failure } : value?.fallbackReason ? { fallbackReason: value.fallbackReason } : {}) };
+    const fallback = value ?? (config.nativeToolLoading === "bundle" && !options.preserveAll
+      ? bundleFallbackRoute(tools, query, "bundle_route_failure")
+      : { ...baseline, ...(failure ? { fallbackReason: failure } : {}) });
+    log(fallback, false, failure ?? fallback.fallbackReason ?? "fallback");
+    return fallback;
   }
   log(value, true);
   return value;

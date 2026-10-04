@@ -68,6 +68,7 @@ import type { SubagentActivityUpdate } from "./subagents/contracts.js";
 import { resolveComposioRoute } from "./composioRouting.js";
 import { buildArtifactEmailArguments, type ArtifactEmailFile } from "./artifactEmail.js";
 import { buildArtifactUploadArguments } from "./artifactBridge.js";
+import { compactModelMessages } from "./agentContext.js";
 import { composeSystemPrompt } from "./prompt.js";
 import { contextPrompt } from "./contextGraph.js";
 import { AUTONOMY_OPERATING_KERNEL, needsAutonomyCloseoutNudge } from "./autonomy/operatingLoop.js";
@@ -2637,10 +2638,14 @@ export async function runAgent(
         };
       })
       : routedTools;
+    const modelMessages = compactModelMessages(messages);
+    if (modelMessages.length !== messages.length || modelMessages.some((message, index) => message.content !== messages[index]?.content)) {
+      logger.info({ round, originalMessages: messages.length, modelMessages: modelMessages.length }, "Compacted agent context for model round");
+    }
     let response: ChatResponse;
     try {
       await persistRun("running", "run.model_requested", undefined, { model: requestModel, round, messageCount: messages.length });
-      response = await orChat(requestModel, messages, modelAvailableTools, signal, streamModelText, undefined, voiceTurn ? {
+      response = await orChat(requestModel, modelMessages, modelAvailableTools, signal, streamModelText, undefined, voiceTurn ? {
         preferredMaxLatencySeconds: 2,
         preferredMinThroughput: 50,
         fallbackModels: config.voiceFallbackModels,
@@ -2655,7 +2660,7 @@ export async function runAgent(
         requestModel = config.visionModel;
         if (onStatus) await onStatus(`👁️ I’m switching to a model that can understand ${modality} input…`);
         logger.warn({ requestedModel: model, requestModel, modality }, "Selected model rejected media input; using fallback");
-        response = await orChat(requestModel, messages, modelAvailableTools, signal, streamModelText, undefined, voiceTurn ? {
+        response = await orChat(requestModel, modelMessages, modelAvailableTools, signal, streamModelText, undefined, voiceTurn ? {
           preferredMaxLatencySeconds: 2,
           preferredMinThroughput: 50,
           fallbackModels: config.voiceFallbackModels,
@@ -3480,7 +3485,7 @@ execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, ge
     role: "user",
     content: `The configured limit of ${config.maxToolRounds} model/tool rounds has been reached. No more tools can be called in this run. Give a concise, truthful status based only on verified results already in this conversation. Do not claim unfinished work succeeded; state what remains and the next safe action.`,
   });
-  const final = await orChat(requestModel, messages, [], signal, onDelta);
+  const final = await orChat(requestModel, compactModelMessages(messages), [], signal, onDelta);
   if (final.usage?.cost) totalCost += final.usage.cost;
   const text = final.choices[0]?.message?.content ?? "";
 
