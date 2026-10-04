@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { boundedMissionHistory, captureMissionSliceState, missionHasTimerWakeContinuation, missionNeedsLifecycleCloseoutNudge, missionNoProgressNextAction, missionPostWakeNextAction, missionSliceHasPersistedProgress, missionStepInstruction, missionWakeNeedsRecovery, missionWorkerToolAllowlist, MISSION_WORKER_CONTROL_TOOLS } from "../src/missionWorker.js";
+import { boundedMissionHistory, captureMissionSliceState, deriveMissionToolHints, missionHasTimerWakeContinuation, missionNeedsLifecycleCloseoutNudge, missionNoProgressNextAction, missionPostWakeNextAction, missionSliceHasPersistedProgress, missionStepInstruction, missionWakeNeedsRecovery, missionWorkerToolAllowlist, MISSION_WORKER_CONTROL_TOOLS } from "../src/missionWorker.js";
 
 test("bounded mission history keeps only a recent bounded text frontier", () => {
   const history = Array.from({ length: 12 }, (_, index) => ({ role: index % 2 ? "assistant" as const : "user" as const, content: `message-${index}-${"x".repeat(900)}` }));
@@ -71,6 +71,13 @@ test("worker instructions name one executable step and its recovery action", () 
   assert.match(missionStepInstruction(step), /Execute only this mission step now/);
   assert.match(missionStepInstruction(step), /Read Sheet1!A1:D20/);
   assert.match(missionNoProgressNextAction(step), /Read the sheet/);
+});
+
+test("derived mission tools are preload hints and include the live Composio search tool", () => {
+  const hints = deriveMissionToolHints("Check Stripe invoices and reply to customer tickets");
+  assert.ok(hints.includes("COMPOSIO_SEARCH_TOOLS"));
+  assert.ok(!hints.includes("COMPOSIO_SEARCH_TOOL"));
+  assert.deepEqual(missionWorkerToolAllowlist(undefined), undefined, "hints must not become an authorization fence");
 });
 
 test("mission worker fences provider tools while retaining lifecycle controls", () => {

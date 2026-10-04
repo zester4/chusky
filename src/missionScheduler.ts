@@ -247,11 +247,22 @@ export async function scheduleMissionSteps(userId: number, mission: MissionRecor
         missionId: current.id,
         missionStepId: stepId,
         missionAllowedTools: step.allowedTools,
+        missionToolHints: step.toolHints,
         runAt: nextMissionWorkAt(current.workSchedule, now),
         maxAttempts: Math.max(1, Math.min(10, (step.retryLimit ?? 2) + 1)),
       });
       shouldEnqueue = task.status === "queued";
-    } else if (["failed", "cancelled", "blocked"].includes(task.status)) {
+    } else {
+      // Replans can keep the same step ID. Refresh the explicit fence versus
+      // preload hints so an old derived fence cannot survive onto the new
+      // objective. Undefined allowedTools is intentional: it means the step
+      // remains unrestricted and only bundle/preload routing applies.
+      const sameList = (left?: string[], right?: string[]) => JSON.stringify(left ?? []) === JSON.stringify(right ?? []);
+      if (!sameList(task.missionAllowedTools, step.allowedTools) || !sameList(task.missionToolHints, step.toolHints)) {
+        task = await updateTask(userId, task.id, { missionAllowedTools: step.allowedTools, missionToolHints: step.toolHints }) ?? task;
+      }
+    }
+    if (["failed", "cancelled", "blocked"].includes(task.status)) {
       const retried = await retryTask(userId, task.id);
       if (retried) {
         task = retried;
