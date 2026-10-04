@@ -199,7 +199,7 @@ export function searchNativeToolManifest(query: string, bundle?: NativeToolBundl
 export function searchComposioGatewayManifest(query: string, allowed?: ReadonlySet<string>): NativeToolSearchResult[] {
   if (!/\b(?:email|gmail|outlook|slack|notion|calendar|github|crm|message|send|post|publish|app|connected|account)\b/i.test(query)) return [];
   const entries: NativeToolSearchResult[] = [
-    { slug: "COMPOSIO_SEARCH_TOOL", description: "Search connected-app actions by capability.", bundle: "workspace", risk: "read" },
+    { slug: "COMPOSIO_SEARCH_TOOLS", description: "Search connected-app actions by capability.", bundle: "workspace", risk: "read" },
     { slug: "COMPOSIO_GET_TOOL_SCHEMAS", description: "Load the exact schema for a connected-app action.", bundle: "workspace", risk: "read" },
     { slug: "COMPOSIO_EXECUTE_TOOL", description: "Execute one verified connected-app action.", bundle: "workspace", risk: "write" },
     { slug: "COMPOSIO_MULTI_EXECUTE_TOOL", description: "Execute bounded connected-app actions with verification.", bundle: "workspace", risk: "write" },

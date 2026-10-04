@@ -1988,6 +1988,8 @@ export interface AgentRunOptions {
   missionStepId?: string;
   /** Current step objective, used to invalidate persisted routing after replans. */
   missionStepObjective?: string;
+  /** Planner-derived mission hints; these preload tools but never form an authorization fence. */
+  missionToolHints?: string[];
   /** Link approval recovery to the exact autonomous reminder/job occurrence. */
   autonomyResume?: { kind: "reminder" | "job"; sourceId: string; occurrenceId?: string };
 }
@@ -2537,7 +2539,10 @@ export async function runAgent(
   // Start native routing at the same time as the other Jev surfaces. It used
   // to start only after these calls completed, reusing their already-expired
   // deadline and turning a healthy native route into a timeout fallback.
-  const nativeToolRoutePromise = routeNativeToolsForTurn(availableTools, routingQuery, {
+  const nativeRoutingQuery = options?.missionToolHints?.length
+    ? `${routingQuery}\nPlanner preload hints: ${options.missionToolHints.join(", ")}`
+    : routingQuery;
+  const nativeToolRoutePromise = routeNativeToolsForTurn(availableTools, nativeRoutingQuery, {
     signal,
     deadline: routingDeadline,
     recentContext: routingRecentContext,
@@ -2761,7 +2766,11 @@ export async function runAgent(
       imageComposioDirectActionGuidanceAdded = true;
     }
     const revealed = availableTools.filter((tool) => revealedNativeTools.has(toolSchemaName(tool)));
-    const composioGateway = new Set(["COMPOSIO_SEARCH_TOOL", "COMPOSIO_EXECUTE_TOOL", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_MANAGE_CONNECTIONS"]);
+    const composioGateway = new Set(["COMPOSIO_SEARCH_TOOL", "COMPOSIO_SEARCH_TOOLS", "COMPOSIO_EXECUTE_TOOL", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_MANAGE_CONNECTIONS"]);
+    const missionPreloadNames = new Set(options?.missionToolHints ?? []);
+    const preloadedMissionTools = missionPreloadNames.size
+      ? availableTools.filter((tool) => missionPreloadNames.has(toolSchemaName(tool)))
+      : [];
     const routedComposioNames = new Set((composioDecision?.directTools ?? []).map((tool) => toolName(tool)).filter(Boolean));
     const routedComposioTools = routedComposioNames.size
       ? availableTools.filter((tool) => routedComposioNames.has(toolSchemaName(tool)))
@@ -2771,7 +2780,7 @@ export async function runAgent(
       : [];
     const routedTools = (noToolTurn
       ? availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || composioGateway.has(toolSchemaName(tool)) || revealedNativeTools.has(toolSchemaName(tool)))
-      : [...nativeToolRoute.tools, ...routedComposioTools, ...requiredWorkerTools, ...revealed])
+      : [...nativeToolRoute.tools, ...preloadedMissionTools, ...routedComposioTools, ...requiredWorkerTools, ...revealed])
       .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index);
     const imageSafeTools = roundMediaSelection
       ? routedTools.filter((tool) => toolSchemaName(tool) !== "COMPOSIO_MULTI_EXECUTE_TOOL")
@@ -3309,7 +3318,7 @@ export async function runAgent(
             if (!receipt || receipt.status !== "succeeded" || receipt.receiptVerification !== "provider_read") throw new Error("Verified provider state could not be attached to a durable external-action receipt.");
             return { receiptId: receipt.id, ...(receipt.providerId ? { providerReceiptId: receipt.providerId } : {}), verificationId: verification.id, summary: `${input.toolSlug} recovery state verified using ${verifySlug}.` };
           } : undefined;
-execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, onSubagentActivity: reportSubagentActivity, getComposioToolPresentation: (toolSlug) => composioToolPresentations.get(toolSlug), parentToolCallId: call.id, approvedApprovalId: approvedForTool ? approvedApprovalId : undefined, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, ownerPrivateRun, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, missionTimerResumed: options?.missionTimerResumed, missionWakeCheckpoint: options?.missionWakeCheckpoint, missionWakeNextAction: options?.missionWakeNextAction, tregMaxCalls: options?.tregMaxCalls, tregMaxSpendUsd: options?.tregMaxSpendUsd, organizationId: options?.organizationId, currentRunId: durableRunId, toolCatalog: modelAvailableTools, availableToolCatalog: availableTools, connectedAccounts: connectedAccountSnapshot, ...(options?.enqueueMissionTask ? { enqueueMissionTask: options.enqueueMissionTask } : {}), ...(slug === "CHUCK_MISSION_VERIFY" ? { outcomeReadAdapter: createSessionOutcomeReadAdapter(userId, sessionObj, availableTools, allow, deny, signal) } : {}), ...(executeMissionCompensation ? { executeMissionCompensation } : {}), requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
+        execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, onSubagentActivity: reportSubagentActivity, getComposioToolPresentation: (toolSlug) => composioToolPresentations.get(toolSlug), parentToolCallId: call.id, approvedApprovalId: approvedForTool ? approvedApprovalId : undefined, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, conversationId: channelContext?.conversationId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, ownerPrivateRun, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, missionTimerResumed: options?.missionTimerResumed, missionWakeCheckpoint: options?.missionWakeCheckpoint, missionWakeNextAction: options?.missionWakeNextAction, tregMaxCalls: options?.tregMaxCalls, tregMaxSpendUsd: options?.tregMaxSpendUsd, organizationId: options?.organizationId, currentRunId: durableRunId, toolCatalog: modelAvailableTools, availableToolCatalog: availableTools, connectedAccounts: connectedAccountSnapshot, ...(options?.enqueueMissionTask ? { enqueueMissionTask: options.enqueueMissionTask } : {}), ...(slug === "CHUCK_MISSION_VERIFY" ? { outcomeReadAdapter: createSessionOutcomeReadAdapter(userId, sessionObj, availableTools, allow, deny, signal) } : {}), ...(executeMissionCompensation ? { executeMissionCompensation } : {}), requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
           if ((slug === "CHUCK_DELEGATE_SUBAGENT" || slug === "CHUCK_HANDOFF_SUBAGENT") && execResult && typeof execResult === "object") {
             const delegation = execResult as { status?: unknown; approvalId?: unknown; proposal?: { actionName?: unknown; payload?: unknown } };
             if (delegation.status === "requires_approval" && typeof delegation.approvalId === "string" && typeof delegation.proposal?.actionName === "string") {

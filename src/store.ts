@@ -20,7 +20,7 @@ import type { ApprovalPolicy, HandoffRecord, WorkerDuration } from "./subagents/
 import type { CapabilityWorkerName } from "./memory/types.js";
 import { durableMemoryConfigured, forgetDurableMemory, saveDurableMemory, saveMemoryEntity, searchDurableMemory } from "./memory/durable.js";
 import { queueConversationReflection } from "./memory/reflection.js";
-import { deriveMissionAllowedTools } from "./missionWorker.js";
+import { deriveMissionToolHints } from "./missionWorker.js";
 import type { MissionRoutingCache } from "./decisions/missionRoutingCache.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { deleteR2Object, inspectR2Object, putR2Object, r2Configured, readR2ObjectBounded, signR2Download } from "./lib/storage/r2.js";
@@ -52,6 +52,13 @@ export interface Message {
   createdAt?: number;
   /** Server-only idempotency marker for imported or SDK-run history. */
   sourceId?: string;
+  /** Optional durable scope metadata for bounded conversation retrieval. */
+  scope?: "personal" | "conversation" | "organization" | "project" | "meeting" | "channel";
+  scopeId?: string;
+  conversationId?: string;
+  organizationId?: string;
+  projectId?: string;
+  meetingId?: string;
 }
 
 // Session history is stored in one Redis value. Count-only limits are not
@@ -86,6 +93,12 @@ function compactPersistedMessage(value: unknown, maxChars = PERSISTED_MESSAGE_MA
     content: boundPersistedText(item.content, maxChars),
     ...(typeof item.createdAt === "number" && Number.isFinite(item.createdAt) && item.createdAt >= 0 ? { createdAt: item.createdAt } : {}),
     ...(typeof item.sourceId === "string" && item.sourceId.length <= 160 ? { sourceId: item.sourceId } : {}),
+    ...(item.scope && ["personal", "conversation", "organization", "project", "meeting", "channel"].includes(item.scope) ? { scope: item.scope } : {}),
+    ...(typeof item.scopeId === "string" && item.scopeId.length <= 180 ? { scopeId: item.scopeId } : {}),
+    ...(typeof item.conversationId === "string" && item.conversationId.length <= 180 ? { conversationId: item.conversationId } : {}),
+    ...(typeof item.organizationId === "string" && item.organizationId.length <= 180 ? { organizationId: item.organizationId } : {}),
+    ...(typeof item.projectId === "string" && item.projectId.length <= 180 ? { projectId: item.projectId } : {}),
+    ...(typeof item.meetingId === "string" && item.meetingId.length <= 180 ? { meetingId: item.meetingId } : {}),
   };
 }
 
@@ -947,6 +960,8 @@ export interface MissionStepRecord {
   evidence?: MissionEvidenceRecord[];
   /** Optional exact tools this executable step may use; lifecycle controls are added by the worker. */
   allowedTools?: string[];
+  /** Planner-derived preload hints; unlike allowedTools, these never restrict execution. */
+  toolHints?: string[];
   compensationObjective?: string;
   retryBackoffSeconds?: number;
   parallelGroup?: string;
@@ -1122,6 +1137,8 @@ export interface TaskRecord {
   missionStepId?: string;
   /** Exact provider/native tools allowed for this mission step; worker controls are runtime-added. */
   missionAllowedTools?: string[];
+  /** Planner-derived preload hints; undefined missionAllowedTools remains unrestricted. */
+  missionToolHints?: string[];
   /** One approved tool execution may be replayed when a durable mission resumes. */
   approvedApprovalId?: string;
   /** Compact per-step routing result reused across mission slices and restarts. */
@@ -6510,6 +6527,7 @@ function normalizeTask(task: TaskRecord): TaskRecord {
     ...(typeof task.missionId === "string" && /^mis_[A-Za-z0-9_-]{1,160}$/.test(task.missionId) ? { missionId: task.missionId } : { missionId: undefined }),
     ...(typeof task.missionStepId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(task.missionStepId) ? { missionStepId: task.missionStepId } : { missionStepId: undefined }),
     ...(Array.isArray(task.missionAllowedTools) ? { missionAllowedTools: [...new Set(task.missionAllowedTools.filter((tool): tool is string => typeof tool === "string" && /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(tool)))].slice(0, 100) } : { missionAllowedTools: undefined }),
+    ...(Array.isArray(task.missionToolHints) ? { missionToolHints: [...new Set(task.missionToolHints.filter((tool): tool is string => typeof tool === "string" && /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(tool)))].slice(0, 40) } : { missionToolHints: undefined }),
     ...(task.missionRoutingCache && typeof task.missionRoutingCache === "object" && typeof task.missionRoutingCache.stepId === "string" ? {
       missionRoutingCache: {
         stepId: task.missionRoutingCache.stepId.slice(0, 160),
@@ -6570,6 +6588,7 @@ export async function createTask(userId: number, input: Pick<TaskRecord, "title"
     missionId: input.missionId,
     missionStepId: input.missionStepId,
     missionAllowedTools: input.missionAllowedTools,
+    missionToolHints: input.missionToolHints,
     events: [taskEvent(input.runAt ? "scheduled" : "created", input.runAt ? "Task scheduled" : "Task created", 0, now)],
     createdAt: now,
     updatedAt: now,
@@ -6627,6 +6646,7 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
       ...(step.outputSchema && typeof step.outputSchema === "object" && !Array.isArray(step.outputSchema) ? { outputSchema: structuredClone(step.outputSchema) } : {}),
       evidenceRequired: Array.isArray(step.evidenceRequired) ? step.evidenceRequired.filter((item): item is string => typeof item === "string").slice(0, 20).map((item) => item.slice(0, 500)) : [],
       evidence: Array.isArray(step.evidence) ? step.evidence.filter((item): item is MissionEvidenceRecord => Boolean(item) && typeof item === "object" && typeof (item as MissionEvidenceRecord).id === "string").slice(-50) : [],
+      ...(Array.isArray(step.toolHints) ? { toolHints: [...new Set(step.toolHints.filter((tool): tool is string => typeof tool === "string" && /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(tool)))].slice(0, 40) } : {}),
       ...(typeof step.compensationObjective === "string" ? { compensationObjective: step.compensationObjective.slice(0, 4000) } : {}),
       retryBackoffSeconds: Math.max(0, Math.min(86400, Math.floor(numeric(step.retryBackoffSeconds, 0)))),
       ...(typeof step.parallelGroup === "string" ? { parallelGroup: step.parallelGroup.slice(0, 120) } : {}),
@@ -6813,8 +6833,9 @@ export async function createMission(userId: number, input: MissionCreateInput): 
     const dependencies = step.dependsOn ?? [];
     if (!Array.isArray(dependencies) || dependencies.some((dependency) => typeof dependency !== "string")) throw new Error(`Mission step ${stepIds[index]} has invalid dependencies`);
     const dependsOn = [...new Set(dependencies.map((dependency) => dependency.trim()))];
-    const allowedTools = normalizeMissionStepAllowedTools(step.allowedTools, `Mission step ${stepIds[index]}`) ?? deriveMissionAllowedTools(step.objective);
-    return { id: stepIds[index], title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn, attempts: 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? 2))), updatedAt: now, ...(step.input ? { input: structuredClone(step.input) } : {}), ...(step.outputSchema ? { outputSchema: structuredClone(step.outputSchema) } : {}), ...(step.evidenceRequired ? { evidenceRequired: step.evidenceRequired.slice(0, 20) } : {}), ...(step.compensationObjective ? { compensationObjective: step.compensationObjective.slice(0, 4000) } : {}), ...(step.retryBackoffSeconds !== undefined ? { retryBackoffSeconds: Math.max(0, Math.min(86400, Math.floor(step.retryBackoffSeconds))) } : {}), ...(step.parallelGroup ? { parallelGroup: step.parallelGroup.slice(0, 120) } : {}), allowedTools };
+    const allowedTools = normalizeMissionStepAllowedTools(step.allowedTools, `Mission step ${stepIds[index]}`);
+    const toolHints = allowedTools === undefined ? deriveMissionToolHints(step.objective) : undefined;
+    return { id: stepIds[index], title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn, attempts: 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? 2))), updatedAt: now, ...(step.input ? { input: structuredClone(step.input) } : {}), ...(step.outputSchema ? { outputSchema: structuredClone(step.outputSchema) } : {}), ...(step.evidenceRequired ? { evidenceRequired: step.evidenceRequired.slice(0, 20) } : {}), ...(step.compensationObjective ? { compensationObjective: step.compensationObjective.slice(0, 4000) } : {}), ...(step.retryBackoffSeconds !== undefined ? { retryBackoffSeconds: Math.max(0, Math.min(86400, Math.floor(step.retryBackoffSeconds))) } : {}), ...(step.parallelGroup ? { parallelGroup: step.parallelGroup.slice(0, 120) } : {}), ...(allowedTools !== undefined ? { allowedTools } : {}), ...(toolHints?.length ? { toolHints } : {}) };
   });
   validateMissionStepGraph(steps);
   const ready = steps.find((step) => step.dependsOn.length === 0);
@@ -7008,8 +7029,9 @@ export async function replanMission(userId: number, id: string, rawSteps: Array<
       if (!step.objective?.trim() || step.objective.length > 4000) throw new Error(`Mission step ${stepId} objective is required and must be 4000 characters or fewer`);
       const dependencies = step.dependsOn ?? [];
       if (!Array.isArray(dependencies) || dependencies.some((dependency) => typeof dependency !== "string")) throw new Error(`Mission step ${stepId} has invalid dependencies`);
-      const allowedTools = normalizeMissionStepAllowedTools(step.allowedTools, `Replanned mission step ${stepId}`) ?? previous?.allowedTools ?? deriveMissionAllowedTools(step.objective);
-      return { ...previous, id: stepId, title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn: [...new Set(dependencies.map((dependency) => dependency.trim()))], taskId: previous?.taskId, attempts: previous?.attempts ?? 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? previous?.retryLimit ?? 2))), updatedAt: now, result: previous?.result, allowedTools };
+      const allowedTools = normalizeMissionStepAllowedTools(step.allowedTools, `Replanned mission step ${stepId}`);
+      const toolHints = allowedTools === undefined ? deriveMissionToolHints(step.objective) : undefined;
+      return { ...previous, id: stepId, title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn: [...new Set(dependencies.map((dependency) => dependency.trim()))], taskId: previous?.taskId, attempts: previous?.attempts ?? 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? previous?.retryLimit ?? 2))), updatedAt: now, result: previous?.result, allowedTools, toolHints };
     });
     const completedIds = new Set(mission.steps.filter((step) => step.status === "completed").map((step) => step.id));
     const removedCompletedIds = [...completedIds].filter((stepId) => !steps.some((step) => step.id === stepId && step.status === "completed"));
@@ -8579,6 +8601,71 @@ export async function updateMemory(uid: number, target: { id?: string; key?: str
     ...(updated.reviewAt !== undefined ? { reviewAt: updated.reviewAt } : {}),
     ...(updated.expiresAt !== undefined ? { expiresAt: updated.expiresAt } : {}),
   })).memory;
+}
+
+export type ConversationSearchScope = "personal" | "conversation" | "organization" | "project" | "meeting" | "channel";
+
+export type ConversationSearchResult = {
+  messageId: string;
+  timestamp?: number;
+  conversationId?: string;
+  speaker: Message["role"];
+  snippet: string;
+  score: number;
+};
+
+function conversationMessageId(userId: number, message: Message, index: number): string {
+  return message.id ?? `msg_${createHash("sha256").update(`${userId}:${index}:${message.createdAt ?? 0}:${message.content}`).digest("hex").slice(0, 48)}`;
+}
+
+function conversationScopeMatches(message: Message, scope: ConversationSearchScope, scopeId?: string): boolean {
+  if (scope === "personal") return !message.scope || message.scope === "personal";
+  if (!scopeId) return false;
+  if (message.scope !== scope) return false;
+  if (scope === "conversation") return message.conversationId === scopeId;
+  if (scope === "organization") return message.organizationId === scopeId || message.scopeId === scopeId;
+  if (scope === "project") return message.projectId === scopeId || message.scopeId === scopeId;
+  if (scope === "meeting") return message.meetingId === scopeId || message.scopeId === scopeId;
+  return message.scopeId === scopeId || message.conversationId === scopeId;
+}
+
+function conversationTerms(query: string): string[] {
+  return [...new Set(query.toLowerCase().replace(/[^a-z0-9@._ -]+/g, " ").split(/\s+/).filter((term) => term.length >= 2))].slice(0, 24);
+}
+
+export async function searchConversationMessages(userId: number, query: string, options: { scope?: ConversationSearchScope; scopeId?: string; after?: number; before?: number; limit?: number } = {}): Promise<ConversationSearchResult[]> {
+  const terms = conversationTerms(query.trim());
+  if (!terms.length) return [];
+  const scope = options.scope ?? "personal";
+  const history = (await getSession(userId)).history ?? [];
+  return history.map((message, index) => {
+    if (!conversationScopeMatches(message, scope, options.scopeId)) return undefined;
+    if (options.after !== undefined && (message.createdAt ?? 0) < options.after) return undefined;
+    if (options.before !== undefined && (message.createdAt ?? Number.MAX_SAFE_INTEGER) > options.before) return undefined;
+    const lower = message.content.toLowerCase();
+    const matched = terms.filter((term) => lower.includes(term));
+    if (!matched.length) return undefined;
+    const phraseBoost = lower.includes(query.trim().toLowerCase()) ? 3 : 0;
+    return {
+      messageId: conversationMessageId(userId, message, index),
+      ...(message.createdAt !== undefined ? { timestamp: message.createdAt } : {}),
+      ...(message.conversationId ? { conversationId: message.conversationId } : {}),
+      speaker: message.role,
+      snippet: boundPersistedText(message.content.replace(/\s+/g, " ").trim(), 1_200),
+      score: matched.length + phraseBoost,
+    } satisfies ConversationSearchResult;
+  }).filter((item): item is ConversationSearchResult => Boolean(item)).sort((a, b) => b.score - a.score || (b.timestamp ?? 0) - (a.timestamp ?? 0)).slice(0, Math.max(1, Math.min(20, Math.floor(options.limit ?? 8))));
+}
+
+export async function getConversationMessage(userId: number, messageId: string, options: { scope?: ConversationSearchScope; scopeId?: string } = {}): Promise<(ConversationSearchResult & { content: string }) | undefined> {
+  const scope = options.scope ?? "personal";
+  const history = (await getSession(userId)).history ?? [];
+  for (const [index, message] of history.entries()) {
+    if (!conversationScopeMatches(message, scope, options.scopeId)) continue;
+    if (conversationMessageId(userId, message, index) !== messageId) continue;
+    return { messageId, ...(message.createdAt !== undefined ? { timestamp: message.createdAt } : {}), ...(message.conversationId ? { conversationId: message.conversationId } : {}), speaker: message.role, snippet: boundPersistedText(message.content.replace(/\s+/g, " ").trim(), 1_200), content: message.content, score: 1 };
+  }
+  return undefined;
 }
 
 export async function searchMemories(uid: number, query?: string, options: { category?: MemoryFact["category"]; projectId?: string; organizationId?: string; personKey?: string; sensitivity?: MemoryFact["sensitivity"]; limit?: number } = {}): Promise<MemoryFact[]> {
