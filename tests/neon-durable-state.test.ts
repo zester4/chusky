@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { durableSdkRunHash, DURABLE_SESSION_DOMAINS, NeonDurableState, type DurableMissionRecord } from "../src/neonDurableState.js";
-import { DURABLE_SESSION_FORMAT, joinSessionDomains, splitSessionDomains } from "../src/sessionDomains.js";
+import { DURABLE_SESSION_FORMAT, joinSessionDomains, mergeDurableSessionDomain, splitSessionDomains } from "../src/sessionDomains.js";
 import type { UserSession } from "../src/store.js";
 
 class FakeClient {
@@ -100,20 +100,42 @@ test("Neon durable session domains write atomically and permit versioned partial
   await assert.rejects(() => state.writeSessionDomains(42, new Map([["unknown", {}]] as never)), /unknown domain/);
 });
 
-test("Neon durable session writes refresh a stale expected version under the owner lock", async () => {
+test("Neon durable session writes reject a stale expected version instead of overwriting newer data", async () => {
   const pool = new FakePool();
   pool.client.staleSessionDomainInsertOnce = true;
   const state = new NeonDurableState(pool as never);
 
-  const versions = await state.writeSessionDomains(42, new Map([["conversation", { changed: true }]] as const), [], new Map([["conversation", 1]]));
+  await assert.rejects(() => state.writeSessionDomains(42, new Map([["conversation", { changed: true }]] as const), [], new Map([["conversation", 1]])), /domain version conflict/);
   const statements = pool.client.calls.map((call) => call.text);
 
-  assert.deepEqual([...versions], [["conversation", 3]]);
   assert.ok(statements.indexOf("SELECT pg_advisory_xact_lock($1::bigint)") < statements.findIndex((sql) => sql.includes("INSERT INTO chusky_session_domain")));
-  assert.ok(statements.findIndex((sql) => sql.includes("INSERT INTO chusky_session_domain")) < statements.findIndex((sql) => sql.includes("SELECT version FROM chusky_session_domain")));
-  assert.ok(statements.findIndex((sql) => sql.includes("SELECT version FROM chusky_session_domain")) < statements.findIndex((sql) => sql.startsWith("UPDATE chusky_session_domain")));
-  assert.equal(statements.at(-1), "COMMIT");
+  assert.equal(statements.some((sql) => sql.startsWith("UPDATE chusky_session_domain")), false);
+  assert.equal(statements.at(-1), "ROLLBACK");
   assert.equal(pool.client.released, true);
+});
+
+test("durable domain merge combines independent edits and additive profile counters", () => {
+  assert.deepEqual(mergeDurableSessionDomain(
+    { left: "old", right: "old" },
+    { left: "new", right: "old" },
+    { left: "old", right: "new" },
+    "conversation",
+  ), { left: "new", right: "new" });
+  assert.deepEqual(mergeDurableSessionDomain(
+    { totalMessages: 10, totalCost: 2 },
+    { totalMessages: 11, totalCost: 2.5 },
+    { totalMessages: 12, totalCost: 3 },
+    "profile",
+  ), { totalMessages: 13, totalCost: 3.5 });
+  assert.throws(() => mergeDurableSessionDomain(
+    { setting: "old" }, { setting: "owner edit" }, { setting: "stale edit" }, "memories",
+  ), /overlapping concurrent changes/);
+});
+
+test("durable session snapshots never leak into the Redis core payload", () => {
+  const value = { ...session(), durableDomainSnapshots: { profile: { totalMessages: 1 } } } as UserSession & { durableDomainSnapshots: Record<string, unknown> };
+  const { core } = splitSessionDomains(value);
+  assert.equal("durableDomainSnapshots" in core, false);
 });
 
 test("Neon durable session-domain failures roll back and release the connection", async () => {

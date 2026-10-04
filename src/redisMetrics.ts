@@ -75,11 +75,47 @@ function bytes(value: unknown): number {
 }
 
 function responseBytes(value: unknown, budget = { remaining: 10_000 }): number {
-  if (budget.remaining-- <= 0 || value === null || value === undefined) return 0;
-  const scalar = bytes(value);
-  if (scalar) return scalar;
-  if (!Array.isArray(value)) return 0;
-  return value.reduce((total, entry) => total + responseBytes(entry, budget), 0);
+  const pending: unknown[] = [value];
+  const visited = new WeakSet<object>();
+  let total = 0;
+
+  while (pending.length && budget.remaining > 0) {
+    const current = pending.pop();
+    budget.remaining -= 1;
+    if (current === null || current === undefined) continue;
+    if (Buffer.isBuffer(current)) {
+      total += current.byteLength;
+      continue;
+    }
+    if (typeof current === "string" || typeof current === "number" || typeof current === "bigint" || typeof current === "boolean") {
+      total += bytes(current);
+      continue;
+    }
+    if (typeof current !== "object" || visited.has(current)) continue;
+    visited.add(current);
+
+    if (Array.isArray(current)) {
+      const limit = Math.min(current.length, Math.max(0, budget.remaining - pending.length));
+      for (let index = limit - 1; index >= 0; index -= 1) pending.push(current[index]);
+      continue;
+    }
+
+    // Redis hash replies are commonly plain objects. Count their field names
+    // and scalar values without serializing or retaining the reply payload.
+    let queued = 0;
+    for (const key in current) {
+      if (queued >= budget.remaining - pending.length) break;
+      if (!Object.prototype.hasOwnProperty.call(current, key)) continue;
+      total += Buffer.byteLength(key, "utf8");
+      const descriptor = Object.getOwnPropertyDescriptor(current, key);
+      if (descriptor && Object.prototype.hasOwnProperty.call(descriptor, "value")) {
+        pending.push(descriptor.value);
+        queued += 1;
+      }
+    }
+  }
+
+  return total;
 }
 
 function keyArguments(command: RedisMetricCommand): unknown[] {
