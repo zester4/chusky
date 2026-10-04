@@ -10,6 +10,7 @@ import { backfillMissionSnapshotToNeon } from "./missionBackfill.js";
 import { HOT_CONVERSATION_MESSAGES, joinSessionDomains, sessionUsesNeonDomains, splitSessionDomains } from "./sessionDomains.js";
 import { normalizeVoiceCallProfile, type VoiceCallProfile } from "./calls/voiceProfile.js";
 import { logger } from "./logger.js";
+import { instrumentRedisClient, RedisCommandMetrics } from "./redisMetrics.js";
 import { recordFailure, recordVectorFailure } from "./monitoring.js";
 import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channels/contracts.js";
 import type { ApprovalPolicy, HandoffRecord, WorkerDuration } from "./subagents/contracts.js";
@@ -1944,7 +1945,7 @@ function boundedAgentRun(record: AgentRunRecord): AgentRunRecord {
 // ── Redis ─────────────────────────────────────────────────────────────────────
 class RedisBackend implements Backend {
   private readonly durableStorageMetrics = { redisSessionCommands: 0, redisSessionBytesRead: 0, redisSessionBytesWritten: 0, redisDomainCacheHits: 0, redisDomainCacheMisses: 0, redisSessionCoreBytes: 0, redisDomainCacheBytes: 0 };
-  constructor(private r: Redis, private readonly durableState?: NeonDurableState, private readonly durableSdkRunsEnabled = false, private readonly durableStateMissionsEnabled = false) {}
+  constructor(private r: Redis, private readonly durableState?: NeonDurableState, private readonly durableSdkRunsEnabled = false, private readonly durableStateMissionsEnabled = false, private readonly redisCommandMetrics = new RedisCommandMetrics()) {}
 
   private async missionOwnerUsesNeon(userId: number): Promise<boolean> {
     return this.durableStateMissionsEnabled && Boolean(this.durableState) && await this.durableState!.isMissionOwnerMigrated(userId);
@@ -1964,7 +1965,7 @@ class RedisBackend implements Backend {
   async getDurableStorageMetrics(): Promise<Record<string, number>> {
     const { redisDomainCacheHits, redisDomainCacheMisses, ...redis } = this.durableStorageMetrics;
     const attempts = redisDomainCacheHits + redisDomainCacheMisses;
-    return { ...redis, redisDomainCacheHits, redisDomainCacheMisses, redisDomainCacheHitRatio: attempts ? redisDomainCacheHits / attempts : 0, ...(this.durableState?.getMetrics() ?? {}) };
+    return { ...this.redisCommandMetrics.flatten(), ...redis, redisDomainCacheHits, redisDomainCacheMisses, redisDomainCacheHitRatio: attempts ? redisDomainCacheHits / attempts : 0, ...(this.durableState?.getMetrics() ?? {}) };
   }
   getObjectMetadata(userId: number, objectId: string): Promise<DurableObjectMetadata | undefined> {
     return this.durableState?.getObjectMetadata(userId, objectId) ?? Promise.resolve(undefined);
@@ -3647,7 +3648,7 @@ class MemoryBackend implements Backend {
   }
   async readConversationBefore(_userId: number, _before: { createdAt: number; id: string }, _limit: number): Promise<DurableConversationMessage[] | undefined> { return undefined; }
   async getDurableStateHealth(): Promise<DurableStateStatus> { return { enabled: false, reachable: false }; }
-  async getDurableStorageMetrics(): Promise<Record<string, number>> { return { redisSessionCommands: 0, redisSessionBytesRead: 0, redisSessionBytesWritten: 0, redisDomainCacheHits: 0, redisDomainCacheMisses: 0, redisDomainCacheHitRatio: 0, redisSessionCoreBytes: 0, redisDomainCacheBytes: 0 }; }
+  async getDurableStorageMetrics(): Promise<Record<string, number>> { return { ...new RedisCommandMetrics().flatten(), redisSessionCommands: 0, redisSessionBytesRead: 0, redisSessionBytesWritten: 0, redisDomainCacheHits: 0, redisDomainCacheMisses: 0, redisDomainCacheHitRatio: 0, redisSessionCoreBytes: 0, redisDomainCacheBytes: 0 }; }
   async getObjectMetadata(_userId: number, _objectId: string): Promise<DurableObjectMetadata | undefined> { return undefined; }
   async listExpiredObjectMetadata(_nowMs: number, _limit: number): Promise<DurableObjectMetadata[]> { throw new Error("Neon object catalog is unavailable."); }
   async createObjectMetadata(_record: DurableObjectMetadata): Promise<DurableObjectMetadata> { throw new Error("Neon object catalog is unavailable."); }
@@ -4472,7 +4473,9 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
       });
       await r.connect();
       await r.ping();
-      backend = new RedisBackend(r, durableState, config.durableStateSdkRunsEnabled, config.durableStateMissionsEnabled);
+      const redisCommandMetrics = new RedisCommandMetrics();
+      instrumentRedisClient(r as unknown as Parameters<typeof instrumentRedisClient>[0], redisCommandMetrics);
+      backend = new RedisBackend(r, durableState, config.durableStateSdkRunsEnabled, config.durableStateMissionsEnabled, redisCommandMetrics);
       logger.info("Store: Redis connected");
       return;
     } catch (e) {
