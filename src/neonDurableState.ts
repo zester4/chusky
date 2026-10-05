@@ -854,7 +854,7 @@ export class NeonDurableState {
         const expected = expectedVersions.get(domain);
         let result = await this.measuredQuery<{ version: number }>(client,
           `INSERT INTO chusky_session_domain (user_id, domain, payload, version, updated_at)
-           SELECT $1, $2, $3::jsonb, 1, NOW() WHERE $4::integer IS NULL
+           VALUES ($1, $2, $3::jsonb, 1, NOW())
            ON CONFLICT (user_id, domain) DO UPDATE
            SET payload = EXCLUDED.payload, version = chusky_session_domain.version + 1, updated_at = NOW()
            WHERE $4::integer IS NOT NULL AND chusky_session_domain.version = $4

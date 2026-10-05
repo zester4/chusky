@@ -31,7 +31,7 @@ class FakeClient {
       const [owner, id, kind, key, status, contentType, size, sha256, encryptionVersion, expiresAt, metadata, createdAt, updatedAt] = values ?? [];
       return { rows: [{ owner_user_id: owner, object_id: id, object_kind: kind, object_key: key, lifecycle_status: status, content_type: contentType, size_bytes: size, sha256, encryption_version: encryptionVersion, retention_expires_at: expiresAt ? new Date(Number(expiresAt)) : null, metadata: JSON.parse(String(metadata)), created_at: new Date(Number(createdAt)), updated_at: new Date(Number(updatedAt)) }] as never[] };
     }
-    return { rows: text.includes("INSERT INTO chusky_sdk_run") ? [{ run_id: "run_1" }] as never[] : text.includes("INSERT INTO chusky_session_domain") ? [{ version: 1 }] as never[] : text.includes("INSERT INTO chusky_conversation_message") ? [{ message_id: "msg_1" }] as never[] : [] as never[] };
+    return { rows: text.includes("INSERT INTO chusky_sdk_run") ? [{ run_id: "run_1" }] as never[] : text.includes("INSERT INTO chusky_session_domain") ? [{ version: values?.[3] === null || values?.[3] === undefined ? 1 : Number(values[3]) + 1 }] as never[] : text.includes("INSERT INTO chusky_conversation_message") ? [{ message_id: "msg_1" }] as never[] : [] as never[] };
   }
   release() { this.released = true; }
 }
@@ -91,9 +91,11 @@ test("Neon durable session domains write atomically and permit versioned partial
   assert.equal(pool.client.calls.filter((call) => call.text.includes("pg_advisory_xact_lock")).length, 1);
   assert.equal(pool.client.calls.at(-1)?.text, "COMMIT");
   assert.equal(pool.client.released, true);
-  assert.deepEqual([...await state.writeSessionDomains(42, new Map([["conversation", { changed: true }]] as const), [], new Map([["conversation", 1]]))], [["conversation", 1]]);
+  assert.deepEqual([...await state.writeSessionDomains(42, new Map([["conversation", { changed: true }]] as const), [], new Map([["conversation", 1]]))], [["conversation", 2]]);
   assert.equal(pool.client.calls.filter((call) => call.text.includes("pg_advisory_xact_lock")).length, 2);
   const compareAndSwap = pool.client.calls.at(-2)!;
+  assert.match(compareAndSwap.text, /VALUES \(\$1, \$2, \$3::jsonb, 1, NOW\(\)\)/);
+  assert.doesNotMatch(compareAndSwap.text, /WHERE \$4::integer IS NULL/);
   assert.match(compareAndSwap.text, /chusky_session_domain\.version = \$4/);
   assert.match(compareAndSwap.text, /RETURNING version/);
   assert.deepEqual(compareAndSwap.values?.[3], 1);
