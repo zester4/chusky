@@ -31,6 +31,20 @@ test("durable tasks checkpoint, complete, and remain private to their owner", as
   assert.equal((await getTask(userId, task.id))?.checkpoint, "Scaffold is ready");
 });
 
+test("task checkpoints preserve long bounded progress and reject text beyond durable limits", async () => {
+  const userId = 830009;
+  const task = await nativeTool(userId, "CHUCK_TASK_CREATE", { title: "Research cake options", objective: "Compare options and preserve findings" }) as { id: string };
+  const checkpoint = "Verified research finding. ".repeat(80);
+  const nextAction = "Compare the shortlisted options against the budget and delivery window. ".repeat(20);
+
+  const saved = await nativeTool(userId, "CHUCK_TASK_CHECKPOINT", { id: task.id, checkpoint, nextAction }) as { checkpoint: string; nextAction: string };
+  assert.equal(saved.checkpoint, checkpoint.trim());
+  assert.equal(saved.nextAction, nextAction.trim());
+  assert.equal((await getTask(userId, task.id))?.checkpoint, checkpoint.trim());
+  await assert.rejects(() => nativeTool(userId, "CHUCK_TASK_CHECKPOINT", { id: task.id, checkpoint: "x".repeat(8_001) }), /checkpoint.*8000/i);
+  await assert.rejects(() => nativeTool(userId, "CHUCK_TASK_CHECKPOINT", { id: task.id, checkpoint: "Valid checkpoint", nextAction: "x".repeat(2_001) }), /nextAction.*2000/i);
+});
+
 test("task lifecycle rejects invalid transitions and retries recoverable tasks", async () => {
   const userId = 830003;
   const task = await nativeTool(userId, "CHUCK_TASK_CREATE", { title: "Investigate incident", objective: "Find root cause" }) as { id: string };

@@ -1735,7 +1735,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return task;
     }
     case "CHUCK_TASK_CHECKPOINT": {
-      const task = await checkpointTask(userId, text(args.id), text(args.checkpoint), args.nextAction ? text(args.nextAction) : undefined);
+      const task = await checkpointTask(userId, text(args.id), text(args.checkpoint, 8_000), optionalText(args.nextAction, 2_000, "nextAction"));
       if (!task) throw new Error("Only unfinished tasks you own can be checkpointed");
       return task;
     }
