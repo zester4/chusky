@@ -1154,6 +1154,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         afterDate: optionalText(args.afterDate, 10, "afterDate"),
         beforeDate: optionalText(args.beforeDate, 10, "beforeDate"),
         page: args.page === undefined ? undefined : Number(args.page),
+        limit: args.limit === undefined ? undefined : Number(args.limit),
         includeDomains: Array.isArray(args.includeDomains) ? args.includeDomains.map((item) => text(item, 253)) : undefined,
         excludeDomains: Array.isArray(args.excludeDomains) ? args.excludeDomains.map((item) => text(item, 253)) : undefined,
         domainType: args.domainType as "web" | "news" | "research_paper" | undefined,
@@ -1746,7 +1747,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return task;
     }
     case "CHUCK_TASK_COMPLETE": {
-      const task = await completeTask(userId, text(args.id), text(args.result));
+      const result = typeof args.result === "string" ? args.result.trim() : "";
+      if (!result || result.length > 8_000) throw new Error("CHUCK_TASK_COMPLETE.result must contain 1-8000 non-whitespace characters.");
+      const task = await completeTask(userId, text(args.id), result);
       if (!task) throw new Error("Only unfinished tasks you own can be completed");
       return task;
     }

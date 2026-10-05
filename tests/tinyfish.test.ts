@@ -23,6 +23,19 @@ test("TinyFish search sends server auth and returns bounded source results", asy
   assert.equal(JSON.stringify(result).includes("server-secret"), false);
 });
 
+test("TinyFish search applies an optional result limit locally without changing provider parameters", async () => {
+  let requestedUrl = "";
+  const client = createTinyFishClient("server-secret", async (input) => {
+    requestedUrl = String(input);
+    return Response.json({ results: Array.from({ length: 8 }, (_, position) => ({ position, title: `Result ${position}` })) });
+  });
+
+  const result = await client.search({ query: "news", limit: 3 });
+  assert.equal(new URL(requestedUrl).searchParams.has("limit"), false);
+  assert.equal(result.results.length, 3);
+  await assert.rejects(() => client.search({ query: "news", limit: 9 }), /limit must be an integer from 1 to 8/i);
+});
+
 test("TinyFish fetch rejects local URLs and bounds per-page and total extracted text", async () => {
   let requestBody: Record<string, unknown> = {};
   const client = createTinyFishClient("server-secret", async (_input, init) => {

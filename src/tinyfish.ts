@@ -17,6 +17,7 @@ type SearchInput = {
   afterDate?: string;
   beforeDate?: string;
   page?: number;
+  limit?: number;
   purpose?: string;
   includeDomains?: string[];
   excludeDomains?: string[];
@@ -217,6 +218,7 @@ export function createTinyFishClient(apiKey: string, fetcher: typeof fetch = fet
       const beforeDate = optionalSearchText(input.beforeDate, "beforeDate", 10);
       if (input.domainType !== undefined && !["web", "news", "research_paper"].includes(input.domainType)) throw new Error("TinyFish domainType is unsupported.");
       if (input.page !== undefined && (!Number.isInteger(input.page) || input.page < 0 || input.page > 10)) throw new Error("TinyFish page must be an integer from 0 to 10.");
+      if (input.limit !== undefined && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > MAX_SEARCH_RESULTS)) throw new Error(`TinyFish search limit must be an integer from 1 to ${MAX_SEARCH_RESULTS}.`);
       if (input.recencyMinutes !== undefined && (!Number.isInteger(input.recencyMinutes) || input.recencyMinutes < 1 || input.recencyMinutes > 5_256_000)) throw new Error("recencyMinutes must be an integer from 1 to 5256000.");
       if ([input.pubYearMin, input.pubYearMax].some((year) => year !== undefined && (!Number.isInteger(year) || year < 0 || year > 9999))) throw new Error("Publication years must be integers from 0 to 9999.");
       if ((input.includeDomains?.length ?? 0) > 20 || (input.excludeDomains?.length ?? 0) > 20) throw new Error("TinyFish search accepts at most 20 domains per filter.");
@@ -247,7 +249,7 @@ export function createTinyFishClient(apiKey: string, fetcher: typeof fetch = fet
         headers: { "X-API-Key": apiKey, Accept: "application/json" },
         signal,
       }, 30_000));
-      const results = Array.isArray(payload.results) ? payload.results.slice(0, MAX_SEARCH_RESULTS).map((item) => {
+      const results = Array.isArray(payload.results) ? payload.results.slice(0, input.limit ?? MAX_SEARCH_RESULTS).map((item) => {
         const result = record(item);
         return {
           position: typeof result.position === "number" ? result.position : undefined,

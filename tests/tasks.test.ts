@@ -31,6 +31,24 @@ test("durable tasks checkpoint, complete, and remain private to their owner", as
   assert.equal((await getTask(userId, task.id))?.checkpoint, "Scaffold is ready");
 });
 
+test("task completion accepts a bounded durable result longer than the legacy text limit", async () => {
+  const userId = 830010;
+  const task = await nativeTool(userId, "CHUCK_TASK_CREATE", { title: "Summarize results", objective: "Save a factual completion summary" }) as { id: string };
+  const result = "Verified outcome and evidence. ".repeat(100);
+
+  const completed = await nativeTool(userId, "CHUCK_TASK_COMPLETE", { id: task.id, result }) as { status: string; result: string };
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.result, result.trim());
+});
+
+test("task completion reports its result field boundary clearly", async () => {
+  const userId = 830011;
+  const task = await nativeTool(userId, "CHUCK_TASK_CREATE", { title: "Validate completion", objective: "Reject an empty or oversized completion result" }) as { id: string };
+
+  await assert.rejects(() => nativeTool(userId, "CHUCK_TASK_COMPLETE", { id: task.id, result: "   " }), /requires argument: result/i);
+  await assert.rejects(() => nativeTool(userId, "CHUCK_TASK_COMPLETE", { id: task.id, result: "x".repeat(8_001) }), /result.*exceeds maxLength 8000/i);
+});
+
 test("task checkpoints preserve long bounded progress and reject text beyond durable limits", async () => {
   const userId = 830009;
   const task = await nativeTool(userId, "CHUCK_TASK_CREATE", { title: "Research cake options", objective: "Compare options and preserve findings" }) as { id: string };

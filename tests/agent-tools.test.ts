@@ -83,6 +83,10 @@ test("TinyFish web tools expose bounded search and public page fetch schemas", (
   assert.equal(names.has("CHUCK_TINYFISH_RESEARCH"), true);
   assert.equal(names.has("CHUCK_TINYFISH_MONITOR"), true);
   validateNativeToolArguments("CHUCK_TINYFISH_SEARCH", { query: "latest AI news", recencyMinutes: 60, page: 0 });
+  validateNativeToolArguments("CHUCK_TINYFISH_SEARCH", { query: "latest AI news", limit: 5 });
+  assert.throws(() => validateNativeToolArguments("CHUCK_TINYFISH_SEARCH", { query: "latest AI news", limit: 9 }), /limit.*at most 8/i);
+  validateNativeToolArguments("CHUCK_TASK_COMPLETE", { id: "task_123", result: "Completed with verified evidence." });
+  assert.throws(() => validateNativeToolArguments("CHUCK_TASK_COMPLETE", { id: "task_123", result: "x".repeat(8_001) }), /result.*maxLength 8000/i);
   validateNativeToolArguments("CHUCK_TINYFISH_SEARCH", { query: "papers", domainType: "research_paper", pubYearMin: 2020, pubYearMax: 2025, includeDomains: ["arxiv.org"] });
   validateNativeToolArguments("CHUCK_TINYFISH_FETCH", { urls: ["https://example.com"], format: "markdown", links: true, includeSelectors: ["main"], highlights: { query: "what changed?", maxCount: 3 } });
   validateNativeToolArguments("CHUCK_TINYFISH_RESEARCH", { action: "start", query: "Compare official policy sources", mode: "standard" });

@@ -31,3 +31,17 @@ test("native TinyFish Search treats blank optional model arguments as omitted", 
     assert.equal(params.has(field), false, `${field} should not be sent when blank`);
   }
 });
+
+test("native TinyFish Search accepts a result limit and returns only that many results", async (t) => {
+  const originalApiKey = config.tinyFishApiKey;
+  const originalFetch = globalThis.fetch;
+  config.tinyFishApiKey = "test-tinyfish-key";
+  globalThis.fetch = (async () => Response.json({ results: Array.from({ length: 8 }, (_, position) => ({ position, title: `Result ${position}` })) })) as typeof fetch;
+  t.after(() => {
+    config.tinyFishApiKey = originalApiKey;
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await nativeTool(7654322, "CHUCK_TINYFISH_SEARCH", { query: "latest product updates", limit: 2 }) as { results: unknown[] };
+  assert.equal(result.results.length, 2);
+});
