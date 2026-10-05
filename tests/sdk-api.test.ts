@@ -1874,6 +1874,28 @@ test("memory persistence conflicts return a retryable sanitized error instead of
   assert.equal(JSON.stringify(loggedFields).includes("chusky_onboarding_profile"), false);
 });
 
+test("a profile save is confirmed after session projection failure only when exact read-back matches", async () => {
+  const durableMemoryEnabled = config.durableMemoryEnabled;
+  (config as { durableMemoryEnabled: boolean }).durableMemoryEnabled = false;
+  try {
+    setSdkMemoryWriterForTests(async (userId, memory) => {
+      const saved = await upsertMemory(userId, memory);
+      throw Object.assign(new Error("projection failed"), { memoryPersistenceStage: "session_projection", saved });
+    });
+    const api = app();
+    const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "onboarding-owner", "Content-Type": "application/json" };
+    const payload = { category: "profile", key: "chusky_onboarding_profile", value: "{\"version\":1}", sensitivity: "normal" };
+    const saved = await api.fetch(new Request("http://local/v1/memory", { method: "POST", headers, body: JSON.stringify(payload) }));
+    assert.equal(saved.status, 201);
+    const exact = await api.fetch(new Request("http://local/v1/memory?key=chusky_onboarding_profile", { headers }));
+    assert.equal(exact.status, 200);
+    const body = await exact.json() as { data: Array<{ value: string }> };
+    assert.deepEqual(body.data.map((item) => item.value), [payload.value]);
+  } finally {
+    (config as { durableMemoryEnabled: boolean }).durableMemoryEnabled = durableMemoryEnabled;
+  }
+});
+
 test("dashboard devices are revocable by opaque owner-scoped IDs, without exposing token hashes", async () => {
   (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
   setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);

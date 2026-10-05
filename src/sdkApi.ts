@@ -2848,6 +2848,22 @@ export function registerSdkApi(app: Hono): void {
       return c.json({ ...memoryView(saved.memory), contextNodeId: saved.context.id }, 201);
     } catch (error) {
       const requestId = ((c.get as (key: string) => unknown)("sdkRequestId") as string | undefined) ?? randomUUID();
+      const owner = sdkUser(c)!;
+      const persistedProfile = (error as { memoryPersistenceStage?: unknown })?.memoryPersistenceStage === "session_projection"
+        ? await getMemoryByKey(owner.userId, key).catch(() => undefined)
+        : undefined;
+      if (persistedProfile
+        && persistedProfile.category === category
+        && persistedProfile.key === key
+        && persistedProfile.value === value
+        && persistedProfile.sensitivity === sensitivity
+        && persistedProfile.confidence === Number(body.confidence ?? 1)
+        && persistedProfile.organizationId === (typeof body.organizationId === "string" ? body.organizationId.trim() || undefined : undefined)
+        && persistedProfile.projectId === (typeof body.projectId === "string" ? body.projectId.trim() || undefined : undefined)
+        && persistedProfile.personKey === (typeof body.personKey === "string" ? body.personKey.trim() || undefined : undefined)) {
+        logger.warn({ requestId, failureStage: "session_projection" }, "SDK memory save verified in canonical storage after projection failure");
+        return c.json(memoryView(persistedProfile), 201);
+      }
       logger.error({ ...memoryPersistenceDiagnostic(error, phase, startedAt), requestId }, "SDK memory persistence failed");
       return apiError(c, 503, "memory_save_unavailable", "Chusky could not save this profile right now. Your answers are still on this page; please try again.");
     }

@@ -18,7 +18,7 @@ import { recordFailure, recordVectorFailure } from "./monitoring.js";
 import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channels/contracts.js";
 import type { ApprovalPolicy, HandoffRecord, WorkerDuration } from "./subagents/contracts.js";
 import type { CapabilityWorkerName } from "./memory/types.js";
-import { durableMemoryConfigured, forgetDurableMemory, saveDurableMemory, saveMemoryEntity, searchDurableMemory } from "./memory/durable.js";
+import { durableMemoryConfigured, forgetDurableMemory, getDurableMemoryByKey, saveDurableMemory, saveMemoryEntity, searchDurableMemory } from "./memory/durable.js";
 import { queueConversationReflection } from "./memory/reflection.js";
 import { deriveMissionToolHints } from "./missionWorker.js";
 import type { MissionRoutingCache } from "./decisions/missionRoutingCache.js";
@@ -8806,6 +8806,26 @@ export async function updateBrowserHandoffResolution(uid: number, id: string, re
 export async function getMemoryByKey(uid: number, key: string): Promise<MemoryFact | undefined> {
   const normalizedKey = key.trim();
   if (!normalizedKey || normalizedKey.length > 200) return undefined;
+  if (durableMemoryConfigured()) {
+    const durable = await getDurableMemoryByKey({ ownerUserId: uid, key: normalizedKey });
+    if (!durable) return undefined;
+    return {
+      id: durable.id,
+      category: durable.category as MemoryFact["category"],
+      key: durable.key,
+      value: durable.value,
+      confidence: durable.confidence,
+      source: durable.source?.type ?? "durable",
+      sensitivity: durable.sensitivity,
+      status: durable.status === "needs_review" ? "active" : durable.status,
+      ...(durable.scope.kind === "project" ? { projectId: durable.scope.externalId } : {}),
+      ...(durable.scope.kind === "organization" ? { organizationId: durable.scope.externalId } : {}),
+      ...(durable.reviewAt ? { reviewAt: durable.reviewAt } : {}),
+      ...(durable.validUntil ? { expiresAt: durable.validUntil } : {}),
+      createdAt: durable.createdAt,
+      updatedAt: durable.updatedAt,
+    };
+  }
   const now = Date.now();
   return (await getSession(uid)).memories
     .filter((memory) => memory.status !== "deleted" && memory.key === normalizedKey && (!memory.expiresAt || memory.expiresAt > now) && (!memory.reviewAt || memory.reviewAt > now))
