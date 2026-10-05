@@ -674,6 +674,96 @@ test("approved run stays visible while resuming and preserves its earlier steps"
   }
 });
 
+test("a failed approval resume remains in the next model turn's conversation context", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalDurableConfig = {
+    enabled: config.durableStateEnabled,
+    sdkRunsEnabled: config.durableStateSdkRunsEnabled,
+    missionsEnabled: config.durableStateMissionsEnabled,
+    durableMemoryEnabled: config.durableMemoryEnabled,
+    vectorUrl: config.upstashVectorRestUrl,
+    vectorToken: config.upstashVectorRestToken,
+  };
+  (config as { durableStateEnabled: boolean }).durableStateEnabled = false;
+  (config as { durableStateSdkRunsEnabled: boolean }).durableStateSdkRunsEnabled = false;
+  (config as { durableStateMissionsEnabled: boolean }).durableStateMissionsEnabled = false;
+  (config as { durableMemoryEnabled: boolean }).durableMemoryEnabled = false;
+  (config as { upstashVectorRestUrl: string }).upstashVectorRestUrl = "";
+  (config as { upstashVectorRestToken: string }).upstashVectorRestToken = "";
+  const externalId = "approval-failure-context-owner";
+  const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
+  let followupMessages: Array<{ role: string; content?: string }> = [];
+  setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "approval-failure-context-session", tools: async () => [] }) } });
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (!url.includes("openrouter.ai")) return new Response("offline", { status: 503 });
+    if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    const payload = JSON.parse(String(init?.body ?? "{}")) as { messages?: Array<{ role: string; content?: string }>; stream?: boolean };
+    if (payload.stream) followupMessages = payload.messages ?? [];
+    const text = payload.stream
+      ? `data: ${JSON.stringify({ choices: [{ delta: { role: "assistant", content: "I can see the previous run did not complete." }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`
+      : JSON.stringify({ choices: [{ message: { role: "assistant", content: "I didn't call any tools." }, finish_reason: "stop" }] });
+    return new Response(text, { status: 200, headers: { "content-type": payload.stream ? "text/event-stream" : "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    const api = app();
+    const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId, "Content-Type": "application/json" };
+    const created = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers: { ...headers, "Idempotency-Key": "approval-failure-context-thread" }, body: JSON.stringify({}) }));
+    const thread = await created.json() as { id: string };
+    const approval = await createApproval({
+      userId,
+      toolSlug: "CHUCK_CONVERSATION_SEARCH",
+      args: { query: "What do you know about me so far?" },
+      request: "What do you know about me so far?",
+      history: [],
+      model: "openai/gpt-luna-latest",
+    });
+    const session = await getSession(userId);
+    session.sdkThreads!.find((item) => item.id === thread.id)!.runs.push({
+      id: "run_approval_failure_context",
+      status: "requires_approval",
+      input: "What do you know about me so far?",
+      approvalId: approval.id,
+      events: [
+        { id: "find_one", type: "run.tool_activity", at: 1, toolSlug: "CHUCK_FIND_TOOLS", status: "completed", message: "Tool discovery completed" },
+        { id: "find_two", type: "run.tool_activity", at: 2, toolSlug: "CHUCK_FIND_TOOLS", status: "completed", message: "Tool discovery completed" },
+        { id: "search_approval", type: "run.tool_activity", at: 3, toolSlug: "CHUCK_CONVERSATION_SEARCH", status: "approval_required", message: "Waiting for approval" },
+      ],
+      createdAt: 1,
+      updatedAt: 3,
+    });
+    await saveSession(userId, session);
+
+    const decision = await api.fetch(new Request(`http://local/v1/approvals/${approval.id}`, { method: "POST", headers, body: JSON.stringify({ decision: "approve" }) }));
+    assert.equal(decision.status, 200);
+    const settledSession = await getSession(userId);
+    const settledThread = settledSession.sdkThreads!.find((item) => item.id === thread.id)!;
+    assert.equal(settledThread.runs.find((item) => item.id === "run_approval_failure_context")?.error?.code, "approved_action_not_executed", JSON.stringify(settledThread.runs.find((item) => item.id === "run_approval_failure_context")));
+    assert.match(settledThread.history[0]?.content ?? "", /What do you know about me so far\?/);
+    assert.match(settledThread.history[1]?.content ?? "", /approved action was not executed/i);
+    assert.match(settledThread.history[1]?.content ?? "", /CHUCK_FIND_TOOLS completed ×2/);
+    assert.match(settledThread.history[1]?.content ?? "", /CHUCK_CONVERSATION_SEARCH failed ×1/);
+
+    const followup = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/stream`, { method: "POST", headers, body: JSON.stringify({ input: "Why did you call find tools more than once?" }) }));
+    assert.equal(followup.status, 200);
+    await followup.text();
+    const modelContext = JSON.stringify(followupMessages);
+    assert.match(modelContext, /What do you know about me so far\?/);
+    assert.match(modelContext, /approved action was not executed/i);
+    assert.match(modelContext, /CHUCK_FIND_TOOLS completed ×2/);
+    assert.match(modelContext, /CHUCK_CONVERSATION_SEARCH failed ×1/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    (config as { durableStateEnabled: boolean }).durableStateEnabled = originalDurableConfig.enabled;
+    (config as { durableStateSdkRunsEnabled: boolean }).durableStateSdkRunsEnabled = originalDurableConfig.sdkRunsEnabled;
+    (config as { durableStateMissionsEnabled: boolean }).durableStateMissionsEnabled = originalDurableConfig.missionsEnabled;
+    (config as { durableMemoryEnabled: boolean }).durableMemoryEnabled = originalDurableConfig.durableMemoryEnabled;
+    (config as { upstashVectorRestUrl: string }).upstashVectorRestUrl = originalDurableConfig.vectorUrl;
+    (config as { upstashVectorRestToken: string }).upstashVectorRestToken = originalDurableConfig.vectorToken;
+  }
+});
+
 test("SDK tool activity survives a disconnected stream while the same run keeps working", async () => {
   const originalFetch = globalThis.fetch;
   let chatCalls = 0;

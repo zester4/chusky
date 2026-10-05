@@ -797,6 +797,30 @@ function runView(threadId: string, run: SdkRunRecord) {
   return { ...visible, threadId, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() };
 }
 
+/** Keep a bounded, truthful failure closeout in the next model turn's history.
+ * Raw tool arguments, results, and provider errors stay in the run record only. */
+function failedSdkRunHistory(run: SdkRunRecord): SdkThreadRecord["history"] {
+  if (run.status !== "failed") return [];
+  const input = `${run.input || "Attached file(s)"}${run.attachments?.length ? `\n[Attachments: ${run.attachments.map((file) => file.name).join(", ")}]` : ""}`;
+  const counts = new Map<string, number>();
+  for (const item of run.events) {
+    if (item.type !== "run.tool_activity" || typeof item.toolSlug !== "string" || typeof item.status !== "string") continue;
+    const slug = item.toolSlug.replace(/[^A-Za-z0-9_.:-]/g, "").slice(0, 80);
+    const status = item.status.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32);
+    if (!slug || !status) continue;
+    const key = `${slug} ${status}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const activities = [...counts.entries()].slice(0, 10).map(([key, count]) => `${key} ×${count}`).join("; ") || "none recorded";
+  const outcome = run.error?.code === "approved_action_not_executed"
+    ? "The previous run failed because the approved action was not executed."
+    : "The previous run failed and did not complete.";
+  return [
+    { role: "user", content: input, createdAt: run.createdAt },
+    { role: "assistant", content: `${outcome} Recorded tool activity (status only): ${activities}. The timeline is not evidence that the request completed.`, createdAt: run.updatedAt },
+  ];
+}
+
 /** Persist a run update against the latest account snapshot so a long-running
  * request does not overwrite unrelated account changes made after it started. */
 async function persistSdkRunSnapshot(
@@ -829,13 +853,13 @@ async function persistSdkRunSnapshot(
       stored.status = "cancelled";
       stored.approvalId = undefined;
     }
-    if (!preserveCancellation && run.status === "completed") {
-      const completedHistory = historyAppend.length ? historyAppend : [
+    if (!preserveCancellation && (run.status === "completed" || run.status === "failed")) {
+      const settledHistory = historyAppend.length ? historyAppend : run.status === "completed" ? [
         { role: "user" as const, content: `${run.input || "Attached file(s)"}${run.attachments?.length ? `\n[Attachments: ${run.attachments.map((file) => file.name).join(", ")}]` : ""}`, createdAt: run.createdAt },
         { role: "assistant" as const, content: run.output ?? "", createdAt: run.updatedAt },
-      ];
-      appendSdkRunHistoryToSession(session, threadId, run.id, completedHistory);
-      if (previousStatus !== "completed") session.totalCost = (session.totalCost ?? 0) + costIncrement;
+      ] : failedSdkRunHistory(run);
+      appendSdkRunHistoryToSession(session, threadId, run.id, settledHistory);
+      if (run.status === "completed" && previousStatus !== "completed") session.totalCost = (session.totalCost ?? 0) + costIncrement;
     }
     run.events = events;
     run.status = stored.status;
@@ -2564,6 +2588,7 @@ export function registerSdkApi(app: Hono): void {
       { role: "assistant", content: result.text, createdAt: Date.now() },
     ]); }
     catch (error) { if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); } else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); } }
+    if (run.status === "failed") appendSdkRunHistoryToSession(session, thread.id, run.id, failedSdkRunHistory(run));
     run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await appendReliabilitySample({ ownerId: owner.userId, operation: "sdk.run", status: run.status === "completed" ? "success" : run.status === "requires_approval" ? "uncertain" : "failure", costUsd: run.cost, latencyMs: run.updatedAt - run.createdAt, at: run.updatedAt }); const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status }); return c.json(response, 201);
     } finally { await releaseUserLock(owner.userId, lockToken); }
   });
@@ -2664,6 +2689,7 @@ export function registerSdkApi(app: Hono): void {
        { role: "assistant", content: result.text, createdAt: Date.now() },
      ]); }
     catch (error) { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); }
+    if (run.status === "failed") appendSdkRunHistoryToSession(session, thread.id, run.id, failedSdkRunHistory(run));
     run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await appendReliabilitySample({ ownerId: owner.userId, operation: "sdk.run", status: run.status === "completed" ? "success" : "failure", costUsd: run.cost, latencyMs: run.updatedAt - run.createdAt, at: run.updatedAt }); await saveSession(owner.userId, session); await persistSdkCompanyRun(run); return c.json(runView(thread.id, run), 201);
   });
   app.post("/v1/threads/:threadId/runs/:runId/cancel", async (c) => { const owner = sdkUser(c)!; const session = await getSessionWithSdkRuns(owner.userId, c.req.param("threadId")); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); if (!thread || !run) return apiError(c, 404, "not_found", "Run not found."); if (!["queued", "running"].includes(run.status)) return apiError(c, 409, "run_not_cancellable", "Only a queued or running run can be cancelled."); if (run.taskId) await cancelTask(owner.userId, run.taskId); activeRuns.get(run.id)?.abort(); run.status = "cancelled"; run.events.push(event("run.cancelled")); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); return c.json(runView(thread.id, run)); });
