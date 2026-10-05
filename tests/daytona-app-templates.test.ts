@@ -26,6 +26,8 @@ test("all explicit design styles produce framework-ready, responsive starter fil
     assert.deepEqual(Object.keys(files).sort(), ["index.html", "src/App.tsx", "src/index.css"]);
     assert.match(files["src/App.tsx"], /export default function App/);
     assert.match(files["src/App.tsx"], new RegExp(`className="app ${archetype} `));
+    assert.match(files["src/App.tsx"], new RegExp(`composition-${archetype}`));
+    assert.match(files["src/App.tsx"], /data-state-contract="loading empty error success responsive reduced-motion"/);
     assert.match(files["src/index.css"], /@media\s*\(max-width:\s*760px\)/);
     assert.match(files["src/index.css"], /--color-primary:/);
     assert.match(files["src/index.css"], /scrollbar-width:\s*thin/);
@@ -59,7 +61,7 @@ test("nocturne provides an opt-in editorial landing style without changing dashb
   assert.ok((appTool.function.parameters.properties.style as { enum: readonly string[] }).enum.includes("nocturne"));
 
   const landing = buildAppTemplateFiles("vite-react", "business-site", "nocturne", "studio-site");
-  assert.match(landing["src/App.tsx"], /className="app business-site style-nocturne editorial-landing"/);
+  assert.match(landing["src/App.tsx"], /className="app business-site composition-business-site style-nocturne editorial-landing"/);
   assert.match(landing["src/index.css"], /--color-canvas:#0e0c08/);
   assert.match(landing["src/index.css"], /--color-primary:#f0c34e/);
   assert.match(landing["src/index.css"], /--shadow:none/);
@@ -68,9 +70,23 @@ test("nocturne provides an opt-in editorial landing style without changing dashb
   assert.match(landing["src/index.css"], /prefers-reduced-motion/);
 
   const dashboard = buildAppTemplateFiles("vite-react", "saas-dashboard", "nocturne", "studio-dashboard");
-  assert.match(dashboard["src/App.tsx"], /className="app saas-dashboard style-nocturne"/);
+  assert.match(dashboard["src/App.tsx"], /className="app saas-dashboard composition-saas-dashboard style-nocturne"/);
   assert.doesNotMatch(dashboard["src/App.tsx"], /editorial-landing/);
   assert.match(dashboard["src/App.tsx"], /dashboard-nav/);
+});
+
+test("scaffold briefs replace generic opening copy and visible technical ids", () => {
+  const files = buildAppTemplateFiles("vite-react", "business-site", "grove", "greenroom", {
+    projectName: "Greenroom Studio",
+    brief: "A calm client workspace for independent interior teams to align on materials, approvals, and next steps.",
+    audience: "INTERIOR TEAMS",
+    primaryAction: "Start a project",
+  });
+  assert.match(files["src/App.tsx"], /Greenroom Studio/);
+  assert.match(files["src/App.tsx"], /A calm client workspace for independent interior teams/);
+  assert.match(files["src/App.tsx"], /INTERIOR TEAMS/);
+  assert.match(files["src/App.tsx"], /Start a project/);
+  assert.doesNotMatch(files["src/App.tsx"], /Spaces that feel like you/);
 });
 
 test("design inputs reject unsupported values instead of silently selecting a look", () => {

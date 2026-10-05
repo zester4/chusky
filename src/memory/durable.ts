@@ -138,6 +138,20 @@ export async function forgetDurableMemory(input: { ownerUserId: number; keyOrId:
   } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
 }
 
+/** Read the current active record for an exact key in the owner's personal scope. */
+export async function getDurableMemoryByKey(input: { ownerUserId: number; key: string }): Promise<DurableMemoryRecord | undefined> {
+  if (!durableMemoryConfigured()) return undefined;
+  if (!Number.isSafeInteger(input.ownerUserId) || input.ownerUserId <= 0) throw new Error("Memory owner is invalid");
+  const key = bounded(input.key, 240);
+  if (!key) return undefined;
+  const client = await pool().connect();
+  try {
+    const result = await client.query(`SELECT m.*, s.kind AS scope_kind, s.external_id AS scope_external_id, src.source_type, src.source_ref FROM chusky_memory_items m JOIN chusky_memory_scopes s ON s.id=m.scope_id JOIN chusky_memory_grants g ON g.scope_id=m.scope_id AND g.subject_type='user' AND g.subject_id=$2 AND 'read'=ANY(g.permissions) LEFT JOIN chusky_memory_sources src ON src.id=m.source_id WHERE m.owner_user_id=$1 AND m.memory_key=$3 AND m.status='active' AND (m.valid_until IS NULL OR m.valid_until>now()) AND (m.review_at IS NULL OR m.review_at>now()) ORDER BY m.updated_at DESC LIMIT 1`, [input.ownerUserId, String(input.ownerUserId), key]);
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? rowToMemory(row) : undefined;
+  } finally { client.release(); }
+}
+
 export async function searchDurableMemory(input: { ownerUserId: number; scopes: Array<{ kind: MemoryScopeKind; externalId: string }>; query?: string; category?: MemoryCategory; limit?: number; includeSensitive?: boolean }): Promise<DurableMemoryRecord[]> {
   if (!durableMemoryConfigured()) return [];
   const client = await pool().connect();

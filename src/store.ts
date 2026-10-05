@@ -18,7 +18,7 @@ import { recordFailure, recordVectorFailure } from "./monitoring.js";
 import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channels/contracts.js";
 import type { ApprovalPolicy, HandoffRecord, WorkerDuration } from "./subagents/contracts.js";
 import type { CapabilityWorkerName } from "./memory/types.js";
-import { durableMemoryConfigured, forgetDurableMemory, saveDurableMemory, saveMemoryEntity, searchDurableMemory } from "./memory/durable.js";
+import { durableMemoryConfigured, forgetDurableMemory, getDurableMemoryByKey, saveDurableMemory, saveMemoryEntity, searchDurableMemory } from "./memory/durable.js";
 import { queueConversationReflection } from "./memory/reflection.js";
 import { deriveMissionToolHints } from "./missionWorker.js";
 import type { MissionRoutingCache } from "./decisions/missionRoutingCache.js";
@@ -856,7 +856,7 @@ export type DaytonaAppFramework = "vite-react" | "nextjs";
  */
 export type DaytonaAppStatus = "scaffolded" | "verified" | "running" | "ready_for_review" | "ready_to_publish" | "stopped" | "failed";
 export interface DaytonaAppCheck {
-  name: "typecheck" | "lint" | "test" | "build" | "health";
+  name: "typecheck" | "lint" | "test" | "build" | "health" | "ui-contract";
   status: "passed" | "failed" | "skipped";
   output: string;
   completedAt: number;
@@ -865,11 +865,15 @@ export interface DaytonaAppVerification {
   status: "passed" | "failed" | "pending";
   checks: DaytonaAppCheck[];
   verifiedAt?: number;
-  visual?: { status: "captured" | "passed" | "failed"; summary?: string; capturedAt: number; reviewedAt?: number };
+  visual?: { status: "captured" | "passed" | "failed"; summary?: string; capturedAt: number; reviewedAt?: number; qa?: { status: "passed" | "failed"; checks: string[] } };
 }
 export interface DaytonaAppRecord {
   id: string;
   framework: DaytonaAppFramework;
+  productName?: string;
+  brief?: string;
+  audience?: string;
+  primaryAction?: string;
   archetype?: import("./lib/daytona/appTemplates.js").DaytonaAppArchetype;
   style?: import("./lib/daytona/appTemplates.js").ResolvedDaytonaAppStyle;
   path: string;
@@ -877,6 +881,8 @@ export interface DaytonaAppRecord {
   status: DaytonaAppStatus;
   /** Isolated local Git branch; remote push remains an approval-gated action. */
   branch?: string;
+  /** Source-level evidence that the scaffold was changed before preview handoff. */
+  customization?: { status: "pending" | "detected"; output?: string; checkedAt: number };
   verification?: DaytonaAppVerification;
   release?: { status: "not_requested" | "awaiting_approval" | "published"; requestedAt?: number; target?: string };
   ptySessionId?: string;
@@ -1994,7 +2000,7 @@ class RedisBackend implements Backend {
   private missionFromDurable(record: DurableMissionRecord): MissionRecord { return normalizeMission(record.payload as unknown as MissionRecord); }
 
   getDurableStateHealth(): Promise<DurableStateStatus> {
-    return this.durableState?.healthStatus() ?? Promise.resolve({ enabled: false, reachable: false });
+    return this.durableState?.healthStatus() ?? Promise.resolve({ enabled: false, reachable: false, schemaReady: false });
   }
   async getDurableStorageMetrics(): Promise<Record<string, number>> {
     const { redisDomainCacheHits, redisDomainCacheMisses, ...redis } = this.durableStorageMetrics;
@@ -2271,8 +2277,8 @@ class RedisBackend implements Backend {
       if (pendingMessages.length) await this.durableState.appendConversationMessages(userId, pendingMessages);
       let { core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled);
       const metadata = withMessageIds as UserSession & DurableSessionMetadata;
-      const oldHashes = metadata.durableDomainHashes ?? {};
-      const oldSnapshots = metadata.durableDomainSnapshots;
+      let oldHashes = metadata.durableDomainHashes ?? {};
+      let oldSnapshots = metadata.durableDomainSnapshots;
       const changedDomains = new Map([...domains].filter(([domain, payload]) => oldHashes[domain] !== durableDomainHash(payload)));
       const expectedVersions = new Map([...changedDomains.keys()].map((domain) => [domain, metadata.durableDomainVersions?.[domain]] as const));
       (core as UserSession & DurableSessionMetadata).durableConversationHeadId = withMessageIds.history.at(-1)?.id;
@@ -2285,6 +2291,52 @@ class RedisBackend implements Backend {
       // retry a stale payload against a refreshed version.
       let writtenVersions: Map<DurableSessionDomain, number>;
       let writeExpectedVersions = expectedVersions;
+      // A caller loads its session before entering this save lease. Another
+      // writer may therefore have committed while this caller waited for the
+      // lease. Reconcile once under the lease before attempting the CAS so the
+      // common stale-snapshot case does not consume the conflict retry budget.
+      if (changedDomains.size) {
+        const latest = await this.durableState.readSessionDomains(userId);
+        const latestPayloads = new Map<DurableSessionDomain, unknown>(
+          [...domains].map(([domain, payload]) => [domain, latest.get(domain)?.payload ?? payload]),
+        );
+        let refreshed = false;
+        for (const [domain, desired] of changedDomains) {
+          const current = latest.get(domain);
+          const expected = writeExpectedVersions.get(domain);
+          if (!current) {
+            if (expected !== undefined) throw new Error(`Durable session domain disappeared during a concurrent write: ${domain}.`);
+            continue;
+          }
+          if (current.version === expected) continue;
+          if (!oldSnapshots || !Object.hasOwn(oldSnapshots, domain)) {
+            throw new Error(`Durable session domain cannot be safely merged without its loaded baseline: ${domain}.`);
+          }
+          const merged = mergeDurableSessionDomain(oldSnapshots[domain], current.payload, desired, domain);
+          changedDomains.set(domain, merged);
+          latestPayloads.set(domain, merged);
+          domains.set(domain, merged);
+          writeExpectedVersions.set(domain, current.version);
+          refreshed = true;
+        }
+        if (refreshed) {
+          const latestVersions = Object.fromEntries([...latest].map(([domain, document]) => [domain, document.version]));
+          oldHashes = {
+            ...oldHashes,
+            ...Object.fromEntries([...latestPayloads].map(([domain, payload]) => [domain, durableDomainHash(payload)])),
+          };
+          oldSnapshots = {
+            ...oldSnapshots,
+            ...Object.fromEntries([...latestPayloads].map(([domain, payload]) => [domain, structuredClone(payload)])),
+          };
+          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads), {
+            durableDomainVersions: { ...metadata.durableDomainVersions, ...latestVersions },
+            durableDomainHashes: oldHashes,
+            durableDomainSnapshots: oldSnapshots,
+          });
+          ({ core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled));
+        }
+      }
       let writeAttempts = 0;
       while (true) {
         try {
@@ -3755,7 +3807,7 @@ class MemoryBackend implements Backend {
     return session ? structuredClone(session) : fresh();
   }
   async readConversationBefore(_userId: number, _before: { createdAt: number; id: string }, _limit: number): Promise<DurableConversationMessage[] | undefined> { return undefined; }
-  async getDurableStateHealth(): Promise<DurableStateStatus> { return { enabled: false, reachable: false }; }
+  async getDurableStateHealth(): Promise<DurableStateStatus> { return { enabled: false, reachable: false, schemaReady: false }; }
   async getDurableStorageMetrics(): Promise<Record<string, number>> { return { ...new RedisCommandMetrics().flatten(), redisSessionCommands: 0, redisSessionBytesRead: 0, redisSessionBytesWritten: 0, redisDomainCacheHits: 0, redisDomainCacheMisses: 0, redisDomainCacheHitRatio: 0, redisSessionCoreBytes: 0, redisDomainCacheBytes: 0 }; }
   async getObjectMetadata(_userId: number, _objectId: string): Promise<DurableObjectMetadata | undefined> { return undefined; }
   async listRecallTranscriptObjects(_userId: number, _meetingHash: string, _includeUnavailable: boolean): Promise<DurableObjectMetadata[]> { throw new Error("Neon object catalog is unavailable."); }
@@ -4542,10 +4594,10 @@ function deferMemoryVectorBackfill(uid: number): void {
   memoryVectorBackfillRetryAt.set(uid, now + 60_000);
 }
 
-export async function initStore(options: { memoryOnly?: boolean } = {}): Promise<void> {
+export async function initStore(options: { memoryOnly?: boolean; suppressStorageMetrics?: boolean } = {}): Promise<void> {
   if (redisMetricsFlushTimer) clearInterval(redisMetricsFlushTimer);
   redisMetricsFlushTimer = undefined;
-  await backend?.flushStorageMetrics?.();
+  if (!options.suppressStorageMetrics) await backend?.flushStorageMetrics?.();
   const production = process.env.NODE_ENV === "production";
   if ((config.webhookUrl || production) && !config.redisUrl && !options.memoryOnly) {
     const error = new Error("REDIS_URL is required in webhook/production mode; refusing in-memory persistence");
@@ -4609,7 +4661,7 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
       await r.ping();
       const redisCommandMetrics = new RedisCommandMetrics();
       instrumentRedisClient(r as unknown as Parameters<typeof instrumentRedisClient>[0], redisCommandMetrics);
-      const redisMetricsPublisher = !options.memoryOnly && config.durableStorageMetricsEnabled && durableState
+      const redisMetricsPublisher = !options.memoryOnly && !options.suppressStorageMetrics && config.durableStorageMetricsEnabled && durableState
         ? new RedisMetricsPublisher(redisCommandMetrics,
           (instanceId, batchId, observedAt, samples) => durableState.recordStorageMetricBatch(instanceId, batchId, observedAt, samples),
           {
@@ -7031,7 +7083,7 @@ export async function replanMission(userId: number, id: string, rawSteps: Array<
       if (!Array.isArray(dependencies) || dependencies.some((dependency) => typeof dependency !== "string")) throw new Error(`Mission step ${stepId} has invalid dependencies`);
       const allowedTools = normalizeMissionStepAllowedTools(step.allowedTools, `Replanned mission step ${stepId}`);
       const toolHints = allowedTools === undefined ? deriveMissionToolHints(step.objective) : undefined;
-      return { ...previous, id: stepId, title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn: [...new Set(dependencies.map((dependency) => dependency.trim()))], taskId: previous?.taskId, attempts: previous?.attempts ?? 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? previous?.retryLimit ?? 2))), updatedAt: now, result: previous?.result, allowedTools, toolHints };
+      return { ...previous, id: stepId, title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn: [...new Set(dependencies.map((dependency) => dependency.trim()))], taskId: previous?.taskId, attempts: previous?.attempts ?? 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? previous?.retryLimit ?? 2))), updatedAt: now, result: previous?.result, ...(allowedTools !== undefined ? { allowedTools } : {}), ...(toolHints !== undefined ? { toolHints } : {}) };
     });
     const completedIds = new Set(mission.steps.filter((step) => step.status === "completed").map((step) => step.id));
     const removedCompletedIds = [...completedIds].filter((stepId) => !steps.some((step) => step.id === stepId && step.status === "completed"));
@@ -8502,7 +8554,7 @@ export async function upsertMemoryAndContext(
   const kinds: ContextNodeRecord["kind"][] = ["memory", "decision", "preference", "objective", "open_loop", "tool_receipt", "artifact", "meeting", "message", "fact", "relationship"];
   if (!scopes.includes(contextInput.scope) || !kinds.includes(contextInput.kind)) throw new Error("Context scope or kind is invalid");
 
-  const session = await getSession(uid);
+  const session = await withMemoryPersistenceStage("load_session", () => getSession(uid));
   const now = Date.now();
   const existingMemory = session.memories.find((item) => (memory.id && item.id === memory.id) || (!memory.id && item.category === memory.category && item.key === memory.key));
   const savedMemory: MemoryFact = {
@@ -8544,32 +8596,56 @@ export async function upsertMemoryAndContext(
   // Prefer the memory's stable source reference when updating it. Its key,
   // category, or project scope may have changed, so matching only on the new
   // context identity would leave the old projection searchable.
-  const previousContext = session.contextNodes?.find((item) => item.sourceRef === existingMemory?.id)
-    ?? session.contextNodes?.find((item) => `${item.scope}:${item.scopeId ?? ""}:${item.kind}:${item.key}` === contextIdentity);
-  if (previousContext) {
-    savedContext.id = previousContext.id;
-    savedContext.createdAt = previousContext.createdAt;
-  }
   savedContext.sourceRef = savedMemory.id;
-  session.memories = [...session.memories.filter((item) => item.id !== savedMemory.id && !(item.category === savedMemory.category && item.key === savedMemory.key)), savedMemory].slice(-200);
-  session.contextNodes = previousContext
-    ? (session.contextNodes ?? []).map((item) => item.id === previousContext.id ? savedContext : item)
-    : [savedContext, ...(session.contextNodes ?? [])].slice(0, 1000);
   if (durableMemoryConfigured()) {
-    const entity = savedMemory.personKey ? await saveMemoryEntity({ ownerUserId: uid, type: "person", canonicalName: savedMemory.personKey }) : savedMemory.projectId ? await saveMemoryEntity({ ownerUserId: uid, type: "project", canonicalName: savedMemory.projectId }) : undefined;
-    const persisted = await saveDurableMemory({ ownerUserId: uid, scope: { kind: savedMemory.organizationId ? "organization" : savedMemory.projectId ? "project" : "personal", externalId: savedMemory.organizationId ?? savedMemory.projectId ?? String(uid) }, category: savedMemory.category as never, key: savedMemory.key, value: savedMemory.value, confidence: savedMemory.confidence, sensitivity: savedMemory.sensitivity, source: { type: savedMemory.source, ref: savedMemory.id }, entityId: entity?.id, reviewAt: savedMemory.reviewAt, expiresAt: savedMemory.expiresAt, id: savedMemory.id, metadata: { contextNodeId: savedContext.id } });
+    const entity = await withMemoryPersistenceStage("save_entity", async () => savedMemory.personKey
+      ? saveMemoryEntity({ ownerUserId: uid, type: "person", canonicalName: savedMemory.personKey })
+      : savedMemory.projectId
+        ? saveMemoryEntity({ ownerUserId: uid, type: "project", canonicalName: savedMemory.projectId })
+        : undefined);
+    const persisted = await withMemoryPersistenceStage("save_memory", () => saveDurableMemory({ ownerUserId: uid, scope: { kind: savedMemory.organizationId ? "organization" : savedMemory.projectId ? "project" : "personal", externalId: savedMemory.organizationId ?? savedMemory.projectId ?? String(uid) }, category: savedMemory.category as never, key: savedMemory.key, value: savedMemory.value, confidence: savedMemory.confidence, sensitivity: savedMemory.sensitivity, source: { type: savedMemory.source, ref: savedMemory.id }, entityId: entity?.id, reviewAt: savedMemory.reviewAt, expiresAt: savedMemory.expiresAt, id: savedMemory.id }));
     savedMemory.id = persisted.id;
     savedContext.sourceRef = persisted.id;
   }
-  await saveSession(uid, session);
+  // Re-read the owner session under its mutation lease before writing the
+  // projection. The durable-memory transaction above can take long enough
+  // for a concurrent profile update to make the initial snapshot stale.
+  let latestExistingMemory = existingMemory;
+  await withMemoryPersistenceStage("session_projection", () => mutateSession(uid, (latestSession) => {
+    latestExistingMemory = latestSession.memories.find((item) =>
+      (memory.id && item.id === memory.id) || (!memory.id && item.category === memory.category && item.key === memory.key),
+    );
+    const latestContext = latestSession.contextNodes?.find((item) => item.sourceRef === latestExistingMemory?.id)
+      ?? latestSession.contextNodes?.find((item) => `${item.scope}:${item.scopeId ?? ""}:${item.kind}:${item.key}` === contextIdentity);
+    if (latestContext) {
+      savedContext.id = latestContext.id;
+      savedContext.createdAt = latestContext.createdAt;
+    }
+    latestSession.memories = [...latestSession.memories.filter((item) => item.id !== savedMemory.id && !(item.category === savedMemory.category && item.key === savedMemory.key)), savedMemory].slice(-200);
+    latestSession.contextNodes = latestContext
+      ? (latestSession.contextNodes ?? []).map((item) => item.id === latestContext.id ? savedContext : item)
+      : [savedContext, ...(latestSession.contextNodes ?? [])].slice(0, 1000);
+  }));
 
   if (vectorConfigured()) {
     const vector = new UpstashKnowledgeStore();
     void vector.upsertMemory({ userId: String(uid), id: savedMemory.id, category: savedMemory.category, key: savedMemory.key, value: savedMemory.value, projectId: savedMemory.projectId, personKey: savedMemory.personKey }).then(async () => {
-      if (existingMemory?.projectId && existingMemory.projectId !== savedMemory.projectId) await vector.deleteMemory(String(uid), existingMemory.id, existingMemory.projectId);
+      if (latestExistingMemory?.projectId && latestExistingMemory.projectId !== savedMemory.projectId) await vector.deleteMemory(String(uid), latestExistingMemory.id, latestExistingMemory.projectId);
     }).catch((error) => { recordVectorFailure(error, { phase: "memory_index", errorClass: "vector_indexing" }); logger.warn({ err: error, userId: uid }, "Memory vector indexing unavailable; structured memory retained"); });
   }
   return { memory: savedMemory, context: savedContext };
+}
+
+type MemoryPersistenceStage = "load_session" | "save_entity" | "save_memory" | "session_projection";
+
+async function withMemoryPersistenceStage<T>(stage: MemoryPersistenceStage, operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (cause) {
+    const error = new Error("Durable memory persistence failed", { cause });
+    Object.assign(error, { memoryPersistenceStage: stage });
+    throw error;
+  }
 }
 
 export async function updateMemory(uid: number, target: { id?: string; key?: string; category?: MemoryFact["category"] }, patch: Partial<Pick<MemoryFact, "category" | "key" | "value" | "confidence" | "source" | "sensitivity" | "projectId" | "organizationId" | "personKey" | "reviewAt" | "expiresAt">>): Promise<MemoryFact | undefined> {
@@ -8730,6 +8806,26 @@ export async function updateBrowserHandoffResolution(uid: number, id: string, re
 export async function getMemoryByKey(uid: number, key: string): Promise<MemoryFact | undefined> {
   const normalizedKey = key.trim();
   if (!normalizedKey || normalizedKey.length > 200) return undefined;
+  if (durableMemoryConfigured()) {
+    const durable = await getDurableMemoryByKey({ ownerUserId: uid, key: normalizedKey });
+    if (!durable) return undefined;
+    return {
+      id: durable.id,
+      category: durable.category as MemoryFact["category"],
+      key: durable.key,
+      value: durable.value,
+      confidence: durable.confidence,
+      source: durable.source?.type ?? "durable",
+      sensitivity: durable.sensitivity,
+      status: durable.status === "needs_review" ? "active" : durable.status,
+      ...(durable.scope.kind === "project" ? { projectId: durable.scope.externalId } : {}),
+      ...(durable.scope.kind === "organization" ? { organizationId: durable.scope.externalId } : {}),
+      ...(durable.reviewAt ? { reviewAt: durable.reviewAt } : {}),
+      ...(durable.validUntil ? { expiresAt: durable.validUntil } : {}),
+      createdAt: durable.createdAt,
+      updatedAt: durable.updatedAt,
+    };
+  }
   const now = Date.now();
   return (await getSession(uid)).memories
     .filter((memory) => memory.status !== "deleted" && memory.key === normalizedKey && (!memory.expiresAt || memory.expiresAt > now) && (!memory.reviewAt || memory.reviewAt > now))

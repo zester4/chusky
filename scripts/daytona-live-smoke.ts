@@ -20,11 +20,15 @@ async function main(): Promise<void> {
   const probePath = `workspace/.chusky/live-probe-${randomUUID()}.txt`;
   const probeContent = "chusky live Daytona probe";
   const engine = new DaytonaEngine();
+  const keepPreview = process.env.DAYTONA_KEEP_PREVIEW === "1";
   let created = false;
+  let retainedWorkspaceId = "";
+  let retainedPreviewUrl = "";
 
   try {
     const workspace = await engine.workspace(userId, "create") as { id?: string; networkBlockAll?: boolean; domainAllowList?: string };
     created = true;
+    retainedWorkspaceId = String(workspace.id ?? "");
     const networkProbe = await engine.execute(
       userId,
       "for url in https://api.github.com https://example.com https://www.wikipedia.org; do printf '%s ' \"$url\"; curl -L --max-time 10 -sS -o /dev/null -w '%{http_code} %{url_effective} %{errormsg}\\n' \"$url\" || true; done; env | grep -iE '^(http|https|all|no)_proxy=' || true",
@@ -44,6 +48,38 @@ async function main(): Promise<void> {
     if (read.content !== probeContent || !files.some((file) => file.path === probePath)) {
       throw new Error("Live Daytona create/write/read/list verification failed.");
     }
+    const appId = `live-preview-${randomUUID().slice(0, 8)}`;
+    const scaffolded = await engine.app(userId, {
+      action: "scaffold",
+      id: appId,
+      framework: "vite-react",
+      archetype: "waitlist",
+      style: "auto",
+      productName: "Fieldnotes",
+      brief: "A calm launch space for teams turning a rough idea into a shared plan.",
+      audience: "PRODUCT TEAMS",
+      primaryAction: "Request early access",
+    }) as { id?: string; status?: string };
+    if (scaffolded.id !== appId || scaffolded.status !== "scaffolded") {
+      throw new Error("Live Daytona app scaffold verification failed.");
+    }
+    await engine.writeFile(userId, `workspace/apps/${appId}/README.md`, "# Fieldnotes\n\nLive Daytona smoke customization.\n");
+    const started = await engine.app(userId, {
+      action: "start",
+      id: appId,
+      expiresInSeconds: 600,
+    }) as { url?: string; previewUrl?: string; status?: string; verification?: { status?: string } };
+    const previewUrl = String(started.url ?? started.previewUrl ?? "").trim();
+    retainedPreviewUrl = previewUrl;
+    if (!/^https:\/\//i.test(previewUrl) || started.status !== "running" || started.verification?.status !== "passed") {
+      throw new Error("Live Daytona app start did not return a verified HTTPS preview URL.");
+    }
+    const previewResponse = await fetch(previewUrl, { redirect: "follow" });
+    const previewBody = await previewResponse.text();
+    if (!previewResponse.ok || !previewBody.includes("<")) {
+      throw new Error(`Live Daytona preview URL was not reachable: HTTP ${previewResponse.status}`);
+    }
+    if (!keepPreview) await engine.app(userId, { action: "stop", id: appId });
     const probes: Array<{ type: "pdf" | "docx" | "presentation" | "spreadsheet"; extension: "pdf" | "docx" | "pptx" | "xlsx"; artifact: any; signature: (data: Buffer) => boolean }> = [
       {
         type: "pdf",
@@ -102,12 +138,12 @@ async function main(): Promise<void> {
       }
       artifactResults[probe.extension] = "create+qa+register+download passed";
     }
-    console.log(JSON.stringify({ liveDaytona: "passed", workspaceState: "created", sandboxPolicy: { networkBlockAll: workspace.networkBlockAll, domainAllowList: workspace.domainAllowList || "" }, networkProbe: { exitCode: networkProbe.exitCode, output: networkProbe.output }, computerUse: computer.status ?? "available", screenshotBytes: screenshot.sizeBytes ?? 0, writeReadList: "passed", artifacts: artifactResults, cleanup: "pending" }));
+    console.log(JSON.stringify({ liveDaytona: "passed", workspaceState: "created", sandboxPolicy: { networkBlockAll: workspace.networkBlockAll, domainAllowList: workspace.domainAllowList || "" }, networkProbe: { exitCode: networkProbe.exitCode, output: networkProbe.output }, computerUse: computer.status ?? "available", screenshotBytes: screenshot.sizeBytes ?? 0, writeReadList: "passed", appPreview: { status: "passed", url: previewUrl, httpStatus: previewResponse.status, bodyBytes: previewBody.length }, artifacts: artifactResults, cleanup: "pending" }));
   } finally {
-    if (created) await engine.workspace(userId, "delete");
+    if (created && !keepPreview) await engine.workspace(userId, "delete");
   }
 
-  console.log(JSON.stringify({ liveDaytona: "passed", cleanup: "deleted" }));
+  console.log(JSON.stringify({ liveDaytona: "passed", cleanup: keepPreview ? "retained" : "deleted", ...(keepPreview ? { workspaceId: retainedWorkspaceId, previewUrl: retainedPreviewUrl } : {}) }));
 }
 
 void main();

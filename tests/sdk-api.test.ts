@@ -4,7 +4,8 @@ import { createHash, createHmac } from "node:crypto";
 import { Readable } from "node:stream";
 import { Hono } from "hono";
 import { config } from "../src/config.js";
-import { browserFileDownloadResponse, persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, sdkRunImages, setOrganizationAccessResolverForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
+import { logger } from "../src/logger.js";
+import { browserFileDownloadResponse, persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, sdkRunImages, setOrganizationAccessResolverForTests, setSdkAuditWriterForTests, setSdkMemoryWriterForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
@@ -12,7 +13,7 @@ import { addRecallMeeting, authenticateCliToken, completeMissionStep, createAppr
 import { redeemLinkCode } from "../src/channels/identity.js";
 import { appendTraceEvent, queueCompensation, saveOutcomeVerification } from "../src/reliability/persistence.js";
 import { resetTriggerCatalogueForTests } from "../src/triggerCatalog.js";
-import { acquireUserLock, releaseUserLock } from "../src/store.js";
+import { acquireUserLock, mutateSession, releaseUserLock } from "../src/store.js";
 
 beforeEach(async () => {
   (config as { apiKey: string }).apiKey = "sdk-test-key";
@@ -29,6 +30,8 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  setSdkAuditWriterForTests();
+  setSdkMemoryWriterForTests();
   setPhoneCallLauncherForTests();
   (config as { providerSmokeSigningSecret: string }).providerSmokeSigningSecret = "";
 });
@@ -44,6 +47,16 @@ test("onboarding website research rejects unsafe URLs before agent execution", a
   }));
   assert.equal(response.status, 400);
   assert.equal((await response.json() as { error?: { code?: string } }).error?.code, "unsafe_website_url");
+});
+
+test("post-response SDK audit failures do not replace a completed route response", async () => {
+  setSdkAuditWriterForTests(async () => { throw new Error("simulated Neon version conflict"); });
+
+  const response = await app().fetch(request({ metadata: { title: "Keep the successful response" } }));
+
+  assert.equal(response.status, 201);
+  assert.ok(response.headers.get("x-request-id"));
+  assert.equal(typeof (await response.json() as { id?: unknown }).id, "string");
 });
 
 test("older account history requires a valid cursor and durable history backend", async () => {
@@ -1237,6 +1250,18 @@ test("root key provisions hash-only project keys with isolated SDK users and rev
   assert.equal(JSON.stringify(await projects.json()).includes(project.key), false);
 });
 
+test("concurrent SDK audit-style session mutations retain every appended record", async () => {
+  const ownerId = 831_999;
+  await Promise.all(Array.from({ length: 20 }, (_, index) => mutateSession(ownerId, (session) => {
+    session.sdkAudit ??= [];
+    session.sdkAudit.push({ id: `audit_test_${index}`, action: "POST /test", requestId: `request_${index}`, status: 200, at: index });
+  })));
+
+  const audit = (await getSession(ownerId)).sdkAudit ?? [];
+  assert.equal(audit.length, 20);
+  assert.deepEqual(new Set(audit.map((entry) => entry.id)), new Set(Array.from({ length: 20 }, (_, index) => `audit_test_${index}`)));
+});
+
 test("root-only admin routes never require an SDK end-user header", async () => {
   const api = app();
   const response = await api.fetch(new Request("https://local.test/v1/admin/projects", { headers: { Authorization: "Bearer sdk-test-key" } }));
@@ -1813,6 +1838,62 @@ test("dashboard onboarding completion uses an exact owner-scoped memory key", as
   assert.match(body.data[0]!.value, /Seyyid/);
   const unrelated = await api.fetch(new Request("http://local/v1/memory?key=chusky_onboarding_profile_other", { headers }));
   assert.deepEqual((await unrelated.json() as { data: unknown[] }).data, []);
+});
+
+test("memory persistence conflicts return a retryable sanitized error instead of a client or auth error", async () => {
+  const databaseError = Object.assign(new Error("sensitive profile data must never be logged"), { code: "40001" });
+  const persistenceError = Object.assign(new Error("memory persistence failed"), {
+    memoryPersistenceStage: "session_projection",
+    cause: databaseError,
+  });
+  setSdkMemoryWriterForTests(async () => { throw persistenceError; });
+  let loggedFields: Record<string, unknown> | undefined;
+  const originalError = logger.error;
+  logger.error = ((fields: Record<string, unknown>) => { loggedFields = fields; }) as typeof logger.error;
+  let response: Response;
+  try {
+    response = await app().fetch(new Request("http://local/v1/memory", {
+      method: "POST",
+      headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "onboarding-owner", "Content-Type": "application/json" },
+      body: JSON.stringify({ category: "profile", key: "chusky_onboarding_profile", value: "{}", sensitivity: "normal" }),
+    }));
+  } finally {
+    logger.error = originalError;
+  }
+
+  const body = await response.json() as { error?: { code?: string; message?: string; requestId?: string } };
+  assert.equal(response.status, 503);
+  assert.equal(body.error?.code, "memory_save_unavailable");
+  assert.match(body.error?.message ?? "", /try again/i);
+  assert.doesNotMatch(body.error?.message ?? "", /session domain version conflict/i);
+  assert.ok(body.error?.requestId);
+  assert.equal(loggedFields?.failureStage, "session_projection");
+  assert.equal(loggedFields?.databaseCode, "40001");
+  assert.equal(loggedFields?.errorName, "Error");
+  assert.equal(JSON.stringify(loggedFields).includes("sensitive profile data"), false);
+  assert.equal(JSON.stringify(loggedFields).includes("chusky_onboarding_profile"), false);
+});
+
+test("a profile save is confirmed after session projection failure only when exact read-back matches", async () => {
+  const durableMemoryEnabled = config.durableMemoryEnabled;
+  (config as { durableMemoryEnabled: boolean }).durableMemoryEnabled = false;
+  try {
+    setSdkMemoryWriterForTests(async (userId, memory) => {
+      const saved = await upsertMemory(userId, memory);
+      throw Object.assign(new Error("projection failed"), { memoryPersistenceStage: "session_projection", saved });
+    });
+    const api = app();
+    const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "onboarding-owner", "Content-Type": "application/json" };
+    const payload = { category: "profile", key: "chusky_onboarding_profile", value: "{\"version\":1}", sensitivity: "normal" };
+    const saved = await api.fetch(new Request("http://local/v1/memory", { method: "POST", headers, body: JSON.stringify(payload) }));
+    assert.equal(saved.status, 201);
+    const exact = await api.fetch(new Request("http://local/v1/memory?key=chusky_onboarding_profile", { headers }));
+    assert.equal(exact.status, 200);
+    const body = await exact.json() as { data: Array<{ value: string }> };
+    assert.deepEqual(body.data.map((item) => item.value), [payload.value]);
+  } finally {
+    (config as { durableMemoryEnabled: boolean }).durableMemoryEnabled = durableMemoryEnabled;
+  }
 });
 
 test("dashboard devices are revocable by opaque owner-scoped IDs, without exposing token hashes", async () => {
