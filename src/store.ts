@@ -5528,11 +5528,11 @@ function appendSessionHistory(session: UserSession, messages: Message[]): void {
   session.history = fitted.history;
 }
 
-/** Add one completed SDK turn to its thread and, for first-party web runs, the owner's canonical history. */
+/** Add one settled SDK turn to its thread and, for first-party web runs, the owner's canonical history. */
 export function appendSdkRunHistoryToSession(session: UserSession, threadId: string, runId: string, messages: Message[]): boolean {
   const thread = session.sdkThreads?.find((item) => item.id === threadId);
   const run = thread?.runs.find((item) => item.id === runId);
-  if (!thread || !run || run.status !== "completed" || !messages.length) return false;
+  if (!thread || !run || !["completed", "failed"].includes(run.status) || !messages.length) return false;
   const tagged = messages.slice(0, 10).map((message, index) => ({
     ...message,
     sourceId: `sdk-run:${runId}:${index}`,
