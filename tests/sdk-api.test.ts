@@ -4,6 +4,7 @@ import { createHash, createHmac } from "node:crypto";
 import { Readable } from "node:stream";
 import { Hono } from "hono";
 import { config } from "../src/config.js";
+import { logger } from "../src/logger.js";
 import { browserFileDownloadResponse, persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, sdkRunImages, setOrganizationAccessResolverForTests, setSdkAuditWriterForTests, setSdkMemoryWriterForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
@@ -1840,12 +1841,25 @@ test("dashboard onboarding completion uses an exact owner-scoped memory key", as
 });
 
 test("memory persistence conflicts return a retryable sanitized error instead of a client or auth error", async () => {
-  setSdkMemoryWriterForTests(async () => { throw new Error("Durable session domain version conflict: profile"); });
-  const response = await app().fetch(new Request("http://local/v1/memory", {
-    method: "POST",
-    headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "onboarding-owner", "Content-Type": "application/json" },
-    body: JSON.stringify({ category: "profile", key: "chusky_onboarding_profile", value: "{}", sensitivity: "normal" }),
-  }));
+  const databaseError = Object.assign(new Error("sensitive profile data must never be logged"), { code: "40001" });
+  const persistenceError = Object.assign(new Error("memory persistence failed"), {
+    memoryPersistenceStage: "session_projection",
+    cause: databaseError,
+  });
+  setSdkMemoryWriterForTests(async () => { throw persistenceError; });
+  let loggedFields: Record<string, unknown> | undefined;
+  const originalError = logger.error;
+  logger.error = ((fields: Record<string, unknown>) => { loggedFields = fields; }) as typeof logger.error;
+  let response: Response;
+  try {
+    response = await app().fetch(new Request("http://local/v1/memory", {
+      method: "POST",
+      headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "onboarding-owner", "Content-Type": "application/json" },
+      body: JSON.stringify({ category: "profile", key: "chusky_onboarding_profile", value: "{}", sensitivity: "normal" }),
+    }));
+  } finally {
+    logger.error = originalError;
+  }
 
   const body = await response.json() as { error?: { code?: string; message?: string; requestId?: string } };
   assert.equal(response.status, 503);
@@ -1853,6 +1867,11 @@ test("memory persistence conflicts return a retryable sanitized error instead of
   assert.match(body.error?.message ?? "", /try again/i);
   assert.doesNotMatch(body.error?.message ?? "", /session domain version conflict/i);
   assert.ok(body.error?.requestId);
+  assert.equal(loggedFields?.failureStage, "session_projection");
+  assert.equal(loggedFields?.databaseCode, "40001");
+  assert.equal(loggedFields?.errorName, "Error");
+  assert.equal(JSON.stringify(loggedFields).includes("sensitive profile data"), false);
+  assert.equal(JSON.stringify(loggedFields).includes("chusky_onboarding_profile"), false);
 });
 
 test("dashboard devices are revocable by opaque owner-scoped IDs, without exposing token hashes", async () => {

@@ -8554,7 +8554,7 @@ export async function upsertMemoryAndContext(
   const kinds: ContextNodeRecord["kind"][] = ["memory", "decision", "preference", "objective", "open_loop", "tool_receipt", "artifact", "meeting", "message", "fact", "relationship"];
   if (!scopes.includes(contextInput.scope) || !kinds.includes(contextInput.kind)) throw new Error("Context scope or kind is invalid");
 
-  const session = await getSession(uid);
+  const session = await withMemoryPersistenceStage("load_session", () => getSession(uid));
   const now = Date.now();
   const existingMemory = session.memories.find((item) => (memory.id && item.id === memory.id) || (!memory.id && item.category === memory.category && item.key === memory.key));
   const savedMemory: MemoryFact = {
@@ -8598,8 +8598,12 @@ export async function upsertMemoryAndContext(
   // context identity would leave the old projection searchable.
   savedContext.sourceRef = savedMemory.id;
   if (durableMemoryConfigured()) {
-    const entity = savedMemory.personKey ? await saveMemoryEntity({ ownerUserId: uid, type: "person", canonicalName: savedMemory.personKey }) : savedMemory.projectId ? await saveMemoryEntity({ ownerUserId: uid, type: "project", canonicalName: savedMemory.projectId }) : undefined;
-    const persisted = await saveDurableMemory({ ownerUserId: uid, scope: { kind: savedMemory.organizationId ? "organization" : savedMemory.projectId ? "project" : "personal", externalId: savedMemory.organizationId ?? savedMemory.projectId ?? String(uid) }, category: savedMemory.category as never, key: savedMemory.key, value: savedMemory.value, confidence: savedMemory.confidence, sensitivity: savedMemory.sensitivity, source: { type: savedMemory.source, ref: savedMemory.id }, entityId: entity?.id, reviewAt: savedMemory.reviewAt, expiresAt: savedMemory.expiresAt, id: savedMemory.id });
+    const entity = await withMemoryPersistenceStage("save_entity", async () => savedMemory.personKey
+      ? saveMemoryEntity({ ownerUserId: uid, type: "person", canonicalName: savedMemory.personKey })
+      : savedMemory.projectId
+        ? saveMemoryEntity({ ownerUserId: uid, type: "project", canonicalName: savedMemory.projectId })
+        : undefined);
+    const persisted = await withMemoryPersistenceStage("save_memory", () => saveDurableMemory({ ownerUserId: uid, scope: { kind: savedMemory.organizationId ? "organization" : savedMemory.projectId ? "project" : "personal", externalId: savedMemory.organizationId ?? savedMemory.projectId ?? String(uid) }, category: savedMemory.category as never, key: savedMemory.key, value: savedMemory.value, confidence: savedMemory.confidence, sensitivity: savedMemory.sensitivity, source: { type: savedMemory.source, ref: savedMemory.id }, entityId: entity?.id, reviewAt: savedMemory.reviewAt, expiresAt: savedMemory.expiresAt, id: savedMemory.id }));
     savedMemory.id = persisted.id;
     savedContext.sourceRef = persisted.id;
   }
@@ -8607,7 +8611,7 @@ export async function upsertMemoryAndContext(
   // projection. The durable-memory transaction above can take long enough
   // for a concurrent profile update to make the initial snapshot stale.
   let latestExistingMemory = existingMemory;
-  await mutateSession(uid, (latestSession) => {
+  await withMemoryPersistenceStage("session_projection", () => mutateSession(uid, (latestSession) => {
     latestExistingMemory = latestSession.memories.find((item) =>
       (memory.id && item.id === memory.id) || (!memory.id && item.category === memory.category && item.key === memory.key),
     );
@@ -8621,7 +8625,7 @@ export async function upsertMemoryAndContext(
     latestSession.contextNodes = latestContext
       ? (latestSession.contextNodes ?? []).map((item) => item.id === latestContext.id ? savedContext : item)
       : [savedContext, ...(latestSession.contextNodes ?? [])].slice(0, 1000);
-  });
+  }));
 
   if (vectorConfigured()) {
     const vector = new UpstashKnowledgeStore();
@@ -8630,6 +8634,18 @@ export async function upsertMemoryAndContext(
     }).catch((error) => { recordVectorFailure(error, { phase: "memory_index", errorClass: "vector_indexing" }); logger.warn({ err: error, userId: uid }, "Memory vector indexing unavailable; structured memory retained"); });
   }
   return { memory: savedMemory, context: savedContext };
+}
+
+type MemoryPersistenceStage = "load_session" | "save_entity" | "save_memory" | "session_projection";
+
+async function withMemoryPersistenceStage<T>(stage: MemoryPersistenceStage, operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (cause) {
+    const error = new Error("Durable memory persistence failed", { cause });
+    Object.assign(error, { memoryPersistenceStage: stage });
+    throw error;
+  }
 }
 
 export async function updateMemory(uid: number, target: { id?: string; key?: string; category?: MemoryFact["category"] }, patch: Partial<Pick<MemoryFact, "category" | "key" | "value" | "confidence" | "source" | "sensitivity" | "projectId" | "organizationId" | "personKey" | "reviewAt" | "expiresAt">>): Promise<MemoryFact | undefined> {
