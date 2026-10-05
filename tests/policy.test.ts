@@ -60,6 +60,10 @@ test("uses explicit native policies and gates only side-effecting Composio batch
   assert.equal(toolApprovalPolicy("CHUCK_UPDATE_MEMORY"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_CONTEXT_SEARCH"), "private");
   assert.equal(requiresToolApproval("CHUCK_CONTEXT_SEARCH"), false);
+  assert.equal(toolApprovalPolicy("CHUCK_CONVERSATION_SEARCH"), "private");
+  assert.equal(requiresToolApproval("CHUCK_CONVERSATION_SEARCH"), false);
+  assert.equal(toolApprovalPolicy("CHUCK_CONVERSATION_GET"), "private");
+  assert.equal(requiresToolApproval("CHUCK_CONVERSATION_GET"), false);
   assert.equal(toolApprovalPolicy("CHUCK_TASK_WAIT"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_ATTENTION_PULSE"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_DAYTONA_MOVE_FILES"), "private");
