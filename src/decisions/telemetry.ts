@@ -1,6 +1,6 @@
 import { logger } from "../logger.js";
 
-export type DecisionSurface = "skills" | "composio_toolkit" | "composio_action" | "treg_tool" | "treg_endpoint" | "autonomy" | "browser" | "native_tool" | "turn_mode";
+export type DecisionSurface = "skills" | "composio_toolkit" | "composio_action" | "treg_tool" | "treg_endpoint" | "autonomy" | "browser" | "memory" | "native_tool" | "turn_mode";
 
 type SurfaceStats = { decisions: number; applied: number; fallbacks: number; agreements: number; comparisons: number; latencyMsTotal: number; costUsdTotal: number };
 
@@ -91,6 +91,22 @@ export function recordTurnMode(input: {
     ...(input.findToolsCalled === undefined ? {} : { findToolsCalled: input.findToolsCalled }),
     ...(input.capabilityFailureReply === undefined ? {} : { capabilityFailureReply: input.capabilityFailureReply }),
   }, "Turn mode telemetry");
+}
+
+/** Content-free operational telemetry for a live meeting turn. */
+export function recordMeetingTurn(input: {
+  interactionMode: "addressed" | "copilot" | "representative";
+  toolsUsed?: string[];
+  recordsReturned?: boolean;
+  verifiedParticipantCount?: number;
+}): void {
+  logger.info({
+    event: "meeting.turn",
+    interactionMode: input.interactionMode,
+    toolsUsed: (input.toolsUsed ?? []).slice(0, 30).map((tool) => tool.slice(0, 160)),
+    recordsReturned: input.recordsReturned === true,
+    verifiedParticipantCount: Math.max(0, Math.min(40, Math.floor(input.verifiedParticipantCount ?? 0))),
+  }, "Meeting turn telemetry");
 }
 
 export function jevRoutingStats(): Record<string, SurfaceStats & { meanAgreement?: number; meanLatencyMs?: number }> {

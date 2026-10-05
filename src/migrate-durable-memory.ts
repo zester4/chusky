@@ -12,7 +12,8 @@ const pool = new Pool({ connectionString, max: 1, connectionTimeoutMillis: 10_00
 Promise.all([
   readFile(join(process.cwd(), "migrations", "0007_durable_memory.sql"), "utf8"),
   readFile(join(process.cwd(), "migrations", "0013_durable_memory_reflection.sql"), "utf8"),
-]).then(([base, reflection]) => pool.query(`${base}\n${reflection}`))
+  readFile(join(process.cwd(), "migrations", "0014_durable_memory_meeting_safe.sql"), "utf8"),
+]).then(([base, reflection, meetingSafe]) => pool.query(`${base}\n${reflection}\n${meetingSafe}`))
   .then(async () => {
     const expectedTables = [
       "chusky_memory_scopes", "chusky_memory_grants", "chusky_memory_sources",

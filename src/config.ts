@@ -214,7 +214,10 @@ export const config = {
   jevApiKey: optional("JEV_API_KEY", ""),
   // Pin a versioned model. Defaults: typesafe/jev-1.13 (OpenRouter), jev-1.13.0 (TypeSafe).
   jevModel: optional("JEV_MODEL", ""),
-  jevSurfaces: new Set(optional("JEV_SURFACES", "skills,composio,treg,autonomy,browser").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean)),
+  jevSurfaces: new Set(optional("JEV_SURFACES", "skills,composio,treg,autonomy,browser,memory").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean)),
+  memoryClassificationEnabled: optional("MEMORY_CLASSIFICATION_ENABLED", "false") === "true",
+  meetingDisclosureGateEnabled: optional("MEETING_DISCLOSURE_GATE", "false") === "true",
+  meetingDisclosureGateMode: oneOf("MEETING_DISCLOSURE_GATE_MODE", "shadow", ["shadow", "enforce"] as const),
   // Native-tool schema reduction is separately opt-in. When false, Jev does
   // not change the existing model-facing native catalog.
   jevNativeToolRouting: optional("JEV_NATIVE_TOOL_ROUTING", "false") === "true",

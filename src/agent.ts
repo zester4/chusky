@@ -62,7 +62,8 @@ import { claimUpgradeNotice, formatAgentReleaseContext, formatAgentUpgradeNotice
 import { abortable, safeToolAudit, throwIfAborted } from "./cancellation.js";
 import { reconcileComposioTriggerSubscription, type ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
 import { SHOPPING_AGENT_PLAYBOOK } from "./shopping/shopping.js";
-import { applyMeetingComposioAccountAlias, isMeetingCalendarAvailabilityTool, isMeetingCalendarWriteTool, isMeetingRepresentativeComposioTool, selectMeetingToolsForToolkit } from "./meetings/representative.js";
+import { applyMeetingComposioAccountAlias, filterMeetingRecordResult, isMeetingCalendarAvailabilityTool, isMeetingCalendarWriteTool, isMeetingRecordLookupTool, isMeetingRepresentativeComposioTool, selectMeetingToolsForToolkit } from "./meetings/representative.js";
+import { meetingDisclosureCheck } from "./decisions/disclosureGate.js";
 import { mcpClient } from "./mcp/client.js";
 import { requiresLiveWebResearchRequest } from "./channels/groupInstructions.js";
 import { isSharedChannelToolDenied } from "./sharedChannelPolicy.js";
@@ -1944,6 +1945,11 @@ export interface AgentRunOptions {
   composioAccount?: string;
   /** Authenticated meeting identity for scoped native meeting tools. */
   meetingId?: string;
+  /** Current Recall speaker assurance; display-name matches never authorize record reads. */
+  meetingParticipantAssurance?: "calendar_verified" | "name_match" | "unverified";
+  meetingParticipantName?: string;
+  meetingParticipantEmail?: string;
+  meetingHasExternalParticipants?: boolean;
   toolDeny?: string[];
   /** Run on volatile shared context: omit private context and durable run traces. */
   ephemeral?: boolean;
@@ -2923,7 +2929,11 @@ export async function runAgent(
       }
       logger.info({ model: requestModel, round, toolsUsed, cost: totalCost }, "Chusky done");
       posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: round + 1, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
-      const finalText = await addUpgradeNotice(appendPreviewLinks(rawText, previewLinks));
+      let finalText = await addUpgradeNotice(appendPreviewLinks(rawText, previewLinks));
+      if (options?.meetingId && options.meetingHasExternalParticipants) {
+        const disclosure = await meetingDisclosureCheck({ text: finalText, usedRecordTool: toolsUsed.some(isMeetingRecordLookupTool), verifiedParticipant: options.meetingParticipantAssurance === "calendar_verified", sessionId: `meeting-disclosure:${options.meetingId}` });
+        if (!disclosure.allowed && !modelTextStreamed) finalText = "I’ll follow up privately with the owner on that.";
+      }
       await persistRun("completed", "run.completed", finalText, { finishReason: finish_reason ?? "unknown" });
       recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: noToolTurn ? "jev_no_native_tool" : "completed", noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision), capabilityFailureReply: isCapabilityFailureReply(finalText) });
       return { text: finalText, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionRoutingCache: missionRoutingResult, ...(privateLinks.length ? { privateLinks } : {}) };
@@ -3035,6 +3045,16 @@ export async function runAgent(
         }
         if (options?.meetingId && isMeetingCalendarWriteTool(slug) && !meetingCalendarAvailabilityChecked) {
           throw new Error("Check real calendar availability first with a successful calendar availability or event-list action; only then create or reschedule the event.");
+        }
+        if (options?.meetingId && options.meetingHasExternalParticipants && isMeetingRecordLookupTool(slug)) {
+          if (options.meetingParticipantAssurance !== "calendar_verified") {
+            throw new Error("This meeting record lookup requires a calendar-verified participant; display names and self-claims are not identity proof. I will follow up privately.");
+          }
+          const identity = [options.meetingParticipantEmail, options.meetingParticipantName].filter(Boolean).map((value) => String(value).toLowerCase());
+          const serializedArgs = JSON.stringify(args).toLowerCase();
+          if (!identity.some((value) => value && serializedArgs.includes(value))) {
+            throw new Error("This meeting record lookup must be explicitly scoped to the verified participant; broad or mismatched searches are refused.");
+          }
         }
         toolCallsExecuted += 1;
         let executionArgs = meetingComposioAccountAliases && !slug.startsWith("CHUCK_")
@@ -3342,6 +3362,9 @@ export async function runAgent(
                 : {};
               throw new ApprovalRequiredError(delegation.approvalId, delegation.proposal.actionName, payload);
             }
+          }
+          if (options?.meetingId && options.meetingHasExternalParticipants && isMeetingRecordLookupTool(slug) && options.meetingParticipantAssurance === "calendar_verified") {
+            execResult = filterMeetingRecordResult(execResult, [options.meetingParticipantEmail ?? "", options.meetingParticipantName ?? ""]);
           }
           if ((slug === "CHUCK_DAYTONA_PREVIEW" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object") {
             const url = String((execResult as { url?: unknown }).url ?? "").trim();

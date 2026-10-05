@@ -29,6 +29,7 @@ export interface DurableMemoryRecord {
   value: string;
   confidence: number;
   sensitivity: "normal" | "sensitive";
+  meetingSafe?: boolean;
   status: MemoryStatus | "needs_review";
   source?: { id: string; type: string; ref?: string };
   entityId?: string;

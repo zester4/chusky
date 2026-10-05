@@ -4,7 +4,7 @@ import { hasMeetingMissionInput, lookupMeetingBusinessKnowledge, lookupMeetingMi
 import type { MemoryFact } from "../src/store.js";
 
 const memories: MemoryFact[] = [
-  { id: "mem_acme", category: "business", key: "Acme pricing discussion", value: "Acme asked about the onboarding package and a September start.", confidence: 1, source: "owner", sensitivity: "normal", personKey: "acme", createdAt: 1, updatedAt: 10 },
+  { id: "mem_acme", category: "business", key: "Acme pricing discussion", value: "Acme asked about the onboarding package and a September start.", confidence: 1, source: "owner", sensitivity: "normal", personKey: "acme", meetingSafe: true, createdAt: 1, updatedAt: 10 },
   { id: "mem_acme_sensitive", category: "business", key: "Acme internal margin", value: "Do not disclose this margin.", confidence: 1, source: "owner", sensitivity: "sensitive", personKey: "acme", createdAt: 1, updatedAt: 11 },
   { id: "mem_other", category: "business", key: "Other client", value: "A separate customer has a different offer.", confidence: 1, source: "owner", sensitivity: "normal", personKey: "other", createdAt: 1, updatedAt: 12 },
 ];
@@ -38,9 +38,20 @@ test("meeting brief excludes facts that are past their review date", () => {
     { id: "mem_review_acme", category: "relationship", key: "Acme old rollout", value: "The pilot starts in March.", confidence: 1, source: "owner", sensitivity: "normal", personKey: "acme", createdAt: 1, updatedAt: 30, reviewAt: 99 },
   ];
   const mission = prepareMeetingMission({ clientName: "Acme", objective: "pilot rollout" }, context, 100);
-  assert.deepEqual(mission.sourceMemoryIds, ["mem_current_acme"]);
-  assert.match(mission.brief, /October/);
-  assert.doesNotMatch(mission.brief, /March/);
+  assert.deepEqual(mission.sourceMemoryIds, []);
+  assert.doesNotMatch(mission.brief, /October|March/);
+});
+
+test("meeting context requires explicit classifier approval for personal facts and relationships", () => {
+  const context: MemoryFact[] = [
+    { id: "mem_personal_fact", category: "fact", key: "Daughter recital", value: "Friday", confidence: 1, source: "owner", sensitivity: "normal", createdAt: 1, updatedAt: 10 },
+    { id: "mem_relationship", category: "relationship", key: "Acme contact", value: "Sarah is a friend", confidence: 1, source: "owner", sensitivity: "normal", personKey: "acme", createdAt: 1, updatedAt: 11 },
+    { id: "mem_safe", category: "relationship", key: "Acme renewal", value: "Renewal is due in March", confidence: 1, source: "owner", sensitivity: "normal", personKey: "acme", meetingSafe: true, createdAt: 1, updatedAt: 12 },
+  ];
+  const mission = prepareMeetingMission({ clientName: "Acme", objective: "renewal" }, context, 100);
+  assert.deepEqual(mission.sourceMemoryIds, ["mem_safe"]);
+  assert.match(mission.brief, /Renewal is due/);
+  assert.doesNotMatch(mission.brief, /Friday|friend/);
 });
 
 test("meeting business lookup uses relevant current business facts, never personal or sensitive memories", () => {

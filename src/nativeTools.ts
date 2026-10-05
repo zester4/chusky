@@ -7,6 +7,7 @@ import { enqueueTaskWithClaim } from "./taskEnqueue.js";
 import { MissionDurationApprovalRequiredError, requestMissionDurationApproval, resumeMissionTaskAfterApproval } from "./missionApproval.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { createHash, randomUUID } from "node:crypto";
+import { classifyMemory } from "./memory/classifier.js";
 import { config } from "./config.js";
 import { getAttentionPulseWatchCoverage } from "./attentionPulse.js";
 import { assertPublicHttpUrl, createTinyFishClient } from "./tinyfish.js";
@@ -1460,6 +1461,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         explicit,
         sensitive: args.sensitivity === "sensitive",
       }, { signal: runtime.signal, sessionId: `memory:${userId}:${key}` });
+      const classification = await classifyMemory({ key, value, category: category as any, sensitivity: args.sensitivity, explicit, sessionId: `memory:${userId}:${key}`, budgetMs: 400 });
       if (!explicit && memoryDecision.source === "jev" && (memoryDecision.disposition === "do_not_save" || memoryDecision.disposition === "forget")) {
         return { saved: false, skipped: true, reason: memoryDecision.reason, autonomyDecision: memoryDecision.disposition };
       }
@@ -1472,8 +1474,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         key,
         value,
         source,
-        confidence: Number(args.confidence ?? 1),
+        confidence: Number(args.confidence ?? classification.confidence ?? 1),
         sensitivity: args.sensitivity,
+        meetingSafe: classification.meetingSafe,
         projectId: args.projectId ? text(args.projectId) : undefined,
         personKey: args.personKey ? text(args.personKey) : undefined,
         reviewAt,

@@ -10,7 +10,7 @@ export interface MeetingMission {
   preparedAt: number;
 }
 
-const SAFE_CATEGORIES = new Set<MemoryFact["category"]>(["business", "relationship", "project", "procedural", "fact"]);
+const LEGACY_MEETING_SAFE_CATEGORIES = new Set<MemoryFact["category"]>(["business", "procedural"]);
 const GENERIC_CLIENT_TOKENS = new Set([
   "a", "an", "and", "call", "client", "customer", "follow", "for", "kickoff", "meeting", "onboarding",
   "project", "review", "session", "the", "with", "workshop",
@@ -49,6 +49,26 @@ function matchesNamedClient(memory: MemoryFact, clientName: string): boolean {
   return tokens.some((token) => searchable.split(/[^a-z0-9]+/).includes(token));
 }
 
+/**
+ * Classifier-approved records are safe explicitly. Legacy records have no
+ * classifier result, so only unscoped business/procedural records retain the
+ * previous compatibility path. Personal facts and relationship/project rows
+ * must never become meeting context by lexical coincidence.
+ */
+function isMeetingSafeMemory(memory: MemoryFact): boolean {
+  if (memory.meetingSafe === true) return true;
+  return memory.meetingSafe === undefined
+    && LEGACY_MEETING_SAFE_CATEGORIES.has(memory.category)
+    && !memory.personKey
+    && !memory.projectId;
+}
+
+function isOwnerApprovedClientRelationship(memory: MemoryFact): boolean {
+  return memory.category === "relationship"
+    && memory.source === "owner"
+    && memory.meetingSafe !== false;
+}
+
 /** Builds a compact, reviewable relationship brief from normal-sensitivity owner memories only. */
 export function prepareMeetingMission(input: {
   clientName: unknown;
@@ -62,7 +82,7 @@ export function prepareMeetingMission(input: {
   const selected = memories
     .filter((memory) => (memory.status === undefined || memory.status === "active")
       && memory.sensitivity === "normal"
-      && SAFE_CATEGORIES.has(memory.category)
+      && (isMeetingSafeMemory(memory) || isOwnerApprovedClientRelationship(memory))
       && (!memory.expiresAt || memory.expiresAt > now)
       && (!memory.reviewAt || memory.reviewAt > now))
     .map((memory) => ({ memory, score: tokenScore(memory, query), clientMatches: matchesNamedClient(memory, clientName) }))
@@ -112,7 +132,7 @@ export function lookupMeetingMission(mission: MeetingMission, memories: MemoryFa
     .filter((memory) => permitted.has(memory.id)
       && (memory.status === undefined || memory.status === "active")
       && memory.sensitivity === "normal"
-      && SAFE_CATEGORIES.has(memory.category)
+      && isMeetingSafeMemory(memory)
       && (!memory.expiresAt || memory.expiresAt > Date.now())
       && (!memory.reviewAt || memory.reviewAt > Date.now()))
     .map((memory) => ({ memory, score: tokenScore(memory, question) }))
@@ -131,7 +151,7 @@ export function lookupMeetingMission(mission: MeetingMission, memories: MemoryFa
 export function lookupMeetingBusinessKnowledge(memories: MemoryFact[], query: unknown, now = Date.now()): { facts: string[] } {
   const question = clean(query, 500, "query", true);
   const facts = memories
-    .filter((memory) => memory.category === "business"
+    .filter((memory) => isMeetingSafeMemory(memory)
       && memory.sensitivity === "normal"
       && (memory.status === undefined || memory.status === "active")
       && !memory.personKey

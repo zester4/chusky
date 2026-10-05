@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS chusky_memory_items (
   value text NOT NULL,
   confidence real NOT NULL DEFAULT 1 CHECK (confidence >= 0 AND confidence <= 1),
   sensitivity text NOT NULL CHECK (sensitivity IN ('normal','sensitive')),
+  meeting_safe boolean NOT NULL DEFAULT false,
   status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','superseded','deleted','needs_review')),
   supersedes_id text REFERENCES chusky_memory_items(id) ON DELETE SET NULL,
   valid_from timestamptz NOT NULL DEFAULT now(),

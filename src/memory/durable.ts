@@ -52,7 +52,7 @@ function rowToMemory(row: Record<string, unknown>): DurableMemoryRecord {
     id: String(row.id), ownerUserId: Number(row.owner_user_id),
     scope: { id: String(row.scope_id), kind: row.scope_kind as MemoryScopeKind, externalId: String(row.scope_external_id) },
     category: row.category as MemoryCategory, key: String(row.memory_key), value: String(row.value),
-    confidence: Number(row.confidence), sensitivity: row.sensitivity as "normal" | "sensitive", status: row.status as DurableMemoryRecord["status"],
+    confidence: Number(row.confidence), sensitivity: row.sensitivity as "normal" | "sensitive", ...(typeof row.meeting_safe === "boolean" ? { meetingSafe: row.meeting_safe } : {}), status: row.status as DurableMemoryRecord["status"],
     ...(row.source_id ? { source: { id: String(row.source_id), type: String(row.source_type ?? "unknown"), ...(row.source_ref ? { ref: String(row.source_ref) } : {}) } } : {}),
     ...(row.entity_id ? { entityId: String(row.entity_id) } : {}), ...(row.supersedes_id ? { supersedesId: String(row.supersedes_id) } : {}),
     validFrom: toMillis(row.valid_from) ?? Date.now(), ...(row.valid_until ? { validUntil: toMillis(row.valid_until) } : {}),
@@ -94,7 +94,7 @@ async function accessibleScopes(client: PoolClient, ownerUserId: number, scopes:
 export async function saveDurableMemory(input: {
   ownerUserId: number; scope: { kind: MemoryScopeKind; externalId: string; name?: string }; category: MemoryCategory; key: string; value: string;
   confidence?: number; sensitivity: "normal" | "sensitive"; source?: { type: string; ref?: string; capturedAt?: number; metadata?: Record<string, unknown> };
-  entityId?: string; reviewAt?: number; expiresAt?: number; metadata?: Record<string, string | number | boolean | null>; id?: string;
+  entityId?: string; reviewAt?: number; expiresAt?: number; meetingSafe?: boolean; metadata?: Record<string, string | number | boolean | null>; id?: string;
 }): Promise<DurableMemoryRecord> {
   if (!durableMemoryConfigured()) throw new Error("Durable memory is not configured");
   if (!Number.isSafeInteger(input.ownerUserId) || input.ownerUserId <= 0) throw new Error("Memory owner is invalid");
@@ -116,7 +116,7 @@ export async function saveDurableMemory(input: {
     const previous = await client.query(`SELECT id FROM chusky_memory_items WHERE owner_user_id=$1 AND scope_id=$2 AND memory_key=$3 AND status='active' FOR UPDATE`, [input.ownerUserId, scopeId, bounded(input.key, 240)]);
     const previousId = previous.rows[0]?.id as string | undefined;
     if (previousId) await client.query(`UPDATE chusky_memory_items SET status='superseded', updated_at=now() WHERE id=$1`, [previousId]);
-    const inserted = await client.query(`INSERT INTO chusky_memory_items (id,owner_user_id,scope_id,source_id,entity_id,category,memory_key,value,confidence,sensitivity,status,supersedes_id,valid_until,review_at,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'active',$11,$12,$13,$14) RETURNING *`, [id, input.ownerUserId, scopeId, sourceId ?? null, input.entityId ?? null, input.category, bounded(input.key, 240), bounded(input.value, 20_000), Math.max(0, Math.min(1, input.confidence ?? 1)), input.sensitivity, previousId ?? null, input.expiresAt ? new Date(input.expiresAt) : null, input.reviewAt ? new Date(input.reviewAt) : null, input.metadata ?? {}]);
+    const inserted = await client.query(`INSERT INTO chusky_memory_items (id,owner_user_id,scope_id,source_id,entity_id,category,memory_key,value,confidence,sensitivity,meeting_safe,status,supersedes_id,valid_until,review_at,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'active',$12,$13,$14,$15) RETURNING *`, [id, input.ownerUserId, scopeId, sourceId ?? null, input.entityId ?? null, input.category, bounded(input.key, 240), bounded(input.value, 20_000), Math.max(0, Math.min(1, input.confidence ?? 1)), input.sensitivity, input.meetingSafe === true, previousId ?? null, input.expiresAt ? new Date(input.expiresAt) : null, input.reviewAt ? new Date(input.reviewAt) : null, input.metadata ?? {}]);
     await client.query(`INSERT INTO chusky_memory_outbox (memory_id,operation) VALUES ($1,'upsert')`, [id]);
     await client.query("COMMIT");
     await invalidateHotMemoryBriefs(input.ownerUserId);

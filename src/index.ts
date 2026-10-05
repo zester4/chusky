@@ -47,6 +47,7 @@ import type { TinyFishResearchRunRecord } from "./store.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
+import { recordMeetingTurn } from "./decisions/telemetry.js";
 import { twilioVoiceInstructions } from "./calls/twilioContext.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
 import { attentionPulseCloseoutOutput, attentionPulseDeliveredToday, attentionPulseDeliveryConfirmation, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, attentionPulseRefreshOwnerState, attentionPulseRequireDueWatchReport, buildAttentionPulsePlan, getAttentionPulseWatchCoverage, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "./attentionPulse.js";
@@ -929,6 +930,8 @@ async function main(): Promise<void> {
       const roomPolicy = meetingRoomToolPolicy(meeting);
       const sharedMeetingRoom = Boolean(meeting.roomId || roomPolicy);
       const ownerPrivateMeeting = !sharedMeetingRoom;
+      const hasExternalMeetingParticipant = ownerPrivateMeeting && (meeting.participantRoster ?? []).length > 1;
+      const trustedOwnerPrivateRun = ownerPrivateMeeting && !hasExternalMeetingParticipant;
       const now = Date.now();
       const turnStartedAtMs = body.turnStartedAtMs;
       const turnEndedAtMs = body.turnEndedAtMs;
@@ -1005,32 +1008,34 @@ async function main(): Promise<void> {
               c.req.raw.signal,
               streamDelta,
               undefined,
-              { accountId: `meeting:${meetingId}`, provider: "telegram", conversationId: meetingId, scope: ownerPrivateMeeting ? "private" : "shared" },
+              { accountId: `meeting:${meetingId}`, provider: "telegram", conversationId: meetingId, scope: trustedOwnerPrivateRun ? "private" : "shared" },
               {
-                instructions: ownerPrivateMeeting
+                instructions: trustedOwnerPrivateRun
                   ? ownerPrivateMeetingInstructions(meetingId, interactionMode, representativeActive ? profile : undefined, meeting.mission)
                   : representativeActive
                     ? meetingRepresentativeInstructions(profile!, meetingId, proactive, meeting.mission)
                     : meetingRepresentativeCopilotInstructions(meetingId, interactionMode === "copilot" ? "copilot" : "addressed"),
-                  ...(ownerPrivateMeeting
+                  ...(trustedOwnerPrivateRun
                     ? (speculative ? { toolAllow: [] } : { ownerPrivateRun: true })
                     : { toolAllow: roomPolicy ? meetingRoomToolAllowlist(roomPolicy) : representativeActive ? meetingRepresentativeToolAllowlist(profile, meeting.mission) : [] }),
                   meetingComposioAccountAliases: representativeActive ? profile!.composioAccountAliases : undefined,
-                  meetingAppAccess: !ownerPrivateMeeting && representativeActive && !roomPolicy,
-                  meetingCapabilityContext: !ownerPrivateMeeting && representativeActive ? {
+                  meetingAppAccess: !trustedOwnerPrivateRun && representativeActive && !roomPolicy,
+                  meetingCapabilityContext: !trustedOwnerPrivateRun && representativeActive ? {
                     role: profile!.role,
                     objective: meeting.mission?.objective ?? profile!.objective,
                     subject: meeting.mission?.clientName ?? meeting.title,
                   } : undefined,
-                  sharedMeetingRoomAccess: !ownerPrivateMeeting && Boolean(roomPolicy),
+                  sharedMeetingRoomAccess: !trustedOwnerPrivateRun && Boolean(roomPolicy),
                   meetingId,
+                  meetingHasExternalParticipants: hasExternalMeetingParticipant,
+                  ...(currentSpeaker ? { meetingParticipantAssurance: currentSpeaker.assurance, meetingParticipantName: currentSpeaker.name, ...(currentSpeaker.email ? { meetingParticipantEmail: currentSpeaker.email } : {}) } : { meetingParticipantAssurance: "unverified" as const }),
                   // Private Recall runs are live spoken turns, just like the
                   // Twilio path. This enables voice-specific routing, model
                   // fallbacks, bounded spoken output, and cache affinity.
-                  voiceTurn: ownerPrivateMeeting,
-                  ...(ownerPrivateMeeting ? { voiceSessionId: `recall:${meetingId}` } : {}),
-                maxToolCalls: ownerPrivateMeeting ? 20 : representativeActive ? 8 : 4,
-                maxCost: ownerPrivateMeeting ? 1 : representativeActive ? 0.5 : 0.25,
+                  voiceTurn: trustedOwnerPrivateRun,
+                ...(trustedOwnerPrivateRun ? { voiceSessionId: `recall:${meetingId}` } : {}),
+                maxToolCalls: trustedOwnerPrivateRun ? 20 : representativeActive ? 8 : 4,
+                maxCost: trustedOwnerPrivateRun ? 1 : representativeActive ? 0.5 : 0.25,
                 ephemeral: true,
               },
             ));
@@ -1044,7 +1049,7 @@ async function main(): Promise<void> {
               send({ type: "done", text: normalizeVoiceText(result.text).slice(0, 5000), speak: true, cost: result.cost ?? 0, speculative });
             }
           } catch (error) {
-            if (error instanceof ApprovalRequiredError && ownerPrivateMeeting && !speculative) {
+            if (error instanceof ApprovalRequiredError && trustedOwnerPrivateRun && !speculative) {
               await notifyOwnerApproval(bot, userId, error);
               send({ type: "done", text: "I paused before that action. Please review the owner's approval request to continue.", speak: true, cost: 0, speculative: false });
               return;
@@ -1146,7 +1151,7 @@ async function main(): Promise<void> {
 
     app.post("/internal/recall/commit-turn", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.recallMediaBridgeSecret) || !config.recallMeetingsEnabled) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { meetingId?: string; userId?: number; transcript?: string; text?: string; cost?: number; turnId?: string; speak?: boolean; runtimeState?: string; eventType?: string; summary?: string; turn?: { firstAudioMs?: number; finalResponseMs?: number; completed?: boolean; failed?: boolean; fallback?: boolean; resumed?: boolean; eager?: boolean; errorCode?: string } };
+      const body = await c.req.json().catch(() => ({})) as { meetingId?: string; userId?: number; transcript?: string; text?: string; cost?: number; turnId?: string; speak?: boolean; runtimeState?: string; eventType?: string; summary?: string; toolsUsed?: unknown; recordsReturned?: boolean; verifiedParticipantCount?: number; turn?: { firstAudioMs?: number; finalResponseMs?: number; completed?: boolean; failed?: boolean; fallback?: boolean; resumed?: boolean; eager?: boolean; errorCode?: string } };
       const meetingId = String(body.meetingId ?? "").trim();
       const userId = Number(body.userId);
       const transcript = String(body.transcript ?? "").trim();
@@ -1158,7 +1163,8 @@ async function main(): Promise<void> {
       const eventType = body.eventType === undefined ? "turn" : body.eventType;
       const runtimeEventTypes = new Set(["created", "joining", "waiting_room", "in_call", "reconnecting", "degraded", "audio_received", "speech_detected", "eager_transcript", "final_transcript", "agent_first_token", "first_audio", "final_audio", "turn", "ended", "failed", "outcome"]);
       const turn = body.turn;
-      if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0 || (speak && (!transcript || transcript.length > 5000 || !text || text.length > 5000)) || (!speak && (transcript || text)) || !/^[A-Za-z0-9:_-]{1,160}$/.test(turnId) || !Number.isFinite(cost) || cost < 0 || cost > 10 || !["healthy", "degraded", "reconnecting", "voice_unavailable", "ended"].includes(runtimeState) || !runtimeEventTypes.has(eventType) || (body.summary !== undefined && (typeof body.summary !== "string" || body.summary.length > 280)) || (turn !== undefined && (!turn || typeof turn !== "object" || Object.values(turn).some((value) => typeof value === "number" && (!Number.isFinite(value) || value < 0 || value > 120_000))))) return c.json({ ok: false, error: "invalid meeting voice commit" }, 400);
+      const toolsUsed = Array.isArray(body.toolsUsed) ? body.toolsUsed.filter((tool): tool is string => typeof tool === "string" && /^[A-Za-z0-9_:-]{1,160}$/.test(tool)).slice(0, 30) : [];
+      if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0 || (speak && (!transcript || transcript.length > 5000 || !text || text.length > 5000)) || (!speak && (transcript || text)) || !/^[A-Za-z0-9:_-]{1,160}$/.test(turnId) || !Number.isFinite(cost) || cost < 0 || cost > 10 || !["healthy", "degraded", "reconnecting", "voice_unavailable", "ended"].includes(runtimeState) || !runtimeEventTypes.has(eventType) || (body.summary !== undefined && (typeof body.summary !== "string" || body.summary.length > 280)) || (body.verifiedParticipantCount !== undefined && (!Number.isSafeInteger(body.verifiedParticipantCount) || body.verifiedParticipantCount < 0 || body.verifiedParticipantCount > 40)) || (turn !== undefined && (!turn || typeof turn !== "object" || Object.values(turn).some((value) => typeof value === "number" && (!Number.isFinite(value) || value < 0 || value > 120_000))))) return c.json({ ok: false, error: "invalid meeting voice commit" }, 400);
       const meeting = await getRecallMeeting(userId, meetingId);
       if (!meeting || meeting.status !== "in_call") return c.json({ ok: false, error: "unknown or inactive meeting" }, 404);
       const key = `recall-turn:${meetingId}:${turnId}`;
@@ -1171,6 +1177,7 @@ async function main(): Promise<void> {
           ]);
         }
         if (cost) await addUsage(userId, cost);
+        recordMeetingTurn({ interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed", toolsUsed, recordsReturned: body.recordsReturned === true, verifiedParticipantCount: body.verifiedParticipantCount });
         await recordRecallMeetingRuntime(userId, meetingId, {
           state: runtimeState as "healthy" | "degraded" | "reconnecting" | "voice_unavailable" | "ended",
           eventType: eventType as Parameters<typeof recordRecallMeetingRuntime>[2]["eventType"],
@@ -2872,6 +2879,8 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             const roomPolicy = meetingRoomToolPolicy(meeting);
             const sharedMeetingRoom = Boolean(meeting.roomId || roomPolicy);
             const ownerPrivateMeeting = !sharedMeetingRoom;
+            const hasExternalMeetingParticipant = ownerPrivateMeeting && (meeting.participantRoster?.length ?? 0) > 1;
+            const trustedOwnerPrivateMeeting = ownerPrivateMeeting && !hasExternalMeetingParticipant;
             let representativeProfile = meeting.interactionMode === "representative"
               ? await getMeetingRepresentativeProfile(event.userId)
               : undefined;
@@ -2901,7 +2910,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                 role: message.role === "assistant" ? "chusky" as const : "participant" as const,
                 text: String(message.content ?? "").slice(0, 1_000),
               })).filter((turn) => turn.text.trim()));
-              const prompt = buildMeetingInput(context, command.text, (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ name, identityStatus, isHost }) => ({ name, identityStatus, ...(isHost ? { isHost } : {}) })), event.senderName);
+              const prompt = buildMeetingInput(context, command.text, (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ name, identityStatus, isHost, email, providerUserId, assurance }) => ({ name, identityStatus, ...(isHost ? { isHost } : {}), ...(email ? { email } : {}), ...(providerUserId ? { providerUserId } : {}), ...(assurance ? { assurance } : {}) })), event.senderName);
               let result: Awaited<ReturnType<typeof runAgent>>;
               try {
                 result = await withCliLock(event.userId, undefined, () => runAgent(
@@ -2913,9 +2922,9 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                   undefined,
                   undefined,
                   undefined,
-                  { accountId: `meeting:${event.meetingId}`, provider: "telegram", conversationId: event.meetingId, scope: ownerPrivateMeeting ? "private" : "shared" },
+                  { accountId: `meeting:${event.meetingId}`, provider: "telegram", conversationId: event.meetingId, scope: trustedOwnerPrivateMeeting ? "private" : "shared" },
                   {
-                    instructions: ownerPrivateMeeting
+                    instructions: trustedOwnerPrivateMeeting
                       ? ownerPrivateMeetingInstructions(event.meetingId, meeting.interactionMode ?? (representativeActive ? "representative" : "copilot"), representativeActive ? representativeProfile : undefined, meeting.mission)
                       : representativeActive
                         ? meetingRepresentativeInstructions(representativeProfile!, event.meetingId, command.kind === "ambient", meeting.mission)
@@ -2923,7 +2932,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                           meetingRepresentativeCopilotInstructions(event.meetingId, command.kind === "ambient" ? "copilot" : "addressed"),
                           "This is shared meeting chat. Use only the bounded meeting context; never use or reveal the owner’s private chat, memories, credentials, connected apps, files, or other private data. Do not claim to record the call or perform follow-up work. Return plain text without Markdown or HTML.",
                         ].join("\n\n"),
-                    ...(ownerPrivateMeeting ? { ownerPrivateRun: true } : {
+                    ...(trustedOwnerPrivateMeeting ? { ownerPrivateRun: true } : {
                       toolAllow: roomPolicy ? meetingRoomToolAllowlist(roomPolicy) : representativeActive ? meetingRepresentativeToolAllowlist(representativeProfile, meeting.mission) : [],
                     }),
                     meetingId: event.meetingId,
@@ -2935,13 +2944,22 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                       subject: meeting.mission?.clientName ?? meeting.title,
                     } : undefined,
                     sharedMeetingRoomAccess: !ownerPrivateMeeting && Boolean(roomPolicy),
-                    maxToolCalls: ownerPrivateMeeting ? 16 : representativeActive ? 8 : 1,
-                    maxCost: ownerPrivateMeeting ? 0.75 : representativeActive ? 0.5 : 0.15,
+                    meetingHasExternalParticipants: hasExternalMeetingParticipant,
+                    ...(event.senderName ? { meetingParticipantName: event.senderName } : {}),
+                    ...(() => {
+                      const sender = (meeting.participantRoster ?? []).find((participant) => participant.name === event.senderName);
+                      return sender ? {
+                        ...(sender.email ? { meetingParticipantEmail: sender.email } : {}),
+                        ...(sender.assurance ? { meetingParticipantAssurance: sender.assurance } : {}),
+                      } : {};
+                    })(),
+                    maxToolCalls: trustedOwnerPrivateMeeting ? 16 : representativeActive ? 8 : 1,
+                    maxCost: trustedOwnerPrivateMeeting ? 0.75 : representativeActive ? 0.5 : 0.15,
                     ephemeral: true,
                   },
                 ));
               } catch (error) {
-                if (!(error instanceof ApprovalRequiredError) || !ownerPrivateMeeting) throw error;
+                if (!(error instanceof ApprovalRequiredError) || !trustedOwnerPrivateMeeting) throw error;
                 await notifyOwnerApproval(bot, event.userId, error);
                 reply = "I paused before that action. Please review the owner's approval request to continue.";
                 const bounded = boundedRecallChatReply(reply, meeting.platform === "google_meet" ? 500 : 4096);

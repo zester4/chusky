@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { config } from "../config.js";
 import { poolForDurableMemory, durableMemoryConfigured, memoryScopeId, provisionMemoryScope, saveDurableMemory } from "./durable.js";
 import type { MemoryCategory, MemoryScopeKind } from "./types.js";
+import { classifyMemory } from "./classifier.js";
 
 export type ReflectionStatus = "queued" | "processing" | "needs_review" | "accepted" | "rejected" | "consolidated" | "duplicate" | "failed";
 
@@ -13,11 +15,13 @@ export interface MemoryCandidate {
   explicit: boolean;
   reason: "owner_statement" | "owner_preference" | "meeting_decision" | "inference";
   reviewAt?: number;
+  meetingSafe?: boolean;
 }
 
 const bounded = (value: string, max: number) => value.trim().replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, max);
 const digest = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 48);
 const sensitive = /\b(password|passcode|secret|api[ _-]?key|ssn|social security|health|medical|diagnos|bank|credit card|routing number|salary|income|home address|private address)\b|\b(?:\+?\d[\d ()-]{8,}\d)\b|\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
+export function isMemoryTextSensitive(value: string): boolean { return sensitive.test(value); }
 
 function candidate(category: MemoryCategory, key: string, value: string, reason: MemoryCandidate["reason"], explicit: boolean): MemoryCandidate {
   const cleanValue = bounded(value.replace(/[.!?]+$/, ""), 2000);
@@ -112,6 +116,14 @@ export async function drainMemoryReflectionQueue(limit = 20): Promise<{ processe
         reviewed += 1;
         continue;
       }
+      const classification = config.memoryClassificationEnabled
+        ? await classifyMemory({ key: item.key, value: item.value, category: item.category, sensitivity: item.sensitivity, explicit: item.explicit, sessionId: `memory-reflection:${row.id}` })
+        : undefined;
+      if (classification && (!item.explicit && (classification.confidence < 0.9 || classification.category !== item.category))) {
+        await poolForDurableMemory().query(`UPDATE chusky_memory_reflections SET status='needs_review',claimed_at=NULL,updated_at=now(),candidate=$2 WHERE id=$1`, [row.id, JSON.stringify({ ...item, category: classification.category, meetingSafe: false })]);
+        reviewed += 1;
+        continue;
+      }
       const duplicate = await poolForDurableMemory().query(`SELECT 1 FROM chusky_memory_items WHERE owner_user_id=$1 AND scope_id=$2 AND memory_key=$3 AND value=$4 AND status='active' LIMIT 1`, [row.owner_user_id, row.scope_id, item.key, item.value]);
       if (duplicate.rowCount) {
         await poolForDurableMemory().query(`UPDATE chusky_memory_reflections SET status='duplicate',claimed_at=NULL,updated_at=now() WHERE id=$1`, [row.id]);
@@ -121,7 +133,7 @@ export async function drainMemoryReflectionQueue(limit = 20): Promise<{ processe
       const scopeRow = scope.rows[0] as { kind: MemoryScopeKind; external_id: string } | undefined;
       if (!scopeRow) throw new Error("Reflection scope not found for owner");
       const source = (await poolForDurableMemory().query("SELECT source_type,source_ref FROM chusky_memory_sources WHERE id=$1", [row.source_id])).rows[0] as { source_type?: string; source_ref?: string } | undefined;
-      await saveDurableMemory({ ownerUserId: Number(row.owner_user_id), scope: { kind: scopeRow.kind, externalId: scopeRow.external_id }, category: item.category, key: item.key, value: item.value, confidence: item.confidence, sensitivity: item.sensitivity, reviewAt: item.reviewAt, source: { type: source?.source_type ?? "conversation", ref: source?.source_ref ?? String(row.source_id), metadata: { reflectionId: String(row.id), reason: item.reason } } });
+      await saveDurableMemory({ ownerUserId: Number(row.owner_user_id), scope: { kind: scopeRow.kind, externalId: scopeRow.external_id }, category: classification?.category ?? item.category, key: item.key, value: item.value, confidence: classification?.confidence ?? item.confidence, sensitivity: classification?.audience === "sensitive" ? "sensitive" : item.sensitivity, meetingSafe: classification?.meetingSafe === true, reviewAt: item.reviewAt, source: { type: source?.source_type ?? "conversation", ref: source?.source_ref ?? String(row.source_id), metadata: { reflectionId: String(row.id), reason: item.reason } } });
       await poolForDurableMemory().query(`UPDATE chusky_memory_reflections SET status='consolidated',claimed_at=NULL,updated_at=now(),last_error=NULL WHERE id=$1`, [row.id]);
       processed += 1;
     } catch (error) {

@@ -665,7 +665,20 @@ export async function joinRecallMeeting(userId: number, input: {
 /** Preview a client-bound brief before joining. This has no side effects. */
 export async function prepareRecallMeetingMission(userId: number, input: { clientName: unknown; objective?: unknown; clientContext?: unknown }) {
   assertUserId(userId);
-  return prepareMeetingMission(input, (await getSession(userId)).memories);
+  const memories = (await getSession(userId)).memories;
+  const mission = prepareMeetingMission(input, memories);
+  const objective = typeof input.objective === "string" && input.objective.trim().length >= 8;
+  return {
+    ...mission,
+    readiness: {
+      approvedCompanyKnowledge: mission.brief.length > 0,
+      objectivePresent: objective,
+      clientFactsFound: mission.sourceMemoryIds.length > 0,
+      attendeeIdentitiesKnown: false,
+      toneConfigured: true,
+      ready: Boolean(objective && mission.brief.length > 0),
+    },
+  };
 }
 
 /** Join an owner-reviewed calendar preparation without ever returning its meeting link to the model. */
