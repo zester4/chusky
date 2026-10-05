@@ -37,6 +37,30 @@ test("mission start gives an actionable correction when an existing mission ID i
   );
 });
 
+test("memory and scratchpad writes declare bounded text and reject blank required values", () => {
+  for (const [toolName, fields, requiredFields] of [
+    ["CHUCK_UPDATE_MEMORY", ["id", "key", "newKey", "value", "source", "projectId", "personKey"], ["value"]],
+    ["CHUCK_SCRATCHPAD_WRITE", ["key", "content"], ["key", "content"]],
+  ] as const) {
+    const schema = chuckTools.find((tool) => tool.function.name === toolName)!.function.parameters;
+    for (const field of fields) {
+      const property = schema.properties[field];
+      assert.equal(property.maxLength, 1000, `${toolName}.${field} maximum`);
+      if (requiredFields.includes(field)) {
+        assert.equal(property.minLength, 1, `${toolName}.${field} minimum`);
+        assert.equal(property.pattern, "\\S", `${toolName}.${field} non-blank pattern`);
+      }
+    }
+    for (const field of requiredFields) {
+      const validArgs: Record<string, unknown> = { key: "valid", newKey: "valid", value: "valid", content: "valid" };
+      const blankArgs = { ...validArgs, [field]: "   " };
+      const oversizedArgs = { ...validArgs, [field]: "x".repeat(1001) };
+      assert.throws(() => validateNativeToolArguments(toolName, blankArgs), new RegExp(`(?:requires argument: ${field}|${field}.*pattern)`, "i"));
+      assert.throws(() => validateNativeToolArguments(toolName, oversizedArgs), new RegExp(`${field}.*maxLength 1000`, "i"));
+    }
+  }
+});
+
 test("mission lifecycle tool descriptions distinguish creation from recovery", () => {
   const start = chuckTools.find((tool) => tool.function.name === "CHUCK_MISSION_START")?.function.description ?? "";
   const resume = chuckTools.find((tool) => tool.function.name === "CHUCK_MISSION_RESUME")?.function.description ?? "";

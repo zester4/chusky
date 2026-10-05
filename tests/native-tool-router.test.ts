@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import { JevClient } from "../src/decisions/jev.js";
-import { computeNativeToolRoute, nativeToolManifest, routeNativeToolsForTurn, searchComposioGatewayManifest, searchNativeToolManifest } from "../src/decisions/nativeToolRouter.js";
+import { computeNativeToolRoute, nativeToolManifest, routeNativeToolsForTurn, searchComposioGatewayManifest, searchDiscoveredToolManifest, searchNativeToolManifest } from "../src/decisions/nativeToolRouter.js";
 
 const mutableConfig = config as unknown as Record<string, unknown>;
 
@@ -85,6 +85,65 @@ test("native tool discovery returns bounded searchable metadata", () => {
   assert.ok(found.length <= 3);
   assert.ok(found.some((item) => item.slug.includes("SPREADSHEET")));
   assert.ok(found.every((item) => !Object.hasOwn(item, "parameters")));
+});
+
+test("memory discovery returns the complete memory and scratchpad tool family", () => {
+  const found = searchNativeToolManifest("everything about memory", "memory");
+  const slugs = found.map((item) => item.slug);
+  for (const slug of ["CHUCK_SEARCH_MEMORY", "CHUCK_SAVE_MEMORY", "CHUCK_UPDATE_MEMORY", "CHUCK_FORGET_MEMORY", "CHUCK_MEMORY_BRIEF", "CHUCK_CONTEXT_SEARCH", "CHUCK_SCRATCHPAD_READ", "CHUCK_SCRATCHPAD_WRITE"]) {
+    assert.ok(slugs.includes(slug), `${slug} should be in the memory family`);
+  }
+  assert.ok(found.length > 5, "the default family result must not truncate useful memory tools");
+});
+
+test("natural TinyFish aliases return every TinyFish tool in one discovery", () => {
+  const found = searchNativeToolManifest("find tiny fish tools");
+  assert.deepEqual(found.map((item) => item.slug).sort(), [
+    "CHUCK_TINYFISH_FETCH",
+    "CHUCK_TINYFISH_MONITOR",
+    "CHUCK_TINYFISH_RESEARCH",
+    "CHUCK_TINYFISH_SEARCH",
+  ]);
+});
+
+test("native discovery finds the primary tool across browser, meeting, artifact, and reminder requests", () => {
+  const cases = [
+    ["fill in a web form using the browser", "CHUCK_BROWSER"],
+    ["prepare context for a Zoom meeting", "CHUCK_MEETING_CONTEXT_PREPARE"],
+    ["create a PDF report", "CHUCK_CREATE_PDF"],
+    ["remind me tomorrow", "CHUCK_SET_REMINDER"],
+  ] as const;
+  for (const [query, expectedSlug] of cases) {
+    const found = searchNativeToolManifest(query);
+    assert.equal(found[0]?.slug, expectedSlug, `${query} should rank ${expectedSlug} first`);
+  }
+});
+
+test("connected-app discovery is not pushed out by native keyword matches", () => {
+  const found = searchDiscoveredToolManifest("search Gmail for an email and send a reply");
+  const slugs = found.map((item) => item.slug);
+  assert.ok(slugs.includes("COMPOSIO_SEARCH_TOOLS"));
+  assert.ok(slugs.includes("COMPOSIO_GET_TOOL_SCHEMAS"));
+  assert.ok(slugs.includes("COMPOSIO_EXECUTE_TOOL"));
+  assert.ok(found.length <= 20);
+});
+
+test("explicit browser, meeting, artifact, and reminder families exclude unrelated tool classes", () => {
+  const browser = searchNativeToolManifest("fill a web form in the browser");
+  assert.ok(browser.length > 0);
+  assert.ok(browser.every((item) => /^(CHUCK_BROWSER(?:_|$)|CHUCK_VAULT_)/.test(item.slug)));
+
+  const meetings = searchNativeToolManifest("prepare for a Zoom meeting");
+  assert.ok(meetings.length > 0);
+  assert.ok(meetings.every((item) => item.slug.startsWith("CHUCK_MEETING_") || ["CHUCK_START_PHONE_CALL", "CHUCK_LIST_PHONE_CALLS"].includes(item.slug)));
+
+  const artifacts = searchNativeToolManifest("create a PDF report");
+  assert.ok(artifacts.some((item) => item.slug === "CHUCK_CREATE_PDF"));
+  assert.ok(artifacts.every((item) => !item.slug.startsWith("CHUCK_DAYTONA_") || item.slug === "CHUCK_DAYTONA_IMAGE"));
+
+  const reminders = searchNativeToolManifest("reminder", "reminders");
+  assert.ok(reminders.length > 0);
+  assert.ok(reminders.every((item) => item.slug.includes("REMINDER")));
 });
 
 test("Link outcome reporting is published to native routing as a shopping write tool", () => {

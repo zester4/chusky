@@ -15,6 +15,9 @@ type ToolSchema = {
 
 export type NativeToolBundle =
   | "core"
+  | "memory"
+  | "tinyfish"
+  | "reminders"
   | "workspace"
   | "browser"
   | "meetings"
@@ -78,6 +81,9 @@ const STOP_WORDS = new Set([
 
 const BUNDLE_TERMS: Record<NativeToolBundle, string[]> = {
   core: ["tool", "skill", "context", "memory", "health", "status"],
+  memory: ["memory", "memories", "scratchpad", "context", "profile", "remember"],
+  tinyfish: ["tinyfish", "tiny", "fish", "research", "monitor", "fetch", "search", "web"],
+  reminders: ["remind", "reminder", "reminders", "notify", "notification", "alert"],
   workspace: ["email", "calendar", "slack", "github", "crm", "notion", "message", "trigger", "webhook", "connected", "account"],
   browser: ["browser", "website", "web", "page", "login", "vault", "password", "form", "click", "scroll", "checkout"],
   meetings: ["meeting", "zoom", "meet", "teams", "webex", "call", "participant", "transcript"],
@@ -99,6 +105,18 @@ function compactDescription(tool: ToolSchema): string {
 }
 
 function inferBundle(slug: string, description: string): NativeToolBundle {
+  const name = slug.toUpperCase();
+  if (/^CHUCK_TINYFISH_/.test(name)) return "tinyfish";
+  if (/^CHUCK_(?:SAVE_MEMORY|UPDATE_MEMORY|SEARCH_MEMORY|FORGET_MEMORY|MEMORY_BRIEF|CONTEXT_SEARCH|SCRATCHPAD_)/.test(name)) return "memory";
+  if (/^CHUCK_.*REMINDER/.test(name)) return "reminders";
+  if (/^CHUCK_(?:BROWSER(?:_|$)|VAULT_)/.test(name)) return "browser";
+  if (/^CHUCK_MEETING_/.test(name) || /^CHUCK_(?:START_PHONE_CALL|LIST_PHONE_CALLS)$/.test(name)) return "meetings";
+  if (/^CHUCK_(?:CREATE_(?:PDF|DOCUMENT|SPREADSHEET|PRESENTATION)|GENERATE_(?:IMAGE|VIDEO)|ARTIFACT(?:_|$)|IMAGE_ASSET_|DAYTONA_IMAGE$|EMAIL_ARTIFACT$|FILE_BRIDGE$|VIDEO_(?:STATUS|CANCEL)$)/.test(name)) return "artifacts";
+  if (/^CHUCK_(?:MISSION_|TASK_|AUTONOMY_|ATTENTION_|.*SUBAGENT|HANDOFF_SUBAGENT|OUTCOME_)/.test(name) || /^CHUCK_(?:SCHEDULE_JOB|LIST_JOBS|RESUME_JOB|CANCEL_JOB|RUN_JOB_NOW|PAUSE_JOB)$/.test(name)) return "autonomy";
+  if (/^CHUCK_(?:SHOPPING_|LINK_)/.test(name)) return "shopping";
+  if (/^CHUCK_DAYTONA_/.test(name)) return "code";
+  if (/^CHUCK_TREG_/.test(name)) return "intelligence";
+  if (/^CHUCK_(?:CONVERSATION_|.*TRIGGER|LIST_CONNECTED_ACCOUNTS|INTEGRATION_HEALTH)/.test(name)) return "workspace";
   const text = `${slug} ${description}`.toLowerCase();
   if (/treg|mcp|enrich|provider|seo|social|market|research/.test(text)) return "intelligence";
   if (/browser|vault|checkout|login|webpage|website/.test(text)) return "browser";
@@ -136,7 +154,9 @@ export const nativeToolManifest: NativeToolDescriptor[] = modelFacingChuckTools
 const descriptorBySlug = new Map(nativeToolManifest.map((item) => [item.slug, item]));
 
 function words(value: string): string[] {
-  return value.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length > 2 && !STOP_WORDS.has(word));
+  return value.toLowerCase().split(/[^a-z0-9]+/)
+    .filter((word) => word.length > 2 && !STOP_WORDS.has(word))
+    .map((word) => /^(?:remind|reminding|reminders)$/.test(word) ? "reminder" : word);
 }
 
 function relevance(query: string, descriptor: NativeToolDescriptor): number {
@@ -147,7 +167,19 @@ function relevance(query: string, descriptor: NativeToolDescriptor): number {
   const bundleWords = BUNDLE_TERMS[descriptor.bundle];
   for (const word of requestWords) if (bundleWords.includes(word)) score += 3;
   if (requestWords.has(descriptor.slug.toLowerCase().replace(/^chuck_/, "").replace(/_/g, " "))) score += 8;
+  if (descriptor.slug === "CHUCK_SET_REMINDER" && /\b(?:remind me|set (?:a )?reminder|schedule (?:a )?reminder)\b/i.test(query)) score += 100;
   return score;
+}
+
+function inferredFamily(query: string): NativeToolBundle | undefined {
+  const normalized = query.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (/\btiny\s*fish\b|\btinyfish\b/.test(normalized)) return "tinyfish";
+  if (/\bmemories\b|\bmemory\b|\bscratchpad\b/.test(normalized)) return "memory";
+  if (/\bremind(?:er|ers)?\b|\breminding\b|\bnotification\b|\bnotify\b/.test(normalized)) return "reminders";
+  if (/\bbrowser\b|\bwebsite\b|\bwebpage\b|\bweb form\b/.test(normalized)) return "browser";
+  if (/\bmeeting\b|\bmeetings\b|\bzoom call\b|\btranscript\b/.test(normalized)) return "meetings";
+  if (/\bpdf\b|\bspreadsheet\b|\bexcel\b|\bpresentation\b|\bartifact\b|\bimage\b|\bvideo\b/.test(normalized)) return "artifacts";
+  return undefined;
 }
 
 function baselineRoute(tools: ToolSchema[], reason?: string): NativeToolRoute {
@@ -183,17 +215,22 @@ function noNativeToolRoute(tools: ToolSchema[], reason: string, confidence = 1, 
   };
 }
 
-export function searchNativeToolManifest(query: string, bundle?: NativeToolBundle, limit = 5, allowed?: ReadonlySet<string>): NativeToolSearchResult[] {
-  const bounded = Math.max(1, Math.min(10, Math.floor(limit) || 5));
+export function searchNativeToolManifest(query: string, bundle?: NativeToolBundle, limit?: number, allowed?: ReadonlySet<string>): NativeToolSearchResult[] {
   const queryText = query.trim();
-  return nativeToolManifest
-    .filter((item) => !bundle || item.bundle === bundle)
+  const family = bundle ?? inferredFamily(queryText);
+  const defaultLimit = family ? 30 : 10;
+  const bounded = Math.max(1, Math.min(30, Math.floor(limit ?? defaultLimit) || defaultLimit));
+  const entries = nativeToolManifest
+    .filter((item) => !family || item.bundle === family)
     .filter((item) => !allowed || allowed.has(item.slug))
     .map((item) => ({ item, score: relevance(queryText, item) }))
-    .filter((entry) => !queryText || entry.score > 0)
+    // Explicit family discovery is an inventory request: return the whole
+    // family instead of requiring each tool to win a lexical score.
+    .filter((entry) => family || !queryText || entry.score > 0)
     .sort((a, b) => b.score - a.score || a.item.slug.localeCompare(b.item.slug))
     .slice(0, bounded)
     .map(({ item }) => ({ slug: item.slug, description: item.description, bundle: item.bundle, risk: item.risk }));
+  return entries;
 }
 
 export function searchComposioGatewayManifest(query: string, allowed?: ReadonlySet<string>): NativeToolSearchResult[] {
@@ -206,6 +243,16 @@ export function searchComposioGatewayManifest(query: string, allowed?: ReadonlyS
     { slug: "COMPOSIO_MANAGE_CONNECTIONS", description: "Inspect or manage the owner’s connected-app authorization.", bundle: "workspace", risk: "high_impact" },
   ];
   return entries.filter((item) => !allowed || allowed.has(item.slug));
+}
+
+/** Return connected-app gateway capabilities first so native keyword matches cannot truncate them. */
+export function searchDiscoveredToolManifest(query: string, bundle?: NativeToolBundle, limit?: number, allowed?: ReadonlySet<string>): NativeToolSearchResult[] {
+  const family = bundle ?? inferredFamily(query);
+  const defaultLimit = family ? 30 : 20;
+  const bounded = Math.max(1, Math.min(30, Math.floor(limit ?? defaultLimit) || defaultLimit));
+  const gateway = bundle === undefined || bundle === "workspace" ? searchComposioGatewayManifest(query, allowed) : [];
+  const native = searchNativeToolManifest(query, bundle, undefined, allowed);
+  return [...gateway, ...native].slice(0, bounded);
 }
 
 function candidateSet(tools: ToolSchema[], query: string): { candidates: NativeToolDescriptor[]; matched: boolean } {
@@ -278,13 +325,13 @@ export async function computeNativeToolRoute(query: string, tools: ToolSchema[],
   const baseline = baselineRoute(tools);
   if (config.nativeToolLoading === "bundle" && !options.preserveAll) {
     const quick = candidateSet(tools, [query, options.recentContext].filter(Boolean).join("\n"));
-    if (!quick.matched || quick.candidates.length < 2) return noNativeToolRoute(tools, "no_native_candidate_set", 1, false);
+    if (!quick.matched || quick.candidates.length < 2) return noNativeToolRoute(tools, "no_native_candidate_set", 1, config.nativeToolLoading === "bundle");
   }
   const availableNative = tools.filter((tool) => descriptorBySlug.has(toolName(tool)));
   if (!availableNative.length) return baseline;
   const routingContext = [query, options.recentContext].filter(Boolean).join("\n");
   const candidates = candidateSet(tools, routingContext);
-  if (!candidates.matched || candidates.candidates.length < 2) return noNativeToolRoute(tools, "no_native_candidate_set", 1, false);
+  if (!candidates.matched || candidates.candidates.length < 2) return noNativeToolRoute(tools, "no_native_candidate_set", 1, config.nativeToolLoading === "bundle");
   const client = options.client ?? jevClient();
   const state = {
     request: jevText(query, 3_000),

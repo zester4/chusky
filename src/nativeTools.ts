@@ -67,7 +67,7 @@ import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { planBusinessGapPlaybook } from "./autonomy/playbooks.js";
 import type { BusinessGap } from "./autonomy/gapDetectors.js";
 import { canonicalNativeToolSlug, validateNativeToolArguments } from "./agentTools.js";
-import { searchComposioGatewayManifest, searchNativeToolManifest, type NativeToolBundle } from "./decisions/nativeToolRouter.js";
+import { searchDiscoveredToolManifest, type NativeToolBundle } from "./decisions/nativeToolRouter.js";
 import { externalArgumentsHash } from "./autonomy/actions.js";
 import { inspectToolRecovery, preflightToolCall, summarizeIntegrationHealth } from "./toolDiagnostics.js";
 import { isSharedChannelToolDenied } from "./sharedChannelPolicy.js";
@@ -231,6 +231,14 @@ export function setPhoneCallLauncherForTests(launcher?: PhoneCallLauncherForTest
 function text(value: unknown, max = MAX_TEXT): string {
   const result = String(value ?? "").trim();
   if (!result || result.length > max) throw new Error(`Text must be 1-${max} characters`);
+  return result;
+}
+
+function requiredText(value: unknown, field: string, max = MAX_TEXT): string {
+  if (typeof value !== "string") throw new Error(`${field} must be text.`);
+  const result = value.trim();
+  if (!result) throw new Error(`${field} must contain non-whitespace text.`);
+  if (result.length > max) throw new Error(`${field} exceeds the ${max}-character limit.`);
   return result;
 }
 
@@ -1138,9 +1146,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         ? new Set((runtime.availableToolCatalog ?? runtime.toolCatalog)!.map((tool: any) => String(tool?.function?.name ?? "").trim().toUpperCase()).filter(Boolean))
         : undefined;
       const query = text(args.query, 500);
-      const native = searchNativeToolManifest(query, args.bundle as NativeToolBundle | undefined, args.maxResults === undefined ? 5 : Number(args.maxResults), allowed);
-      const gateway = searchComposioGatewayManifest(query, allowed);
-      return { tools: [...native, ...gateway].slice(0, 10), next: "The returned tools can be called on the next agent round if they are exposed by this run." };
+      const found = searchDiscoveredToolManifest(query, args.bundle as NativeToolBundle | undefined, args.maxResults === undefined ? undefined : Number(args.maxResults), allowed);
+      return { tools: found, next: "The returned tools can be called on the next agent round if they are exposed by this run. For a recognized family, this is the complete available family; use one of these tools rather than searching again." };
     }
     case "CHUCK_SEARCH_SKILLS": return searchSkills(text(args.query), args.limit === undefined ? 5 : Number(args.limit));
     case "CHUCK_TINYFISH_SEARCH": {
@@ -1446,7 +1453,12 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_RESUME_JOB": return resumeJob(userId, text(args.id));
     case "CHUCK_RUN_JOB_NOW": return runJobNow(userId, text(args.id));
     case "CHUCK_CANCEL_JOB": return cancelJob(userId, text(args.id));
-    case "CHUCK_SCRATCHPAD_WRITE": await writeScratchpad(userId, text(args.key), text(args.content)); return { saved: true, key: args.key };
+    case "CHUCK_SCRATCHPAD_WRITE": {
+      const key = requiredText(args.key, "CHUCK_SCRATCHPAD_WRITE.key");
+      const content = requiredText(args.content, "CHUCK_SCRATCHPAD_WRITE.content");
+      await writeScratchpad(userId, key, content);
+      return { saved: true, key };
+    }
     case "CHUCK_SCRATCHPAD_READ": return readScratchpad(userId, args.query ? String(args.query) : undefined);
     case "CHUCK_SCRATCHPAD_CLEAR": await clearScratchpad(userId, args.key ? text(args.key) : undefined); return { cleared: true };
     case "CHUCK_SAVE_MEMORY": {
@@ -1517,16 +1529,18 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return saveMemoryEdge({ ownerUserId: userId, scope: { kind: scope, externalId: scopeId }, fromEntityId: from.id, relation: text(args.relation), toEntityId: to.id, confidence: args.confidence === undefined ? undefined : Number(args.confidence) });
     }
     case "CHUCK_UPDATE_MEMORY": {
-      if (!args.id && !args.key) throw new Error("CHUCK_UPDATE_MEMORY requires id or key");
-      const updated = await updateMemory(userId, { id: args.id ? text(args.id) : undefined, key: args.key ? text(args.key) : undefined, category: args.category as any }, {
+      const id = optionalText(args.id, 1000, "CHUCK_UPDATE_MEMORY.id");
+      const key = optionalText(args.key, 1000, "CHUCK_UPDATE_MEMORY.key");
+      if (!id && !key) throw new Error("CHUCK_UPDATE_MEMORY requires a non-blank id or key");
+      const updated = await updateMemory(userId, { id, key, category: args.category as any }, {
         category: args.newCategory as any,
-        key: args.newKey ? text(args.newKey) : undefined,
-        value: text(args.value),
-        source: args.source ? text(args.source) : undefined,
+        key: optionalText(args.newKey, 1000, "CHUCK_UPDATE_MEMORY.newKey"),
+        value: requiredText(args.value, "CHUCK_UPDATE_MEMORY.value"),
+        source: optionalText(args.source, 1000, "CHUCK_UPDATE_MEMORY.source"),
         confidence: args.confidence === undefined ? undefined : Number(args.confidence),
         sensitivity: args.sensitivity === "sensitive" ? "sensitive" : args.sensitivity === "normal" ? "normal" : undefined,
-        projectId: args.projectId ? text(args.projectId) : undefined,
-        personKey: args.personKey ? text(args.personKey) : undefined,
+        projectId: optionalText(args.projectId, 1000, "CHUCK_UPDATE_MEMORY.projectId"),
+        personKey: optionalText(args.personKey, 1000, "CHUCK_UPDATE_MEMORY.personKey"),
         reviewAt: args.reviewAt === undefined ? undefined : Number(args.reviewAt),
         expiresAt: args.expiresAt === undefined ? undefined : Number(args.expiresAt),
       });
