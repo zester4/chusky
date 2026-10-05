@@ -32,14 +32,15 @@ test("meeting context lookup cannot expand beyond the mission's frozen source me
   assert.deepEqual(lookupMeetingMission(mission, memories, "different offer").facts, ["No approved meeting-context fact matched that question."]);
 });
 
-test("meeting brief excludes facts that are past their review date", () => {
+test("meeting brief keeps current owner-approved context and excludes facts past review", () => {
   const context: MemoryFact[] = [
     { id: "mem_current_acme", category: "relationship", key: "Acme current rollout", value: "The pilot starts in October.", confidence: 1, source: "owner", sensitivity: "normal", personKey: "acme", createdAt: 1, updatedAt: 20 },
     { id: "mem_review_acme", category: "relationship", key: "Acme old rollout", value: "The pilot starts in March.", confidence: 1, source: "owner", sensitivity: "normal", personKey: "acme", createdAt: 1, updatedAt: 30, reviewAt: 99 },
   ];
   const mission = prepareMeetingMission({ clientName: "Acme", objective: "pilot rollout" }, context, 100);
-  assert.deepEqual(mission.sourceMemoryIds, []);
-  assert.doesNotMatch(mission.brief, /October|March/);
+  assert.deepEqual(mission.sourceMemoryIds, ["mem_current_acme"]);
+  assert.match(mission.brief, /October/);
+  assert.doesNotMatch(mission.brief, /March/);
 });
 
 test("meeting context requires explicit classifier approval for personal facts and relationships", () => {

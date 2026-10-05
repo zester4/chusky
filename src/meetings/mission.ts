@@ -49,24 +49,29 @@ function matchesNamedClient(memory: MemoryFact, clientName: string): boolean {
   return tokens.some((token) => searchable.split(/[^a-z0-9]+/).includes(token));
 }
 
+const COMPANY_MEETING_CATEGORIES = new Set<MemoryFact["category"]>(["business", "procedural", "project", "document"]);
+const PRIVATE_LANGUAGE = /\b(my|i|me|mine|personal|private|home|family|daughter|son|doctor|health|salary|friend|divorce|address|phone)\b/i;
+
 /**
- * Classifier-approved records are safe explicitly. Legacy records have no
- * classifier result, so only unscoped business/procedural records retain the
- * previous compatibility path. Personal facts and relationship/project rows
- * must never become meeting context by lexical coincidence.
+ * Meeting retrieval is intentionally permissive for normal company knowledge.
+ * `meetingSafe` remains useful provenance, but an absent or conservative
+ * classifier result must not hide ordinary business and project context.
+ * Sensitivity and private-language checks remain deterministic floors.
  */
 function isMeetingSafeMemory(memory: MemoryFact): boolean {
+  if (memory.sensitivity !== "normal") return false;
   if (memory.meetingSafe === true) return true;
+  if (COMPANY_MEETING_CATEGORIES.has(memory.category) && !PRIVATE_LANGUAGE.test(`${memory.key} ${memory.value}`)) return true;
   return memory.meetingSafe === undefined
     && LEGACY_MEETING_SAFE_CATEGORIES.has(memory.category)
-    && !memory.personKey
-    && !memory.projectId;
+    && !PRIVATE_LANGUAGE.test(`${memory.key} ${memory.value}`);
 }
 
 function isOwnerApprovedClientRelationship(memory: MemoryFact): boolean {
   return memory.category === "relationship"
     && memory.source === "owner"
-    && memory.meetingSafe !== false;
+    && memory.meetingSafe !== false
+    && !PRIVATE_LANGUAGE.test(`${memory.key} ${memory.value}`);
 }
 
 /** Builds a compact, reviewable relationship brief from normal-sensitivity owner memories only. */
@@ -144,9 +149,9 @@ export function lookupMeetingMission(mission: MeetingMission, memories: MemoryFa
 }
 
 /**
- * Meeting-safe company lookup. Unlike client relationship history, ordinary
- * business facts are available to an enabled representative without requiring
- * a client mission. Personal and sensitive categories never enter this path.
+ * Company/project lookup for an enabled representative. Personal and
+ * sensitive categories never enter this path; project-scoped company context
+ * remains available when it is relevant to the question.
  */
 export function lookupMeetingBusinessKnowledge(memories: MemoryFact[], query: unknown, now = Date.now()): { facts: string[] } {
   const question = clean(query, 500, "query", true);
@@ -154,8 +159,7 @@ export function lookupMeetingBusinessKnowledge(memories: MemoryFact[], query: un
     .filter((memory) => isMeetingSafeMemory(memory)
       && memory.sensitivity === "normal"
       && (memory.status === undefined || memory.status === "active")
-      && !memory.personKey
-      && !memory.projectId
+      && (!memory.personKey || memory.category === "project")
       && (!memory.expiresAt || memory.expiresAt > now)
       && (!memory.reviewAt || memory.reviewAt > now))
     .map((memory) => ({ memory, score: tokenScore(memory, question) }))
