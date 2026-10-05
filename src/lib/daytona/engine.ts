@@ -543,6 +543,25 @@ type PdfSectionInput = {
   pageBreakBefore?: boolean;
 };
 
+type PdfTemplate = "zawiatul_invitation" | "zawiatul_support_letter";
+
+type PdfTemplateData = {
+  recipient?: string;
+  date?: string;
+  event?: string;
+  time?: string;
+  venue?: string;
+  subject?: string;
+  salutation?: string;
+  paragraphs?: string[];
+  contactNumbers?: string[];
+  signature?: string;
+  leaderName?: string;
+  leaderTitle?: string;
+  issued?: string;
+  reference?: string;
+};
+
 type PdfStyleInput = {
   pageSize: "A4" | "LETTER" | "LEGAL";
   margin: number;
@@ -1095,8 +1114,87 @@ function presentationGenerationScript(title: string, slides: PresentationSlideIn
   ].join("\n");
 }
 
-function pdfGenerationScript(title: string, sections: PdfSectionInput[], style: PdfStyleInput, path: string): string {
-  const payload = Buffer.from(JSON.stringify({ title, sections, style, path }), "utf8").toString("base64");
+function zawiatulTemplateLines(): string[] {
+  return [
+    "    def build_zawiatul_template():",
+    "        from reportlab.pdfbase import pdfmetrics",
+    "        from reportlab.pdfbase.ttfonts import TTFont",
+    "        from reportlab.lib.styles import ParagraphStyle",
+    "        try:",
+    "            pdfmetrics.registerFont(TTFont('ZawiatulSerif', '/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf'))",
+    "            pdfmetrics.registerFont(TTFont('ZawiatulSerif-Bold', '/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf'))",
+    "            pdfmetrics.registerFont(TTFont('ZawiatulSans', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'))",
+    "            body_font='ZawiatulSerif'; bold_font='ZawiatulSerif-Bold'; arabic_font='ZawiatulSans'",
+    "        except Exception:",
+    "            body_font='Times-Roman'; bold_font='Times-Bold'; arabic_font='Helvetica'",
+    "        from reportlab.lib.pagesizes import A4",
+    "        from reportlab.pdfgen import canvas as pdf_canvas",
+    "        from reportlab.platypus import Paragraph",
+    "        width, height = A4",
+    "        data = payload.get('templateData') or {}; sections = payload.get('sections') or []",
+    "        def value(key, fallback): return str(data.get(key) or fallback)",
+    "        def paragraphs(fallback):",
+    "            items = data.get('paragraphs') or [section.get('body') for section in sections if section.get('body')]",
+    "            return [str(item) for item in items if item] or fallback",
+    "        def draw_text(c, text, x, y, font, size, color, align='left'):",
+    "            c.setFont(font, size); c.setFillColor(color)",
+    "            if align == 'center': c.drawCentredString(x if x else width / 2, y, text)",
+    "            elif align == 'right': c.drawRightString(width - 83, y, text)",
+    "            else: c.drawString(x, y, text)",
+    "        def draw_para(c, text, x, y, max_width, size=8.5, leading=11.5, color=ink):",
+    "            para_style=ParagraphStyle('ZawiatulBody', fontName=body_font, fontSize=size, leading=leading, textColor=color, spaceAfter=0)",
+    "            para=Paragraph(escape(str(text)), para_style); _, para_height=para.wrap(max_width, height)",
+    "            para.drawOn(c, x, y - para_height); return y - para_height",
+    "        c=pdf_canvas.Canvas(path, pagesize=A4, title=payload['title'], author=style.get('author') or 'Chusky')",
+    "        paper=colors.HexColor('#FAF9F3'); forest=colors.HexColor('#214B35'); gold=colors.HexColor('#B89A5A'); pale=colors.HexColor('#E8DCC0'); muted=colors.HexColor('#6A684F'); ink=colors.HexColor('#183B2B')",
+    "        c.setFillColor(paper); c.rect(0, 0, width, height, fill=1, stroke=0)",
+    "        c.setStrokeColor(colors.HexColor('#EFEDE3')); c.setLineWidth(.25)",
+    "        for y_rule in range(22, int(height), 9): c.line(34, y_rule, width - 34, y_rule)",
+    "        c.setStrokeColor(forest); c.setLineWidth(1.2); c.rect(47, 47, width - 94, height - 94, fill=0, stroke=1)",
+    "        c.setStrokeColor(gold); c.setLineWidth(.65); c.rect(53, 53, width - 106, height - 106, fill=0, stroke=1)",
+    "        for x, y_corner, sx, sy in [(53,53,1,1),(width-53,53,-1,1),(53,height-53,1,-1),(width-53,height-53,-1,-1)]:",
+    "            c.saveState(); c.translate(x, y_corner); c.scale(sx, sy); c.setStrokeColor(gold); c.line(0,0,0,22); c.line(0,0,22,0); c.setStrokeColor(forest); c.line(4,4,4,16); c.line(4,4,16,4); c.restoreState()",
+    "        c.setStrokeColor(pale); c.line(55, height-82, 158, height-82); c.line(width-158, height-82, width-55, height-82)",
+    "        c.setFillColor(paper); c.setStrokeColor(gold); c.saveState(); c.translate(width/2, height-74); c.rotate(45); c.roundRect(-39,-18,78,36,7,fill=1,stroke=1); c.restoreState()",
+    "        c.setStrokeColor(forest); c.circle(width/2,height-74,17,fill=0,stroke=1); c.circle(width/2,height-74,7,fill=0,stroke=1); c.setFillColor(forest); c.circle(width/2,height-74,3,fill=1,stroke=0)",
+    "        draw_text(c, 'بِسْمِ اللهِ الرَّحْمَنِ الرَّحِيمِ', 0, height-142, arabic_font, 17, forest, 'center')",
+    "        draw_text(c, 'Bismillahi Rahmani Raheem', 0, height-161, body_font, 8.5, muted, 'center')",
+    "        draw_text(c, 'ZAWIATUL AL FAYDA', 0, height-201, bold_font, 20, forest, 'center')",
+    "        draw_text(c, 'Under the Leadership of ' + value('leaderName','Mallam Haruna Nelson'), 0, height-219, body_font, 8.2, muted, 'center')",
+    "        c.setStrokeColor(pale); c.line(178,height-239,width-178,height-239); c.setFillColor(forest); c.circle(width/2,height-239,3,fill=1,stroke=0)",
+    "        kind=payload.get('template')",
+    "        left=83; content_width=width-166",
+    "        if kind == 'zawiatul_invitation':",
+    "            draw_text(c, 'OFFICIAL INVITATION', 0, height-274, bold_font, 16, ink, 'center'); c.setStrokeColor(gold); c.line(205,height-291,width-205,height-291)",
+    "            y=height-326; draw_text(c, 'To: ' + value('recipient','Mallam Aziz - Main Master of Ceremonies (MC)'), left, y, bold_font, 10.8, ink); y-=23",
+    "            y=draw_para(c, 'We are honoured to formally invite you to serve as the Main Master of Ceremonies (MC) for the ' + value('event','9th Annual Maulid Celebration') + '.', left, y, content_width, 9.1, 13.2)",
+    "            y-=12",
+    "            for label, key, fallback in [('Event:', 'event', '9th Annual Maulid Celebration'), ('Date:', 'date', 'Saturday, 21st November 2026'), ('Time:', 'time', '10:00 AM - 4:00 PM'), ('Venue:', 'venue', 'Chorkor 31st Street')]: draw_text(c, label, left, y, bold_font, 9.2, ink); draw_text(c, value(key,fallback), left+39, y, body_font, 9.2, ink); y-=14",
+    "            y-=7; y=draw_para(c, 'Your esteemed presence and dedication to guiding the proceedings as Main Master of Ceremonies will greatly enrich our celebration as we gather to commemorate the birth of the Prophet Muhammad (Peace Be Upon Him) through devotional remembrance, prayers, and community reflection.', left, y, content_width, 8.55, 12.1); y-=10",
+    "            y=draw_para(c, 'We would be honoured by your acceptance to lead the event with your eloquence and guidance.', left, y, content_width, 8.55, 12.1); y-=7; draw_para(c, 'Your participation is highly anticipated and valued.', left, y, content_width, 8.55, 12.1)",
+    "            box_y=88; box_w=145; subject='For Confirmations & Inquiries:'",
+    "        else:",
+    "            draw_text(c, value('date','5th October 2026'), 0, height-268, body_font, 7.0, muted, 'right'); draw_text(c, 'Zawiatul Al Fayda - Chorkor 31st Street, Accra, Ghana', left, height-268, body_font, 7.0, muted); draw_text(c, 'Contact: ' + ' / '.join(data.get('contactNumbers') or ['+233247553394', '+233550472834']), left, height-279, body_font, 7.0, muted)",
+    "            draw_text(c, value('subject','SUBJECT: REQUEST FOR SUPPORT'), 0, height-300, bold_font, 10.2, forest, 'right'); y=height-341; draw_text(c, value('salutation','Dear Sir,'), left, y, bold_font, 10.2, ink); y-=23",
+    "            support_fallback=['We humbly write to seek your kind support for the 9th Annual Maulid Celebration, organised by Zawiatul Al Fayda and scheduled to take place in November 2026 at Chorkor 31st Street, Accra, Ghana. The gathering will bring members of the community together to honour the noble birth of the Prophet Muhammad (Peace Be Upon Him) through prayers, lectures, remembrance, and communal sharing.', 'As we prepare for this blessed occasion, we respectfully invite you to support the event in whatever way is comfortable and possible. Every gesture, large or small, will be received with sincere gratitude and used carefully for the benefit of the gathering.', 'Your support will help us welcome attendees and create a meaningful, well-organised celebration for our community. We would be honoured to acknowledge your contribution in our programme and during the event.', 'We understand that every organisation has its own priorities, and there is no fixed amount expected. Kindly consider supporting the occasion at a level that is convenient for you.', 'We look forward to your positive response and partnership in this noble cause.']",
+    "            for paragraph in paragraphs(support_fallback): y=draw_para(c, paragraph, left, y, content_width, 8.45, 11.4); y-=8",
+    "            draw_text(c, 'Yours sincerely,', left, y-5, body_font, 9.0, ink); box_y=91; box_w=160; subject='For Confirmations & Inquiries:'",
+    "        c.setStrokeColor(gold); c.rect(left,box_y,box_w,48 if kind == 'zawiatul_invitation' else 50,fill=0,stroke=1); draw_text(c, subject, left+8, box_y+34, body_font, 7.2, muted); numbers=data.get('contactNumbers') or ['+233247553394','+233550472834']; draw_text(c, 'Contact: ' + str(numbers[0]), left+8, box_y+20, body_font, 7.1, muted); draw_text(c, 'Contact: ' + str(numbers[1] if len(numbers)>1 else numbers[0]), left+8, box_y+8, body_font, 7.1, muted)",
+    "        signature_center=width-145; draw_text(c, value('signature','Haruna Nelson'), signature_center, box_y+39, body_font, 15, muted, 'center'); draw_text(c, value('leaderName','Mallam Haruna Nelson'), signature_center, box_y+22, bold_font, 9.4, ink, 'center'); draw_text(c, value('leaderTitle','Leader, Zawiatul Al Fayda'), signature_center, box_y+10, body_font, 7.4, muted, 'center')",
+    "        footer=value('issued','May Allah bless your generosity') if kind == 'zawiatul_support_letter' else 'Issued: ' + value('issued','12th November 2026') + ' - Reference: ' + value('reference','ZAF/INV/2026/009')",
+    "        draw_text(c, footer, 0, 61, body_font, 6.7, muted, 'center'); draw_text(c, 'Zawiatul Al Fayda | Official Document', 0, 42, body_font, 6.2, muted, 'center'); c.showPage(); c.save()",
+    "    if payload.get('template'):",
+    "        build_zawiatul_template();",
+    "        if not os.path.isfile(path) or os.path.getsize(path) < 100: raise RuntimeError('named PDF template output was not written')",
+    "        from pypdf import PdfReader",
+    "        page_count=len(PdfReader(path).pages)",
+    "        if page_count != 1: raise RuntimeError('named PDF template must produce exactly one page')",
+    "        print(json.dumps({'path': path, 'pages': page_count, 'bytes': os.path.getsize(path), 'template': payload['template']})); sys.exit(0)",
+  ];
+}
+
+function pdfGenerationScript(title: string, sections: PdfSectionInput[], style: PdfStyleInput, path: string, template?: PdfTemplate, templateData?: PdfTemplateData): string {
+  const payload = Buffer.from(JSON.stringify({ title, sections, style, path, ...(template ? { template } : {}), ...(templateData ? { templateData } : {}) }), "utf8").toString("base64");
   return [
     "import base64, importlib, json, os, re, shutil, subprocess, sys",
     `payload=json.loads(base64.b64decode(${JSON.stringify(payload)}))`,
@@ -1190,6 +1288,7 @@ function pdfGenerationScript(title: string, sections: PdfSectionInput[], style: 
     "            sys.stderr.write('PDF page chrome error (non-fatal): ' + repr(page_error) + '\\n')",
     "    on_first=draw_page if callable(draw_page) else _noop",
     "    on_later=draw_page if callable(draw_page) else _noop",
+    ...zawiatulTemplateLines(),
     "    def add_image(story, section):",
     "        image_path=section['imagePath']",
     "        if not os.path.isfile(image_path): raise FileNotFoundError('PDF image does not exist: ' + image_path)",
@@ -1246,6 +1345,46 @@ function presentationImageMime(path: string): string {
   if (extension === "webp") return "image/webp";
   if (extension === "gif") return "image/gif";
   return "image/png";
+}
+
+function pdfTemplate(value: unknown): PdfTemplate | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const template = String(value).trim().toLowerCase();
+  if (template !== "zawiatul_invitation" && template !== "zawiatul_support_letter") {
+    throw new DaytonaInputError("template must be zawiatul_invitation or zawiatul_support_letter");
+  }
+  return template;
+}
+
+function pdfTemplateData(value: unknown): PdfTemplateData | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new DaytonaInputError("templateData must be an object");
+  const input = value as Record<string, unknown>;
+  const text = (key: keyof PdfTemplateData, max = 500) => input[key] === undefined ? undefined : presentationText(input[key], `templateData.${key}`, max);
+  const contactNumbers = input.contactNumbers === undefined ? undefined : (() => {
+    if (!Array.isArray(input.contactNumbers) || input.contactNumbers.length < 1 || input.contactNumbers.length > 4) throw new DaytonaInputError("templateData.contactNumbers must contain 1-4 phone numbers");
+    return input.contactNumbers.map((item, index) => presentationText(item, `templateData.contactNumbers[${index}]`, 40, true)!);
+  })();
+  const paragraphs = input.paragraphs === undefined ? undefined : (() => {
+    if (!Array.isArray(input.paragraphs) || input.paragraphs.length < 1 || input.paragraphs.length > 12) throw new DaytonaInputError("templateData.paragraphs must contain 1-12 paragraphs");
+    return input.paragraphs.map((item, index) => presentationText(item, `templateData.paragraphs[${index}]`, 1800, true)!);
+  })();
+  return {
+    ...(text("recipient") ? { recipient: text("recipient") } : {}),
+    ...(text("date") ? { date: text("date") } : {}),
+    ...(text("event") ? { event: text("event") } : {}),
+    ...(text("time") ? { time: text("time") } : {}),
+    ...(text("venue") ? { venue: text("venue") } : {}),
+    ...(text("subject") ? { subject: text("subject") } : {}),
+    ...(text("salutation") ? { salutation: text("salutation") } : {}),
+    ...(paragraphs ? { paragraphs } : {}),
+    ...(contactNumbers ? { contactNumbers } : {}),
+    ...(text("signature", 160) ? { signature: text("signature", 160) } : {}),
+    ...(text("leaderName", 160) ? { leaderName: text("leaderName", 160) } : {}),
+    ...(text("leaderTitle", 160) ? { leaderTitle: text("leaderTitle", 160) } : {}),
+    ...(text("issued") ? { issued: text("issued") } : {}),
+    ...(text("reference", 160) ? { reference: text("reference", 160) } : {}),
+  };
 }
 
 type PresentationImageDimensions = { width: number; height: number };
@@ -3137,6 +3276,8 @@ export class DaytonaEngine {
   async createPdf(userId: number, args: Record<string, unknown>): Promise<ArtifactRecord & { __chuskyArtifactReady: true; generated: true; pageCount?: number }> {
     const title = presentationText(args.title, "title", 240, true)!;
     const sections = pdfSections(args.sections);
+    const template = pdfTemplate(args.template);
+    const templateData = pdfTemplateData(args.templateData);
     const style = pdfStyle(mergeBrandStyle(args.style, brandInput(args.brand)));
     const requestedPath = args.path === undefined
       ? `artifacts/${artifactNameForType(`${title.slice(0, 70).replace(/\s+/g, "_") || "document"}`, "pdf")}`
@@ -3145,7 +3286,7 @@ export class DaytonaEngine {
     const sandbox = await this.getOrCreateWorkspace(userId);
     const scriptPath = safeDaytonaPath(`artifacts/.chusky/pdf-generator-${randomUUID()}.py`, "generator path");
     const attemptPath = artifactAttemptPath(path);
-    const script = pdfGenerationScript(title, sections, style, attemptPath);
+    const script = pdfGenerationScript(title, sections, style, attemptPath, template, templateData);
     await sandbox.fs.uploadFile(Buffer.from(script, "utf8"), scriptPath);
     try {
       const result = await sandbox.process.executeCommand(`python3 ${scriptPath}`, await sandbox.getUserHomeDir(), undefined, 240);

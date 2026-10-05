@@ -1,5 +1,6 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import JSZip from "jszip";
 import { config } from "../src/config.js";
 import { appScaffoldCommand, DaytonaEngine } from "../src/lib/daytona/engine.js";
@@ -729,6 +730,35 @@ test("creates a structured PDF in Daytona before registering it", async () => {
   assert.match(visualScript, /kind="pdf"/);
   // require_renderer is now emitted as a real Python boolean (capital True/False)
   assert.match(visualScript, /require_renderer=True/);
+});
+
+test("emits the reusable Zawiatul PDF templates with bounded editable fields", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820026) as any;
+  let generatorScript = "";
+  sandbox.fs.uploadFile = async (contents: Buffer, path: string) => {
+    if (path.endsWith(".py")) generatorScript = Buffer.from(contents).toString("utf8");
+  };
+  sandbox.process.executeCommand = async () => ({ exitCode: 0, result: "ok" });
+  const result = await e.createPdf(820026, {
+    title: "Zawiatul Al Fayda Invitation",
+    template: "zawiatul_invitation",
+    templateData: {
+      recipient: "Mallam Aziz - Main Master of Ceremonies (MC)",
+      contactNumbers: ["+233247553394", "+233550472834"],
+      signature: "Haruna Nelson",
+      leaderName: "Mallam Haruna Nelson",
+    },
+    sections: [{ body: "A short invitation body." }],
+  });
+  assert.equal(result.generated, true);
+  assert.match(generatorScript, /def build_zawiatul_template\(\):/);
+  assert.match(generatorScript, /payload\.get\('template'\)/);
+  assert.match(generatorScript, /Main Master of Ceremonies/);
+  assert.match(generatorScript, /named PDF template must produce exactly one page/);
+  const syntax = spawnSync("python", ["-c", "import sys; compile(sys.stdin.buffer.read().decode('utf-8'), '<zawiatul-template>', 'exec')"], { input: Buffer.from(generatorScript, "utf8"), encoding: "utf8" });
+  assert.equal(syntax.status, 0, syntax.stderr || "named template generator did not compile");
+  await assert.rejects(() => e.createPdf(820026, { title: "Bad template", template: "unknown", sections: [{ body: "Nope" }] }), /template must be zawiatul_invitation or zawiatul_support_letter/);
 });
 
 test("makes optional PDF chrome non-fatal and emits hard smoke checks", async () => {
