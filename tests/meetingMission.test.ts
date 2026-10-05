@@ -68,3 +68,20 @@ test("meeting business lookup uses relevant current business facts, never person
   assert.deepEqual(result.facts, ["Standard pricing: The standard plan starts at $49 per month."]);
   assert.doesNotMatch(JSON.stringify(result), /Private Road|margin|Old pricing|Other client/i);
 });
+
+test("an explicit unsafe verdict cannot be bypassed through owner-approved relationship context", () => {
+  const mission = prepareMeetingMission({ clientName: "Acme", objective: "Discuss the Acme rollout plan" }, [
+    { id: "mem_unsafe_relationship", category: "relationship", key: "Acme rollout detail", value: "The pilot starts in October.", confidence: 1, source: "owner", sensitivity: "normal", meetingSafe: true, meetingVerdict: "unsafe", personKey: "acme", createdAt: 1, updatedAt: 10 },
+  ]);
+  assert.deepEqual(mission.sourceMemoryIds, []);
+});
+
+test("an explicit unsafe business verdict is excluded while unknown business context stays compatible", () => {
+  const context: MemoryFact[] = [
+    { id: "mem_unsafe", category: "business", key: "Sarah recital", value: "Friday", confidence: 1, source: "owner", sensitivity: "normal", meetingSafe: false, meetingVerdict: "unsafe", createdAt: 1, updatedAt: 10 },
+    { id: "mem_unknown", category: "business", key: "Refund policy", value: "Refunds are available for 30 days.", confidence: 1, source: "owner", sensitivity: "normal", createdAt: 1, updatedAt: 11 },
+  ];
+  const result = lookupMeetingBusinessKnowledge(context, "refund recital");
+  assert.deepEqual(result.facts, ["Refund policy: Refunds are available for 30 days."]);
+  assert.doesNotMatch(JSON.stringify(result), /Sarah|Friday/);
+});

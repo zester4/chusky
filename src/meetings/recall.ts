@@ -75,7 +75,7 @@ export interface ParsedRecallParticipantWebhook {
   providerBotId: string;
   meetingId: string;
   userId: number;
-  participant: { id: string; name: string; identityStatus?: "named" | "unknown"; isHost?: boolean; status: "present" | "left" };
+  participant: { id: string; name: string; identityStatus?: "named" | "unknown"; isHost?: boolean; email?: string; emailSource?: "recall_match"; assurance?: "calendar_matched" | "unverified"; status: "present" | "left" };
 }
 
 export interface ParsedRecallSpeakerWebhook {
@@ -427,12 +427,16 @@ export function parseRecallParticipantWebhook(value: unknown): ParsedRecallParti
   const rawId = participant.id;
   const id = typeof rawId === "string" || typeof rawId === "number" ? String(rawId) : "";
   const name = typeof participant.name === "string" ? participant.name.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 160) : "";
+  const email = event === "participant_events.update" && typeof participant.email === "string"
+    && participant.email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(participant.email)
+    ? participant.email.trim().toLowerCase()
+    : undefined;
   if (!isValidRecallBotId(providerBotId) || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0 || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) return undefined;
   return {
     providerBotId,
     meetingId,
     userId,
-    participant: { id, name: name || "Unknown participant", ...(!name ? { identityStatus: "unknown" as const } : {}), ...(typeof participant.is_host === "boolean" ? { isHost: participant.is_host } : {}), status: event === "participant_events.leave" ? "left" : "present" },
+    participant: { id, name: name || "Unknown participant", ...(!name ? { identityStatus: "unknown" as const } : {}), ...(typeof participant.is_host === "boolean" ? { isHost: participant.is_host } : {}), ...(email ? { email, emailSource: "recall_match" as const, assurance: "calendar_matched" as const } : {}), status: event === "participant_events.leave" ? "left" : "present" },
   };
 }
 

@@ -13,7 +13,8 @@ Promise.all([
   readFile(join(process.cwd(), "migrations", "0007_durable_memory.sql"), "utf8"),
   readFile(join(process.cwd(), "migrations", "0013_durable_memory_reflection.sql"), "utf8"),
   readFile(join(process.cwd(), "migrations", "0014_durable_memory_meeting_safe.sql"), "utf8"),
-]).then(([base, reflection, meetingSafe]) => pool.query(`${base}\n${reflection}\n${meetingSafe}`))
+  readFile(join(process.cwd(), "migrations", "0015_durable_memory_meeting_verdict.sql"), "utf8"),
+]).then(([base, reflection, meetingSafe, meetingVerdict]) => pool.query(`${base}\n${reflection}\n${meetingSafe}\n${meetingVerdict}`))
   .then(async () => {
     const expectedTables = [
       "chusky_memory_scopes", "chusky_memory_grants", "chusky_memory_sources",
@@ -21,13 +22,14 @@ Promise.all([
       "chusky_memory_profiles", "chusky_memory_outbox", "chusky_memory_reflections",
     ];
     const expectedIndexes = ["chusky_memory_items_one_active_key_idx", "chusky_memory_outbox_ready_idx", "chusky_memory_reflections_ready_idx"];
-    const [tables, indexes] = await Promise.all([
+    const [tables, indexes, columns] = await Promise.all([
       pool.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name = ANY($1::text[])", [expectedTables]),
       pool.query("SELECT indexname FROM pg_indexes WHERE schemaname='public' AND indexname = ANY($1::text[])", [expectedIndexes]),
+      pool.query("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='chusky_memory_items' AND column_name='meeting_verdict'"),
     ]);
     const foundTables = new Set(tables.rows.map((row: { table_name: string }) => row.table_name));
     const foundIndexes = new Set(indexes.rows.map((row: { indexname: string }) => row.indexname));
-    const missing = [...expectedTables.filter((name) => !foundTables.has(name)), ...expectedIndexes.filter((name) => !foundIndexes.has(name))];
+    const missing = [...expectedTables.filter((name) => !foundTables.has(name)), ...expectedIndexes.filter((name) => !foundIndexes.has(name)), ...(columns.rowCount ? [] : ["chusky_memory_items.meeting_verdict"])];
     if (missing.length) throw new Error(`Durable memory migration verification failed; missing schema objects: ${missing.join(", ")}`);
     console.log(`Durable memory schema is ready (${expectedTables.length} tables and ${expectedIndexes.length} indexes verified).`);
   })

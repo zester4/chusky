@@ -264,6 +264,7 @@ export async function applyRecallParticipantWebhook(body: unknown): Promise<"upd
       const existing = current.participantRoster ?? [];
       const incoming = rosterEvent.participant;
       const previous = existing.find((item) => item.id === incoming.id);
+      const nameChanged = Boolean(previous && previous.identityStatus !== "unknown" && incoming.identityStatus !== "unknown" && previous.name !== incoming.name);
       // Recall may send a lifecycle event before it has a usable display name.
       // Preserve a previously named participant instead of downgrading it to
       // "Unknown participant"; a later named update can still refine it.
@@ -273,9 +274,15 @@ export async function applyRecallParticipantWebhook(body: unknown): Promise<"upd
           ? { name: previous.name, identityStatus: "named" as const }
           : {}),
         ...(incoming.isHost === undefined && previous?.isHost !== undefined ? { isHost: previous.isHost } : {}),
+        ...(!nameChanged && incoming.email === undefined && previous?.email ? { email: previous.email, emailSource: previous.emailSource, assurance: previous.assurance } : {}),
+        ...(nameChanged ? { email: undefined, emailSource: undefined, assurance: "unverified" as const } : {}),
         updatedAt: Date.now(),
       };
-      const roster = [participant, ...existing.filter((item) => item.id !== participant.id)].slice(0, 40);
+      let roster = [participant, ...existing.filter((item) => item.id !== participant.id)].slice(0, 40);
+      const duplicateEmails = new Set(roster.filter((item) => item.status === "present" && item.email).map((item) => item.email!.toLowerCase()).filter((email, index, all) => all.indexOf(email) !== index));
+      if (duplicateEmails.size) roster = roster.map((item) => item.email && duplicateEmails.has(item.email.toLowerCase())
+        ? { ...item, email: undefined, emailSource: undefined, assurance: "unverified" as const }
+        : item);
       await updateRecallMeeting(event.userId, event.meetingId, { participantRoster: roster });
       return "updated";
     }

@@ -19,7 +19,7 @@ export interface MeetingRosterParticipant {
   name: string;
   email?: string;
   providerUserId?: string;
-  assurance?: "calendar_verified" | "name_match" | "unverified";
+  assurance?: "confirmed" | "calendar_matched" | "unverified";
   identityStatus?: "named" | "unknown";
   isHost?: boolean;
 }

@@ -15,7 +15,6 @@ export const MEETING_REPRESENTATIVE_NATIVE_TOOLS = [
 
 const MEETING_REPRESENTATIVE_NATIVE_TOOL_SET = new Set<string>(MEETING_REPRESENTATIVE_NATIVE_TOOLS);
 const HIGH_IMPACT_TOOL_PATTERN = /(^|_)(DELETE|REMOVE|DESTROY|PAYMENT|CHARGE|TRANSFER|PURCHASE|REFUND|CHECKOUT|ORDER|BILLING|SUBSCRIPTION|INVITE|REVOKE|PERMISSION|DEPLOY|SIGN|SIGNATURE|CONTRACT|LEGAL|CANCEL)(_|$)/i;
-const MEETING_RECORD_LOOKUP_PATTERN = /(?:^|_)(?:CONTACT|CUSTOMER|CLIENT|CANDIDATE|DEAL|ACCOUNT|INVOICE|BALANCE|PERSON|EMPLOYEE|CANDIDATES|CONTACTS|CUSTOMERS)(?:_|$)/i;
 
 export interface MeetingRepresentativeProfile {
   enabled: boolean;
@@ -29,6 +28,8 @@ export interface MeetingRepresentativeProfile {
   approvedKnowledge: string;
   authorityBoundaries: string;
   allowedComposioTools: string[];
+  /** Explicit owner-approved provider reads safe to treat as company-level in meetings. */
+  companyLevelTools: string[];
   /** Owner-selected aliases keyed by the exact Composio action prefix/toolkit. */
   composioAccountAliases: Record<string, string>;
   allowedNativeTools: string[];
@@ -69,6 +70,7 @@ export function defaultMeetingRepresentativeProfile(): MeetingRepresentativeProf
     approvedKnowledge: "",
     authorityBoundaries: "Represent only the owner-approved position. Do not invent product facts, prices, discounts, delivery dates, legal terms, or commitments. If a request falls outside the approved authority, explain the limit and capture a follow-up for the owner.",
     allowedComposioTools: [],
+    companyLevelTools: [],
     composioAccountAliases: {},
     allowedNativeTools: ["CHUCK_SET_REMINDER", "CHUCK_TASK_CREATE"],
     allowMeetingScheduling: true,
@@ -171,27 +173,63 @@ export function isMeetingCalendarWriteTool(slug: string): boolean {
 }
 
 /** Read actions that can expose a person's/account's record require verified identity in a meeting. */
-export function isMeetingRecordLookupTool(slug: string): boolean {
+export function isMeetingRecordLookupTool(slug: string, companyLevelTools: string[] = []): boolean {
   const normalized = slug.trim().toUpperCase();
-  if (!normalized || normalized.startsWith("CHUCK_") || normalized.startsWith("MCP_")) return false;
-  return /(?:^|_)(?:GET|LIST|SEARCH|FIND|LOOKUP|FETCH|RETRIEVE|QUERY|CHECK|VERIFY)(?:_|$)/.test(normalized)
-    && MEETING_RECORD_LOOKUP_PATTERN.test(normalized);
+  if (!normalized || normalized.startsWith("CHUCK_") || normalized.startsWith("MCP_") || isMeetingCalendarAvailabilityTool(normalized)) return false;
+  if (companyLevelTools.some((tool) => tool.trim().toUpperCase() === normalized)) return false;
+  return /(?:^|_)(?:GET|LIST|SEARCH|FIND|LOOKUP|FETCH|RETRIEVE|QUERY|CHECK|VERIFY)(?:_|$)/.test(normalized);
+}
+
+const MEETING_RECORD_EMAIL_FILTERS: Record<string, string[]> = {
+  HUBSPOT: ["email", "contact_email", "email_address"],
+  SALESFORCE: ["email", "contact_email", "email_address"],
+  ZOHO: ["email", "email_address", "contact_email"],
+  PIPEDRIVE: ["email", "email_address"],
+  GOOGLECONTACTS: ["email", "email_address"],
+  STRIPE: ["email", "customer_email"],
+  ZENDESK: ["email", "requester_email", "user_email"],
+  BAMBOOHR: ["email", "work_email"],
+};
+
+/** Only exact email filters on known provider schemas can scope a meeting record read. */
+export function meetingRecordLookupIsScoped(slug: string, args: Record<string, unknown>, email: string | undefined, assurance: string | undefined): boolean {
+  if (assurance !== "confirmed" || !email) return false;
+  const normalized = slug.trim().toUpperCase();
+  const toolkit = Object.keys(MEETING_RECORD_EMAIL_FILTERS).sort((a, b) => b.length - a.length)
+    .find((prefix) => normalized.startsWith(`${prefix}_`));
+  if (!toolkit) return false;
+  const allowed = new Set(MEETING_RECORD_EMAIL_FILTERS[toolkit]);
+  const expected = email.trim().toLowerCase();
+  return Object.entries(args).some(([key, value]) => allowed.has(key.toLowerCase())
+    && typeof value === "string" && value.trim().toLowerCase() === expected);
 }
 
 /** Remove unscoped person/account rows before provider output reaches the model. */
 export function filterMeetingRecordResult(value: unknown, identity: string[]): unknown {
-  const needles = identity.map((item) => item.trim().toLowerCase()).filter(Boolean);
+  const needles = identity.map((item) => item.trim().toLowerCase()).filter(Boolean).slice(0, 4);
   if (!needles.length) return { records: [] };
-  const containsIdentity = (item: unknown) => JSON.stringify(item).toLowerCase().split(/[^a-z0-9@._+-]+/).some((part) => needles.includes(part));
-  const visit = (item: unknown): unknown => {
-    if (Array.isArray(item)) return item.filter((entry) => containsIdentity(entry)).slice(0, 20).map(visit);
+  const containsIdentity = (item: unknown) => {
+    let serialized: string;
+    try { serialized = JSON.stringify(item).toLowerCase(); } catch { return false; }
+    return needles.some((needle) => serialized.includes(needle));
+  };
+  const visit = (item: unknown, root = false): unknown => {
+    if (Array.isArray(item)) return item.filter((entry) => containsIdentity(entry)).slice(0, 20).map((entry) => visit(entry));
     if (!item || typeof item !== "object") return item;
     const object = item as Record<string, unknown>;
     const output: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(object)) output[key] = Array.isArray(child) ? visit(child) : child && typeof child === "object" ? visit(child) : child;
+    const hasCollection = Object.values(object).some(Array.isArray);
+    if (!containsIdentity(item) && !hasCollection) return root ? { records: [] } : undefined;
+    for (const [key, child] of Object.entries(object)) {
+      if (Array.isArray(child)) output[key] = visit(child);
+      else if (child && typeof child === "object") {
+        const filtered = visit(child);
+        if (filtered !== undefined) output[key] = filtered;
+      } else output[key] = child;
+    }
     return output;
   };
-  return visit(value);
+  return visit(value, true) ?? { records: [] };
 }
 
 export function normalizeMeetingRepresentativeProfile(
@@ -202,7 +240,7 @@ export function normalizeMeetingRepresentativeProfile(
   const patch = value as Record<string, unknown>;
   const allowedKeys = new Set([
     "enabled", "representativeName", "organizationName", "role", "objective", "communicationStyle", "register", "smallTalkAllowed",
-    "approvedKnowledge", "authorityBoundaries", "allowedComposioTools", "composioAccountAliases", "allowedNativeTools", "allowMeetingScheduling", "updatedAt",
+    "approvedKnowledge", "authorityBoundaries", "allowedComposioTools", "companyLevelTools", "composioAccountAliases", "allowedNativeTools", "allowMeetingScheduling", "updatedAt",
     "autoJoinCalendar",
   ]);
   if (Object.keys(patch).some((key) => !allowedKeys.has(key))) throw new Error("Meeting representative profile contains an unsupported field");
@@ -232,6 +270,9 @@ export function normalizeMeetingRepresentativeProfile(
     allowedComposioTools: patch.allowedComposioTools === undefined
       ? [...current.allowedComposioTools]
       : toolList(patch.allowedComposioTools, "allowedComposioTools", 40, isMeetingRepresentativeComposioTool),
+    companyLevelTools: patch.companyLevelTools === undefined
+      ? [...current.companyLevelTools]
+      : toolList(patch.companyLevelTools, "companyLevelTools", 40, isMeetingRepresentativeComposioTool),
     composioAccountAliases: patch.composioAccountAliases === undefined
       ? { ...current.composioAccountAliases }
       : normalizeComposioAccountAliases(patch.composioAccountAliases),

@@ -20,6 +20,7 @@ import type { ApprovalPolicy, HandoffRecord, WorkerDuration } from "./subagents/
 import type { CapabilityWorkerName } from "./memory/types.js";
 import { durableMemoryConfigured, forgetDurableMemory, getDurableMemoryByKey, saveDurableMemory, saveMemoryEntity, searchDurableMemory } from "./memory/durable.js";
 import { queueConversationReflection } from "./memory/reflection.js";
+import { classifyMemory } from "./memory/classifier.js";
 import { deriveMissionToolHints } from "./missionWorker.js";
 import type { MissionRoutingCache } from "./decisions/missionRoutingCache.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
@@ -517,8 +518,9 @@ export interface RecallMeetingParticipant {
   /** Recall supplied a non-empty display name, or the platform did not expose one. */
   identityStatus?: "named" | "unknown";
   email?: string;
+  emailSource?: "recall_match";
   providerUserId?: string;
-  assurance?: "calendar_verified" | "name_match" | "unverified";
+  assurance?: "confirmed" | "calendar_matched" | "unverified";
   isHost?: boolean;
   status: "present" | "left";
   updatedAt: number;
@@ -1297,6 +1299,7 @@ export interface MemoryFact {
   sensitivity: "normal" | "sensitive";
   /** Explicit classifier result; undefined means legacy/unclassified. */
   meetingSafe?: boolean;
+  meetingVerdict?: "safe" | "unsafe" | "unknown";
   status?: "active" | "superseded" | "deleted";
   supersedesId?: string;
   projectId?: string;
@@ -4731,6 +4734,7 @@ function normalizeMemory(memory: Partial<MemoryFact>): MemoryFact {
     // broadly shareable merely because they predate the sensitivity field.
     sensitivity: memory.sensitivity === "normal" ? "normal" : "sensitive",
     ...(typeof memory.meetingSafe === "boolean" ? { meetingSafe: memory.meetingSafe } : {}),
+    ...(memory.meetingVerdict === "safe" || memory.meetingVerdict === "unsafe" || memory.meetingVerdict === "unknown" ? { meetingVerdict: memory.meetingVerdict } : {}),
     status: memory.status === "superseded" || memory.status === "deleted" ? memory.status : "active",
     supersedesId: typeof memory.supersedesId === "string" ? memory.supersedesId : undefined,
     projectId: typeof memory.projectId === "string" ? memory.projectId.trim() || undefined : undefined,
@@ -4792,8 +4796,9 @@ function normalizeMeetingRoster(value: unknown): RecallMeetingParticipant[] {
       name: name || (identityStatus === "unknown" ? "Unknown participant" : ""),
       ...(identityStatus === "unknown" ? { identityStatus } : {}),
       ...(typeof item.email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(item.email) ? { email: item.email.toLowerCase().slice(0, 254) } : {}),
+      ...(item.emailSource === "recall_match" && typeof item.email === "string" ? { emailSource: "recall_match" as const } : {}),
       ...(typeof item.providerUserId === "string" && /^[A-Za-z0-9:_-]{1,160}$/.test(item.providerUserId) ? { providerUserId: item.providerUserId } : {}),
-      assurance: (item.assurance === "calendar_verified" || item.assurance === "name_match" ? item.assurance : "unverified") as "calendar_verified" | "name_match" | "unverified",
+      assurance: item.assurance === "confirmed" ? "confirmed" as const : item.assurance === "calendar_matched" || item.assurance === "calendar_verified" || item.assurance === "name_match" ? "calendar_matched" as const : "unverified" as const,
       ...(typeof item.isHost === "boolean" ? { isHost: item.isHost } : {}),
       status: item.status === "left" ? "left" as const : "present" as const,
       updatedAt: typeof item.updatedAt === "number" && Number.isSafeInteger(item.updatedAt) ? item.updatedAt : Date.now(),
@@ -6054,7 +6059,7 @@ export async function updateRecallMeeting(uid: number, id: string, patch: Partia
   if (patch.turnMetrics !== undefined && (!Number.isSafeInteger(patch.turnMetrics.updatedAt) || patch.turnMetrics.updatedAt <= 0)) throw new Error("Meeting turn metrics are invalid");
   if (patch.outcomeFollowThrough?.notionTool && (patch.outcomeFollowThrough.notionTool.length > 128 || !/^NOTION_[A-Z0-9_]+$/.test(patch.outcomeFollowThrough.notionTool))) throw new Error("Meeting outcome Notion action is invalid");
   if (patch.outcomeFollowThrough?.notionUrl && (patch.outcomeFollowThrough.notionUrl.length > 2_048 || !/^https:\/\/(?:[\w-]+\.)*notion\.so\//.test(patch.outcomeFollowThrough.notionUrl) && !/^https:\/\/(?:[\w-]+\.)*notion\.site\//.test(patch.outcomeFollowThrough.notionUrl))) throw new Error("Meeting outcome Notion URL is invalid");
-  if (patch.participantRoster && (patch.participantRoster.length > 40 || patch.participantRoster.some((participant) => !participant || !/^[A-Za-z0-9_-]{1,128}$/.test(participant.id) || typeof participant.name !== "string" || !participant.name.trim() || participant.name.length > 160 || (participant.email !== undefined && (typeof participant.email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(participant.email))) || (participant.providerUserId !== undefined && (typeof participant.providerUserId !== "string" || !/^[A-Za-z0-9:_-]{1,160}$/.test(participant.providerUserId))) || (participant.assurance !== undefined && !["calendar_verified", "name_match", "unverified"].includes(participant.assurance)) || (participant.identityStatus !== undefined && participant.identityStatus !== "named" && participant.identityStatus !== "unknown") || (participant.isHost !== undefined && typeof participant.isHost !== "boolean") || (participant.status !== "present" && participant.status !== "left") || !Number.isSafeInteger(participant.updatedAt)))) throw new Error("Meeting participant roster is invalid");
+  if (patch.participantRoster && (patch.participantRoster.length > 40 || patch.participantRoster.some((participant) => !participant || !/^[A-Za-z0-9_-]{1,128}$/.test(participant.id) || typeof participant.name !== "string" || !participant.name.trim() || participant.name.length > 160 || (participant.email !== undefined && (typeof participant.email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(participant.email))) || (participant.emailSource !== undefined && participant.emailSource !== "recall_match") || (participant.providerUserId !== undefined && (typeof participant.providerUserId !== "string" || !/^[A-Za-z0-9:_-]{1,160}$/.test(participant.providerUserId))) || (participant.assurance !== undefined && !["confirmed", "calendar_matched", "unverified"].includes(participant.assurance)) || (participant.identityStatus !== undefined && participant.identityStatus !== "named" && participant.identityStatus !== "unknown") || (participant.isHost !== undefined && typeof participant.isHost !== "boolean") || (participant.status !== "present" && participant.status !== "left") || !Number.isSafeInteger(participant.updatedAt)))) throw new Error("Meeting participant roster is invalid");
   if (patch.speakerEvents && (patch.speakerEvents.length > 200 || patch.speakerEvents.some((event) => !event || (event.type !== "speech_on" && event.type !== "speech_off") || typeof event.participantId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(event.participantId) || !Number.isSafeInteger(event.at) || event.at <= 0))) throw new Error("Meeting speaker timeline is invalid");
   const effectivePatch = { ...patch };
   if (patch.status === "ended" && current.transcriptRetentionDays && !current.transcriptExpiresAt) {
@@ -8524,6 +8529,7 @@ export async function upsertMemory(uid: number, memory: Omit<MemoryFact, "id" | 
     source: memory.source || "user",
     sensitivity: memory.sensitivity === "sensitive" ? "sensitive" : "normal",
     meetingSafe: memory.meetingSafe === true,
+    meetingVerdict: memory.meetingVerdict === "safe" || memory.meetingVerdict === "unsafe" || memory.meetingVerdict === "unknown" ? memory.meetingVerdict : undefined,
     status: "active",
     projectId: typeof memory.projectId === "string" ? memory.projectId.trim() || undefined : undefined,
     organizationId: typeof memory.organizationId === "string" ? memory.organizationId.trim() || undefined : undefined,
@@ -8535,7 +8541,7 @@ export async function upsertMemory(uid: number, memory: Omit<MemoryFact, "id" | 
   };
   if (durableMemoryConfigured()) {
     const entity = value.personKey ? await saveMemoryEntity({ ownerUserId: uid, type: "person", canonicalName: value.personKey }) : value.projectId ? await saveMemoryEntity({ ownerUserId: uid, type: "project", canonicalName: value.projectId }) : undefined;
-    const persisted = await saveDurableMemory({ ownerUserId: uid, scope: { kind: value.organizationId ? "organization" : value.projectId ? "project" : "personal", externalId: value.organizationId ?? value.projectId ?? String(uid) }, category: value.category as never, key: value.key, value: value.value, confidence: value.confidence, sensitivity: value.sensitivity, meetingSafe: value.meetingSafe, source: { type: value.source, ref: value.id }, entityId: entity?.id, reviewAt: value.reviewAt, expiresAt: value.expiresAt, id: value.id });
+    const persisted = await saveDurableMemory({ ownerUserId: uid, scope: { kind: value.organizationId ? "organization" : value.projectId ? "project" : "personal", externalId: value.organizationId ?? value.projectId ?? String(uid) }, category: value.category as never, key: value.key, value: value.value, confidence: value.confidence, sensitivity: value.sensitivity, meetingSafe: value.meetingSafe, meetingVerdict: value.meetingVerdict, source: { type: value.source, ref: value.id }, entityId: entity?.id, reviewAt: value.reviewAt, expiresAt: value.expiresAt, id: value.id });
     value.id = persisted.id;
   }
   s.memories = [...s.memories.filter((m) => m.id !== value.id && !(m.category === value.category && m.key === value.key)), value].slice(-200);
@@ -8576,6 +8582,7 @@ export async function upsertMemoryAndContext(
     source: memory.source || "user",
     sensitivity: memory.sensitivity === "sensitive" ? "sensitive" : "normal",
     meetingSafe: memory.meetingSafe === true,
+    meetingVerdict: memory.meetingVerdict === "safe" || memory.meetingVerdict === "unsafe" || memory.meetingVerdict === "unknown" ? memory.meetingVerdict : undefined,
     status: "active",
     projectId: typeof memory.projectId === "string" ? memory.projectId.trim() || undefined : undefined,
     organizationId: typeof memory.organizationId === "string" ? memory.organizationId.trim() || undefined : undefined,
@@ -8614,7 +8621,7 @@ export async function upsertMemoryAndContext(
       : savedMemory.projectId
         ? saveMemoryEntity({ ownerUserId: uid, type: "project", canonicalName: savedMemory.projectId })
         : undefined);
-    const persisted = await withMemoryPersistenceStage("save_memory", () => saveDurableMemory({ ownerUserId: uid, scope: { kind: savedMemory.organizationId ? "organization" : savedMemory.projectId ? "project" : "personal", externalId: savedMemory.organizationId ?? savedMemory.projectId ?? String(uid) }, category: savedMemory.category as never, key: savedMemory.key, value: savedMemory.value, confidence: savedMemory.confidence, sensitivity: savedMemory.sensitivity, meetingSafe: savedMemory.meetingSafe, source: { type: savedMemory.source, ref: savedMemory.id }, entityId: entity?.id, reviewAt: savedMemory.reviewAt, expiresAt: savedMemory.expiresAt, id: savedMemory.id }));
+    const persisted = await withMemoryPersistenceStage("save_memory", () => saveDurableMemory({ ownerUserId: uid, scope: { kind: savedMemory.organizationId ? "organization" : savedMemory.projectId ? "project" : "personal", externalId: savedMemory.organizationId ?? savedMemory.projectId ?? String(uid) }, category: savedMemory.category as never, key: savedMemory.key, value: savedMemory.value, confidence: savedMemory.confidence, sensitivity: savedMemory.sensitivity, meetingSafe: savedMemory.meetingSafe, meetingVerdict: savedMemory.meetingVerdict, source: { type: savedMemory.source, ref: savedMemory.id }, entityId: entity?.id, reviewAt: savedMemory.reviewAt, expiresAt: savedMemory.expiresAt, id: savedMemory.id }));
     savedMemory.id = persisted.id;
     savedContext.sourceRef = persisted.id;
   }
@@ -8659,7 +8666,7 @@ async function withMemoryPersistenceStage<T>(stage: MemoryPersistenceStage, oper
   }
 }
 
-export async function updateMemory(uid: number, target: { id?: string; key?: string; category?: MemoryFact["category"] }, patch: Partial<Pick<MemoryFact, "category" | "key" | "value" | "confidence" | "source" | "sensitivity" | "meetingSafe" | "projectId" | "organizationId" | "personKey" | "reviewAt" | "expiresAt">>): Promise<MemoryFact | undefined> {
+export async function updateMemory(uid: number, target: { id?: string; key?: string; category?: MemoryFact["category"] }, patch: Partial<Pick<MemoryFact, "category" | "key" | "value" | "confidence" | "source" | "sensitivity" | "meetingSafe" | "meetingVerdict" | "projectId" | "organizationId" | "personKey" | "reviewAt" | "expiresAt">>): Promise<MemoryFact | undefined> {
   const session = await getSession(uid);
   const existing = session.memories.find((memory) => target.id ? memory.id === target.id : memory.key === target.key && (!target.category || memory.category === target.category));
   if (!existing) return undefined;
@@ -8672,6 +8679,10 @@ export async function updateMemory(uid: number, target: { id?: string; key?: str
     source: changed.source ?? existing.source,
     sensitivity: changed.sensitivity ?? existing.sensitivity,
   };
+  const classification = await classifyMemory({ key: updated.key, value: updated.value, category: updated.category, sensitivity: updated.sensitivity });
+  updated.sensitivity = existing.sensitivity === "sensitive" || classification.audience === "sensitive" ? "sensitive" : updated.sensitivity;
+  updated.meetingSafe = classification.meetingSafe;
+  updated.meetingVerdict = classification.meetingVerdict;
   const kind = (["preference", "relationship", "fact", "decision", "objective", "open_loop"] as string[]).includes(updated.category)
     ? updated.category as ContextNodeRecord["kind"]
     : "memory";

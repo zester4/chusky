@@ -14,6 +14,7 @@ export type MemoryCategory =
   | "asset";       // References to saved images, logos, documents, media
 
 export type MemoryStatus = "active" | "superseded" | "deleted";
+export type MeetingVerdict = "safe" | "unsafe" | "unknown";
 
 export type MemoryScopeKind = "personal" | "organization" | "team" | "project" | "client" | "meeting" | "conversation" | "channel";
 export type MemoryEntityType = "person" | "organization" | "team" | "project" | "client" | "product" | "tool" | "meeting";
@@ -30,6 +31,7 @@ export interface DurableMemoryRecord {
   confidence: number;
   sensitivity: "normal" | "sensitive";
   meetingSafe?: boolean;
+  meetingVerdict?: MeetingVerdict;
   status: MemoryStatus | "needs_review";
   source?: { id: string; type: string; ref?: string };
   entityId?: string;

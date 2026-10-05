@@ -3,7 +3,7 @@ import type { RecallMeetingParticipant, RecallMeetingSpeakerEvent } from "../sto
 export interface RecallAttributedSpeaker {
   participantId: string;
   name: string;
-  assurance?: "calendar_verified" | "name_match" | "unverified";
+  assurance: "confirmed" | "calendar_matched" | "unverified";
   email?: string;
 }
 
@@ -82,15 +82,15 @@ export function resolveRecallMeetingSpeaker(
   if (participant?.identityStatus === "unknown") return undefined;
   const name = participant?.name.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
   if (!name) return undefined;
-  const assurance = participant?.assurance === "calendar_verified"
-    ? "calendar_verified"
-    : participant?.assurance === "name_match"
-      ? "name_match"
-      : undefined;
+  const assurance = participant?.assurance === "confirmed"
+    ? "confirmed"
+    : participant?.assurance === "calendar_matched"
+      ? "calendar_matched"
+      : "unverified";
   return {
     participantId,
     name,
-    ...(assurance ? { assurance } : {}),
+    assurance,
     ...(participant?.email ? { email: participant.email } : {}),
   };
 }

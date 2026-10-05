@@ -60,6 +60,8 @@ const PRIVATE_LANGUAGE = /\b(my|i|me|mine|personal|private|home|family|daughter|
  */
 function isMeetingSafeMemory(memory: MemoryFact): boolean {
   if (memory.sensitivity !== "normal") return false;
+  if (memory.meetingVerdict === "unsafe") return false;
+  if (memory.meetingVerdict === "safe") return true;
   if (memory.meetingSafe === true) return true;
   if (COMPANY_MEETING_CATEGORIES.has(memory.category) && !PRIVATE_LANGUAGE.test(`${memory.key} ${memory.value}`)) return true;
   return memory.meetingSafe === undefined
@@ -71,6 +73,7 @@ function isOwnerApprovedClientRelationship(memory: MemoryFact): boolean {
   return memory.category === "relationship"
     && memory.source === "owner"
     && memory.meetingSafe !== false
+    && memory.meetingVerdict !== "unsafe"
     && !PRIVATE_LANGUAGE.test(`${memory.key} ${memory.value}`);
 }
 

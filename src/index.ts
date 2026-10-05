@@ -1019,6 +1019,7 @@ async function main(): Promise<void> {
                     ? (speculative ? { toolAllow: [] } : { ownerPrivateRun: true })
                     : { toolAllow: roomPolicy ? meetingRoomToolAllowlist(roomPolicy) : representativeActive ? meetingRepresentativeToolAllowlist(profile, meeting.mission) : [] }),
                   meetingComposioAccountAliases: representativeActive ? profile!.composioAccountAliases : undefined,
+                  meetingCompanyLevelTools: trustedOwnerPrivateRun ? profile?.companyLevelTools : undefined,
                   meetingAppAccess: !trustedOwnerPrivateRun && representativeActive && !roomPolicy,
                   meetingCapabilityContext: !trustedOwnerPrivateRun && representativeActive ? {
                     role: profile!.role,
@@ -2937,6 +2938,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                     }),
                     meetingId: event.meetingId,
                     meetingComposioAccountAliases: representativeActive ? representativeProfile!.composioAccountAliases : undefined,
+                    meetingCompanyLevelTools: ownerPrivateMeeting ? representativeProfile?.companyLevelTools : undefined,
                     meetingAppAccess: !ownerPrivateMeeting && representativeActive && !roomPolicy,
                     meetingCapabilityContext: !ownerPrivateMeeting && representativeActive ? {
                       role: representativeProfile!.role,

@@ -62,7 +62,7 @@ import { claimUpgradeNotice, formatAgentReleaseContext, formatAgentUpgradeNotice
 import { abortable, safeToolAudit, throwIfAborted } from "./cancellation.js";
 import { reconcileComposioTriggerSubscription, type ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
 import { SHOPPING_AGENT_PLAYBOOK } from "./shopping/shopping.js";
-import { applyMeetingComposioAccountAlias, filterMeetingRecordResult, isMeetingCalendarAvailabilityTool, isMeetingCalendarWriteTool, isMeetingRecordLookupTool, isMeetingRepresentativeComposioTool, selectMeetingToolsForToolkit } from "./meetings/representative.js";
+import { applyMeetingComposioAccountAlias, filterMeetingRecordResult, isMeetingCalendarAvailabilityTool, isMeetingCalendarWriteTool, isMeetingRecordLookupTool, isMeetingRepresentativeComposioTool, meetingRecordLookupIsScoped, selectMeetingToolsForToolkit } from "./meetings/representative.js";
 import { meetingDisclosureCheck } from "./decisions/disclosureGate.js";
 import { mcpClient } from "./mcp/client.js";
 import { requiresLiveWebResearchRequest } from "./channels/groupInstructions.js";
@@ -1946,10 +1946,11 @@ export interface AgentRunOptions {
   /** Authenticated meeting identity for scoped native meeting tools. */
   meetingId?: string;
   /** Current Recall speaker assurance; display-name matches never authorize record reads. */
-  meetingParticipantAssurance?: "calendar_verified" | "name_match" | "unverified";
+  meetingParticipantAssurance?: "confirmed" | "calendar_matched" | "unverified" | "calendar_verified" | "name_match";
   meetingParticipantName?: string;
   meetingParticipantEmail?: string;
   meetingHasExternalParticipants?: boolean;
+  meetingCompanyLevelTools?: string[];
   toolDeny?: string[];
   /** Run on volatile shared context: omit private context and durable run traces. */
   ephemeral?: boolean;
@@ -2931,7 +2932,7 @@ export async function runAgent(
       posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: round + 1, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
       let finalText = await addUpgradeNotice(appendPreviewLinks(rawText, previewLinks));
       if (options?.meetingId && options.meetingHasExternalParticipants) {
-        const disclosure = await meetingDisclosureCheck({ text: finalText, usedRecordTool: toolsUsed.some(isMeetingRecordLookupTool), verifiedParticipant: options.meetingParticipantAssurance === "calendar_verified", sessionId: `meeting-disclosure:${options.meetingId}` });
+        const disclosure = await meetingDisclosureCheck({ text: finalText, usedRecordTool: toolsUsed.some((slug) => isMeetingRecordLookupTool(slug, options.meetingCompanyLevelTools)), verifiedParticipant: options.meetingParticipantAssurance === "confirmed", sessionId: `meeting-disclosure:${options.meetingId}` });
         if (!disclosure.allowed && !modelTextStreamed) finalText = "I’ll follow up privately with the owner on that.";
       }
       await persistRun("completed", "run.completed", finalText, { finishReason: finish_reason ?? "unknown" });
@@ -3046,14 +3047,9 @@ export async function runAgent(
         if (options?.meetingId && isMeetingCalendarWriteTool(slug) && !meetingCalendarAvailabilityChecked) {
           throw new Error("Check real calendar availability first with a successful calendar availability or event-list action; only then create or reschedule the event.");
         }
-        if (options?.meetingId && options.meetingHasExternalParticipants && isMeetingRecordLookupTool(slug)) {
-          if (options.meetingParticipantAssurance !== "calendar_verified") {
-            throw new Error("This meeting record lookup requires a calendar-verified participant; display names and self-claims are not identity proof. I will follow up privately.");
-          }
-          const identity = [options.meetingParticipantEmail, options.meetingParticipantName].filter(Boolean).map((value) => String(value).toLowerCase());
-          const serializedArgs = JSON.stringify(args).toLowerCase();
-          if (!identity.some((value) => value && serializedArgs.includes(value))) {
-            throw new Error("This meeting record lookup must be explicitly scoped to the verified participant; broad or mismatched searches are refused.");
+        if (options?.meetingId && options.meetingHasExternalParticipants && isMeetingRecordLookupTool(slug, options.meetingCompanyLevelTools)) {
+          if (!meetingRecordLookupIsScoped(slug, args, options.meetingParticipantEmail, options.meetingParticipantAssurance)) {
+            throw new Error("This meeting record lookup requires a confirmed participant and an exact supported email filter. Broad, name-only, and unsupported-provider searches are refused; no provider read was attempted.");
           }
         }
         toolCallsExecuted += 1;
@@ -3363,8 +3359,8 @@ export async function runAgent(
               throw new ApprovalRequiredError(delegation.approvalId, delegation.proposal.actionName, payload);
             }
           }
-          if (options?.meetingId && options.meetingHasExternalParticipants && isMeetingRecordLookupTool(slug) && options.meetingParticipantAssurance === "calendar_verified") {
-            execResult = filterMeetingRecordResult(execResult, [options.meetingParticipantEmail ?? "", options.meetingParticipantName ?? ""]);
+          if (options?.meetingId && options.meetingHasExternalParticipants && isMeetingRecordLookupTool(slug, options.meetingCompanyLevelTools) && options.meetingParticipantAssurance === "confirmed") {
+            execResult = filterMeetingRecordResult(execResult, [options.meetingParticipantEmail ?? ""]);
           }
           if ((slug === "CHUCK_DAYTONA_PREVIEW" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object") {
             const url = String((execResult as { url?: unknown }).url ?? "").trim();

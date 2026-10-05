@@ -12,13 +12,13 @@ test("display-name-only Recall speaker remains unverified", () => {
   assert.equal(result?.assurance, "unverified");
 });
 
-test("calendar-verified participant carries only the verified email", () => {
+test("Recall calendar match remains a non-confirmed identity hint", () => {
   const result = resolveRecallMeetingSpeaker(
     [{ type: "speech_on", participantId: "p1", at: 1_000 }, { type: "speech_off", participantId: "p1", at: 2_000 }],
-    [{ id: "p1", name: "Sarah Lee", email: "sarah@example.com", status: "present", updatedAt: 1_000, assurance: "calendar_verified" }],
+    [{ id: "p1", name: "Sarah Lee", email: "sarah@example.com", status: "present", updatedAt: 1_000, assurance: "calendar_matched" }],
     1_000,
     2_000,
   );
-  assert.equal(result?.assurance, "calendar_verified");
+  assert.equal(result?.assurance, "calendar_matched");
   assert.equal(result?.email, "sarah@example.com");
 });

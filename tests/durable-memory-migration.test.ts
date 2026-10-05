@@ -29,3 +29,13 @@ test("reflection migration is a reviewable staging queue, not an active fact tab
   assert.match(sql, /UNIQUE \(owner_user_id, idempotency_key\)/);
   assert.match(sql, /chusky_memory_reflections_review_idx/);
 });
+
+test("memory meeting verdict migration adds a nullable tri-state compatibility column", async () => {
+  const sql = await readFile(new URL("../migrations/0015_durable_memory_meeting_verdict.sql", import.meta.url), "utf8");
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS meeting_verdict text/);
+  assert.match(sql, /'safe', 'unsafe', 'unknown'/);
+  assert.match(sql, /meeting_verdict IS NULL/);
+  const script = await readFile(new URL("../src/migrate-durable-memory.ts", import.meta.url), "utf8");
+  assert.match(script, /0015_durable_memory_meeting_verdict\.sql/);
+  assert.match(script, /chusky_memory_items\.meeting_verdict/);
+});

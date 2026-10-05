@@ -9,10 +9,12 @@ test("memory classifier never sends locally sensitive text to Jev and fails clos
   assert.equal(calls.length, 0);
   assert.equal(result.meetingSafe, false);
   assert.equal(result.audience, "sensitive");
+  assert.equal(result.meetingVerdict, "unsafe");
 });
 
 test("disabled memory classification remains owner-only for meeting exposure", async () => {
   const result = await classifyMemory({ key: "conversation.remembered", value: "Our refund window is 30 days", category: "fact", explicit: true });
   assert.equal(result.meetingSafe, false);
   assert.equal(result.audience, "owner_only");
+  assert.equal(result.meetingVerdict, "unknown");
 });

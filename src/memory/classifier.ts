@@ -4,12 +4,14 @@ import { recordDecision } from "../decisions/telemetry.js";
 import type { MemoryCategory } from "./types.js";
 
 export type MemoryAudience = "owner_only" | "meeting_safe_business" | "sensitive";
+export type MeetingVerdict = "safe" | "unsafe" | "unknown";
 export interface MemoryClassification {
   category: MemoryCategory;
   audience: MemoryAudience;
   durable: boolean;
   confidence: number;
   meetingSafe: boolean;
+  meetingVerdict: MeetingVerdict;
   source: "deterministic" | "jev";
   reason: string;
 }
@@ -23,7 +25,7 @@ function deterministic(input: { key: string; value: string; category?: MemoryCat
   const sensitive = input.sensitivity === "sensitive" || isSensitive(`${input.key} ${input.value}`);
   const category = input.category && categorySet.has(input.category) ? input.category : "fact";
   const meetingSafe = !sensitive && ["business", "procedural", "project"].includes(category) && !/\b(my|i|me|mine|personal|private|home|family|daughter|son|doctor|health|salary|friend)\b/i.test(`${input.key} ${input.value}`);
-  return { category, audience: sensitive ? "sensitive" : meetingSafe ? "meeting_safe_business" : "owner_only", durable: Boolean(input.value.trim()), confidence: sensitive ? 1 : 0.5, meetingSafe, source: "deterministic", reason: sensitive ? "Local sensitivity rules require private handling." : "Jev classification was unavailable or disabled; meeting exposure remains closed." };
+  return { category, audience: sensitive ? "sensitive" : meetingSafe ? "meeting_safe_business" : "owner_only", durable: Boolean(input.value.trim()), confidence: sensitive ? 1 : 0.5, meetingSafe, meetingVerdict: sensitive ? "unsafe" : "unknown", source: "deterministic", reason: sensitive ? "Local sensitivity rules require private handling." : "Jev classification was unavailable or disabled; meeting exposure remains unclassified." };
 }
 
 export async function classifyMemory(input: { key: string; value: string; category?: MemoryCategory; sensitivity?: "normal" | "sensitive"; explicit?: boolean; client?: JevClient; sessionId?: string; budgetMs?: number }): Promise<MemoryClassification> {
@@ -46,7 +48,11 @@ export async function classifyMemory(input: { key: string; value: string; catego
   const audience = (["owner_only", "meeting_safe_business", "sensitive"] as string[]).includes(audienceAnswer.choice) ? audienceAnswer.choice as MemoryAudience : "owner_only";
   const confidence = Math.min(categoryAnswer.confidence, audienceAnswer.confidence);
   const meetingSafe = audience === "meeting_safe_business" && confidence >= 0.9 && !isSensitive(`${input.key} ${input.value}`) && ["business", "procedural", "project"].includes(category);
+  const meetingVerdict: MeetingVerdict = isSensitive(`${input.key} ${input.value}`)
+    || ((audience === "owner_only" || audience === "sensitive") && confidence >= 0.7)
+    ? "unsafe"
+    : meetingSafe ? "safe" : "unknown";
   recordDecision({ surface: "memory", mode: config.jevMode === "enforce" ? "enforce" : "shadow", applied: config.jevMode === "enforce", jev: [{ id: category, p: categoryAnswer.probabilities[category] ?? categoryAnswer.confidence }, { id: audience, p: audienceAnswer.probabilities[audience] ?? audienceAnswer.confidence }], baseline: [fallback.category, fallback.audience], latencyMs: result.latencyMs, costUsd: result.costUsd, model: result.model, routeSource: "jev" });
   if (config.jevMode !== "enforce") return fallback;
-  return { category, audience, durable: durableAnswer.type === "noul" ? durableAnswer.noul >= 0.5 : fallback.durable, confidence, meetingSafe, source: "jev", reason: "Jev proposed classification; local sensitivity and meeting-safe constraints remain authoritative." };
+  return { category, audience, durable: durableAnswer.type === "noul" ? durableAnswer.noul >= 0.5 : fallback.durable, confidence, meetingSafe: meetingVerdict === "safe", meetingVerdict, source: "jev", reason: "Jev proposed classification; local sensitivity and meeting-safe constraints remain authoritative." };
 }
