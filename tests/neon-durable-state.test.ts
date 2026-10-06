@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { durableSdkRunHash, DURABLE_SESSION_DOMAINS, NeonDurableState, type DurableMissionRecord } from "../src/neonDurableState.js";
-import { DURABLE_SESSION_FORMAT, joinSessionDomains, mergeDurableSessionDomain, splitSessionDomains } from "../src/sessionDomains.js";
+import { DURABLE_SESSION_FORMAT, DurableSessionDocumentsIncompleteError, joinSessionDomains, mergeDurableSessionDomain, splitSessionDomains } from "../src/sessionDomains.js";
 import type { UserSession } from "../src/store.js";
 
 class FakeClient {
@@ -461,7 +461,16 @@ test("session split leaves runs out of the SDK document and emits owner-thread r
   assert.deepEqual((domains.get("sdk") as { sdkThreads: Array<{ runs: unknown[] }> }).sdkThreads[0]?.runs, []);
   assert.deepEqual(sdkRuns, [{ threadId: "thr_1", run: original.sdkThreads![0]!.runs[0] }]);
   assert.deepEqual(joinSessionDomains(core, domains).sdkThreads?.[0]?.runs, []);
-  assert.throws(() => joinSessionDomains(core, new Map()), /incomplete/);
+  const incompleteDomains = new Map(domains);
+  incompleteDomains.delete("assets");
+  assert.throws(
+    () => joinSessionDomains(core, incompleteDomains),
+    (error) => {
+      assert.ok(error instanceof DurableSessionDocumentsIncompleteError);
+      assert.deepEqual(error.missingDomains, ["assets"]);
+      return true;
+    },
+  );
 });
 
 test("session-domain writes retain embedded SDK runs until per-run cutover is enabled", () => {

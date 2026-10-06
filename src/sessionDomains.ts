@@ -9,6 +9,16 @@ export type DurableSessionPayloads = Map<DurableSessionDomain, unknown>;
 
 const MISSING = Symbol("missing durable domain value");
 
+export class DurableSessionDocumentsIncompleteError extends Error {
+  readonly missingDomains: DurableSessionDomain[];
+
+  constructor(missingDomains: DurableSessionDomain[]) {
+    super(`Durable session documents are incomplete (missing: ${missingDomains.join(", ")}); refusing to read stale session state.`);
+    this.name = "DurableSessionDocumentsIncompleteError";
+    this.missingDomains = missingDomains;
+  }
+}
+
 /** Merge non-overlapping edits without allowing a stale session to erase a newer one. */
 export function mergeDurableSessionDomain(base: unknown, current: unknown, desired: unknown, domain: DurableSessionDomain): unknown {
   let visited = 0;
@@ -81,7 +91,8 @@ function object(value: unknown): Record<string, unknown> { return value && typeo
 
 /** Rehydrate a normal UserSession only when all canonical Neon documents exist. */
 export function joinSessionDomains(core: UserSession, documents: ReadonlyMap<DurableSessionDomain, unknown>): UserSession {
-  if (DURABLE_SESSION_DOMAINS.some((domain) => !documents.has(domain))) throw new Error("Durable session documents are incomplete; refusing to read stale session state.");
+  const missingDomains = DURABLE_SESSION_DOMAINS.filter((domain) => !documents.has(domain));
+  if (missingDomains.length) throw new DurableSessionDocumentsIncompleteError(missingDomains);
   const conversation = object(documents.get("conversation"));
   const profile = object(documents.get("profile"));
   const memories = object(documents.get("memories"));

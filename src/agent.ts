@@ -41,6 +41,7 @@ import type { ApiMessage, ContentPart, TaskWaitRequest, ToolCall } from "./types
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { buildTemporalContext, type TemporalContext } from "./temporal.js";
 import { daytonaEngine, safeDaytonaPath, DaytonaInputError } from "./lib/daytona/index.js";
+import { prepareVaultSetupDelivery } from "./vault/setupLink.js";
 import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestination } from "./video.js";
 import { listVideoModels, resolveVideoRequest } from "./videoModels.js";
 import { imageModelAcceptsExactSize, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
@@ -3365,6 +3366,11 @@ export async function runAgent(
           if ((slug === "CHUCK_DAYTONA_PREVIEW" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object") {
             const url = String((execResult as { url?: unknown }).url ?? "").trim();
             if (url) previewLinks.push(url);
+          }
+          if (slug === "CHUCK_VAULT_SAVE") {
+            const delivery = prepareVaultSetupDelivery(execResult);
+            privateLinks.push(delivery.privateLink);
+            execResult = delivery.modelResult;
           }
           if ((slug === "CHUCK_BROWSER_HANDOFF" || slug === "CHUCK_VAULT_LOGIN" || slug === "CHUCK_BROWSER") && execResult && typeof execResult === "object") {
             const vaultResult = execResult as { browserHandoff?: unknown };

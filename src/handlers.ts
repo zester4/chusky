@@ -44,6 +44,7 @@ import { daytonaEngine } from "./lib/daytona/index.js";
 import { connectMcpServer, disconnectMcpServer, listMcpCatalog, listMcpConnections } from "./mcp/client.js";
 import { browserSessionHealth } from "./vault/vault.js";
 import { defaultMediaInstruction } from "./mediaInput.js";
+import { DurableSessionDocumentsIncompleteError } from "./sessionDomains.js";
 import {
   cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinPreparedCalendarMeeting, joinRecallMeeting, leaveRecallMeeting,
   listRecallMeetingsForUser, lookupRecallMeetingContext, prepareRecallMeetingMission,
@@ -675,7 +676,16 @@ async function guard(ctx: Context): Promise<boolean> {
   if (ctx.from && ctx.chat && isAllowed(ctx)) {
     // Keep a direct-chat route for private fallback delivery. A group ID must
     // never replace it, otherwise a later approval could be sent publicly.
-    if (ctx.chat.type === "private") await setTelegramChatId(ctx.from.id, ctx.chat.id);
+    if (ctx.chat.type === "private") {
+      try {
+        await setTelegramChatId(ctx.from.id, ctx.chat.id);
+      } catch (error) {
+        if (!(error instanceof DurableSessionDocumentsIncompleteError)) throw error;
+        logger.error({ err: error, userId: ctx.from.id }, "Telegram update blocked because durable session documents are incomplete");
+        await ctx.reply("I couldn't safely access your saved session, so I didn't process this message. The service needs a session-store repair; please try again later.");
+        return false;
+      }
+    }
     await linkChannelIdentity(ctx.from.id, { provider: "telegram", externalUserId: String(ctx.from.id), displayName: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") });
   }
   if (isAllowed(ctx)) return true;
@@ -805,15 +815,13 @@ async function saveTelegramConversation(ctx: Context, userId: number, text: stri
   });
 }
 
-/** Send expiring browser handoff URLs outside saved conversational history. */
+/** Send expiring private browser and vault URLs outside saved conversational history. */
 async function sendPrivateBrowserLinks(ctx: Context, links: Awaited<ReturnType<typeof runAgent>>["privateLinks"]): Promise<void> {
   for (const link of links ?? []) {
-    // A Telegram URL button preserves the signed Daytona preview exactly and
-    // avoids an automatic chat-link preview navigating to a dashboard login.
-    await ctx.reply(`${link.label}\n\nThis private session expires soon. Complete the website step there, then return here and say continue.`, {
+    await ctx.reply(`${link.label}\n\nThis private link expires soon. Complete the website step there, then return here and say continue.`, {
       link_preview_options: { is_disabled: true },
       reply_markup: {
-        inline_keyboard: [[{ text: "Open private browser session", url: link.url }]],
+        inline_keyboard: [[{ text: link.label, url: link.url }]],
       },
     });
   }

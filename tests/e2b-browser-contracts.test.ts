@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { E2B_BROWSER_ACTIONS } from "../src/lib/e2b/types.js";
-import { assertE2BBrowserHandoffAllowsAction, isTrustedBrowserUrlObservation, normalizeE2BBrowserFileName, normalizeE2BPageContent } from "../src/lib/e2b/contracts.js";
+import { assertE2BBrowserHandoffAllowsAction, browserHandoffWaitingResult, isTrustedBrowserUrlObservation, normalizeE2BBrowserFileName, normalizeE2BPageContent, resolveE2BBrowserCommandTimeout } from "../src/lib/e2b/contracts.js";
+import { E2BBrowserHandoffWaitingError } from "../src/lib/e2b/errors.js";
 import { shouldUseE2BBrowser } from "../src/nativeTools.js";
 import { chuckTools } from "../src/agentTools.js";
 import { pendingVaultInspectionOrigins } from "../src/vault/browserGuard.js";
@@ -88,12 +89,37 @@ test("browser filenames cannot retain paths or control characters", () => {
   assert.equal(normalizeE2BBrowserFileName("../"), "browser-download.bin");
 });
 
+test("browser command timeouts are bounded by the configured request ceiling", () => {
+  assert.equal(resolveE2BBrowserCommandTimeout(undefined, 120_000), 120_000);
+  assert.equal(resolveE2BBrowserCommandTimeout(90_000, 120_000), 90_000);
+  assert.equal(resolveE2BBrowserCommandTimeout(200_000, 120_000), 120_000);
+  assert.equal(resolveE2BBrowserCommandTimeout(90_000, 45_000), 45_000);
+  for (const value of [0, -1, 999, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "90000"]) {
+    assert.throws(() => resolveE2BBrowserCommandTimeout(value, 120_000), /timeoutMs must be a positive whole number/);
+  }
+  assert.throws(() => resolveE2BBrowserCommandTimeout(undefined, 500), /configured E2B request timeout is invalid/);
+});
+
 test("human handoff blocks browser mutation until same-origin verification", () => {
   const handoff = {
     id: "bh_test", userId: 8, workspaceId: "sandbox", origin: "https://example.test", reason: "captcha" as const,
     status: "waiting" as const, createdAt: 10, expiresAt: 10_000,
   };
-  assert.throws(() => assertE2BBrowserHandoffAllowsAction("click", [handoff], "https://example.test/path", "sandbox", 100), /waiting for the owner/);
+  assert.throws(
+    () => assertE2BBrowserHandoffAllowsAction("click", [handoff], "https://example.test/path", "sandbox", 100),
+    (error) => error instanceof E2BBrowserHandoffWaitingError
+      && error.code === "handoff_waiting_for_owner"
+      && error.handoffId === handoff.id
+      && error.expiresAt === handoff.expiresAt,
+  );
+  assert.throws(() => assertE2BBrowserHandoffAllowsAction("open", [handoff], "https://example.test/path", "sandbox", 100), E2BBrowserHandoffWaitingError);
+  assert.doesNotThrow(() => assertE2BBrowserHandoffAllowsAction("status", [handoff], "https://example.test/path", "sandbox", 100));
+  assert.doesNotThrow(() => assertE2BBrowserHandoffAllowsAction("stop", [handoff], "https://example.test/path", "sandbox", 100));
+  const waitingResult = browserHandoffWaitingResult(new E2BBrowserHandoffWaitingError(handoff.id, handoff.expiresAt), "click");
+  assert.equal(waitingResult.status, "waiting_for_owner");
+  assert.equal(waitingResult.handoffId, handoff.id);
+  assert.match(waitingResult.next, /Do not retry browser actions/);
+  assert.equal("url" in waitingResult, false);
   const awaiting = { ...handoff, status: "awaiting_verification" as const };
   assert.doesNotThrow(() => assertE2BBrowserHandoffAllowsAction("snapshot", [awaiting], "https://example.test/path", "sandbox", 100));
   assert.throws(() => assertE2BBrowserHandoffAllowsAction("open", [awaiting], "https://example.test/path", "sandbox", 100), /awaiting same-origin verification/);

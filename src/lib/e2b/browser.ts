@@ -4,7 +4,7 @@ import { config } from "../../config.js";
 import { getSession, saveSession } from "../../store.js";
 import { guardVaultBrowserAction, rememberVaultBrowserNodes } from "../../vault/browserGuard.js";
 import { redactBrowserText } from "../../vault/browserObservation.js";
-import { assertE2BBrowserHandoffAllowsAction, normalizeE2BBrowserFileName, normalizeE2BPageContent } from "./contracts.js";
+import { assertE2BBrowserHandoffAllowsAction, DEFAULT_E2B_BROWSER_COMMAND_TIMEOUT_MS, normalizeE2BBrowserFileName, normalizeE2BPageContent, resolveE2BBrowserCommandTimeout } from "./contracts.js";
 import { E2BBrowserError } from "./errors.js";
 import { assertSafeBrowserUrl } from "./urlSafety.js";
 import { E2B_BROWSER_DENY_OUT_CIDRS } from "./networkPolicy.js";
@@ -236,13 +236,13 @@ export class E2BBrowserEngine {
     throw new E2BBrowserError(`E2B browser daemon did not become ready: ${lastError}; ${await this.runtimeDiagnostics(sandbox.sandboxId)}`);
   }
 
-  private async run(sandbox: Sandbox, request: Record<string, unknown>): Promise<E2BCommandResult> {
+  private async run(sandbox: Sandbox, request: Record<string, unknown>, commandTimeoutMs = Math.min(config.e2bRequestTimeoutMs, DEFAULT_E2B_BROWSER_COMMAND_TIMEOUT_MS)): Promise<E2BCommandResult> {
     const browserRequest = { ...request, webBotAuthEnabled: webBotAuthSigningEnabled() };
     const responseFile = `/tmp/chusky-browser-response-${randomUUID()}.json`;
     const result = await sandbox.commands.run("node /app/browser-client.mjs", {
       cwd: "/app",
       envs: { CHUSKY_E2B_REQUEST_B64: encodeRequest(browserRequest), CHUSKY_E2B_RESPONSE_FILE: responseFile },
-      timeoutMs: Math.min(config.e2bRequestTimeoutMs, 60_000),
+      timeoutMs: commandTimeoutMs,
       requestTimeoutMs: config.e2bRequestTimeoutMs,
     });
     if (result.exitCode !== 0) {
@@ -376,12 +376,12 @@ export class E2BBrowserEngine {
     return next;
   }
 
-  private async replanInteraction(userId: number, sandbox: Sandbox, record: E2BBrowserRecord, args: Record<string, unknown>, action: string): Promise<{ record: E2BBrowserRecord; selector: Record<string, unknown> }> {
+  private async replanInteraction(userId: number, sandbox: Sandbox, record: E2BBrowserRecord, args: Record<string, unknown>, action: string, commandTimeoutMs = Math.min(config.e2bRequestTimeoutMs, DEFAULT_E2B_BROWSER_COMMAND_TIMEOUT_MS)): Promise<{ record: E2BBrowserRecord; selector: Record<string, unknown> }> {
     const saved = typeof args.nodeId === "string" ? record.nodes?.find((item) => item.nodeId === args.nodeId) : undefined;
     const role = typeof saved?.role === "string" ? saved.role : typeof args.role === "string" ? args.role : undefined;
     const name = typeof saved?.name === "string" ? saved.name : typeof args.name === "string" ? args.name : undefined;
     if (!role || !name) throw new E2BBrowserError("Browser recovery needs the control role and accessible name; inspect the current page before retrying");
-    const inspected = await this.run(sandbox, { action: "find", currentUrl: record.lastUrl, role, name, nameMatch: args.nameMatch, limit: 12 });
+    const inspected = await this.run(sandbox, { action: "find", currentUrl: record.lastUrl, role, name, nameMatch: args.nameMatch, limit: 12 }, commandTimeoutMs);
     const url = typeof inspected.url === "string" ? inspected.url : record.lastUrl ?? "";
     const nodes = normalizeMatches(inspected, url, Date.now());
     const next = await this.persistResult(userId, record, inspected, nodes, "find");
@@ -408,6 +408,7 @@ export class E2BBrowserEngine {
     return withUserLock(userId, async () => {
       await this.purgeExpiredBrowserFiles(userId);
       const action = safeAction(args.action);
+      const commandTimeoutMs = resolveE2BBrowserCommandTimeout(args.timeoutMs, config.e2bRequestTimeoutMs);
       if (["clipboard_read", "clipboard_write"].includes(action)) {
         if (!internal.ownerPrivateRun) throw new E2BBrowserError("Clipboard access is available only in the owner's private conversation");
         if (!internal.ownerApprovedAction) throw new E2BBrowserError("Clipboard access requires owner approval");
@@ -459,7 +460,7 @@ export class E2BBrowserEngine {
         }
         try {
           const { sandbox } = await this.sandbox(userId, false);
-          const health = await this.run(sandbox, { action: "health" });
+          const health = await this.run(sandbox, { action: "health" }, commandTimeoutMs);
           return { provider: "e2b", sandboxId: record.sandboxId, lastUrl: record.lastUrl, title: record.title, sessionId: record.sessionId, expiresAt: record.expiresAt, health: health.health ?? health };
         } catch (error) {
           return { provider: "e2b", sandboxId: record.sandboxId, lastUrl: record.lastUrl, title: record.title, sessionId: record.sessionId, expiresAt: record.expiresAt, health: { status: "unhealthy", error: redactBrowserText(error instanceof Error ? error.message : String(error), 400) } };
@@ -512,7 +513,7 @@ export class E2BBrowserEngine {
         return { provider: "e2b", sandboxId: record.sandboxId, action, started: true, resumed: action === "resume", expiresAt: record.expiresAt };
       }
       if (action === "form_plan" || action === "form_fill") {
-        const inspected = await this.run(sandbox, { action: "form_inspect", currentUrl: record.lastUrl, includePageContent: internal.ownerPrivateRun === true });
+        const inspected = await this.run(sandbox, { action: "form_inspect", currentUrl: record.lastUrl, includePageContent: internal.ownerPrivateRun === true }, commandTimeoutMs);
         const forms = Array.isArray(inspected.forms) ? inspected.forms : [];
         const plan = planFormSubmission(forms, requestedFormFields(args.fields), typeof args.formId === "string" ? args.formId : undefined);
         record = await this.persistResult(userId, record, inspected, normalizeMatches(inspected, inspected.url ?? record.lastUrl ?? "", Date.now()), "form_inspect");
@@ -540,7 +541,7 @@ export class E2BBrowserEngine {
         Object.assign(request, { selector: selectorForNode(saved), ...(action === "fill" || action === "select_option" ? { value: args.value ?? args.text } : {}) });
       }
       if ((INTERACTIVE_ACTIONS as readonly string[]).includes(action) && !request.selector && (args.role || args.name)) {
-        const replanned = await this.replanInteraction(userId, sandbox, record, args, action);
+        const replanned = await this.replanInteraction(userId, sandbox, record, args, action, commandTimeoutMs);
         record = replanned.record;
         Object.assign(request, { selector: replanned.selector, ...(action === "fill" || action === "select_option" ? { value: args.value ?? args.text } : {}) });
       }
@@ -579,7 +580,7 @@ export class E2BBrowserEngine {
       if (action === "recording_stop" || action === "recording_get") request.recordingId = boundedText(args.recordingId ?? args.fileId, "recordingId", 128);
       let result: E2BCommandResult;
       try {
-        result = await this.run(sandbox, request);
+        result = await this.run(sandbox, request, commandTimeoutMs);
       } catch (error) {
         // Only replay idempotent control operations. A click, keypress, type,
         // submit, or coordinate action may already have caused an external
@@ -588,10 +589,10 @@ export class E2BBrowserEngine {
         const retryableCode = error instanceof E2BBrowserError && ["stale_observation", "action_timeout", "browser_action_failed"].includes(error.code);
         if (!retryable || !retryableCode) throw error;
         await new Promise((resolve) => setTimeout(resolve, 150));
-        const replanned = await this.replanInteraction(userId, sandbox, record, args, action);
+        const replanned = await this.replanInteraction(userId, sandbox, record, args, action, commandTimeoutMs);
         record = replanned.record;
         Object.assign(request, { selector: replanned.selector });
-        result = await this.run(sandbox, request);
+        result = await this.run(sandbox, request, commandTimeoutMs);
       }
       let importedFiles: E2BBrowserFileRecord[] = [];
       if (["wait_download"].includes(action)) importedFiles = await this.syncRuntimeFiles(userId, sandbox, record, "download");

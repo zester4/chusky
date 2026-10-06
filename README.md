@@ -828,6 +828,12 @@ can safely represent different websites. The agent can also use `CHUCK_BROWSER_P
 `CHUCK_BROWSER_HANDOFF_STATUS`, and `CHUCK_BROWSER_HANDOFF_COMPLETE`. Human CAPTCHA/2FA handoffs
 remain metadata-only and move from waiting to awaiting verification before the retained session is
 re-authorized.
+While a handoff is waiting for the owner, browser actions return a waiting state and remain blocked;
+after the owner returns, resume the handoff and verify the retained same-origin page before continuing.
+`CHUCK_BROWSER.timeoutMs` controls an individual E2B browser-agent command (120 seconds by default),
+bounded by the configured `E2B_REQUEST_TIMEOUT_MS` ceiling; it cannot disable the timeout.
+`CHUCK_VAULT_SAVE` setup URLs are bearer links delivered directly to the owner rather than copied
+through model output. If a setup page reports an invalid link, request a fresh setup link.
 
 ### Images across chat, Daytona, and connected apps
 

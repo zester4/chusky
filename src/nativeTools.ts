@@ -32,6 +32,8 @@ import {
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
 import { e2bBrowserEngine } from "./lib/e2b/index.js";
+import { E2BBrowserHandoffWaitingError } from "./lib/e2b/errors.js";
+import { browserHandoffWaitingResult } from "./lib/e2b/contracts.js";
 import { isTrustedBrowserUrlObservation } from "./lib/e2b/contracts.js";
 import { E2B_BROWSER_ACTIONS } from "./lib/e2b/types.js";
 import { transferDaytonaImage, type DaytonaImageTransferInput } from "./daytonaImageTransfer.js";
@@ -2422,6 +2424,10 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         }
         return result;
       } catch (error) {
+        if (error instanceof E2BBrowserHandoffWaitingError) {
+          await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "browser_action", ...(origin ? { origin } : {}), action, status: "waiting", summary: "Browser action paused until the owner completes the private handoff", createdAt: Date.now() });
+          return browserHandoffWaitingResult(error, action);
+        }
         await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "browser_action", ...(origin ? { origin } : {}), action, status: "failed", summary: `Browser ${String(args.action ?? "operation").replaceAll("_", " ")} failed`, createdAt: Date.now() });
         throw error;
       }
