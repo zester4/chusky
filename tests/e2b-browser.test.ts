@@ -64,7 +64,14 @@ test("E2B runtime starts display and browser services through separate idempoten
   assert.doesNotMatch(browserEngine, /process\.exit\(2\)/);
   assert.doesNotMatch(browserEngine, /bash -lc '[^\n]*chusky-xvfb\.pid[^\n]*chusky-fluxbox\.pid[^\n]*chusky-browser\.pid/);
   assert.match(browserEngine, /x11vnc -display :99 -rfbport 5900/);
+  assert.match(browserEngine, /const vncPasswordFile = "\/tmp\/chusky-vnc\.passwd"/);
+  assert.match(browserEngine, /-passwdfile \$\{vncPasswordFile\}/);
+  assert.match(browserEngine, /CHUSKY_VNC_PASSWORD/);
+  assert.doesNotMatch(browserEngine, /-passwd \$\{token\}/);
+  assert.match(browserEngine, /tail -n 12 \/tmp\/chusky-x11vnc\.log/);
   assert.match(browserEngine, /websockify --web=\/usr\/share\/novnc \$\{BROWSER_STREAM_PORT\} localhost:5900/);
+  assert.match(liveSmoke, /-passwdfile \$\{vncPasswordFile\}/);
+  assert.doesNotMatch(liveSmoke, /-passwd \$\{vncPassword\}/);
   assert.match(browserEngine, /vnc\.html#autoconnect=1&resize=scale&password=/);
   assert.doesNotMatch(browserEngine, /vnc\.html\?autoconnect=1&resize=scale&password=/);
   assert.match(browserEngine, /BROWSER_STREAM_PORT.*vnc\.html/);
