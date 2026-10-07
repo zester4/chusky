@@ -162,7 +162,7 @@ test("mission provider allowlists receive the routed direct action schema", asyn
   }
 });
 
-test("ordinary Composio turns expose JEV's exact action even in a small gateway session", async () => {
+test("ordinary Composio turns expose JEV's exact action even when its slug starts with COMPOSIO_", async () => {
   const userId = 831240;
   await initStore({ memoryOnly: true });
   invalidateSession(userId);
@@ -182,8 +182,8 @@ test("ordinary Composio turns expose JEV's exact action even in a small gateway 
   };
   setAgentDependenciesForTests({ composio: {
     create: async () => session,
-    connectedAccounts: { list: async () => ({ items: [{ id: "ca_exa", toolkit: { slug: "exa" }, status: "ACTIVE" }] }) },
-    tools: { getRawComposioTools: async () => [{ slug: "EXA_ANSWER", name: "Answer a question", description: "Answer using web research", toolkit: { slug: "exa" }, inputParameters: directSchema }] },
+    connectedAccounts: { list: async () => ({ items: [{ id: "ca_walmart", toolkit: { slug: "walmart" }, status: "ACTIVE" }] }) },
+    tools: { getRawComposioTools: async () => [{ slug: "COMPOSIO_SEARCH_WALMART", name: "Search Walmart", description: "Search Walmart for products", toolkit: { slug: "walmart" }, inputParameters: directSchema }] },
   } });
   config.jevMode = "enforce";
   config.jevSurfaces = new Set(["composio"]);
@@ -194,7 +194,7 @@ test("ordinary Composio turns expose JEV's exact action even in a small gateway 
     for (const [key, question] of Object.entries<any>(body.questions ?? {})) {
       if (question.type === "noul") { answers[key] = { type: "noul", noul: 0.99 }; continue; }
       const ids = Object.keys(question.criteria).filter((id) => id !== "__none__");
-      const selected = ids.find((id) => id === "EXA_ANSWER") ?? ids.find((id) => id === "exa") ?? ids[0] ?? "__none__";
+      const selected = ids.find((id) => id === "COMPOSIO_SEARCH_WALMART") ?? ids.find((id) => id === "walmart") ?? ids[0] ?? "__none__";
       const probabilities = Object.fromEntries(Object.keys(question.criteria).map((id) => [id, id === selected ? 0.99 : 0.01 / Math.max(1, Object.keys(question.criteria).length - 1)]));
       answers[key] = { type: "choice", choice: selected, confidence: 0.99, probabilities };
     }
@@ -207,17 +207,17 @@ test("ordinary Composio turns expose JEV's exact action even in a small gateway 
       const body = JSON.parse(String(init?.body ?? "{}"));
       requests.push(body);
       return modelResponse++ === 0
-        ? toolResponse("EXA_ANSWER", JSON.stringify({ query: "latest company news", max_results: 3 }))
+        ? toolResponse("COMPOSIO_SEARCH_WALMART", JSON.stringify({ query: "wireless headphones", max_results: 3 }))
         : chatResponse({ role: "assistant", content: "research complete" });
     }
     return new Response("{}", { status: 200 });
   }) as typeof fetch;
   try {
-    const result = await runAgent(userId, "Research the latest company news", [], "test/model", undefined, undefined, undefined, undefined, undefined, { ephemeral: true });
+    const result = await runAgent(userId, "Find wireless headphones on Walmart", [], "test/model", undefined, undefined, undefined, undefined, undefined, { ephemeral: true });
     assert.equal(result.text, "research complete");
-    assert.deepEqual(result.toolsSucceeded, ["EXA_ANSWER"]);
+    assert.deepEqual(result.toolsSucceeded, ["COMPOSIO_SEARCH_WALMART"]);
     const visible = requests[0]?.tools?.map((tool: any) => tool.function.name) ?? [];
-    assert.ok(visible.includes("EXA_ANSWER"), "ordinary turns must receive the exact JEV-routed action schema");
+    assert.ok(visible.includes("COMPOSIO_SEARCH_WALMART"), "ordinary turns must receive the exact JEV-routed action schema");
     assert.equal(visible.includes("COMPOSIO_GET_TOOL_SCHEMAS"), false, "the first round should not need schema discovery for the routed action");
   } finally {
     globalThis.fetch = originalFetch;

@@ -158,6 +158,13 @@ const LOCAL_TOOLS = modelFacingChuckTools.filter((tool) =>
   !tool.function.name.startsWith("CHUCK_TINYFISH_") || Boolean(config.tinyFishApiKey),
 );
 const HIDDEN_COMPOSIO_MODEL_TOOLS = new Set(["COMPOSIO_GET_CONNECTED_ACCOUNTS"]);
+const COMPOSIO_GATEWAY_TOOLS = new Set([
+  "COMPOSIO_SEARCH_TOOLS",
+  "COMPOSIO_EXECUTE_TOOL",
+  "COMPOSIO_GET_TOOL_SCHEMAS",
+  "COMPOSIO_MULTI_EXECUTE_TOOL",
+  "COMPOSIO_MANAGE_CONNECTIONS",
+]);
 const SHARED_PUBLIC_COMPOSIO_TOOLS = new Set(["COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT"]);
 export const VOICE_TURN_NATIVE_TOOLS = [
   "CHUCK_SEARCH_MEMORY",
@@ -2595,7 +2602,7 @@ export async function runAgent(
         const present = new Set(availableTools.map((tool) => toolName(tool)));
         for (const tool of composioDecision.directTools) {
           const slug = toolName(tool);
-          if (!slug || (allow && !allow.has(slug)) || present.has(slug) || deny.has(slug) || slug.startsWith("COMPOSIO_") || slug.startsWith("CHUCK_") || slug.startsWith("MCP_")) continue;
+          if (!slug || (allow && !allow.has(slug)) || present.has(slug) || deny.has(slug) || COMPOSIO_GATEWAY_TOOLS.has(slug) || slug.startsWith("CHUCK_") || slug.startsWith("MCP_")) continue;
           registerComposioToolMetadata(tool);
           availableTools.push(addAccountSelector(tool));
           present.add(slug);
@@ -2807,7 +2814,7 @@ export async function runAgent(
       imageComposioDirectActionGuidanceAdded = true;
     }
     const revealed = availableTools.filter((tool) => revealedNativeTools.has(toolSchemaName(tool)));
-    const composioGateway = new Set(["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_EXECUTE_TOOL", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_MANAGE_CONNECTIONS"]);
+    const composioGateway = COMPOSIO_GATEWAY_TOOLS;
     const missionPreloadNames = new Set(options?.missionToolHints ?? []);
     const preloadedMissionTools = missionPreloadNames.size
       ? availableTools.filter((tool) => missionPreloadNames.has(toolSchemaName(tool)))
