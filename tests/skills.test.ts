@@ -31,6 +31,19 @@ test("routes core engineering and growth skills deterministically", () => {
   assert.ok(meet.includes("meeting-pro"));
 });
 
+test("routes browser and shopping requests to browser-pro and loads its guidance", async () => {
+  for (const query of [
+    "Browse Walmart and add two sweaters to my cart",
+    "Fill out this website form",
+    "Sign in to a website and complete checkout",
+  ]) {
+    assert.ok(routedSkillNames(query).includes("browser-pro"), `expected browser-pro for ${query}`);
+  }
+  const context = await routedSkillContext("Browse Walmart and add two sweaters to my cart");
+  assert.match(context, /### browser-pro \((?:primary|supporting)\)/);
+  assert.match(context, /classify → plan → acquire → observe → act → verify → checkpoint/);
+});
+
 test("routes game requests to game-scaffold", () => {
   for (const query of ["game", "make a game", "scaffold game", "platformer", "snake", "tetris", "racing", "fps", "canvas game", "three.js game"]) {
     assert.ok(routedSkillNames(query).includes("game-scaffold"), `expected game-scaffold for ${query}`);

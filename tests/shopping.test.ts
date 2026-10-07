@@ -32,9 +32,16 @@ test("shopping starts retailer-neutral and suggests local options", async () => 
 test("shopping supports any clean HTTPS retailer after selection", async () => {
   const started = await startShopping(9003, { items: ["dog food"], category: "household" });
   const selected = await selectShoppingRetailer(9003, { id: started.id, retailer: "Pet Store", origin: "https://shop.example.com" });
-  assert.equal(selected.status, "awaiting_connection");
+  assert.equal(selected.status, "ready_to_shop");
   assert.equal(selected.retailer?.origin, "https://shop.example.com");
   await assert.rejects(() => selectShoppingRetailer(9003, { id: started.id, retailer: "Unsafe", origin: "http://shop.example.com" }), /HTTPS/);
+});
+
+test("retailer shopping starts with public discovery instead of forced login setup", async () => {
+  const result = await startShopping(9008, { items: ["two black sweaters"], category: "fashion", retailer: "Walmart", country: "US", postcode: "90503", budget: 100, deliveryPreference: "delivery" });
+  assert.equal(result.status, "ready_to_shop");
+  assert.match(result.nextStep, /browse the retailer publicly first/i);
+  assert.match(result.nextStep, /only if the live site requires authentication/i);
 });
 
 test("shopping plans update privately and cancellation does not affect an external cart", async () => {
