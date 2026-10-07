@@ -74,7 +74,7 @@ import { resolveComposioRoute } from "./composioRouting.js";
 import { buildArtifactEmailArguments, type ArtifactEmailFile } from "./artifactEmail.js";
 import { buildArtifactUploadArguments } from "./artifactBridge.js";
 import { compactModelMessages } from "./agentContext.js";
-import { compactConversationalCustomization, compactMissionCustomization, composeSystemPrompt } from "./prompt.js";
+import { compactActionCustomization, compactConversationalCustomization, compactMissionCustomization, composeSystemPrompt } from "./prompt.js";
 import { contextPrompt } from "./contextGraph.js";
 import { AUTONOMY_OPERATING_KERNEL, needsAutonomyCloseoutNudge } from "./autonomy/operatingLoop.js";
 import { createComposioOutcomeReadAdapter } from "./reliability/composioReadAdapter.js";
@@ -2694,7 +2694,7 @@ export async function runAgent(
       ? compactConversationalCustomization(config.chuckSystemPrompt)
       : options?.missionId
         ? compactMissionCustomization(config.chuckSystemPrompt)
-        : config.chuckSystemPrompt,
+        : compactActionCustomization(config.chuckSystemPrompt),
     mandatorySections: noToolTurn ? [] : ownerPrivateRun
       ? [AUTONOMY_OPERATING_KERNEL, ...(shoppingPromptRelevant ? [SHOPPING_AGENT_PLAYBOOK] : []), ...(meetingPromptRelevant ? [MEETING_MISSION_PLAYBOOK] : []), ...(triggerAutonomy ? [triggerAutonomy] : [])]
       : !voiceTurn && !sharedScope
