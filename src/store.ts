@@ -1482,6 +1482,12 @@ export interface ApprovalRecord {
   autonomyResume?: { kind: "reminder" | "job"; sourceId: string; occurrenceId?: string };
 }
 
+export interface TriggerEventAction {
+  id: string;
+  label: string;
+  prompt: string;
+}
+
 export interface TriggerEventRecord {
   eventId: string;
   userId: number;
@@ -1499,6 +1505,8 @@ export interface TriggerEventRecord {
   operatingObservationId?: string;
   operatingCommitmentId?: string;
   result?: string;
+  /** Bounded, model-suggested next steps surfaced as prepared chat actions. */
+  suggestedActions?: TriggerEventAction[];
   error?: string;
   /** Delivery is separate from processing: a missing channel must not erase a completed result. */
   notificationStatus?: "pending" | "delivered" | "unavailable" | "failed";

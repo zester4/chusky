@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mdToTelegramHtml } from "../src/markdown.js";
-import { ensureTriggerCloseout, TRIGGER_DEFAULT_HANDLING } from "../src/triggerGuidance.js";
+import { ensureTriggerCloseout, parseTriggerSuggestedActions, TRIGGER_DEFAULT_HANDLING } from "../src/triggerGuidance.js";
 
 test("default trigger policy authorizes clear routine email handling but protects sensitive decisions", () => {
   assert.match(TRIGGER_DEFAULT_HANDLING, /No custom per-trigger instructions are required/i);
@@ -55,4 +55,13 @@ test("trigger closeout reports an empty, no-tool run without claiming an externa
   assert.equal(fallback.reportMissing, true);
   assert.match(fallback.text, /No external action was attempted/i);
   assert.match(fallback.text, /Status update/);
+});
+
+test("trigger closeouts expose bounded prepared actions without treating them as authorization", () => {
+  const parsed = parseTriggerSuggestedActions(`I found a newsletter backlog.\n\n<chusky_actions>[{"label":"Archive","prompt":"Archive the newsletters I described, then verify the inbox."},{"label":"Clear","prompt":"Clear the unread newsletter messages after showing me what will change."}]</chusky_actions>`);
+  assert.equal(parsed.text, "I found a newsletter backlog.");
+  assert.deepEqual(parsed.actions.map(({ id, label }) => ({ id, label })), [{ id: "action-1", label: "Archive" }, { id: "action-2", label: "Clear" }]);
+  const bounded = parseTriggerSuggestedActions(`<chusky_actions>[{"label":"${"x".repeat(100)}","prompt":"${"y".repeat(1000)}"}]</chusky_actions>`);
+  assert.equal(bounded.actions[0]?.label.length, 32);
+  assert.equal(bounded.actions[0]?.prompt.length, 600);
 });

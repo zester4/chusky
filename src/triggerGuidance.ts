@@ -19,6 +19,37 @@ export interface TriggerCloseout {
   reportMissing: boolean;
 }
 
+export interface TriggerSuggestedAction {
+  id: string;
+  label: string;
+  prompt: string;
+}
+
+const TRIGGER_ACTION_BLOCK = /\n?\s*<chusky_actions>\s*([\s\S]*?)\s*<\/chusky_actions>\s*$/i;
+
+/**
+ * Extracts optional next-step proposals from a trigger closeout. The model
+ * supplies the wording, but the server bounds the shape and treats the result
+ * as a prepared owner prompt, never as permission to execute a tool.
+ */
+export function parseTriggerSuggestedActions(text: string): { text: string; actions: TriggerSuggestedAction[] } {
+  const match = text.match(TRIGGER_ACTION_BLOCK);
+  if (!match) return { text: text.trim(), actions: [] };
+  let parsed: unknown;
+  try { parsed = JSON.parse(match[1] ?? ""); } catch { return { text: text.replace(TRIGGER_ACTION_BLOCK, "").trim(), actions: [] }; }
+  const actions = Array.isArray(parsed)
+    ? parsed.slice(0, 3).flatMap((value, index) => {
+      if (!value || typeof value !== "object") return [];
+      const item = value as Record<string, unknown>;
+      const label = typeof item.label === "string" ? item.label.trim().replace(/[\r\n]+/g, " ").slice(0, 32) : "";
+      const prompt = typeof item.prompt === "string" ? item.prompt.trim().replace(/[\r\n]+/g, " ").slice(0, 600) : "";
+      if (!label || !prompt) return [];
+      return [{ id: `action-${index + 1}`, label, prompt }];
+    })
+    : [];
+  return { text: text.replace(TRIGGER_ACTION_BLOCK, "").trim(), actions };
+}
+
 /**
  * A background event must never disappear because the model returned its
  * internal NO_ACTION sentinel or an empty completion. Preserve uncertainty:
