@@ -29,7 +29,10 @@ export function recordDecision(input: {
   routeSource?: "jev" | "fallback";
   exposedTools?: number;
   baselineTools?: number;
+  exposedNativeTools?: number;
+  baselineNativeTools?: number;
   loading?: "full" | "bundle";
+  preserveAll?: boolean;
   noTool?: boolean;
   noNativeTool?: boolean;
 }): void {
@@ -62,7 +65,10 @@ export function recordDecision(input: {
     ...(input.routeSource ? { routeSource: input.routeSource } : {}),
     ...(input.exposedTools === undefined ? {} : { exposedTools: input.exposedTools }),
     ...(input.baselineTools === undefined ? {} : { baselineTools: input.baselineTools }),
+    ...(input.exposedNativeTools === undefined ? {} : { exposedNativeTools: input.exposedNativeTools }),
+    ...(input.baselineNativeTools === undefined ? {} : { baselineNativeTools: input.baselineNativeTools }),
     ...(input.loading ? { loading: input.loading } : {}),
+    ...(input.preserveAll === undefined ? {} : { preserveAll: input.preserveAll }),
     ...(input.noTool === undefined ? {} : { noTool: input.noTool }),
     ...(input.noNativeTool === undefined ? {} : { noNativeTool: input.noNativeTool }),
   }, "Jev routing decision");

@@ -47,6 +47,17 @@ function chooseNoTool(): typeof fetch {
   }) as typeof fetch;
 }
 
+function chooseEveryTool(): typeof fetch {
+  return (async (_url: string | URL, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { questions: Record<string, any> };
+    const question = body.questions.rank;
+    const ids = Object.keys(question.criteria);
+    const probabilities = Object.fromEntries(ids.map((id) => [id, id === "__none__" ? 0.01 : 0.99 / Math.max(1, ids.length - 1)]));
+    const selected = ids.find((id) => id !== "__none__") ?? "__none__";
+    return new Response(JSON.stringify({ model: body, answers: { rank: { type: "choice", choice: selected, confidence: 0.99, probabilities } } }), { status: 200 });
+  }) as typeof fetch;
+}
+
 test("native routing is inert when Jev native routing is disabled", async () => {
   const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["native"]), jevNativeToolRouting: false });
   try {
@@ -85,6 +96,21 @@ test("native tool discovery returns bounded searchable metadata", () => {
   assert.ok(found.length <= 3);
   assert.ok(found.some((item) => item.slug.includes("SPREADSHEET")));
   assert.ok(found.every((item) => !Object.hasOwn(item, "parameters")));
+});
+
+test("bundle mode fails closed when a Jev route would expose the full native catalog", async () => {
+  const restore = withConfig({ nativeToolLoading: "bundle", jevMode: "enforce", jevSurfaces: new Set(["native"]), jevNativeToolRouting: true });
+  try {
+    const all = tools().map((tool: any) => ({
+      ...tool,
+      function: { ...tool.function, description: `${tool.function.description} PDF report` },
+    }));
+    const route = await routeNativeToolsForTurn(all, "Create a PDF report", { client: new JevClient({ apiKey: "k", fetchImpl: chooseEveryTool() }) });
+    const nativeNames = new Set(nativeToolManifest.map((item) => item.slug));
+    const exposedNative = route.tools.filter((tool: any) => nativeNames.has(tool.function.name)).length;
+    const baselineNative = all.filter((tool: any) => nativeNames.has(tool.function.name)).length;
+    assert.ok(exposedNative < baselineNative, "bundle mode must never expose the full native catalog");
+  } finally { restore(); }
 });
 
 test("memory discovery returns the complete memory and scratchpad tool family", () => {

@@ -279,6 +279,10 @@ function modelToolsForSelection(tools: ToolSchema[], selected: Set<string>): Too
   });
 }
 
+function nativeToolCount(tools: ToolSchema[]): number {
+  return tools.reduce((count, tool) => count + (descriptorBySlug.has(toolName(tool)) ? 1 : 0), 0);
+}
+
 function requestsLifecycleCreation(query: string, family: "mission" | "task"): boolean {
   const slug = family === "mission" ? "CHUCK_MISSION_START" : "CHUCK_TASK_CREATE";
   // Keep this bounded and explicit: the current request must be able to
@@ -428,17 +432,22 @@ export async function routeNativeToolsForTurn(tools: ToolSchema[], query: string
   });
   const log = (route: NativeToolRoute | undefined, applied: boolean, reason?: string) => {
     const telemetry = route?.telemetry;
+    const baselineNativeTools = nativeToolCount(tools);
+    const exposedNativeTools = route ? nativeToolCount(route.tools) : undefined;
     const reducedBundleApplied = Boolean(
       route
       && config.nativeToolLoading === "bundle"
       && !options.preserveAll
-      && (route.noNativeTool || route.fallbackReason?.startsWith("bundle_"))
-      && route.tools.length < tools.length,
+      && exposedNativeTools !== undefined
+      && exposedNativeTools < baselineNativeTools,
     );
     recordDecision({
       surface: "native_tool",
       mode: mode === "enforce" ? "enforce" : "shadow",
-      applied: applied || reducedBundleApplied,
+      // `applied` means the model-facing native schema set was actually
+      // changed. A Jev response alone is not enough: bundle mode must reduce
+      // the native catalog or use a bounded fallback.
+      applied: applied && (config.nativeToolLoading !== "bundle" || options.preserveAll === true || reducedBundleApplied),
       ...(reason ? { fallbackReason: reason } : {}),
       ...(telemetry?.ranked ? { jev: telemetry.ranked.map((item) => ({ id: item.id, p: item.probability })) } : {}),
       baseline: baseline.selected.slice(0, 6),
@@ -447,8 +456,10 @@ export async function routeNativeToolsForTurn(tools: ToolSchema[], query: string
       routeSource: route?.source,
       exposedTools: route?.tools.length,
       baselineTools: tools.length,
+      ...(baselineNativeTools ? { exposedNativeTools, baselineNativeTools } : {}),
       loading: config.nativeToolLoading,
       noNativeTool: route?.noNativeTool,
+      preserveAll: options.preserveAll === true,
     });
   };
   if (mode === "shadow") {
@@ -462,6 +473,15 @@ export async function routeNativeToolsForTurn(tools: ToolSchema[], query: string
       : { ...baseline, ...(failure ? { fallbackReason: failure } : {}) });
     log(fallback, false, failure ?? fallback.fallbackReason ?? "fallback");
     return fallback;
+  }
+  if (config.nativeToolLoading === "bundle" && !options.preserveAll) {
+    const baselineNativeTools = nativeToolCount(tools);
+    const exposedNativeTools = nativeToolCount(value.tools);
+    if (exposedNativeTools >= baselineNativeTools) {
+      const fallback = bundleFallbackRoute(tools, query, "jev_route_not_reduced");
+      log(fallback, false, "jev_route_not_reduced");
+      return fallback;
+    }
   }
   log(value, true);
   return value;
