@@ -2,7 +2,7 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
-## 0.10.1 - 2026-10-07
+## 1.10.1 - 2026-10-07
 
 - Synchronize meeting projections across the API, dashboard, and SDK with
   attendee data, transcript/visual state, safe runtime metrics, and owner-only
