@@ -3761,6 +3761,20 @@ export async function runAgent(
 
 // ── Get connection URL for a toolkit (for the /connect command) ───────────────
 
+function connectionRedirectUrl(value: unknown, description: string): string {
+  const candidate = value && typeof value === "object"
+    ? (value as { redirectUrl?: unknown; redirect_url?: unknown; url?: unknown }).redirectUrl
+      ?? (value as { redirect_url?: unknown }).redirect_url
+      ?? (value as { url?: unknown }).url
+    : undefined;
+  if (typeof candidate !== "string" || !candidate.trim()) throw new Error(`Composio did not return a ${description} URL.`);
+  let parsed: URL;
+  try { parsed = new URL(candidate.trim()); }
+  catch { throw new Error(`Composio returned an invalid ${description} URL.`); }
+  if (parsed.protocol !== "https:") throw new Error(`Composio returned an unsafe ${description} URL.`);
+  return parsed.toString();
+}
+
 export async function getConnectionUrl(
   userId: number,
   toolkit: string,
@@ -3771,8 +3785,7 @@ export async function getConnectionUrl(
     ...(alias ? { alias } : {}),
     ...(config.composioCallbackUrl ? { callbackUrl: config.composioCallbackUrl } : {}),
   });
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (req as any).redirectUrl ?? (req as any).url ?? String(req);
+  return connectionRedirectUrl(req, "connection");
 }
 
 /**
@@ -3791,8 +3804,7 @@ export async function getReconnectUrl(userId: number, connectedAccountId: string
   const request = await refresh.call(composio.connectedAccounts, account.id, {
     ...(config.composioCallbackUrl ? { redirectUrl: config.composioCallbackUrl } : {}),
   });
-  const url = (request as any)?.redirectUrl ?? (request as any)?.url;
-  if (typeof url !== "string" || !url.trim()) throw new Error("Composio did not return a reconnect URL.");
+  const url = connectionRedirectUrl(request, "reconnect");
   invalidateSession(userId);
   return url;
 }

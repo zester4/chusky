@@ -1803,6 +1803,16 @@ test("reconnects one expired connected account by its existing Composio ID", asy
   await assert.rejects(() => getReconnectUrl(830017, "ca_expired"), /not found for this Chusky account/);
 });
 
+test("accepts Composio's wire-format reconnect URL without creating a new account", async () => {
+  setAgentDependenciesForTests({ composio: {
+    connectedAccounts: {
+      list: async () => ({ items: [{ id: "ca_wire", toolkit: { slug: "gmail" }, status: "INITIATED" }] }),
+      refresh: async () => ({ redirect_url: "https://composio.example/reconnect/ca_wire" }),
+    },
+  } });
+  assert.equal(await getReconnectUrl(830016, "ca_wire"), "https://composio.example/reconnect/ca_wire");
+});
+
 test("agent uses the native account boundary and hides the raw Composio account tool", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830017);
