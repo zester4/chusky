@@ -162,6 +162,70 @@ test("mission provider allowlists receive the routed direct action schema", asyn
   }
 });
 
+test("ordinary Composio turns expose JEV's exact action even in a small gateway session", async () => {
+  const userId = 831240;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const previous = { jevMode: config.jevMode, jevSurfaces: config.jevSurfaces, jevTurnBudgetMs: config.jevTurnBudgetMs };
+  const originalFetch = globalThis.fetch;
+  const requests: Array<Record<string, any>> = [];
+  const directSchema = {
+    type: "object",
+    properties: { query: { type: "string" }, max_results: { type: "integer" } },
+    required: ["query"],
+    additionalProperties: false,
+  };
+  const session = {
+    sessionId: "ordinary-direct-schema-session",
+    tools: async () => [{ type: "function", function: { name: "COMPOSIO_SEARCH_TOOLS", parameters: { type: "object" } } }],
+    execute: async () => ({ successful: true, data: { items: [{ title: "result" }] }, logId: "provider-log-ordinary-1" }),
+  };
+  setAgentDependenciesForTests({ composio: {
+    create: async () => session,
+    connectedAccounts: { list: async () => ({ items: [{ id: "ca_exa", toolkit: { slug: "exa" }, status: "ACTIVE" }] }) },
+    tools: { getRawComposioTools: async () => [{ slug: "EXA_ANSWER", name: "Answer a question", description: "Answer using web research", toolkit: { slug: "exa" }, inputParameters: directSchema }] },
+  } });
+  config.jevMode = "enforce";
+  config.jevSurfaces = new Set(["composio"]);
+  config.jevTurnBudgetMs = 5_000;
+  setJevClientForTests(new JevClient({ apiKey: "test-jev-key", fetchImpl: (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    const answers: Record<string, unknown> = {};
+    for (const [key, question] of Object.entries<any>(body.questions ?? {})) {
+      if (question.type === "noul") { answers[key] = { type: "noul", noul: 0.99 }; continue; }
+      const ids = Object.keys(question.criteria).filter((id) => id !== "__none__");
+      const selected = ids.find((id) => id === "EXA_ANSWER") ?? ids.find((id) => id === "exa") ?? ids[0] ?? "__none__";
+      const probabilities = Object.fromEntries(Object.keys(question.criteria).map((id) => [id, id === selected ? 0.99 : 0.01 / Math.max(1, Object.keys(question.criteria).length - 1)]));
+      answers[key] = { type: "choice", choice: selected, confidence: 0.99, probabilities };
+    }
+    return new Response(JSON.stringify({ model: body.model, answers, usage: { input_tokens: 20, cost: 0 } }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch }));
+  let modelResponse = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes("/chat/completions")) {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      requests.push(body);
+      return modelResponse++ === 0
+        ? toolResponse("EXA_ANSWER", JSON.stringify({ query: "latest company news", max_results: 3 }))
+        : chatResponse({ role: "assistant", content: "research complete" });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(userId, "Research the latest company news", [], "test/model", undefined, undefined, undefined, undefined, undefined, { ephemeral: true });
+    assert.equal(result.text, "research complete");
+    assert.deepEqual(result.toolsSucceeded, ["EXA_ANSWER"]);
+    const visible = requests[0]?.tools?.map((tool: any) => tool.function.name) ?? [];
+    assert.ok(visible.includes("EXA_ANSWER"), "ordinary turns must receive the exact JEV-routed action schema");
+    assert.equal(visible.includes("COMPOSIO_GET_TOOL_SCHEMAS"), false, "the first round should not need schema discovery for the routed action");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Object.assign(config, previous);
+    setJevClientForTests(undefined);
+  }
+});
+
 test("mission provider allowlists resolve an exact schema when the session exposes only meta-tools", async () => {
   const userId = 831237;
   await initStore({ memoryOnly: true });

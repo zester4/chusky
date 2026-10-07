@@ -2586,7 +2586,12 @@ export async function runAgent(
       // exact action without a broad search round. For an explicit mission
       // allowlist, only inject a routed action when that exact slug is already
       // granted; this adds its schema without widening the worker's fence.
-      if (composioDecision.directTools.length && sessionObj && fullComposioTools.length > 80) {
+      // JEV's direct action route is useful for every ordinary run, not only
+      // ToolRouter sessions with a large meta-tool catalogue. Small sessions
+      // can still expose only gateway tools, and withholding the exact routed
+      // schema there forces the model through SEARCH_TOOLS/GET_TOOL_SCHEMAS
+      // even though the action has already been selected and verified.
+      if (composioDecision.directTools.length && sessionObj) {
         const present = new Set(availableTools.map((tool) => toolName(tool)));
         for (const tool of composioDecision.directTools) {
           const slug = toolName(tool);
