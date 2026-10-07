@@ -96,6 +96,7 @@ import { ensureTriggerCloseout, TRIGGER_DEFAULT_HANDLING } from "./triggerGuidan
 import { captureMissionSliceState, missionHasTimerWakeContinuation, missionPostWakeNextAction, missionStepInstruction, missionWakeNeedsRecovery, missionWorkerToolAllowlist } from "./missionWorker.js";
 import { settleMissionSlice } from "./missionSlice.js";
 import { diagnoseMission } from "./reliability/missionDoctor.js";
+import { classifyTriggerWebhookSessionFailure } from "./triggerWebhookErrors.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -3356,6 +3357,12 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
         } else if (config.composioWebhookSecret) return c.json({ ok: false, error: "unsupported trigger webhook" }, 400);
         return c.json({ ok: true });
       } catch (e) {
+        const sessionFailure = classifyTriggerWebhookSessionFailure(e);
+        if (sessionFailure) {
+          logger.error({ err: e }, "Trigger deferred because durable session documents are incomplete");
+          c.header("Retry-After", String(sessionFailure.retryAfterSeconds));
+          return c.json(sessionFailure.body, sessionFailure.status);
+        }
         logger.error({ err: e }, "Trigger webhook error");
         const message = String(e);
         const status = e instanceof TriggerWebhookVerificationError || Boolean(config.composioWebhookSecret && /signature|verify|secret|webhook/i.test(message)) ? 401 : 400;
