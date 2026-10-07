@@ -7,6 +7,17 @@ export interface RecallAttributedSpeaker {
   email?: string;
 }
 
+/** Count distinct live provider identities, ignoring duplicate lifecycle updates. */
+export function countDistinctRecallParticipants(roster: RecallMeetingParticipant[]): number {
+  return new Set(roster.filter((participant) => participant?.status === "present"
+    && typeof participant.id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(participant.id))
+    .map((participant) => participant.id)).size;
+}
+
+export function hasExternalRecallParticipants(roster: RecallMeetingParticipant[]): boolean {
+  return countDistinctRecallParticipants(roster) > 1;
+}
+
 /**
  * Attribute a transcript audio window only when Recall's speaker timeline
  * leaves exactly one rostered participant overlapping it. The widened

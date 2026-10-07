@@ -51,7 +51,7 @@ import { recordMeetingTurn } from "./decisions/telemetry.js";
 import { twilioVoiceInstructions } from "./calls/twilioContext.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
 import { attentionPulseCloseoutOutput, attentionPulseDeliveredToday, attentionPulseDeliveryConfirmation, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, attentionPulseRefreshOwnerState, attentionPulseRequireDueWatchReport, buildAttentionPulsePlan, getAttentionPulseWatchCoverage, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "./attentionPulse.js";
-import { resolveRecallMeetingSpeaker } from "./meetings/participants.js";
+import { hasExternalRecallParticipants, resolveRecallMeetingSpeaker } from "./meetings/participants.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import { createSignedWebBotAuthDirectory, WEB_BOT_AUTH_DIRECTORY_CONTENT_TYPE, WEB_BOT_AUTH_DIRECTORY_PATH, webBotAuthConfigurationIssue, webBotAuthConfigurationStatus, webBotAuthSigningEnabled } from "./webBotAuth.js";
 import twilio from "twilio";
@@ -160,6 +160,7 @@ async function persistCalendarMeetingPreparation(userId: number, eventId: string
     ...(candidate.startAt ? { startAt: candidate.startAt } : {}),
     ...(candidate.endAt ? { endAt: candidate.endAt } : {}),
     participants: candidate.participants,
+    attendees: candidate.attendees,
     ...(candidate.meetingUrl ? { sealedMeetingUrl: sealCalendarMeetingUrl(candidate.meetingUrl) } : {}),
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -932,7 +933,7 @@ async function main(): Promise<void> {
       const roomPolicy = meetingRoomToolPolicy(meeting);
       const sharedMeetingRoom = Boolean(meeting.roomId || roomPolicy);
       const ownerPrivateMeeting = !sharedMeetingRoom;
-      const hasExternalMeetingParticipant = ownerPrivateMeeting && (meeting.participantRoster ?? []).length > 1;
+      const hasExternalMeetingParticipant = ownerPrivateMeeting && hasExternalRecallParticipants(meeting.participantRoster ?? []);
       const trustedOwnerPrivateRun = ownerPrivateMeeting && !hasExternalMeetingParticipant;
       const now = Date.now();
       const turnStartedAtMs = body.turnStartedAtMs;

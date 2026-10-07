@@ -51,7 +51,7 @@ import { loginWithVault } from "./vault/broker.js";
 import { classifyBrowserIntent, createBrowserOperationPlan, normalizeBrowserAlias, normalizeBrowserOrigin, normalizePlaybook, verifyBrowserResult, type BrowserHandoffReason, type BrowserPlaybookRecord } from "./vault/browserOps.js";
 import { normalizeChallengeProvider, normalizeChallengeType, transitionChallengeState } from "./vault/challengeResolution.js";
 import { cancelShopping, listSavedShoppingSites, listShopping, pauseShopping, removeSavedShoppingSite, resumeShopping, saveShoppingSitePreference, selectShoppingRetailer, startShopping, updateShopping } from "./shopping/shopping.js";
-import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinRecallMeeting, joinPreparedCalendarMeeting, leaveRecallMeeting, listRecallMeetingsForUser, lookupRecallMeetingContext, ownerExplicitlyRequestedTranscriptRetention, prepareRecallMeetingMission } from "./meetings/service.js";
+import { cancelAutomaticCalendarMeetingJoins, confirmRecallMeetingParticipant, getRecallMeetingForUser, joinRecallMeeting, joinPreparedCalendarMeeting, leaveRecallMeeting, listRecallMeetingsForUser, listRecallMeetingParticipantsForOwner, lookupRecallMeetingContext, ownerExplicitlyRequestedTranscriptRetention, prepareRecallMeetingMission } from "./meetings/service.js";
 import { hasMeetingMissionInput } from "./meetings/mission.js";
 import { isMeetingRepresentativeEmailTool, needsPrivateMeetingBriefBeforeJoin } from "./meetings/representative.js";
 import type { TaskWaitRequest } from "./types.js";
@@ -1587,7 +1587,16 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_LIST_PHONE_CALLS": return listPhoneCalls(userId);
     case "CHUCK_MEETING_CONTEXT_PREPARE": {
       if (runtime.sharedConversation) throw new Error("Client meeting preparation is available only in a private owner conversation");
-      return prepareRecallMeetingMission(userId, { clientName: args.clientName, objective: args.objective, clientContext: args.clientContext });
+      return prepareRecallMeetingMission(userId, { clientName: args.clientName, objective: args.objective, clientContext: args.clientContext, preparationId: args.preparationId });
+    }
+    case "CHUCK_MEETING_PARTICIPANT_CONFIRM": {
+      if (runtime.sharedConversation || !runtime.ownerPrivateRun || runtime.meetingId) throw new Error("Participant identity can be confirmed only by the authenticated owner in a private conversation outside the live meeting");
+      if (!/\b(confirm|verify|verified|confirmation)\b/i.test(runtime.userRequest ?? "")) throw new Error("The owner must explicitly ask to confirm this participant's identity");
+      return confirmRecallMeetingParticipant(userId, args.meetingId, args.participantId, args.email);
+    }
+    case "CHUCK_MEETING_PARTICIPANTS_LIST": {
+      if (runtime.sharedConversation || !runtime.ownerPrivateRun || runtime.meetingId) throw new Error("Participant identity details are available only in a private owner conversation outside the live meeting");
+      return listRecallMeetingParticipantsForOwner(userId);
     }
     case "CHUCK_MEETING_CONTEXT_LOOKUP": {
       if (!runtime.meetingId) throw new Error("CHUCK_MEETING_CONTEXT_LOOKUP is available only inside an active meeting");

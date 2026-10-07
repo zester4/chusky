@@ -10,7 +10,14 @@ export interface CalendarMeetingCandidate {
   startAt?: string;
   endAt?: string;
   participants: string[];
+  attendees: CalendarMeetingAttendee[];
   meetingUrl?: string;
+}
+
+export interface CalendarMeetingAttendee {
+  name?: string;
+  email?: string;
+  responseStatus?: "accepted" | "declined" | "tentative" | "needsAction" | "unknown";
 }
 
 const CALENDAR_TRIGGER_LIFECYCLES: Record<string, CalendarMeetingLifecycle> = {
@@ -78,21 +85,30 @@ function conferenceUrl(source: Record<string, unknown>[]): string | undefined {
   return undefined;
 }
 
-function participantNames(source: Record<string, unknown>[]): string[] {
+function participants(source: Record<string, unknown>[]): { names: string[]; attendees: CalendarMeetingAttendee[] } {
   const values: string[] = [];
+  const attendees: CalendarMeetingAttendee[] = [];
   for (const item of source) {
     const raw = item.attendees ?? item.participants ?? item.invitees;
     if (!Array.isArray(raw)) continue;
     for (const attendee of raw.slice(0, 30)) {
       const data = record(attendee);
-      const name = data && (text(data.displayName, 120) ?? text(data.display_name, 120) ?? text(data.email, 160));
-      if (name) values.push(name);
+      const name = data && (text(data.displayName, 120) ?? text(data.display_name, 120));
+      const email = data && text(data.email, 254)?.toLowerCase();
+      const response = data && text(data.responseStatus, 32);
+      if (name || email) attendees.push({ ...(name ? { name } : {}), ...(email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? { email } : {}), responseStatus: response && ["accepted", "declined", "tentative", "needsAction"].includes(response) ? response as CalendarMeetingAttendee["responseStatus"] : "unknown" });
+      const displayName = name ?? email;
+      if (displayName) values.push(displayName);
     }
     const organizer = record(item.organizer);
     const organizerName = organizer && (text(organizer.displayName, 120) ?? text(organizer.email, 160));
     if (organizerName) values.push(organizerName);
+    const organizerEmail = text(organizer?.email, 254)?.toLowerCase();
+    if (organizerName || organizerEmail) attendees.push({ ...(organizerName ? { name: organizerName } : {}), ...(organizerEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(organizerEmail) ? { email: organizerEmail } : {}), responseStatus: "accepted" });
   }
-  return [...new Set(values)].slice(0, 30);
+  const distinct = new Map<string, CalendarMeetingAttendee>();
+  for (const attendee of attendees) distinct.set(attendee.email ? `email:${attendee.email}` : `name:${(attendee.name ?? "").toLowerCase()}`, attendee);
+  return { names: [...new Set(values)].slice(0, 30), attendees: [...distinct.values()].slice(0, 30) };
 }
 
 /**
@@ -116,13 +132,15 @@ export function parseGoogleCalendarMeetingTrigger(triggerSlug: unknown, payload:
   if (!meetingUrl && lifecycle !== "cancelled" && !calendarEventId) return undefined;
   const startAt = firstNestedText(source, ["start", "startTime", "start_time"], 80) ?? firstText(source, ["startAt", "start_at", "startTime", "start_time"], 80);
   const endAt = firstNestedText(source, ["end", "endTime", "end_time"], 80) ?? firstText(source, ["endAt", "end_at", "endTime", "end_time"], 80);
+  const participantData = participants(source);
   return {
     lifecycle,
     ...(calendarEventId ? { calendarEventId } : {}),
     ...(title ? { title } : {}),
     ...(startAt ? { startAt } : {}),
     ...(endAt ? { endAt } : {}),
-    participants: participantNames(source),
+    participants: participantData.names,
+    attendees: participantData.attendees,
     ...(meetingUrl ? { meetingUrl } : {}),
   };
 }

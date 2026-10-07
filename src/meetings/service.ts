@@ -21,6 +21,7 @@ import {
   type RecallMeetingRecord,
   type RecallMeetingSpeakerEvent,
   type RecallMeetingStatus,
+  type RecallCalendarAttendee,
   type MeetingRoomPolicy,
 } from "../store.js";
 import {
@@ -265,6 +266,8 @@ export async function applyRecallParticipantWebhook(body: unknown): Promise<"upd
       const incoming = rosterEvent.participant;
       const previous = existing.find((item) => item.id === incoming.id);
       const nameChanged = Boolean(previous && previous.identityStatus !== "unknown" && incoming.identityStatus !== "unknown" && previous.name !== incoming.name);
+      const matchedInviteEmails = (current.calendarAttendees ?? []).filter((attendee) => attendee.email?.toLowerCase() === incoming.email?.toLowerCase());
+      const inviteMatched = Boolean(incoming.email && matchedInviteEmails.length === 1);
       // Recall may send a lifecycle event before it has a usable display name.
       // Preserve a previously named participant instead of downgrading it to
       // "Unknown participant"; a later named update can still refine it.
@@ -275,6 +278,7 @@ export async function applyRecallParticipantWebhook(body: unknown): Promise<"upd
           : {}),
         ...(incoming.isHost === undefined && previous?.isHost !== undefined ? { isHost: previous.isHost } : {}),
         ...(!nameChanged && incoming.email === undefined && previous?.email ? { email: previous.email, emailSource: previous.emailSource, assurance: previous.assurance } : {}),
+        ...(incoming.email && !nameChanged ? { assurance: previous?.assurance === "confirmed" && previous.email?.toLowerCase() === incoming.email.toLowerCase() ? "confirmed" as const : inviteMatched ? "calendar_matched" as const : "unverified" as const } : {}),
         ...(nameChanged ? { email: undefined, emailSource: undefined, assurance: "unverified" as const } : {}),
         updatedAt: Date.now(),
       };
@@ -473,6 +477,7 @@ export async function joinRecallMeeting(userId: number, input: {
   inheritMeetingId?: string;
   /** Internal-only marker preventing an automatic calendar join from adopting a manual bot. */
   calendarPreparationId?: string;
+  calendarAttendees?: RecallCalendarAttendee[];
   /** Internal-only workspace policy resolved by the authenticated API boundary. */
   meetingRoom?: { roomId: string; organizationId: string; teamId?: string; projectId?: string; visibility: "private" | "team" | "organization"; policy: MeetingRoomPolicy };
 } & MeetingMissionInput, signal?: AbortSignal) {
@@ -588,6 +593,7 @@ export async function joinRecallMeeting(userId: number, input: {
     meetingUrlHash,
     meetingInstanceHash,
     ...(input.calendarPreparationId ? { calendarPreparationId: input.calendarPreparationId } : {}),
+    ...(input.calendarAttendees?.length ? { calendarAttendees: input.calendarAttendees.slice(0, 30) } : {}),
     ...(title ? { title } : {}),
     ...(mission ? { mission } : {}),
     ...(joinAt ? { joinAt } : {}),
@@ -670,22 +676,50 @@ export async function joinRecallMeeting(userId: number, input: {
 }
 
 /** Preview a client-bound brief before joining. This has no side effects. */
-export async function prepareRecallMeetingMission(userId: number, input: { clientName: unknown; objective?: unknown; clientContext?: unknown }) {
+export async function prepareRecallMeetingMission(userId: number, input: { clientName: unknown; objective?: unknown; clientContext?: unknown; preparationId?: unknown }) {
   assertUserId(userId);
   const memories = (await getSession(userId)).memories;
   const mission = prepareMeetingMission(input, memories);
-  const objective = typeof input.objective === "string" && input.objective.trim().length >= 8;
+  const profile = await getMeetingRepresentativeProfile(userId);
+  const objective = (typeof input.objective === "string" && input.objective.trim().length >= 8)
+    || (typeof profile.objective === "string" && profile.objective.trim().length >= 8);
+  const preparationId = typeof input.preparationId === "string" ? input.preparationId.trim() : "";
+  const preparation = preparationId ? await getCalendarMeetingPreparation(userId, preparationId) : undefined;
+  if (preparationId && !preparation) throw new Error("That calendar preparation is not available to this owner");
+  const attendees = preparation?.attendees ?? [];
+  const identifiedAttendees = attendees.filter((attendee) => Boolean(attendee.email));
   return {
     ...mission,
     readiness: {
       approvedCompanyKnowledge: mission.brief.length > 0,
       objectivePresent: objective,
       clientFactsFound: mission.sourceMemoryIds.length > 0,
-      attendeeIdentitiesKnown: false,
-      toneConfigured: true,
-      ready: Boolean(objective && mission.brief.length > 0),
+      attendeeIdentitiesKnown: attendees.length > 0 && identifiedAttendees.length === attendees.length,
+      toneConfigured: Boolean(profile.register),
+      attendeeCount: attendees.length,
+      identifiedAttendeeCount: identifiedAttendees.length,
+      ready: Boolean(objective && mission.brief.length > 0 && (attendees.length === 0 || identifiedAttendees.length === attendees.length)),
     },
   };
+}
+
+/** The authenticated owner may confirm an invite-matched participant in private chat. */
+export async function confirmRecallMeetingParticipant(userId: number, meetingId: unknown, participantId: unknown, email: unknown) {
+  assertUserId(userId);
+  const id = typeof meetingId === "string" ? meetingId.trim() : "";
+  const personId = typeof participantId === "string" ? participantId.trim() : "";
+  const normalizedEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+  if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(id) || !/^[A-Za-z0-9_-]{1,128}$/.test(personId) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) throw new Error("Meeting, participant, or email is invalid");
+  const meeting = await getRecallMeeting(userId, id);
+  if (!meeting || meeting.userId !== userId || !ACTIVE.has(meeting.status)) throw new Error("That meeting is not active or is not owned by this account");
+  if (meeting.roomId) throw new Error("Participant identity can only be confirmed for an owner-private meeting");
+  const roster = meeting.participantRoster ?? [];
+  const participant = roster.find((item) => item.id === personId && item.status === "present");
+  if (!participant || !participant.email || participant.email.toLowerCase() !== normalizedEmail) throw new Error("The supplied email does not exactly match this present participant's provider identity");
+  const duplicate = roster.some((item) => item.id !== personId && item.status === "present" && item.email?.toLowerCase() === normalizedEmail);
+  if (duplicate) throw new Error("This email is associated with multiple present participants; identity remains unconfirmed");
+  await updateRecallMeeting(userId, id, { participantRoster: roster.map((item) => item.id === personId ? { ...item, assurance: "confirmed", updatedAt: Date.now() } : item) });
+  return { confirmed: true, meetingId: id, participantId: personId, email: normalizedEmail };
 }
 
 /** Join an owner-reviewed calendar preparation without ever returning its meeting link to the model. */
@@ -703,6 +737,8 @@ export async function joinPreparedCalendarMeeting(userId: number, preparationId:
   const result = await joinRecallMeeting(userId, {
     meetingUrl,
     title: preparation.title,
+    calendarPreparationId: preparation.id,
+    calendarAttendees: preparation.attendees,
     ...(hasMeetingMissionInput(missionInput) ? missionInput : {}),
     ...(joinAt ? { joinAt } : {}),
   }, requestSignal);
@@ -766,6 +802,7 @@ export async function reconcileCalendarMeetingAutoJoin(userId: number, preparati
       joinAt: plan.joinAt,
       interactionMode: "representative",
       calendarPreparationId: preparation.id,
+      calendarAttendees: preparation.attendees,
     }, signal);
     const meetingId = typeof result.id === "string" ? result.id : "";
     const createdMeeting = meetingId ? await getRecallMeeting(userId, meetingId) : undefined;
@@ -840,6 +877,17 @@ export async function listRecallMeetingsForUser(userId: number, limit = 10) {
   requireRecall();
   assertUserId(userId);
   return (await listRecallMeetings(userId, limit)).map(safeMeeting);
+}
+
+/** Private owner-only identity review data; never expose it to a live meeting model. */
+export async function listRecallMeetingParticipantsForOwner(userId: number) {
+  requireRecall();
+  assertUserId(userId);
+  return (await listRecallMeetings(userId, 20)).filter((meeting) => ACTIVE.has(meeting.status)).map((meeting) => ({
+    meetingId: meeting.id,
+    title: meeting.title,
+    participants: (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ id, name, email, assurance }) => ({ id, name, ...(email ? { email } : {}), assurance: assurance ?? "unverified" })),
+  }));
 }
 
 export async function getRecallMeetingForUser(userId: number, id: string) {
