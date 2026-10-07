@@ -11,6 +11,10 @@ export interface DurableSessionBackfillDependencies {
   compareAndSetRedisSession(userId: number, expectedRaw: string, replacement: string): Promise<boolean>;
 }
 
+export interface IncompleteDurableSessionRepairDependencies {
+  state: Pick<NeonDurableState, "readSessionDomains" | "appendConversationMessages" | "writeSessionDomains">;
+}
+
 function legacyMessages(userId: number, session: UserSession): DurableConversationMessage[] {
   return (Array.isArray(session.history) ? session.history : []).flatMap((message, index) => {
     if (!message || (message.role !== "user" && message.role !== "assistant") || typeof message.content !== "string") return [];
@@ -24,6 +28,42 @@ function legacyMessages(userId: number, session: UserSession): DurableConversati
 
 function domainsMatch(documents: Map<DurableSessionDomain, DurableSessionDocument>, domains: Map<DurableSessionDomain, unknown>): boolean {
   return DURABLE_SESSION_DOMAINS.every((domain) => documents.has(domain) && isDeepStrictEqual(documents.get(domain)!.payload, domains.get(domain)));
+}
+
+/**
+ * Complete a session whose durable marker was promoted before all domain rows
+ * were written. Existing Neon rows are authoritative and are never replaced;
+ * only absent rows are reconstructed from the hot core. Conversation history
+ * is appended separately because it is idempotent and lives outside the
+ * session-domain table.
+ */
+export async function repairIncompleteDurableSession(
+  userId: number,
+  session: UserSession,
+  dependencies: IncompleteDurableSessionRepairDependencies,
+): Promise<Map<DurableSessionDomain, DurableSessionDocument>> {
+  if (!Number.isSafeInteger(userId) || userId <= 0) throw new Error("A positive owner ID is required for session repair.");
+  const existing = await dependencies.state.readSessionDomains(userId);
+  const missing = DURABLE_SESSION_DOMAINS.filter((domain) => !existing.has(domain));
+  if (!missing.length) return existing;
+
+  const history = legacyMessages(userId, session).map(({ id, role, content, createdAt, sourceId }) => ({
+    id: id!, role, content, createdAt: createdAt ?? Date.now(), ...(sourceId ? { sourceId } : {}),
+  }));
+  const { domains } = splitSessionDomains({ ...session, history } as UserSession);
+  await dependencies.state.appendConversationMessages(userId, history);
+
+  const missingDocuments = new Map<DurableSessionDomain, unknown>(missing.map((domain) => [domain, domains.get(domain)!]));
+  await dependencies.state.writeSessionDomains(
+    userId,
+    missingDocuments,
+    [],
+    new Map(missing.map((domain) => [domain, undefined])),
+  );
+  const repaired = await dependencies.state.readSessionDomains(userId);
+  const stillMissing = DURABLE_SESSION_DOMAINS.filter((domain) => !repaired.has(domain));
+  if (stillMissing.length) throw new Error(`Durable session repair did not produce all required domains: ${stillMissing.join(", ")}.`);
+  return repaired;
 }
 
 /** Migrate one immutable Redis snapshot; the final marker is installed only by exact-value CAS. */

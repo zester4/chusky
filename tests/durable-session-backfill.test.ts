@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { backfillDurableSessionSnapshot } from "../src/durableSessionBackfill.js";
+import { backfillDurableSessionSnapshot, repairIncompleteDurableSession } from "../src/durableSessionBackfill.js";
 import { DURABLE_SESSION_DOMAINS, type DurableSessionDocument } from "../src/neonDurableState.js";
 import { sessionUsesNeonDomains, splitSessionDomains } from "../src/sessionDomains.js";
 import type { UserSession } from "../src/store.js";
@@ -103,4 +103,30 @@ test("session backfill rejects owner zero and recognizes an already-promoted sna
   const result = await backfillDurableSessionSnapshot(820004, JSON.stringify({ ...session(), durableSessionFormat: 1 }), fixture.dependencies);
   assert.equal(result, "already_migrated");
   assert.equal(fixture.writes, 0);
+});
+
+test("incomplete promoted sessions repair only missing durable domains", async () => {
+  const snapshot = session();
+  const documents = new Map<string, DurableSessionDocument>([
+    ["profile", { domain: "profile", payload: { model: "existing/model" }, version: 7, updatedAt: 1 } as DurableSessionDocument],
+  ]);
+  const writes: string[] = [];
+  const state = {
+    async readSessionDomains() { return new Map(documents) as Map<never, never>; },
+    async appendConversationMessages(_userId: number, messages: readonly unknown[]) { assert.equal(messages.length, 1); },
+    async writeSessionDomains(_userId: number, payloads: ReadonlyMap<string, unknown>, _runs: unknown[], expected: ReadonlyMap<string, number | undefined>) {
+      assert.deepEqual([...expected.keys()].sort(), ["assets", "conversation", "memories", "sdk"]);
+      for (const [domain, payload] of payloads) {
+        writes.push(domain);
+        documents.set(domain, { domain, payload, version: 1, updatedAt: 1 } as DurableSessionDocument);
+      }
+      return new Map([...payloads.keys()].map((domain) => [domain, 1]));
+    },
+  };
+
+  const repaired = await repairIncompleteDurableSession(820006, snapshot, { state: state as never });
+
+  assert.deepEqual([...repaired.keys()].sort(), ["assets", "conversation", "memories", "profile", "sdk"]);
+  assert.deepEqual(writes.sort(), ["assets", "conversation", "memories", "sdk"]);
+  assert.deepEqual(repaired.get("profile")?.payload, { model: "existing/model" });
 });

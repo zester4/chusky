@@ -6,10 +6,11 @@ import Redis from "ioredis";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import { withDistributedLease } from "./distributedLease.js";
-import { createNeonDurableState, durableSdkRunHash, type DurableConversationMessage, type DurableMissionEvent, type DurableMissionRecord, type DurableObjectMetadata, type DurableSessionDocument, type DurableSessionDomain, type DurableStateStatus, type NeonDurableState } from "./neonDurableState.js";
+import { createNeonDurableState, durableSdkRunHash, DURABLE_SESSION_DOMAINS, type DurableConversationMessage, type DurableMissionEvent, type DurableMissionRecord, type DurableObjectMetadata, type DurableSessionDocument, type DurableSessionDomain, type DurableStateStatus, type NeonDurableState } from "./neonDurableState.js";
 import { archiveRecallTranscriptSegment, deleteRecallTranscriptArchive, getArchivedRecallTranscriptSegment, listArchivedRecallTranscriptSegments, recallTranscriptMeetingHash, updateRecallTranscriptArchiveExpiry as updateArchivedRecallExpiry, type RecallTranscriptArchiveDependencies } from "./recallTranscriptArchive.js";
 import { backfillMissionSnapshotToNeon } from "./missionBackfill.js";
 import { HOT_CONVERSATION_MESSAGES, joinSessionDomains, mergeDurableSessionDomain, sessionUsesNeonDomains, splitSessionDomains } from "./sessionDomains.js";
+import { repairIncompleteDurableSession } from "./durableSessionBackfill.js";
 import { normalizeVoiceCallProfile, type VoiceCallProfile } from "./calls/voiceProfile.js";
 import { logger } from "./logger.js";
 import { instrumentRedisClient, RedisCommandMetrics } from "./redisMetrics.js";
@@ -2167,7 +2168,10 @@ class RedisBackend implements Backend {
         const migrated = sessionUsesNeonDomains(session);
         if (migrated) {
           if (!this.durableState) throw new Error("This session has migrated to Neon durable state, but DURABLE_STATE_ENABLED is not configured.");
-          const documents = await this.readSessionDomains(userId);
+          let documents = await this.readSessionDomains(userId);
+          if (documents.size < DURABLE_SESSION_DOMAINS.length) {
+            documents = await this.repairIncompleteSessionDomains(userId, session);
+          }
           const hadProfileDomain = documents.has("profile");
           if (!hadProfileDomain) documents.set("profile", { domain: "profile", payload: durableProfilePayload(session), version: 0, updatedAt: Date.now() });
           const conversation = documents.get("conversation")?.payload as { history?: Message[] } | undefined;
@@ -2208,7 +2212,10 @@ class RedisBackend implements Backend {
       }
     }
     if (this.durableState && userId !== 0) {
-      const documents = await this.readSessionDomains(userId);
+      let documents = await this.readSessionDomains(userId);
+      if (documents.size > 0 && documents.size < DURABLE_SESSION_DOMAINS.length) {
+        documents = await this.repairIncompleteSessionDomains(userId, fresh());
+      }
       if (documents.size) {
         // Redis contains only the hot session cache. On expiry, reconstruct
         // durable domains and the recent conversation window from Neon.
@@ -2415,6 +2422,26 @@ class RedisBackend implements Backend {
     const documents = await this.durableState!.readSessionDomains(userId);
     if (documents.size === 5) await this.writeSessionDomainCache(userId, new Map([...documents].map(([domain, document]) => [domain, document.payload] as const)), Object.fromEntries([...documents].map(([domain, document]) => [domain, document.version])));
     return documents;
+  }
+
+  private async repairIncompleteSessionDomains(userId: number, session: UserSession): Promise<Map<DurableSessionDomain, DurableSessionDocument>> {
+    if (!this.durableState) throw new Error("Durable session repair requires Neon durable state.");
+    const lockKey = `session-domain:${userId}`;
+    const lockToken = randomUUID();
+    return withDistributedLease({
+      acquire: async () => this.acquireKeyLock(lockKey, lockToken, 30),
+      renew: async () => this.renewKeyLock(lockKey, lockToken, 30),
+      release: async () => this.releaseKeyLock(lockKey, lockToken),
+    }, async () => {
+      // Re-read under the same lease used by saves. A concurrent writer may
+      // have completed the missing rows after the original read.
+      const repaired = await repairIncompleteDurableSession(userId, session, { state: this.durableState! });
+      await this.writeSessionDomainCache(userId, new Map([...repaired].map(([domain, document]) => [domain, document.payload] as const)), Object.fromEntries([...repaired].map(([domain, document]) => [domain, document.version])));
+      return repaired;
+    }, {
+      busyMessage: "Owner session is being migrated or saved concurrently; retry shortly.",
+      lostMessage: "Owner session repair lost its coordination lease; retry shortly.",
+    });
   }
 
   private async writeSessionDomainCache(userId: number, payloads: ReadonlyMap<DurableSessionDomain, unknown>, versions: Partial<Record<DurableSessionDomain, number>>): Promise<void> {
