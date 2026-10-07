@@ -90,7 +90,7 @@ export async function guardVaultBrowserAction(userId: number, workspaceId: strin
     return;
   }
   const currentOrigin = typeof args.currentUrl === "string" ? (() => { try { return new URL(args.currentUrl).origin; } catch { return ""; } })() : "";
-  const pageBoundActions = new Set(["snapshot", "find", "focus", "invoke", "fill", "back", "forward", "refresh", "scroll"]);
+  const pageBoundActions = new Set(["snapshot", "find", "focus", "invoke", "fill", "select_option", "check", "uncheck", "back", "forward", "refresh", "scroll"]);
   if (pageBoundActions.has(action) && (!currentOrigin || !activeSessions.some((session) => session.origin === currentOrigin))) {
     throw new Error("Authenticated browser work must stay on the current saved website origin. Open or inspect the authorised origin again before continuing.");
   }
@@ -101,7 +101,7 @@ export async function guardVaultBrowserAction(userId: number, workspaceId: strin
   if (["click", "type", "mouse_click", "mouse_move", "mouse_drag", "keyboard_type", "keyboard_hotkey", "desktop_click", "desktop_type", "desktop_press"].includes(action)) throw new Error("Coordinate and keyboard typing are disabled in an authenticated vault session. Find the accessible control first, then invoke or fill it with a declared vaultAction.");
   if (action === "accessibility_invoke") return guardVaultBrowserAction(userId, workspaceId, { ...args, action: "invoke" }, ownerPrivateRun, ownerApprovedAction);
   if (action === "accessibility_set_value") return guardVaultBrowserAction(userId, workspaceId, { ...args, action: "fill" }, ownerPrivateRun, ownerApprovedAction);
-  if (!(["invoke", "fill", "press", "open"].includes(action))) return;
+  if (!(["invoke", "fill", "select_option", "check", "uncheck", "press", "open"].includes(action))) return;
   if (action === "press") throw new Error("Keyboard submit is disabled in an authenticated vault session. Invoke a discovered accessible control instead.");
   let target: VaultAction | undefined;
   if (action === "open") {
