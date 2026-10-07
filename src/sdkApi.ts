@@ -1556,6 +1556,7 @@ export function registerSdkApi(app: Hono): void {
         status: event.status,
         notificationStatus: event.notificationStatus ?? (event.status === "completed" ? "delivered" : event.status === "failed" ? "failed" : "pending"),
         ...(event.result ? { result: event.result.slice(0, 4_000) } : {}),
+        ...(event.suggestedActions?.length ? { actions: event.suggestedActions.slice(0, 3).map((action) => ({ id: action.id, label: action.label, prompt: action.prompt })) } : {}),
         ...(event.status === "failed" || event.notificationStatus === "unavailable" || event.notificationStatus === "failed" ? { needsAttention: true } : {}),
         createdAt: new Date(event.createdAt).toISOString(),
         updatedAt: new Date(event.updatedAt).toISOString(),
