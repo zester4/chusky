@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { addRecallMeeting, claimAgentUpgrade, completeMissionStep, createMission, finalizeMissionIfReady, getApproval, getMission, getSession, initStore, listAgentRuns, listMissions, listTasks, saveSession, startMission, updateMeetingRepresentativeProfile } from "../src/store.js";
-import { appendPreviewLinks, cleanModelText, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
+import { appendPreviewLinks, cleanModelText, getReconnectUrl, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { formatAgentUpgradeNotice, loadAgentUpgrade } from "../src/upgradeNotice.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -1788,6 +1788,19 @@ test("lists only safe connected-account metadata", async () => {
     { id: "ca_personal", alias: "personal-gmail", toolkit: "gmail", status: "ACTIVE", createdAt: undefined, updatedAt: undefined },
   ]);
   assert.equal(JSON.stringify(accounts).includes("secret"), false);
+});
+
+test("reconnects one expired connected account by its existing Composio ID", async () => {
+  const refreshed: Array<{ id: string; options: unknown }> = [];
+  setAgentDependenciesForTests({ composio: {
+    connectedAccounts: {
+      list: async ({ userIds }: { userIds: string[] }) => ({ items: userIds[0] === "user_830016" ? [{ id: "ca_expired", alias: "work-gmail", toolkit: { slug: "gmail" }, status: "EXPIRED" }] : [] }),
+      refresh: async (id: string, options: unknown) => { refreshed.push({ id, options }); return { redirectUrl: "https://composio.example/reconnect/ca_expired" }; },
+    },
+  } });
+  assert.equal(await getReconnectUrl(830016, "ca_expired"), "https://composio.example/reconnect/ca_expired");
+  assert.deepEqual(refreshed, [{ id: "ca_expired", options: {} }]);
+  await assert.rejects(() => getReconnectUrl(830017, "ca_expired"), /not found for this Chusky account/);
 });
 
 test("agent uses the native account boundary and hides the raw Composio account tool", async () => {

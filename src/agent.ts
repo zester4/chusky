@@ -3775,6 +3775,28 @@ export async function getConnectionUrl(
   return (req as any).redirectUrl ?? (req as any).url ?? String(req);
 }
 
+/**
+ * Re-authorize one exact owner connection. This intentionally does not call
+ * session.authorize(), because that starts a new connection and can create a
+ * duplicate when the owner has multiple accounts for the same toolkit.
+ */
+export async function getReconnectUrl(userId: number, connectedAccountId: string): Promise<string> {
+  const id = connectedAccountId.trim();
+  if (!id || id.length > 200) throw new Error("Invalid connected account ID.");
+  const account = (await listConnectedAccounts(userId)).find((item) => item.id === id);
+  if (!account) throw new Error("Connected account not found for this Chusky account.");
+  if (account.status.toUpperCase() === "ACTIVE") throw new Error("This connected account is already active.");
+  const refresh = composio.connectedAccounts?.refresh;
+  if (typeof refresh !== "function") throw new Error("This Composio client cannot reauthorize an existing account without creating a duplicate.");
+  const request = await refresh.call(composio.connectedAccounts, account.id, {
+    ...(config.composioCallbackUrl ? { redirectUrl: config.composioCallbackUrl } : {}),
+  });
+  const url = (request as any)?.redirectUrl ?? (request as any)?.url;
+  if (typeof url !== "string" || !url.trim()) throw new Error("Composio did not return a reconnect URL.");
+  invalidateSession(userId);
+  return url;
+}
+
 /** Return safe connected-account metadata; credential fields are never exposed. */
 /**
  * Composio's public toolkit catalogue (most used first), used by decision

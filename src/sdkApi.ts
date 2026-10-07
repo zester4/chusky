@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import type { DurableObjectMetadata } from "./neonDurableState.js";
 import { promoteSdkFileUpload } from "./sdkFilePromotion.js";
 import { getAuth } from "./auth.js";
-import { ApprovalRequiredError, createTrigger, createUserOutcomeReadAdapter, deleteTrigger, disconnectConnectedAccount, executeExactComposioAction, fetchModels, getConnectionUrl, getToolkitStatesPage, listConnectedAccounts, listMeetingComposioCapabilities, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, updateTriggerInstructions, transcribeAudio, queueVideoWorkflow, type AgentToolActivity } from "./agent.js";
+import { ApprovalRequiredError, createTrigger, createUserOutcomeReadAdapter, deleteTrigger, disconnectConnectedAccount, executeExactComposioAction, fetchModels, getConnectionUrl, getReconnectUrl, getToolkitStatesPage, listConnectedAccounts, listMeetingComposioCapabilities, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, updateTriggerInstructions, transcribeAudio, queueVideoWorkflow, type AgentToolActivity } from "./agent.js";
 import type { SubagentActivityUpdate } from "./subagents/contracts.js";
 import { deleteR2Object, inspectR2Object, r2Configured, readR2Object, readR2ObjectBounded, signR2Download, signR2Upload, putR2Object } from "./lib/storage/r2.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
@@ -1832,6 +1832,18 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/apps/connections", async (c) => {
     try { return c.json({ data: await listConnectedAccounts(sdkUser(c)!.userId) }); }
     catch (error) { return apiError(c, 502, "connections_unavailable", error instanceof Error ? error.message : "Connected accounts are temporarily unavailable."); }
+  });
+
+  app.post("/v1/apps/connections/:connectionId/reconnect", async (c) => {
+    const id = c.req.param("connectionId").trim();
+    if (!/^[A-Za-z0-9_-]{1,200}$/.test(id)) return apiError(c, 400, "invalid_connection_id", "Invalid connected account ID.");
+    try {
+      return c.json({ connectionId: id, url: await getReconnectUrl(sdkUser(c)!.userId, id) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not create a reconnect link.";
+      const status = /not found|already active|invalid connected account/i.test(message) ? 404 : 502;
+      return apiError(c, status, "connection_reconnect_failed", message);
+    }
   });
 
   app.delete("/v1/apps/connections/:connectionId", async (c) => {

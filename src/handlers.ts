@@ -1,7 +1,7 @@
 import { Bot, Context, InlineKeyboard, InputFile } from "grammy";
 import { config } from "./config.js";
 import {
-  runAgent, fetchModels, getConnectionUrl, getToolkitStates, listConnectedAccounts, disconnectConnectedAccount, invalidateSession, ApprovalRequiredError,
+  runAgent, fetchModels, getConnectionUrl, getReconnectUrl, getToolkitStates, listConnectedAccounts, disconnectConnectedAccount, invalidateSession, ApprovalRequiredError,
   transcribeAudio, generateImage, generateSpeech,
   listTriggers, createTrigger, setTriggerState, deleteTrigger, listAvailableTriggerToolkits, listAvailableTriggerTypes, getAvailableTriggerType,
   searchTools, type AgentChannelContext,
@@ -1622,6 +1622,30 @@ export function registerHandlers(bot: Bot): void {
     }
   });
 
+  // /reconnect re-authorizes one existing Composio account by its exact ID or
+  // alias. It never falls back to /connect, which would create another account.
+  bot.command("reconnect", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) { await ctx.reply("For your security, reconnect connected apps in your private chat with Chusky."); return; }
+    const target = ctx.match?.trim() ?? "";
+    if (!target) { await ctx.reply("Usage: /reconnect <account-id-or-alias>\n\nUse /accounts to see expired connections."); return; }
+    const accounts = await listConnectedAccounts(ctx.from!.id);
+    const matches = accounts.filter((account) => account.id === target || account.alias?.toLowerCase() === target.toLowerCase());
+    if (matches.length !== 1) { await ctx.reply(matches.length > 1 ? "That alias matches multiple accounts. Use the exact account ID from /accounts." : "That connected account was not found. Use /accounts to see the current IDs and aliases."); return; }
+    const account = matches[0]!;
+    const statusMsg = await ctx.reply(`🔄 Generating a reconnect link for <b>${escapeTelegramHtml(account.toolkit)}${account.alias ? ` (${escapeTelegramHtml(account.alias)})` : ""}…`, { parse_mode: "HTML" });
+    try {
+      const url = await getReconnectUrl(ctx.from!.id, account.id);
+      await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id,
+        `🔄 <b>Reconnect ${escapeTelegramHtml(account.toolkit)}${account.alias ? ` (${escapeTelegramHtml(account.alias)})` : ""}</b>\n\n` +
+        `This link re-authorizes that existing account; it will not add another account.\n\n<a href="${url}">→ Reconnect account</a>`,
+        { parse_mode: "HTML", link_preview_options: { is_disabled: true } });
+    } catch (error) {
+      logger.error({ err: error, userId: ctx.from!.id, accountId: account.id }, "Failed to generate connected account reconnect URL");
+      await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id, `❌ I could not prepare a reconnect link for that account. It was not replaced or duplicated. Try /accounts again shortly.`, { parse_mode: "HTML" });
+    }
+  });
+
   bot.command("accounts", async (ctx) => {
     if (!(await guard(ctx))) return;
     const toolkit = (ctx.match?.trim() ?? "").toLowerCase() || undefined;
@@ -1635,13 +1659,33 @@ export function registerHandlers(bot: Bot): void {
       const body = lines.length
         ? `<b>Connected accounts${toolkit ? ` for ${escapeTelegramHtml(toolkit)}` : ""}</b>\n\n${lines.join("\n")}`
         : `No connected accounts${toolkit ? ` for ${escapeTelegramHtml(toolkit)}` : ""}.\n\nUse <code>/connect gmail work-gmail</code> to add one.`;
+      const expired = accounts.filter((account) => account.status.toUpperCase() !== "ACTIVE");
+      const keyboard = new InlineKeyboard();
+      if (expired.length) for (const account of expired.slice(0, 10)) keyboard.text(`Reconnect ${account.alias || account.toolkit}`.slice(0, 58), `acct:reconnect:${account.id}`).row();
+      if (accounts.length) keyboard.text("Disconnect an account", "acct:disconnect:list");
       await ctx.api.editMessageText(ctx.chat!.id, status.message_id, body, {
         parse_mode: "HTML",
-        ...(accounts.length ? { reply_markup: new InlineKeyboard().text("Disconnect an account", "acct:disconnect:list") } : {}),
+        ...(accounts.length ? { reply_markup: keyboard } : {}),
       });
     } catch (error) {
       logger.error({ err: error, userId: ctx.from!.id, toolkit }, "Failed to list Composio connected accounts");
       await ctx.api.editMessageText(ctx.chat!.id, status.message_id, `❌ Could not load connected accounts: ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" });
+    }
+  });
+
+  bot.callbackQuery(/^acct:reconnect:([A-Za-z0-9_-]{1,200})$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) { await ctx.editMessageText("For your security, reconnect connected apps in your private chat with Chusky."); return; }
+    const accountId = ctx.match[1]!;
+    try {
+      const account = (await listConnectedAccounts(ctx.from!.id)).find((item) => item.id === accountId);
+      if (!account) { await ctx.editMessageText("That connected account is no longer available. Use /accounts to refresh the list."); return; }
+      const url = await getReconnectUrl(ctx.from!.id, account.id);
+      await ctx.editMessageText(`🔄 <b>Reconnect ${escapeTelegramHtml(account.toolkit)}${account.alias ? ` (${escapeTelegramHtml(account.alias)})` : ""}</b>\n\nThis re-authorizes the existing account and does not add a duplicate.\n\n<a href="${url}">→ Reconnect account</a>`, { parse_mode: "HTML", link_preview_options: { is_disabled: true } });
+    } catch (error) {
+      logger.error({ err: error, userId: ctx.from!.id, accountId }, "Telegram connected account reconnect failed");
+      await ctx.editMessageText("❌ I could not prepare a reconnect link. The existing account was not replaced or duplicated. Try /accounts again shortly.");
     }
   });
 
