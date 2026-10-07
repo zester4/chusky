@@ -27,6 +27,29 @@ CHUSKY_API_KEY=chsk_your_project_key
 ~~~
 
 The SDK automatically uses the hosted Chusky API, so `baseUrl` is optional.
+
+## Attention Pulse
+
+Use the typed Attention Pulse resource to configure Elena for an owner-scoped
+account. Enabling Pulse schedules durable checks; it does not grant provider
+access or bypass approval for financial, destructive, permission-changing, or
+high-impact outbound actions.
+
+```ts
+const current = await client.attentionPulse.get();
+const updated = await client.attentionPulse.update({
+  enabled: true,
+  cadence: "hourly",
+  authority: "prepare",
+  deliveryTargets: [{ provider: "telegram" }],
+  monitoredDomains: ["gmail", "calendar"],
+  maxPerDay: 4,
+}, { idempotencyKey: "pulse-setup-2026-10-07" });
+```
+
+The `authority` values are `observe`, `prepare`, and `execute_reversible`.
+Provider actions still pass through the server's connected-account, ownership,
+approval, and verification controls.
 Pass `baseUrl` only when targeting a staging or self-hosted API. Never expose
 `CHUSKY_API_KEY` in browser code, mobile apps, public repositories, or prompts.
 

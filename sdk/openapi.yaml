@@ -66,6 +66,32 @@ paths:
     get: { summary: Read the authenticated owner's unified personal or business autonomy queue, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: mode, in: query, required: false, schema: { type: string, enum: [personal, business] } }], responses: { '200': { description: Owner-scoped autonomy snapshot including profile, watches, blockers, and next checks }, '403': { description: Owner link required } } }
   /account/autonomy/reconcile:
     post: { summary: Run due owner-configured read-only autonomy watches and persist checkpoints, requestBody: { required: false, content: { application/json: { schema: { type: object, properties: { mode: { type: string, enum: [personal, business] }, maxWatches: { type: integer, minimum: 1, maximum: 20 } } } } } }, responses: { '200': { description: Bounded reconciliation results and gap candidates }, '403': { description: Owner link required } } }
+  /account/attention-pulse:
+    get: { summary: Read the authenticated owner's Attention Pulse settings, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Current Pulse cadence, authority, delivery targets, monitored domains, and health-independent settings }, '403': { description: Owner link required } } }
+    put:
+      summary: Configure the authenticated owner's Attention Pulse
+      parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              additionalProperties: false
+              properties:
+                enabled: { type: boolean }
+                cadence: { type: string, enum: [every_30_minutes, hourly, daily], default: hourly }
+                authority: { type: string, enum: [observe, prepare, execute_reversible], default: prepare }
+                deliveryTargets: { type: array, maxItems: 8, items: { type: object, required: [provider], additionalProperties: false, properties: { provider: { type: string }, conversationId: { type: string, maxLength: 300 } } } }
+                maxPerDay: { type: integer, minimum: 0, maximum: 1000, default: 4 }
+                quietHoursUtc: { type: object, nullable: true, additionalProperties: false, properties: { startMinute: { type: integer, minimum: 0, maximum: 1439 }, endMinute: { type: integer, minimum: 0, maximum: 1439 } } }
+                monitoredDomains: { type: array, maxItems: 30, items: { type: string, pattern: '^[a-z][a-z0-9_-]{1,79}$' } }
+      responses:
+        '200': { description: Updated owner-scoped Pulse settings }
+        '400': { description: Invalid Pulse settings }
+        '403': { description: Owner link required }
+        '409': { description: Another autonomy operation is already running or idempotency key was reused with a different request }
   /account/projects/{projectId}/autonomy/queue:
     get: { summary: Read the unified business autonomy queue under a company project policy, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: projectId, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Company autonomy snapshot }, '404': { description: Not found } } }
   /account/projects/{projectId}/autonomy/reconcile:

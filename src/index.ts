@@ -2398,10 +2398,20 @@ Decision context:
 ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.deliveryTarget });
             if (result.status === "requires_tool_request" && result.handoffRecord) {
               const continuation = await enqueueSubagentToolContinuation(payload.userId, result.handoffRecord.id);
-              return { text: `The attention pulse paused for a verified capability request. Continuation ${continuation.workflowRunId} was queued.` };
+              return {
+                text: `The attention pulse paused for a verified capability request. Continuation ${continuation.workflowRunId} was queued.`,
+                terminalStatus: "waiting",
+                nextAction: "Wait for the verified capability continuation to complete.",
+                waitReason: "A verified capability request is waiting for its durable continuation.",
+              };
             }
             if (result.status === "requires_approval") {
-              return { text: `The attention pulse needs approval for ${result.proposal?.actionName ?? "an external action"}. Approve request ${result.approvalId ?? "in Telegram"}.` };
+              return {
+                text: `The attention pulse needs approval for ${result.proposal?.actionName ?? "an external action"}. Approve request ${result.approvalId ?? "in Telegram"}.`,
+                terminalStatus: "waiting",
+                nextAction: result.approvalId ? `Approve request ${result.approvalId}.` : "Review the pending approval in Telegram.",
+                waitReason: "The pulse reached an approval boundary and did not perform the external action.",
+              };
             }
             const reconciliationCompleted = result.toolCallsLog.some((entry) => entry.tool === "CHUCK_AUTONOMY_RECONCILE" && entry.status === "completed");
             let closeoutPlan = attentionPulseRequireDueWatchReport(plan, reconciliationCompleted);
@@ -2423,7 +2433,10 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             const text = !noAction && !handled
               ? `The attention pulse did not complete or delegate an actionable step. The unchanged item remains open and will be reconsidered when its state changes or new evidence arrives.\n\n${output}`
               : output;
-            return { text, suppressDelivery: noAction, ...(deliveryConfirmation ? { deliveryConfirmation } : {}) };
+            const heartbeatText = noAction && job.heartbeat
+              ? "Elena pulse checked the configured attention state. No new owner-visible action was found in this run."
+              : text;
+            return { text: heartbeatText, suppressDelivery: noAction && !job.heartbeat, ...(deliveryConfirmation ? { deliveryConfirmation } : {}) };
           }
           const session = await getSession(payload.userId);
           const context = await buildAutonomyContextBundle(payload.userId, { objective: job.text, links: job.links, snapshot: job.contextSnapshot });

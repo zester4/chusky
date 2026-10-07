@@ -34,6 +34,8 @@ export interface WorkflowExecutionResult {
   toolCalls?: number;
   suppressDelivery?: boolean;
   status?: AutonomyExecutionStatus;
+  /** Persist a waiting/blocked terminal state after the owner-facing notice is sent. */
+  terminalStatus?: Extract<AutonomyExecutionStatus, "waiting" | "blocked">;
   nextAction?: string;
   waitReason?: string;
   retryAt?: number;
@@ -178,7 +180,10 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
     // cause a second external delivery.
     if (deps.completeDelivery) await deps.completeDelivery(deliveryKey, 7 * 24 * 60 * 60);
     if (result.deliveryConfirmation && deps.confirmDelivery) await deps.confirmDelivery(payload.userId, deliveryJob, result.deliveryConfirmation);
-    if (occurrence && deps.updateJobOccurrence) await deps.updateJobOccurrence(payload.userId, occurrence.id, { status: "completed", completedAt: Date.now() }, occurrence.version);
+    if (occurrence && deps.updateJobOccurrence) await deps.updateJobOccurrence(payload.userId, occurrence.id, {
+      status: result.terminalStatus ?? "completed",
+      ...(result.terminalStatus ? { nextAction: result.nextAction, waitReason: result.waitReason } : { completedAt: Date.now() }),
+    }, occurrence.version);
   } catch (error) {
     if (occurrence && deps.updateJobOccurrence) await deps.updateJobOccurrence(payload.userId, occurrence.id, { status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500), completedAt: Date.now() }, occurrence.version);
     await deps.updateJob(payload.userId, payload.jobId, { deliveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });

@@ -67,6 +67,7 @@ import { getOutcomePackage, listOutcomePackages, planOutcome } from "./outcomes/
 import { completeMissionStepAndAdvance, finalizeMissionCloseout, MissionEnqueueError, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, rescheduleQueuedMissionTasks, resumeMissionAndSchedule, validateMissionStepsPayload } from "./missionScheduler.js";
 import { getAutonomySnapshot } from "./autonomy/queue.js";
 import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
+import { applyPulsePreferences, normalizePulsePreferences, readPulsePreferences, type PulsePreferencesInput } from "./proactive/preferences.js";
 import { appendReliabilitySample, compensationView, listCompensations, listOutcomeVerifications, listTraceEvents, reliabilityHealth } from "./reliability/persistence.js";
 import { replayMission, replayScenario } from "./reliability/replay.js";
 import { executeOutcomeVerification, verifiedOutcomeEvidenceSummary } from "./reliability/outcomeEngine.js";
@@ -2183,6 +2184,24 @@ export function registerSdkApi(app: Hono): void {
     return sdkAutonomyMutation(c, owner.userId, fingerprint, async () => ({ data: await runDueAutonomyWatches(owner.userId, { mode, maxWatches }) }));
   });
 
+  app.get("/v1/account/attention-pulse", async (c) => {
+    const owner = sdkUser(c);
+    if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before reading Attention Pulse settings.");
+    try { return c.json(await readPulsePreferences(owner.userId)); }
+    catch (error) { return apiError(c, 503, "attention_pulse_unavailable", error instanceof Error ? error.message : "Attention Pulse settings are unavailable."); }
+  });
+
+  app.put("/v1/account/attention-pulse", async (c) => {
+    const owner = sdkUser(c);
+    if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before changing Attention Pulse settings.");
+    const body = await c.req.json().catch(() => ({})) as PulsePreferencesInput;
+    try { normalizePulsePreferences(body); }
+    catch (error) { return apiError(c, 400, "invalid_attention_pulse", error instanceof Error ? error.message : "Attention Pulse settings are invalid."); }
+    const fingerprint = createHash("sha256").update(`PUT:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
+    try { return await sdkAutonomyMutation(c, owner.userId, fingerprint, async () => ({ data: await applyPulsePreferences(owner.userId, body) })); }
+    catch (error) { return apiError(c, 503, "attention_pulse_update_failed", error instanceof Error ? error.message : "Attention Pulse settings could not be updated safely."); }
+  });
+
   app.get("/v1/account/projects/:projectId/autonomy/queue", async (c) => {
     const control = await getSession(0);
     const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && item.organizationId && !item.revokedAt);
@@ -2822,9 +2841,15 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/memory", async (c) => {
     const key = c.req.query("key")?.trim();
     if (key && key.length > 200) return apiError(c, 400, "invalid_memory_key", "Memory key must be 200 characters or fewer.");
+    const organizationId = c.req.query("organizationId")?.trim() || undefined;
+    if (organizationId && !(await organizationAccessForRequest(c, organizationId))) return apiError(c, 403, "organization_access_required", "A verified organization membership is required.");
     const data = key
-      ? ((memory) => memory ? [memory] : [])(await getMemoryByKey(sdkUser(c)!.userId, key))
-      : await searchMemories(sdkUser(c)!.userId, c.req.query("query"), { limit: 20 });
+      ? organizationId
+        ? (await searchMemories(sdkUser(c)!.userId, key, { organizationId, limit: 20 })).filter((memory) => memory.key === key && memory.organizationId === organizationId)
+        : ((memory) => memory ? [memory] : [])(await getMemoryByKey(sdkUser(c)!.userId, key))
+      : organizationId
+        ? (await searchMemories(sdkUser(c)!.userId, c.req.query("query"), { organizationId, limit: 20 })).filter((memory) => memory.organizationId === organizationId)
+        : await searchMemories(sdkUser(c)!.userId, c.req.query("query"), { limit: 20 });
     return c.json({ data: data.map(memoryView) });
   });
   app.post("/v1/memory/scopes/:organizationId/enable", async (c) => {

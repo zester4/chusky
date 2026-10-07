@@ -5,6 +5,7 @@ import { isReadOnlyToolSlug } from "../policy.js";
 import { config } from "../config.js";
 import { detectBusinessGaps, type NormalizedBusinessSignal } from "./gapDetectors.js";
 import { detectBusinessOpportunities } from "./opportunityDetectors.js";
+import { detectProactiveFindings, type ProactiveFinding } from "../proactive/detectors.js";
 
 export interface ReconciliationRun {
   watchId: string;
@@ -107,11 +108,12 @@ function normalizeSignals(value: unknown, source: string, now: number): Normaliz
     const amount = typeof item.amount === "number" && Number.isFinite(item.amount) && Math.abs(item.amount) <= 1_000_000_000_000 ? item.amount : undefined;
     const metadataInput = item.metadata && typeof item.metadata === "object" && !Array.isArray(item.metadata) ? item.metadata as Record<string, unknown> : {};
     const metadata: Record<string, unknown> = {};
-    for (const key of ["company", "domain", "url", "signal", "evidence", "confidence", "score"] as const) {
+    for (const key of ["company", "domain", "url", "signal", "evidence", "confidence", "score", "important", "priority", "importantPerson", "attachment", "preparationNeeded", "conflict", "followUpRequired", "inactive", "followUpNeeded", "mention", "blocked", "changed"] as const) {
       const candidate = metadataInput[key];
       if (typeof candidate === "string" && candidate.trim() && candidate.length <= 500) {
         if (key !== "url" || /^https:\/\//i.test(candidate)) metadata[key] = compact(candidate, 500);
       } else if ((key === "confidence" || key === "score") && typeof candidate === "number" && Number.isFinite(candidate) && candidate >= 0 && candidate <= 1) metadata[key] = candidate;
+      else if (["important", "importantPerson", "attachment", "preparationNeeded", "conflict", "followUpRequired", "inactive", "followUpNeeded", "mention", "blocked", "changed"].includes(key) && typeof candidate === "boolean") metadata[key] = candidate;
     }
     return [{
       id: typeof item.id === "string" && item.id.trim() ? item.id.trim().slice(0, 180) : undefined,
@@ -200,6 +202,24 @@ async function recordGaps(userId: number, gaps: ReturnType<typeof detectBusiness
   }));
 }
 
+async function recordProactiveFindings(userId: number, findings: ProactiveFinding[]): Promise<void> {
+  if (!findings.length) return;
+  const existing = await listAttentionRecords(userId, "attention_candidate", { limit: 200 }) as AttentionCandidateRecord[];
+  const pendingKeys = new Set(existing.filter((item) => item.status === "pending").map((item) => item.reason.match(/^\[([^\]]+)\]/)?.[1]).filter((item): item is string => Boolean(item)));
+  await Promise.all(findings.slice(0, 30).map(async (item) => {
+    if (pendingKeys.has(item.key)) return;
+    await createAttentionRecord(userId, "attention_candidate", {
+      candidateType: item.actionClass === "approval" ? "act" : item.actionClass === "prepare" ? "prepare" : "nudge",
+      reason: `[${item.key}] ${item.title}: ${item.reason}`,
+      proposedAction: item.nextAction,
+      score: item.score,
+      status: "pending",
+      availableAt: item.detectedAt,
+      expiresAt: item.detectedAt + 30 * 24 * 60 * 60_000,
+    });
+  }));
+}
+
 async function recordWatchObservation(
   userId: number,
   watch: AutonomyWatchRecord,
@@ -214,7 +234,7 @@ async function recordWatchObservation(
     summary: compact(summary, 4000),
     entityId: watch.id,
     dedupeKey: `watch:${watch.id}:${eventType}:${dedupeKey}`,
-    metadata: { watchId: watch.id, mode: watch.mode ?? "personal" },
+    metadata: { watchId: watch.id, mode: watch.mode ?? "personal", ...(watch.capabilityIds?.length ? { capabilityIds: watch.capabilityIds.join(",") } : {}) },
     occurredAt,
     importance: eventType === "watch.failed" ? 0.9 : eventType === "watch.changed" ? 0.85 : 0.7,
     novelty: eventType === "watch.recovered" ? 0.6 : 0.9,
@@ -267,6 +287,13 @@ export async function runDueAutonomyWatches(userId: number, options: Reconciliat
       const signals = parsed.signals;
       const gaps = mode === "business" ? [...detectBusinessGaps(signals, { now }), ...detectBusinessOpportunities(signals, now)] : detectBusinessGaps(signals, { now });
       await recordGaps(userId, gaps);
+      // Existing business-gap records are authoritative for these overlapping
+      // categories. Keep the generic proactive layer for the broader catalog
+      // without creating two candidates for the same owner problem.
+      const proactiveFindings = detectProactiveFindings(signals, now).filter((item) => ![
+        "inbox_priority_scan", "unanswered_message", "invoice_detection", "stalled_task_recovery", "crm_follow_up",
+      ].includes(item.capabilityId));
+      await recordProactiveFindings(userId, proactiveFindings);
       const digestKey = createHash("sha256").update(JSON.stringify({
         watch: watch.id,
         summary,

@@ -168,7 +168,10 @@ function compactSdkThreads(threads: unknown): SdkThreadRecord[] {
 function compactReplayValue(value: unknown, depth = 0): unknown {
   if (typeof value === "string") return boundPersistedText(value, PERSISTED_RUN_OUTPUT_MAX_CHARS);
   if (value === null || typeof value !== "object") return value;
-  if (depth >= 3) return "[nested response omitted from durable storage]";
+  // Keep one additional object level so idempotent API replays preserve small
+  // response DTOs such as Attention Pulse delivery preferences. The value is
+  // still bounded by the array/object limits below and remains provider-safe.
+  if (depth >= 4) return "[nested response omitted from durable storage]";
   if (Array.isArray(value)) return value.slice(-200).map((item) => compactReplayValue(item, depth + 1));
   return Object.fromEntries(Object.entries(value).slice(0, 200).map(([key, item]) => [key, compactReplayValue(item, depth + 1)]));
 }
@@ -1287,6 +1290,8 @@ export interface JobRecord {
   /** Standard recurring work or the owner-enabled attention governor. */
   kind?: "standard" | "attention_pulse";
   attentionPulse?: { lastDigestKey?: string; lastDeliveredAt?: number; lastDeliveredDayUtc?: string; deliveriesToday?: number };
+  /** When enabled, a quiet pulse still emits a bounded owner heartbeat. */
+  heartbeat?: boolean;
   workerBinding?: ScheduledWorkerBinding;
   /** Durable provider-neutral destination captured when the job is created. */
   deliveryTarget?: ReminderDeliveryTarget;
@@ -1394,6 +1399,8 @@ export interface StandingOrderRecord {
 }
 export interface AutonomyWatchRecord {
   id: string; userId: number; name: string; domain: string; toolkit?: string; connectedAccountId?: string; accountAlias?: string;
+  /** Proactive catalogue capabilities served by this bounded read watch. */
+  capabilityIds?: string[];
   /** Legacy watches default to personal; new business watches stay isolated from personal policy. */
   mode?: "personal" | "business";
   objective: string; query?: string; /** Exact owner-selected read-only Composio/native slugs. */
@@ -8570,7 +8577,8 @@ export async function removeShoppingSite(uid: number, id: string): Promise<boole
 export async function upsertMemory(uid: number, memory: Omit<MemoryFact, "id" | "updatedAt" | "createdAt" | "source" | "sensitivity"> & Partial<Pick<MemoryFact, "id" | "createdAt" | "source" | "sensitivity">>): Promise<MemoryFact> {
   const s = await getSession(uid);
   const now = Date.now();
-  const existing = s.memories.find((m) => (memory.id && m.id === memory.id) || (!memory.id && m.category === memory.category && m.key === memory.key));
+  const sameScope = (left: MemoryFact, right: typeof memory) => left.projectId === right.projectId && left.organizationId === right.organizationId && left.personKey === right.personKey;
+  const existing = s.memories.find((m) => (memory.id && m.id === memory.id) || (!memory.id && m.category === memory.category && m.key === memory.key && sameScope(m, memory)));
   const value: MemoryFact = {
     id: existing?.id ?? memory.id ?? `mem_${now}_${Math.random().toString(36).slice(2, 8)}`,
     category: memory.category,
@@ -8595,7 +8603,7 @@ export async function upsertMemory(uid: number, memory: Omit<MemoryFact, "id" | 
     const persisted = await saveDurableMemory({ ownerUserId: uid, scope: { kind: value.organizationId ? "organization" : value.projectId ? "project" : "personal", externalId: value.organizationId ?? value.projectId ?? String(uid) }, category: value.category as never, key: value.key, value: value.value, confidence: value.confidence, sensitivity: value.sensitivity, meetingSafe: value.meetingSafe, meetingVerdict: value.meetingVerdict, source: { type: value.source, ref: value.id }, entityId: entity?.id, reviewAt: value.reviewAt, expiresAt: value.expiresAt, id: value.id });
     value.id = persisted.id;
   }
-  s.memories = [...s.memories.filter((m) => m.id !== value.id && !(m.category === value.category && m.key === value.key)), value].slice(-200);
+  s.memories = [...s.memories.filter((m) => m.id !== value.id && !(m.category === value.category && m.key === value.key && sameScope(m, value))), value].slice(-200);
   await saveSession(uid, s);
   if (vectorConfigured()) {
     const vector = new UpstashKnowledgeStore();
@@ -8623,7 +8631,8 @@ export async function upsertMemoryAndContext(
 
   const session = await withMemoryPersistenceStage("load_session", () => getSession(uid));
   const now = Date.now();
-  const existingMemory = session.memories.find((item) => (memory.id && item.id === memory.id) || (!memory.id && item.category === memory.category && item.key === memory.key));
+  const sameScope = (left: MemoryFact, right: typeof memory) => left.projectId === right.projectId && left.organizationId === right.organizationId && left.personKey === right.personKey;
+  const existingMemory = session.memories.find((item) => (memory.id && item.id === memory.id) || (!memory.id && item.category === memory.category && item.key === memory.key && sameScope(item, memory)));
   const savedMemory: MemoryFact = {
     id: existingMemory?.id ?? memory.id ?? `mem_${now}_${Math.random().toString(36).slice(2, 8)}`,
     category: memory.category,
@@ -8682,7 +8691,7 @@ export async function upsertMemoryAndContext(
   let latestExistingMemory = existingMemory;
   await withMemoryPersistenceStage("session_projection", () => mutateSession(uid, (latestSession) => {
     latestExistingMemory = latestSession.memories.find((item) =>
-      (memory.id && item.id === memory.id) || (!memory.id && item.category === memory.category && item.key === memory.key),
+      (memory.id && item.id === memory.id) || (!memory.id && item.category === memory.category && item.key === memory.key && sameScope(item, memory)),
     );
     const latestContext = latestSession.contextNodes?.find((item) => item.sourceRef === latestExistingMemory?.id)
       ?? latestSession.contextNodes?.find((item) => `${item.scope}:${item.scopeId ?? ""}:${item.kind}:${item.key}` === contextIdentity);
@@ -8690,7 +8699,7 @@ export async function upsertMemoryAndContext(
       savedContext.id = latestContext.id;
       savedContext.createdAt = latestContext.createdAt;
     }
-    latestSession.memories = [...latestSession.memories.filter((item) => item.id !== savedMemory.id && !(item.category === savedMemory.category && item.key === savedMemory.key)), savedMemory].slice(-200);
+    latestSession.memories = [...latestSession.memories.filter((item) => item.id !== savedMemory.id && !(item.category === savedMemory.category && item.key === savedMemory.key && sameScope(item, savedMemory))), savedMemory].slice(-200);
     latestSession.contextNodes = latestContext
       ? (latestSession.contextNodes ?? []).map((item) => item.id === latestContext.id ? savedContext : item)
       : [savedContext, ...(latestSession.contextNodes ?? [])].slice(0, 1000);
@@ -8901,7 +8910,7 @@ export async function getMemoryByKey(uid: number, key: string): Promise<MemoryFa
   }
   const now = Date.now();
   return (await getSession(uid)).memories
-    .filter((memory) => memory.status !== "deleted" && memory.key === normalizedKey && (!memory.expiresAt || memory.expiresAt > now) && (!memory.reviewAt || memory.reviewAt > now))
+    .filter((memory) => memory.status !== "deleted" && !memory.projectId && !memory.organizationId && memory.key === normalizedKey && (!memory.expiresAt || memory.expiresAt > now) && (!memory.reviewAt || memory.reviewAt > now))
     .sort((left, right) => right.updatedAt - left.updatedAt)[0];
 }
 
@@ -9133,7 +9142,7 @@ function attentionRecord(collection: AttentionCollection, raw: Record<string, un
     };
     case "autonomy-watches": return {
       ...base, name: attentionText(raw.name, "name", 200, true)!, domain: attentionText(raw.domain, "domain", 120, true)!, toolkit: attentionText(raw.toolkit, "toolkit", 120), connectedAccountId: attentionText(raw.connectedAccountId, "connectedAccountId", 200), accountAlias: attentionText(raw.accountAlias, "accountAlias", 120), mode: raw.mode === "business" ? "business" : "personal", objective: attentionText(raw.objective, "objective", 2000, true)!, query: attentionText(raw.query, "query", 1000),
-      toolSlugs: attentionArray(raw.toolSlugs, "toolSlugs", 20)?.map((item) => item.trim()).filter((item) => /^[A-Z][A-Z0-9]{1,31}_[A-Z0-9_]+$/.test(item)), cursor: attentionText(raw.cursor, "cursor", 500), lastDigestKey: attentionText(raw.lastDigestKey, "lastDigestKey", 128), consecutiveFailures: Math.round(attentionNumber(raw.consecutiveFailures, "consecutiveFailures", 0, 0, 100)), freshnessMs: Math.round(attentionNumber(raw.freshnessMs, "freshnessMs", 24 * 60 * 60_000, 60_000, 7 * 24 * 60 * 60_000)), lastObservedAt: attentionTimestamp(raw.lastObservedAt, "lastObservedAt"),
+      capabilityIds: attentionArray(raw.capabilityIds, "capabilityIds", 20)?.map((item) => item.trim()).filter((item) => /^[a-z][a-z0-9_]{2,80}$/.test(item)), toolSlugs: attentionArray(raw.toolSlugs, "toolSlugs", 20)?.map((item) => item.trim()).filter((item) => /^[A-Z][A-Z0-9]{1,31}_[A-Z0-9_]+$/.test(item)), cursor: attentionText(raw.cursor, "cursor", 500), lastDigestKey: attentionText(raw.lastDigestKey, "lastDigestKey", 128), consecutiveFailures: Math.round(attentionNumber(raw.consecutiveFailures, "consecutiveFailures", 0, 0, 100)), freshnessMs: Math.round(attentionNumber(raw.freshnessMs, "freshnessMs", 24 * 60 * 60_000, 60_000, 7 * 24 * 60 * 60_000)), lastObservedAt: attentionTimestamp(raw.lastObservedAt, "lastObservedAt"),
       seenSignalKeys: Array.isArray(raw.seenSignalKeys) ? [...new Set(raw.seenSignalKeys.filter((item): item is string => typeof item === "string" && /^[a-f0-9]{64}$/.test(item)))].slice(-2000) : undefined,
       cadenceSeconds: Math.round(attentionNumber(raw.cadenceSeconds, "cadenceSeconds", 3600, 300, 2_592_000)), authority: attentionStatus(raw.authority, ["observe", "prepare", "execute_reversible"], "observe") as AutonomyWatchRecord["authority"], status: attentionStatus(raw.status, ["active", "paused", "revoked"], "active") as AutonomyWatchRecord["status"],
       nextCheckAt: attentionTimestamp(raw.nextCheckAt, "nextCheckAt"), lastCheckedAt: attentionTimestamp(raw.lastCheckedAt, "lastCheckedAt"), lastChangedAt: attentionTimestamp(raw.lastChangedAt, "lastChangedAt"), lastResult: attentionText(raw.lastResult, "lastResult", 4000), lastError: attentionText(raw.lastError, "lastError", 1000), maxItems: Math.round(attentionNumber(raw.maxItems, "maxItems", 20, 1, 100)),

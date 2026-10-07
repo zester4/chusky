@@ -10,11 +10,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { classifyMemory } from "./memory/classifier.js";
 import { config } from "./config.js";
 import { getAttentionPulseWatchCoverage } from "./attentionPulse.js";
+import { defaultWatchInput, missingDefaultWatchKeys, normalizeProactiveCapabilityIds } from "./proactive/watches.js";
 import { assertPublicHttpUrl, createTinyFishClient } from "./tinyfish.js";
 import { receiveTinyFishMonitorWebhook, tinyFishMonitorSignature, tinyFishMonitorSnapshotHash, validateTinyFishMonitorSchedule } from "./tinyfishMonitors.js";
 import { reconcileTinyFishResearchRun } from "./tinyfishResearch.js";
 import {
-  addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, listJobs, listReminders, claimHandoffBudget, searchConversationMessages, getConversationMessage,
+  addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, listJobs, listJobOccurrences, listReminders, claimHandoffBudget, searchConversationMessages, getConversationMessage,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
   upsertMeetingContact, listMeetingContacts, deleteMeetingContact, getMeetingContact, updateMeetingContact,
   readScratchpad, updateJob, updateReminder, transitionReminderStatus, writeScratchpad,
@@ -22,7 +23,7 @@ import {
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, getApproval, getAgentRun, setApprovalStatus, updateTask, getHandoffRecord,
   blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, createMission, finalizeMissionIfReady, getMission, listMissions, missionProof, pauseMission, startMission, updateMission, updateMissionControl, waitMission, recordTrustedMissionEvidence, verifyMission, repairMission, missionBudgetPreflight, missingMissionEvidenceRequirements, MissionReplanConflictError,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
-  type AttentionEntityKind, type DeliveryPreferenceRecord, type ImageAsset, type TinyFishMonitorRecord, type TinyFishResearchRunRecord,
+  type AttentionEntityKind, type AutonomyWatchRecord, type DeliveryPreferenceRecord, type ImageAsset, type TinyFishMonitorRecord, type TinyFishResearchRunRecord,
   type TaskStatus, type MissionStatus, type MissionBudget, type MissionWorkSchedule,
   type JobRecord, type ReminderRecord, type ScheduledWorkerBinding, type ReminderDeliveryTarget,
   listPhoneCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
@@ -632,12 +633,19 @@ async function attentionTool(userId: number, args: Record<string, unknown>): Pro
   if (action === "list") return listAttentionRecords(userId, kind, { query: args.query ? text(args.query) : undefined, status: args.status ? String(args.status).trim().slice(0, 100) : undefined, limit: args.limit === undefined ? undefined : Number(args.limit) });
   if (action === "update") {
     const id = text(args.id);
-    const updated = await updateAttentionRecord(userId, kind, id, attentionInput(args));
+    const patch = attentionInput(args);
+    if (kind === "autonomy_watch" && patch.capabilityIds !== undefined) {
+      patch.capabilityIds = normalizeProactiveCapabilityIds(patch.capabilityIds);
+      if (patch.authority !== undefined && patch.authority !== "observe") throw new Error("Typed proactive watches are read-only and must use authority=observe.");
+    }
+    const updated = await updateAttentionRecord(userId, kind, id, patch);
     if (!updated) throw new Error("Attention record not found or not owned by you");
     return updated;
   }
   const input = attentionInput(args);
   if (kind === "autonomy_watch") {
+    input.capabilityIds = normalizeProactiveCapabilityIds(input.capabilityIds);
+    if (input.authority !== undefined && input.authority !== "observe") throw new Error("Typed proactive watches are read-only and must use authority=observe.");
     const query = typeof args.query === "string" ? args.query : args.queryText;
     if (typeof query === "string" && query.trim()) input.query = text(query);
   }
@@ -748,6 +756,15 @@ async function ensureAttentionPulseDeliveryPreference(userId: number, runtime: N
   });
 }
 
+/** Seed only the two safe starter reads after explicit Pulse opt-in. Existing
+ * owner watches are preserved, and repeated enable calls are idempotent. */
+async function ensureDefaultProactiveWatches(userId: number): Promise<void> {
+  const existing = await listAttentionRecords(userId, "autonomy_watch", { limit: 200 });
+  for (const spec of missingDefaultWatchKeys(existing as AutonomyWatchRecord[])) {
+    await createAttentionRecord(userId, "autonomy_watch", defaultWatchInput(spec));
+  }
+}
+
 export async function configureAttentionPulse(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<unknown> {
   const action = String(args.action ?? "");
   if (!["enable", "disable", "status"].includes(action)) throw new Error("Attention pulse action must be enable, disable, or status");
@@ -755,9 +772,18 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
   const active = (await listJobs(userId)).filter((job) => job.kind === "attention_pulse");
   if (action === "status") {
     const watchCoverage = await getAttentionPulseWatchCoverage(userId);
+    const pulseJobs = active.filter((job) => job.id === ATTENTION_PULSE_JOB_ID(userId));
+    const occurrences = (await listJobOccurrences(userId, ATTENTION_PULSE_JOB_ID(userId), 12)).map((occurrence) => ({
+      occurrenceId: occurrence.occurrenceId, status: occurrence.status, startedAt: occurrence.startedAt, completedAt: occurrence.completedAt,
+      error: occurrence.error, nextAction: occurrence.nextAction, result: occurrence.result?.slice(0, 500),
+    }));
+    const latestOccurrence = occurrences[0];
+    const latestActivityAt = latestOccurrence?.completedAt ?? latestOccurrence?.startedAt;
     return {
       enabled: active.length > 0,
-      jobs: active,
+      jobs: pulseJobs,
+      health: { lastOccurrence: latestOccurrence, recentFailures: occurrences.filter((item) => item.status === "failed" || item.status === "blocked").length, neverRun: Boolean(pulseJobs[0] && !latestActivityAt), stale: Boolean(pulseJobs[0] && (!latestActivityAt || Date.now() - latestActivityAt > 2 * 60 * 60_000)) },
+      occurrences,
       watchCoverage: {
         scope: "owner-configured watches only; not a full sweep of connected apps",
         active: watchCoverage.length,
@@ -779,6 +805,8 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
   if (existing) {
     if (existing.cron === cron) {
       await ensureAttentionPulseDeliveryPreference(userId, runtime);
+      await ensureDefaultProactiveWatches(userId);
+      if (!existing.heartbeat) await updateJob(userId, existing.id, { heartbeat: true });
       return existing;
     }
     const client = new QStashClient({ token: requireQStash() });
@@ -804,16 +832,18 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
       throw error;
     }
     await ensureAttentionPulseDeliveryPreference(userId, runtime);
+    await ensureDefaultProactiveWatches(userId);
     return { ...existing, cron };
   }
   const qstashToken = requireQStash();
   await ensureAttentionPulseDeliveryPreference(userId, runtime);
+  await ensureDefaultProactiveWatches(userId);
   const deliveryTarget = durableReminderTarget(runtime.deliveryTarget);
   const job: JobRecord = {
     id: ATTENTION_PULSE_JOB_ID(userId), userId,
     text: "Run the owner's proactive attention pulse.", cron,
     scheduleId: ATTENTION_PULSE_SCHEDULE_ID(userId), status: "active", kind: "attention_pulse",
-    workerBinding: ATTENTION_PULSE_BINDING,
+    workerBinding: ATTENTION_PULSE_BINDING, heartbeat: true,
     ...(deliveryTarget ? { deliveryTarget } : {}), createdAt: Date.now(),
   };
   const client = new QStashClient({ token: qstashToken });
