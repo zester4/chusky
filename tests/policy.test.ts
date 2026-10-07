@@ -87,6 +87,11 @@ test("uses explicit native policies and gates only side-effecting Composio batch
   assert.equal(toolApprovalPolicy("CHUCK_MISSION_COMPENSATE", { action: "inspect" }), "private");
   assert.equal(requiresToolApproval("CHUCK_MISSION_COMPENSATE", { action: "inspect" }), false);
   for (const name of ["CHUCK_MEETING_JOIN", "CHUCK_MEETING_LIST", "CHUCK_MEETING_STATUS", "CHUCK_MEETING_LEAVE"]) assert.equal(toolApprovalPolicy(name), "private", name);
+  for (const name of ["CHUCK_BROWSER_HANDOFF", "CHUCK_BROWSER_HANDOFF_STATUS", "CHUCK_BROWSER_HANDOFF_COMPLETE", "CHUCK_BROWSER_HANDOFF_RESUME"]) {
+    assert.equal(toolApprovalPolicy(name, { id: "bh_existing" }), "private", name);
+    assert.equal(requiresToolApproval(name, { id: "bh_existing" }, true, true), false, `${name} must ignore force approval`);
+    assert.equal(requiresToolApproval(name, { id: "bh_existing" }, true, false), false, `${name} must ignore force approval outside owner mode`);
+  }
   for (const name of ["CHUCK_MEETING_CONTEXT_LOOKUP", "CHUCK_MEETING_CONTACT_CAPTURE", "CHUCK_MEETING_CONTACTS_LIST", "CHUCK_MEETING_FOLLOWUP_SCHEDULE"]) {
     assert.equal(toolApprovalPolicy(name), "private", name);
   }

@@ -716,24 +716,38 @@ export class E2BBrowserEngine {
   private async startBrowserStream(sandbox: Sandbox, ttlSeconds: number): Promise<{ url: string; expiresAt: number; port: number; startedAt: number }> {
     const token = randomUUID().replaceAll("-", "").slice(0, 8);
     const startedAt = Date.now();
-    const handoffEnv = { DISPLAY: ":99", XDG_RUNTIME_DIR: "/tmp/chusky-runtime" };
-    const startHandoffService = async (command: string) => {
-      await sandbox.commands.run(command, { envs: handoffEnv, requestTimeoutMs: config.e2bRequestTimeoutMs });
+    const handoffEnv: Record<string, string> = { DISPLAY: ":99", XDG_RUNTIME_DIR: "/tmp/chusky-runtime" };
+    const vncPasswordFile = "/tmp/chusky-vnc.passwd";
+    const startHandoffService = async (command: string, envs = handoffEnv) => {
+      await sandbox.commands.run(command, { envs, requestTimeoutMs: config.e2bRequestTimeoutMs });
     };
     // Keep the VNC services separate from the browser daemon. The E2B command
     // API treats a detached nested shell as a failed command intermittently,
     // and returning the preview URL before websockify is listening creates a
     // misleading "closed port" handoff.
-    await startHandoffService("if [ -f /tmp/chusky-x11vnc.pid ] && kill -0 $(cat /tmp/chusky-x11vnc.pid) 2>/dev/null; then kill $(cat /tmp/chusky-x11vnc.pid) 2>/dev/null || true; fi; pkill -x x11vnc 2>/dev/null || true; rm -f /tmp/chusky-x11vnc.pid");
+    await startHandoffService(`if [ -f /tmp/chusky-x11vnc.pid ] && kill -0 $(cat /tmp/chusky-x11vnc.pid) 2>/dev/null; then kill $(cat /tmp/chusky-x11vnc.pid) 2>/dev/null || true; fi; pkill -x x11vnc 2>/dev/null || true; rm -f /tmp/chusky-x11vnc.pid ${vncPasswordFile}`);
     await startHandoffService("if [ -f /tmp/chusky-websockify.pid ] && kill -0 $(cat /tmp/chusky-websockify.pid) 2>/dev/null; then kill $(cat /tmp/chusky-websockify.pid) 2>/dev/null || true; fi; pkill -x websockify 2>/dev/null || true; rm -f /tmp/chusky-websockify.pid");
-    await startHandoffService(`nohup x11vnc -display :99 -rfbport 5900 -localhost -forever -shared -passwd ${token} >/tmp/chusky-x11vnc.log 2>&1 & echo $! >/tmp/chusky-x11vnc.pid`);
+    // Do not pass the VNC password as a process argument. Apart from exposing it
+    // to process inspection, x11vnc's -passwd path is easy to desynchronise from
+    // the noVNC fragment when a shell or command runner rewrites arguments. The
+    // password-file form is supported by x11vnc and keeps the exact value shared
+    // by the server and returned fragment.
+    await startHandoffService(
+      `umask 077; printf '%s\\n' "$CHUSKY_VNC_PASSWORD" > ${vncPasswordFile}; unset CHUSKY_VNC_PASSWORD; nohup x11vnc -display :99 -rfbport 5900 -localhost -forever -shared -passwdfile ${vncPasswordFile} >/tmp/chusky-x11vnc.log 2>&1 & echo $! >/tmp/chusky-x11vnc.pid`,
+      { ...handoffEnv, CHUSKY_VNC_PASSWORD: token },
+    );
     let lastError = "x11vnc did not become ready";
     for (let attempt = 0; attempt < 20; attempt += 1) {
       const probe = await sandbox.commands.run("node -e \"const net=require('node:net'); const s=net.createConnection({host:'127.0.0.1',port:5900}); s.once('connect',()=>{console.log('ready');s.end()}); s.once('error',()=>console.log('not-ready')); setTimeout(()=>{s.destroy();console.log('not-ready')},1000)\"", { timeoutMs: 2_000, requestTimeoutMs: config.e2bRequestTimeoutMs });
-      if (probe.exitCode === 0 && probe.stdout.trim().split(/\r?\n/).includes("ready")) break;
+      const processReady = await sandbox.commands.run("test -s /tmp/chusky-x11vnc.pid && kill -0 $(cat /tmp/chusky-x11vnc.pid) 2>/dev/null", { envs: handoffEnv, timeoutMs: 2_000, requestTimeoutMs: config.e2bRequestTimeoutMs });
+      if (probe.exitCode === 0 && processReady.exitCode === 0 && probe.stdout.trim().split(/\r?\n/).includes("ready")) break;
       lastError = (probe.stderr || probe.stdout || lastError).trim().slice(0, 300);
       await new Promise((resolve) => setTimeout(resolve, 250));
-      if (attempt === 19) throw new E2BBrowserError(`E2B VNC service did not become ready: ${lastError}`);
+      if (attempt === 19) {
+        const diagnostics = await sandbox.commands.run("tail -n 12 /tmp/chusky-x11vnc.log 2>/dev/null || true", { envs: handoffEnv, timeoutMs: 2_000, requestTimeoutMs: config.e2bRequestTimeoutMs });
+        const safeDiagnostics = (diagnostics.stdout || diagnostics.stderr || "").replace(/password|passwd|secret|token/gi, "[redacted]").trim().slice(-500);
+        throw new E2BBrowserError(`E2B VNC service did not become ready: ${lastError}${safeDiagnostics ? ` (${safeDiagnostics})` : ""}`);
+      }
     }
     await startHandoffService(`nohup websockify --web=/usr/share/novnc ${BROWSER_STREAM_PORT} localhost:5900 >/tmp/chusky-websockify.log 2>&1 & echo $! >/tmp/chusky-websockify.pid`);
     lastError = "websockify did not become ready";
@@ -744,7 +758,7 @@ export class E2BBrowserEngine {
       await new Promise((resolve) => setTimeout(resolve, 250));
       if (attempt === 19) throw new E2BBrowserError(`E2B handoff service did not become ready: ${lastError}`);
     }
-    await startHandoffService(`nohup sh -lc "sleep ${ttlSeconds}; if [ -f /tmp/chusky-x11vnc.pid ]; then kill $(cat /tmp/chusky-x11vnc.pid) 2>/dev/null || true; fi; if [ -f /tmp/chusky-websockify.pid ]; then kill $(cat /tmp/chusky-websockify.pid) 2>/dev/null || true; fi" >/dev/null 2>&1 &`);
+    await startHandoffService(`nohup sh -lc "sleep ${ttlSeconds}; if [ -f /tmp/chusky-x11vnc.pid ]; then kill $(cat /tmp/chusky-x11vnc.pid) 2>/dev/null || true; fi; if [ -f /tmp/chusky-websockify.pid ]; then kill $(cat /tmp/chusky-websockify.pid) 2>/dev/null || true; fi; rm -f ${vncPasswordFile}" >/dev/null 2>&1 &`);
     const host = sandbox.getHost(BROWSER_STREAM_PORT);
     const base = /^https?:\/\//i.test(host) ? host : `https://${host}`;
     // noVNC explicitly supports config in the URL fragment. Keep the VNC
@@ -754,7 +768,7 @@ export class E2BBrowserEngine {
   }
 
   private async stopBrowserStream(sandbox: Sandbox): Promise<void> {
-    await sandbox.commands.run("if [ -f /tmp/chusky-x11vnc.pid ]; then kill $(cat /tmp/chusky-x11vnc.pid) 2>/dev/null || true; fi; if [ -f /tmp/chusky-websockify.pid ]; then kill $(cat /tmp/chusky-websockify.pid) 2>/dev/null || true; fi; pkill -x x11vnc 2>/dev/null || true; pkill -x websockify 2>/dev/null || true; rm -f /tmp/chusky-x11vnc.pid /tmp/chusky-websockify.pid", { envs: { DISPLAY: ":99", XDG_RUNTIME_DIR: "/tmp/chusky-runtime" }, requestTimeoutMs: config.e2bRequestTimeoutMs });
+    await sandbox.commands.run("if [ -f /tmp/chusky-x11vnc.pid ]; then kill $(cat /tmp/chusky-x11vnc.pid) 2>/dev/null || true; fi; if [ -f /tmp/chusky-websockify.pid ]; then kill $(cat /tmp/chusky-websockify.pid) 2>/dev/null || true; fi; pkill -x x11vnc 2>/dev/null || true; pkill -x websockify 2>/dev/null || true; rm -f /tmp/chusky-x11vnc.pid /tmp/chusky-websockify.pid /tmp/chusky-vnc.passwd", { envs: { DISPLAY: ":99", XDG_RUNTIME_DIR: "/tmp/chusky-runtime" }, requestTimeoutMs: config.e2bRequestTimeoutMs });
   }
 
   async browserHandoff(userId: number, reason?: string): Promise<{ sandboxId: string; url: string; expiresAt: number; message: string }> {

@@ -186,7 +186,8 @@ async function main() {
     assertCheck("real Chromium screenshot", screenshotBytes.length > 2_000 && screenshotBytes.subarray(0, 2).equals(Buffer.from([0xff, 0xd8])));
 
     const vncPassword = randomUUID().replaceAll("-", "").slice(0, 8);
-    await run("x11vnc handoff service", `x11vnc -display :99 -rfbport 5900 -localhost -forever -shared -passwd ${vncPassword} >/tmp/chusky-x11vnc-smoke.log 2>&1`, { background: true, envs: displayEnv, requestTimeoutMs: 120_000 });
+    const vncPasswordFile = "/tmp/chusky-vnc-smoke.passwd";
+    await run("x11vnc handoff service", `umask 077; printf '%s\\n' "$CHUSKY_VNC_PASSWORD" > ${vncPasswordFile}; unset CHUSKY_VNC_PASSWORD; x11vnc -display :99 -rfbport 5900 -localhost -forever -shared -passwdfile ${vncPasswordFile} >/tmp/chusky-x11vnc-smoke.log 2>&1`, { background: true, envs: { ...displayEnv, CHUSKY_VNC_PASSWORD: vncPassword }, requestTimeoutMs: 120_000 });
     await run("noVNC handoff service", "websockify --web=/usr/share/novnc 6080 127.0.0.1:5900 >/tmp/chusky-websockify-smoke.log 2>&1", { background: true, envs: displayEnv, requestTimeoutMs: 120_000 });
     let previewReady = false;
     for (let attempt = 0; attempt < 20; attempt += 1) {
