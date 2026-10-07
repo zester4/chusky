@@ -41,6 +41,7 @@ function ensurePageTracking(page) {
   const tracking = { generation: 1, crashed: false, observationId: undefined };
   page.__chuskyTracking = tracking;
   page.on("crash", () => { tracking.crashed = true; tracking.generation += 1; });
+  page.on("close", () => { tracking.closed = true; tracking.generation += 1; recordEvent("page_closed", { url: clean(page.url(), 1_000) }); });
   page.on("framenavigated", () => { tracking.generation += 1; });
   page.on("console", (message) => { diagnostics.console.push({ type: message.type(), text: clean(message.text(), 500), url: clean(page.url(), 1_000) }); if (diagnostics.console.length > 100) diagnostics.console.shift(); recordEvent("console", { level: message.type(), text: clean(message.text(), 300) }); });
   page.on("pageerror", (error) => { diagnostics.errors.push({ type: "pageerror", message: clean(error?.message || error, 500), url: clean(page.url(), 1_000) }); if (diagnostics.errors.length > 100) diagnostics.errors.shift(); recordEvent("pageerror", { message: clean(error?.message || error, 300) }); });
@@ -342,6 +343,7 @@ async function roleMatches(page, request = {}) {
   const limit = Math.max(1, Math.min(MAX_MATCHES, Number(request.limit ?? MAX_MATCHES)));
   for (const frame of page.frames()) {
     const root = frame;
+    try {
     for (const role of roles) {
     const locator = role === "file" ? root.locator('input[type="file"]') : root.getByRole(role, options);
     const count = Math.min(await locator.count(), limit - out.length);
@@ -375,7 +377,31 @@ async function roleMatches(page, request = {}) {
     }
     if (out.length >= limit) break;
     }
+    } catch (error) {
+      recordEvent("frame_observation_error", { frameUrl: clean(frame.url?.() || "", 1_000), message: clean(error?.message || error, 300) });
+    }
     if (out.length >= limit) break;
+  }
+  return out;
+}
+
+async function linkMatches(page) {
+  const out = [];
+  for (const frame of page.frames()) {
+    try {
+      const links = await frame.locator("a[href]").evaluateAll((items) => items.slice(0, 200).map((item, index) => ({
+        role: "link",
+        name: String(item.getAttribute("aria-label") || item.textContent || item.getAttribute("title") || "").replace(/\s+/g, " ").trim().slice(0, 300),
+        href: item.href,
+        index,
+        visible: Boolean(item.getClientRects().length && getComputedStyle(item).visibility !== "hidden"),
+      })));
+      for (const link of links) {
+        if (link.visible && link.name && link.href && out.length < 200) out.push({ ...link, frameIndex: page.frames().indexOf(frame), frameUrl: clean(frame.url(), 1_000) });
+      }
+    } catch (error) {
+      recordEvent("frame_link_inventory_error", { frameUrl: clean(frame.url?.() || "", 1_000), message: clean(error?.message || error, 300) });
+    }
   }
   return out;
 }
@@ -426,14 +452,24 @@ async function inspectForms(page) {
 }
 
 async function challengeFor(page) {
-  const url = page.url().toLowerCase();
-  const title = clean(await page.title().catch(() => ""), 200).toLowerCase();
-  const text = clean(await page.locator("body").innerText().catch(() => ""), 4_000).toLowerCase();
-  const source = `${url} ${title} ${text}`;
-  const captcha = /(captcha|recaptcha|hcaptcha|cloudflare.*verify|verify you are human|checking your browser)/.test(source);
-  const twoFactor = /(two[- ]factor|2fa|one[- ]time password|one[- ]time code|verification code|security code|authenticator app|security key|passkey|approve sign[- ]in|magic link)/.test(source);
-  if (!captcha && !twoFactor) return { detected: false };
-  return { detected: true, type: captcha ? "captcha" : "two_factor" };
+  let mainOrigin = "";
+  try { mainOrigin = new URL(page.url()).origin; } catch {}
+  for (const frame of page.frames()) {
+    try {
+      const url = frame.url().toLowerCase();
+      const title = clean(await frame.title().catch(() => ""), 200).toLowerCase();
+      const text = clean(await frame.locator("body").innerText().catch(() => ""), 4_000).toLowerCase();
+      const source = `${url} ${title} ${text}`;
+      const captcha = /(captcha|recaptcha|hcaptcha|cloudflare.*verify|verify you are human|checking your browser|robot or human|are you a robot|automated traffic|access denied|human verification|human challenge|press & hold)/.test(source);
+      let sameOrigin = false;
+      try { sameOrigin = frame === page.mainFrame() || new URL(url).origin === mainOrigin; } catch {}
+      const twoFactor = sameOrigin && /(two[- ]factor|2fa|one[- ]time password|one[- ]time code|verification code|security code|authenticator app|security key|passkey|approve sign[- ]in|magic link)/.test(source);
+      if (captcha || twoFactor) return { detected: true, type: captcha ? "captcha" : "two_factor", frameUrl: clean(url, 1_000) };
+    } catch (error) {
+      recordEvent("challenge_frame_inspection_error", { message: clean(error?.message || error, 300) });
+    }
+  }
+  return { detected: false };
 }
 
 async function tabsFor(context, active) {
@@ -490,8 +526,10 @@ async function result(page, context, extra = {}, includePageContent = false) {
   return { ok: true, url: page.url(), title: clean(await page.title().catch(() => ""), 160), loadState: "settled", observationId, pageGeneration: generation, accessibilityHash, ...(challenge.detected ? { needsUserInteraction: true, challenge } : { challenge }), ...(includePageContent ? await pageText(page) : {}), ...extra, ...(matches ? { matches } : {}), tabs: await tabsFor(context, page), activeIndex: context.pages().indexOf(page) };
 }
 
-async function runSmokeFixture(context) {
-  const page = context.pages()[0] || await context.newPage();
+async function runSmokeFixture(context, pageState) {
+  // Keep the generic fixture disposable. Retailer navigation owns its page;
+  // replacing its DOM made slow/challenge pages look like browser crashes.
+  const page = await context.newPage();
   await page.setContent(`<!doctype html><html><head><title>Chusky E2B browser fixture</title></head><body>
     <main><h1>Browser integration fixture</h1><p>Visible content proves page reading works.</p>
     <label for="query">Search fixture</label><input id="query" aria-label="Search fixture" />
@@ -532,7 +570,9 @@ async function runSmokeFixture(context) {
       document.querySelector('#upload').addEventListener('change',(event)=>{document.querySelector('#output').textContent+='; Uploaded: '+(event.target.files?.[0]?.name||'none')});
     </script>
   </body></html>`);
-  return result(page, context, { matches: await roleMatches(page) }, true);
+  const output = await result(page, context, { matches: await roleMatches(page) }, true);
+  pageState.activeIndex = output.activeIndex;
+  return output;
 }
 
 async function waitForDownload(timeoutMs) {
@@ -750,7 +790,9 @@ async function execute(context, pageState, request) {
   const beforeAction = mutationAction ? { url: page.url(), title: await page.title().catch(() => ""), generation: await pageGeneration(page) } : undefined;
   const target = request.selector ? await resolveLocator(page, request.selector) : null;
   if (action === "open") {
-    await page.goto((await safeHttpUrl(request.url)).toString(), { waitUntil: "domcontentloaded", timeout: 45_000 });
+    const requestedWaitUntil = ["commit", "domcontentloaded", "load", "networkidle"].includes(String(request.waitUntil)) ? String(request.waitUntil) : "domcontentloaded";
+    await page.goto((await safeHttpUrl(request.url)).toString(), { waitUntil: requestedWaitUntil, timeout: 45_000 });
+    if (requestedWaitUntil === "commit") await page.waitForLoadState("domcontentloaded", { timeout: 20_000 }).catch(() => {});
     await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => {});
   } else if (action === "link_inspect") {
     const match = await linkPayTokenFrame(page);
@@ -770,6 +812,7 @@ async function execute(context, pageState, request) {
   } else if (["state", "snapshot", "find"].includes(action)) return result(page, context, { matches: await roleMatches(page, request) }, request.includePageContent === true);
   else if (action === "observe") {
     const observed = { matches: await roleMatches(page, request), forms: request.includeForms === false ? undefined : await inspectForms(page) };
+    if (request.includeLinks === true) observed.links = await linkMatches(page);
     if (request.includeScreenshot === true) {
       const image = await page.screenshot({ type: "jpeg", quality: 75 });
       observed.screenshot = image.toString("base64");
@@ -1064,7 +1107,7 @@ async function start() {
         if (request.action === "vault_login") output = await vaultLogin(context, request);
         else if (request.action === "smoke_fixture") {
           if (process.env.CHUSKY_E2B_SMOKE_TESTS !== "1") throw new Error("Browser smoke fixture is disabled");
-          output = await runSmokeFixture(context);
+          output = await runSmokeFixture(context, pageState);
         }
         else if (request.action === "download_claim" || request.action === "recording_claim") {
           const item = (request.action === "download_claim" ? downloaded : recordings).get(String(request.id));

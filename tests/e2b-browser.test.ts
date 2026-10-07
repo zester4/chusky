@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { chuckTools } from "../src/agentTools.js";
 import { E2B_BROWSER_DENY_OUT_CIDRS } from "../src/lib/e2b/networkPolicy.js";
+import { classifyRetailerFailure, hasCartSignal, isPurchaseControlLabel, pageLooksUsable, phaseTimeoutMs } from "../src/lib/e2b/liveSmoke.js";
 
 const root = process.cwd();
 const templateDockerfile = readFileSync(resolve(root, "e2b", "browser-template", "Dockerfile"), "utf8");
@@ -12,6 +13,7 @@ const browserClient = readFileSync(resolve(root, "e2b", "browser-template", "bro
 const browserEngine = readFileSync(resolve(root, "src", "lib", "e2b", "browser.ts"), "utf8");
 const browserNetworkPolicy = readFileSync(resolve(root, "src", "lib", "e2b", "networkPolicy.ts"), "utf8");
 const liveSmoke = readFileSync(resolve(root, "scripts", "e2b-browser-live-smoke.ts"), "utf8");
+const retailerMatrix = readFileSync(resolve(root, "scripts", "e2b-retailer-live-matrix.ts"), "utf8");
 const envExample = readFileSync(resolve(root, ".env.example"), "utf8");
 const nativeTools = readFileSync(resolve(root, "src", "nativeTools.ts"), "utf8");
 
@@ -116,4 +118,30 @@ test("E2B network deny list excludes API-rejected CIDRs and is shared with live 
 test("legacy Daytona vault identities cannot hijack configured E2B browser work", () => {
   assert.match(nativeTools, /shouldUseE2BBrowser\(action, config\.e2bEnabled, Boolean\(config\.e2bApiKey\)\)/);
   assert.doesNotMatch(nativeTools, /sessions\.some\(\(session\) => .*workspaceId\.startsWith\("e2b-"\)/);
+});
+
+test("retailer live failures are classified and checkout mutations stop at approval", () => {
+  assert.equal(classifyRetailerFailure("deadline_exceeded while opening Target"), "timeout");
+  assert.equal(classifyRetailerFailure("locator.count: Target page, context or browser has been closed"), "browser_closed");
+  assert.equal(classifyRetailerFailure("Cloudflare verify you are human"), "challenge");
+  assert.equal(classifyRetailerFailure("locator.click: button not found"), "action_error");
+  assert.equal(isPurchaseControlLabel("Place order"), true);
+  assert.equal(isPurchaseControlLabel("Add to cart"), false);
+  assert.equal(pageLooksUsable({ url: "https://shop.example/product/1", title: "Product", pageContent: "Add to cart" }), true);
+  assert.equal(pageLooksUsable({ url: "chrome-error://chromewebdata/", title: "", pageContent: "" }), false);
+  assert.equal(pageLooksUsable({ url: "https://shop.example/blocked", title: "Robot or human?", pageContent: "" }), false);
+  assert.equal(hasCartSignal({ url: "https://shop.example/cart", title: "Your cart", pageContent: "Quantity 1" }), true);
+  assert.equal(hasCartSignal({ url: "https://shop.example/product/1", title: "Product", pageContent: "Product details" }), false);
+  assert.equal(phaseTimeoutMs("navigation") >= 30_000, true);
+  assert.match(retailerMatrix, /checkout approval/i);
+  assert.match(retailerMatrix, /never.*(click|submit|place|payment)/i);
+  assert.match(retailerMatrix, /allFlowsVerified/);
+  assert.match(retailerMatrix, /browser daemon readiness/);
+});
+
+test("generic smoke fixture is isolated from retailer navigation", () => {
+  assert.match(browserAgent, /const page = await context\.newPage\(\);/);
+  assert.match(browserAgent, /runSmokeFixture\(context, pageState\)/);
+  assert.match(browserAgent, /page_closed/);
+  assert.match(browserAgent, /sameOrigin && \/\(two\[- \]factor/);
 });

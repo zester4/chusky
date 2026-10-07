@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { Sandbox } from "e2b";
 import { E2B_BROWSER_DENY_OUT_CIDRS } from "../src/lib/e2b/networkPolicy.js";
+import { phaseTimeoutMs } from "../src/lib/e2b/liveSmoke.js";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -17,7 +18,7 @@ async function main() {
     sandbox = await Sandbox.create(template, {
       apiKey,
       timeoutMs: 300_000,
-      requestTimeoutMs: 120_000,
+      requestTimeoutMs: phaseTimeoutMs("startup"),
       allowInternetAccess: process.env.E2B_ALLOW_INTERNET !== "false",
       network: { allowPublicTraffic: true, denyOut: [...E2B_BROWSER_DENY_OUT_CIDRS] },
       metadata: { app: "chusky", purpose: "disposable-browser-integration-smoke" },
@@ -33,13 +34,13 @@ async function main() {
     await run("browser daemon", "node /app/browser-agent.mjs --server >/tmp/chusky-browser-agent.log 2>&1", { background: true, envs: { ...displayEnv, CHUSKY_E2B_SMOKE_TESTS: "1" }, requestTimeoutMs: 120_000 });
     await new Promise((resolve) => setTimeout(resolve, 5_000));
 
-    const requestBrowser = async (request: Record<string, unknown>) => {
+    const requestBrowser = async (request: Record<string, unknown>, phase: "navigation" | "action" | "handoff" = "action") => {
       const responseFile = `/tmp/chusky-browser-smoke-response-${randomUUID()}.json`;
       const result = await run("browser client", "node /app/browser-client.mjs", {
         cwd: "/app",
         envs: { ...displayEnv, CHUSKY_E2B_REQUEST_B64: Buffer.from(JSON.stringify(request), "utf8").toString("base64url"), CHUSKY_E2B_RESPONSE_FILE: responseFile },
-        timeoutMs: 60_000,
-        requestTimeoutMs: 120_000,
+        timeoutMs: phaseTimeoutMs(phase),
+        requestTimeoutMs: phaseTimeoutMs(phase),
       });
       if (result.exitCode !== 0) {
         const diagnostics = await sandbox.commands.run("tail -100 /tmp/chusky-browser-agent.log 2>/dev/null || true").catch(() => ({ stdout: "" }));
