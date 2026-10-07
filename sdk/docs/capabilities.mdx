@@ -38,6 +38,48 @@ Video generation is durable and independently cancellable. Submit a job with `vi
 
 Workers are durable scheduled routines. `workers.create()` accepts a schedule, task input, budget, and optional channel target. Channels and activity provide the control-plane view needed for dashboards and operational history.
 
+## Attention Pulse and Elena
+
+Attention Pulse is Chusky's proactive operating loop. Elena periodically reviews
+bounded, owner-scoped signals from connected apps and durable work, then turns
+useful observations into a safe next step instead of producing an unexplained
+background run.
+
+The pulse can surface unread communication, upcoming meetings, bills, overdue
+work, approvals, failed automations, and artifact or task follow-up. Each update
+keeps the distinction between a verified observation, prepared work, an approval
+request, and a blocked action. Provider content is treated as untrusted input;
+it never grants permission to act.
+
+Configure the pulse through the typed SDK resource:
+
+```ts
+const current = await chusky.attentionPulse.get();
+
+const updated = await chusky.attentionPulse.update(
+  {
+    enabled: true,
+    cadence: "hourly",
+    authority: "prepare",
+    delivery: [
+      { channel: "dashboard", enabled: true },
+      { channel: "telegram", enabled: true },
+    ],
+    monitoredDomains: ["communication", "calendar", "work"],
+    maxPerDay: 8,
+    quietHoursUtc: { start: "22:00", end: "07:00" },
+  },
+  { idempotencyKey: "pulse-settings-2026-10-07" },
+);
+```
+
+The available authority levels are `observe`, `prepare`, and
+`execute_reversible`. Preparing a draft, reminder, summary, or follow-up can be
+automatic when the owner allows it. Financial, destructive,
+permission-changing, and other consequential actions still use Chusky's
+approval flow. Delivery is explicitly opted in per channel and remains
+account-scoped.
+
 ## Voice and meetings
 
 Voice calls and Recall meetings are first-class API resources rather than

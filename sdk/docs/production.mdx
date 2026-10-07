@@ -19,6 +19,7 @@ description: Deploy a reliable Chusky integration.
 - Test duplicate requests, expired approvals, unauthorized IDs, provider outages, and reconnects.
 - For calls, test provider-unavailable responses, redacted call history, direct-call idempotency, and Bland/Twilio configuration separately.
 - For meetings, test direct joins and calendar-prepared joins against an authorized staging meeting for each enabled Recall platform. Verify scheduled joins, cancellation, participant updates, meeting-end reconciliation, and idempotent retries before production use.
+- For Attention Pulse, test owner isolation, duplicate observations, quiet hours, daily delivery caps, channel opt-in, connection-required states, approval boundaries, and recovery after a failed heartbeat. Verify that a prepared draft is never reported as a completed provider action.
 
 ## Local validation
 

@@ -29,15 +29,19 @@ test("recognises only supported conference events among Google Calendar lifecycl
     title: "Acme discovery",
     startAt: "2026-10-01T14:00:00Z",
     participants: ["Avery", "client@example.com"],
+    attendees: [
+      { name: "Avery", responseStatus: "unknown" },
+      { email: "client@example.com", responseStatus: "unknown" },
+    ],
     meetingUrl: "https://meet.google.com/abc-defg-hij",
   });
   assert.equal(parseGoogleCalendarMeetingTrigger("GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CREATED_TRIGGER", { event: { summary: "Lunch" } }), undefined);
   assert.equal(parseGoogleCalendarMeetingTrigger("GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_UPDATED_TRIGGER", { event: { hangoutLink: "https://example.com/not-a-meeting" } }), undefined);
   assert.deepEqual(parseGoogleCalendarMeetingTrigger("GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_UPDATED_TRIGGER", { event: { id: "calendar-event-1", summary: "Updated without conferencing" } }), {
-    lifecycle: "updated", calendarEventId: "calendar-event-1", title: "Updated without conferencing", participants: [],
+    lifecycle: "updated", calendarEventId: "calendar-event-1", title: "Updated without conferencing", participants: [], attendees: [],
   });
   assert.deepEqual(parseGoogleCalendarMeetingTrigger("GOOGLECALENDAR_EVENT_CANCELED_DELETED_TRIGGER", { event: { id: "calendar-event-1", summary: "Acme discovery" } }), {
-    lifecycle: "cancelled", calendarEventId: "calendar-event-1", title: "Acme discovery", participants: [],
+    lifecycle: "cancelled", calendarEventId: "calendar-event-1", title: "Acme discovery", participants: [], attendees: [],
   });
   assert.equal(parseGoogleCalendarMeetingTrigger("GOOGLECALENDAR_SOMETHING_ELSE", {}), undefined);
 });
@@ -46,7 +50,7 @@ test("recognises the Google Calendar event-change trigger as a meeting update", 
   assert.deepEqual(parseGoogleCalendarMeetingTrigger("GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CHANGE_TRIGGER", {
     event: { id: "calendar-event-change", summary: "Updated project review", hangoutLink: "https://meet.google.com/abc-defg-hij" },
   }), {
-    lifecycle: "updated", calendarEventId: "calendar-event-change", title: "Updated project review", participants: [], meetingUrl: "https://meet.google.com/abc-defg-hij",
+    lifecycle: "updated", calendarEventId: "calendar-event-change", title: "Updated project review", participants: [], attendees: [], meetingUrl: "https://meet.google.com/abc-defg-hij",
   });
 });
 
