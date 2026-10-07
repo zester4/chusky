@@ -75,7 +75,7 @@ export interface ParsedRecallParticipantWebhook {
   providerBotId: string;
   meetingId: string;
   userId: number;
-  participant: { id: string; name: string; identityStatus?: "named" | "unknown"; isHost?: boolean; email?: string; emailSource?: "recall_match"; assurance?: "unverified"; status: "present" | "left" };
+  participant: { id: string; name: string; identityStatus?: "named" | "unknown"; isHost?: boolean; email?: string; emailSource?: "recall_match"; assurance?: "calendar_matched" | "unverified"; status: "present" | "left" };
 }
 
 export interface ParsedRecallSpeakerWebhook {
@@ -436,7 +436,7 @@ export function parseRecallParticipantWebhook(value: unknown): ParsedRecallParti
     providerBotId,
     meetingId,
     userId,
-    participant: { id, name: name || "Unknown participant", ...(!name ? { identityStatus: "unknown" as const } : {}), ...(typeof participant.is_host === "boolean" ? { isHost: participant.is_host } : {}), ...(email ? { email, emailSource: "recall_match" as const, assurance: "unverified" as const } : {}), status: event === "participant_events.leave" ? "left" : "present" },
+    participant: { id, name: name || "Unknown participant", ...(!name ? { identityStatus: "unknown" as const } : {}), ...(typeof participant.is_host === "boolean" ? { isHost: participant.is_host } : {}), ...(email ? { email, emailSource: "recall_match" as const, assurance: "calendar_matched" as const } : {}), status: event === "participant_events.leave" ? "left" : "present" },
   };
 }
 

@@ -146,7 +146,7 @@ export async function getDurableMemoryByKey(input: { ownerUserId: number; key: s
   if (!key) return undefined;
   const client = await pool().connect();
   try {
-    const result = await client.query(`SELECT m.*, s.kind AS scope_kind, s.external_id AS scope_external_id, src.source_type, src.source_ref FROM chusky_memory_items m JOIN chusky_memory_scopes s ON s.id=m.scope_id JOIN chusky_memory_grants g ON g.scope_id=m.scope_id AND g.subject_type='user' AND g.subject_id=$2 AND 'read'=ANY(g.permissions) LEFT JOIN chusky_memory_sources src ON src.id=m.source_id WHERE m.owner_user_id=$1 AND m.memory_key=$3 AND m.status='active' AND (m.valid_until IS NULL OR m.valid_until>now()) AND (m.review_at IS NULL OR m.review_at>now()) ORDER BY m.updated_at DESC LIMIT 1`, [input.ownerUserId, String(input.ownerUserId), key]);
+    const result = await client.query(`SELECT m.*, s.kind AS scope_kind, s.external_id AS scope_external_id, src.source_type, src.source_ref FROM chusky_memory_items m JOIN chusky_memory_scopes s ON s.id=m.scope_id JOIN chusky_memory_grants g ON g.scope_id=m.scope_id AND g.subject_type='user' AND g.subject_id=$2 AND 'read'=ANY(g.permissions) LEFT JOIN chusky_memory_sources src ON src.id=m.source_id WHERE m.owner_user_id=$1 AND s.kind='personal' AND s.external_id=$2 AND m.memory_key=$3 AND m.status='active' AND (m.valid_until IS NULL OR m.valid_until>now()) AND (m.review_at IS NULL OR m.review_at>now()) ORDER BY m.updated_at DESC LIMIT 1`, [input.ownerUserId, String(input.ownerUserId), key]);
     const row = result.rows[0] as Record<string, unknown> | undefined;
     return row ? rowToMemory(row) : undefined;
   } finally { client.release(); }

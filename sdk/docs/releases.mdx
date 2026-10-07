@@ -5,6 +5,20 @@ description: Validate, version, publish, and track Chusky SDK releases.
 
 The canonical SDK source is the separate [`zester4/chusky-sdk`](https://github.com/zester4/chusky-sdk) repository. Its **Release Chusky SDK** workflow automatically validates and publishes when `package.json` or `package-lock.json` changes on `main`. It also supports a manually dispatched exact version and `sdk-vX.Y.Z` tags for recovery. The agent monorepo's release workflow is a guarded fallback; never start two releases for the same version concurrently.
 
+## 1.10.0 — Attention Pulse
+
+The TypeScript SDK now exposes `chusky.attentionPulse.get()` and
+`chusky.attentionPulse.update()` for Elena's proactive operating loop.
+
+- Configure cadence, authority, monitored domains, quiet hours, daily delivery
+  limits, and explicitly opted-in Telegram or dashboard delivery.
+- Use idempotency keys for safe retries of preference updates; the API validates
+  the authenticated owner before changing the pulse.
+- Treat pulse messages as accountable observations and proposed next actions,
+  not as proof that an external provider write happened.
+- Reversible preparation can run within the configured authority. Consequential
+  actions remain behind the normal approval boundary.
+
 For the normal release:
 
 1. Update the SDK source, changelog, and package version in the dedicated SDK repository. Keep `package.json` and `package-lock.json` versions in sync.

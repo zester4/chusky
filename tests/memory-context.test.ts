@@ -73,3 +73,19 @@ test("memory projection writes preserve a concurrent profile-domain update", asy
   assert.equal(session.model, "profile-update-during-memory-save");
   assert.equal((await searchMemories(userId, "onboarding"))[0]?.value, "completed");
 });
+
+test("private and organization memories with the same key remain separate", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 991208;
+  await upsertMemoryAndContext(userId, {
+    category: "profile", key: "chusky_onboarding_profile", value: "private profile", confidence: 1, source: "test", sensitivity: "normal",
+  }, { scope: "user", kind: "memory", key: "chusky_onboarding_profile", value: "private profile", source: "test", sensitivity: "normal" });
+  await upsertMemoryAndContext(userId, {
+    category: "profile", key: "chusky_onboarding_profile", value: "shared profile", confidence: 1, source: "test", sensitivity: "normal", organizationId: "org_acme",
+  }, { scope: "organization", scopeId: "org_acme", kind: "memory", key: "chusky_onboarding_profile", value: "shared profile", source: "test", sensitivity: "normal" });
+
+  const all = await searchMemories(userId, "chusky_onboarding_profile");
+  assert.equal(all.length, 2);
+  assert.equal(all.find((item) => item.organizationId === "org_acme")?.value, "shared profile");
+  assert.equal(all.find((item) => !item.organizationId)?.value, "private profile");
+});
