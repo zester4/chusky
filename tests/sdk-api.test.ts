@@ -2026,6 +2026,24 @@ test("connected-app disconnect is scoped to an account-owned Composio connection
   assert.deepEqual(deleted, [account.id]);
 });
 
+test("connected-app reconnect targets the exact expired account and cannot cross owners", async () => {
+  const refreshed: string[] = [];
+  let ownerId = "";
+  setAgentDependenciesForTests({ composio: { connectedAccounts: {
+    list: async ({ userIds }: { userIds: string[] }) => { if (!ownerId) ownerId = userIds[0]!; return userIds[0] === ownerId ? { items: [{ id: "conn_expired", alias: "Work Gmail", toolkit: { slug: "gmail" }, status: "EXPIRED" }] } : { items: [] }; },
+    refresh: async (id: string) => { refreshed.push(id); return { redirectUrl: "https://composio.example/reconnect/conn_expired" }; },
+  } } });
+  const api = app();
+  const headers = (user: string) => ({ Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": user });
+  const response = await api.fetch(new Request("http://local/v1/apps/connections/conn_expired/reconnect", { method: "POST", headers: headers("owner") }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { connectionId: "conn_expired", url: "https://composio.example/reconnect/conn_expired" });
+  assert.deepEqual(refreshed, ["conn_expired"]);
+  const wrongOwner = await api.fetch(new Request("http://local/v1/apps/connections/conn_expired/reconnect", { method: "POST", headers: headers("other-owner") }));
+  assert.equal(wrongOwner.status, 404);
+  assert.deepEqual(refreshed, ["conn_expired"]);
+});
+
 test("connected-app catalogue returns official Composio metadata with cursor pagination", async () => {
   let received: Record<string, unknown> | undefined;
   setAgentDependenciesForTests({ composio: {
