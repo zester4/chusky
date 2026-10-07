@@ -1,11 +1,11 @@
 {
-  "id": "release-4.40.0",
-  "version": "4.40.0",
+  "id": "release-4.41.0",
+  "version": "4.41.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added universal, label-aware form planning and bounded end-to-end form filling for text fields, selects, custom comboboxes, checkboxes, radios, and submit controls.",
-    "Browser mutations now return structured validation recovery, post-action evidence, and durable non-sensitive checkpoints, including the active tab frontier for multi-page workflows.",
-    "Outcome verification supports bounded polling plus positive and negative URL, title, and text detectors; screenshot fallback exposes a fresh visual fingerprint and rejects stale coordinate clicks."
+    "Added owner-only live viewing for the retained E2B headed Chromium browser through a short-lived noVNC stream, without introducing a second browser backend.",
+    "The stream lifecycle is explicit and bounded: start returns a private viewer URL, status reports readiness without returning the password, and stop tears down the viewer services.",
+    "Viewer URLs and passwords are never persisted in browser records; private-scope checks remain separate from CAPTCHA, 2FA, payment, and other approval or human-challenge boundaries."
   ],
-  "createdAt": "2026-10-03T04:15:00.000Z"
+  "createdAt": "2026-10-07T11:01:18.450Z"
 }

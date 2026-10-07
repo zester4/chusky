@@ -20,6 +20,7 @@ const NODE_TTL_MS = 2 * 60_000;
 const MAX_BROWSER_DOWNLOAD_BYTES = 25 * 1024 * 1024;
 const MAX_BROWSER_RECORDING_BYTES = 100 * 1024 * 1024;
 const BROWSER_FILE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const BROWSER_STREAM_PORT = 6080;
 const locks = new Map<number, Promise<void>>();
 
 function boundedText(value: unknown, field: string, max: number): string {
@@ -413,6 +414,40 @@ export class E2BBrowserEngine {
         if (!internal.ownerPrivateRun) throw new E2BBrowserError("Clipboard access is available only in the owner's private conversation");
         if (!internal.ownerApprovedAction) throw new E2BBrowserError("Clipboard access requires owner approval");
       }
+      if (["stream_start", "stream_status", "stream_stop"].includes(action) && !internal.ownerPrivateRun) {
+        throw new E2BBrowserError("Live browser streams are available only in the owner's private conversation");
+      }
+      if (action === "stream_start") {
+        const { sandbox, record } = await this.sandbox(userId);
+        const requestedTtl = Number(args.ttlSeconds ?? config.e2bBrowserHandoffTtlSeconds);
+        const ttlSeconds = Number.isFinite(requestedTtl) ? Math.min(900, Math.max(60, Math.floor(requestedTtl))) : 300;
+        const stream = await this.startBrowserStream(sandbox, ttlSeconds);
+        await this.save(userId, { ...record, stream: { startedAt: stream.startedAt, expiresAt: stream.expiresAt, port: stream.port }, updatedAt: Date.now() });
+        return { provider: "e2b", sandboxId: record.sandboxId, action, url: stream.url, startedAt: stream.startedAt, expiresAt: stream.expiresAt, port: stream.port, private: true };
+      }
+      if (action === "stream_status") {
+        const record = await this.record(userId);
+        if (!record?.sandboxId || !record.stream || record.stream.expiresAt <= Date.now()) return { provider: "e2b", action, active: false };
+        try {
+          const { sandbox } = await this.sandbox(userId, false);
+          const probe = await sandbox.commands.run(`node -e \"fetch('http://127.0.0.1:${BROWSER_STREAM_PORT}/vnc.html').then(async r=>{console.log(JSON.stringify({ready:r.ok}));await r.arrayBuffer()}).catch(()=>console.log(JSON.stringify({ready:false})))\"`, { timeoutMs: 2_000, requestTimeoutMs: config.e2bRequestTimeoutMs });
+          const payload = JSON.parse(probe.stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) || "{}");
+          return { provider: "e2b", action, active: payload.ready === true, startedAt: record.stream.startedAt, expiresAt: record.stream.expiresAt, port: record.stream.port, private: true };
+        } catch (error) {
+          return { provider: "e2b", action, active: false, startedAt: record.stream.startedAt, expiresAt: record.stream.expiresAt, port: record.stream.port, error: redactBrowserText(error instanceof Error ? error.message : String(error), 300) };
+        }
+      }
+      if (action === "stream_stop") {
+        const record = await this.record(userId);
+        if (!record?.sandboxId) return { provider: "e2b", action, stopped: false, active: false };
+        try {
+          const { sandbox } = await this.sandbox(userId, false);
+          await this.stopBrowserStream(sandbox);
+        } finally {
+          await this.save(userId, { ...record, stream: undefined, updatedAt: Date.now() });
+        }
+        return { provider: "e2b", action, stopped: true, active: false };
+      }
       if (action === "session_list") {
         const record = await this.record(userId);
         return { provider: "e2b", sandboxId: record?.sandboxId, sessions: record?.sessionId ? [{ id: record.sessionId, expiresAt: record.expiresAt }] : [] };
@@ -678,11 +713,9 @@ export class E2BBrowserEngine {
     });
   }
 
-  async browserHandoff(userId: number, reason?: string): Promise<{ sandboxId: string; url: string; expiresAt: number; message: string }> {
-    const { sandbox, record } = await this.sandbox(userId);
+  private async startBrowserStream(sandbox: Sandbox, ttlSeconds: number): Promise<{ url: string; expiresAt: number; port: number; startedAt: number }> {
     const token = randomUUID().replaceAll("-", "").slice(0, 8);
-    const requestedTtl = Number(config.e2bBrowserHandoffTtlSeconds);
-    const ttlSeconds = Number.isFinite(requestedTtl) ? Math.min(900, Math.max(60, Math.floor(requestedTtl))) : 300;
+    const startedAt = Date.now();
     const handoffEnv = { DISPLAY: ":99", XDG_RUNTIME_DIR: "/tmp/chusky-runtime" };
     const startHandoffService = async (command: string) => {
       await sandbox.commands.run(command, { envs: handoffEnv, requestTimeoutMs: config.e2bRequestTimeoutMs });
@@ -702,22 +735,35 @@ export class E2BBrowserEngine {
       await new Promise((resolve) => setTimeout(resolve, 250));
       if (attempt === 19) throw new E2BBrowserError(`E2B VNC service did not become ready: ${lastError}`);
     }
-    await startHandoffService(`nohup websockify --web=/usr/share/novnc 6080 localhost:5900 >/tmp/chusky-websockify.log 2>&1 & echo $! >/tmp/chusky-websockify.pid`);
+    await startHandoffService(`nohup websockify --web=/usr/share/novnc ${BROWSER_STREAM_PORT} localhost:5900 >/tmp/chusky-websockify.log 2>&1 & echo $! >/tmp/chusky-websockify.pid`);
     lastError = "websockify did not become ready";
     for (let attempt = 0; attempt < 20; attempt += 1) {
-      const probe = await sandbox.commands.run("node -e \"fetch('http://127.0.0.1:6080/vnc.html').then(async r=>{console.log(r.ok?'ready':'not-ready');await r.arrayBuffer()}).catch(()=>console.log('not-ready'))\"", { timeoutMs: 2_000, requestTimeoutMs: config.e2bRequestTimeoutMs });
+      const probe = await sandbox.commands.run(`node -e \"fetch('http://127.0.0.1:${BROWSER_STREAM_PORT}/vnc.html').then(async r=>{console.log(r.ok?'ready':'not-ready');await r.arrayBuffer()}).catch(()=>console.log('not-ready'))\"`, { timeoutMs: 2_000, requestTimeoutMs: config.e2bRequestTimeoutMs });
       if (probe.exitCode === 0 && probe.stdout.trim().split(/\r?\n/).at(-1) === "ready") break;
       lastError = (probe.stderr || probe.stdout || lastError).trim().slice(0, 300);
       await new Promise((resolve) => setTimeout(resolve, 250));
       if (attempt === 19) throw new E2BBrowserError(`E2B handoff service did not become ready: ${lastError}`);
     }
     await startHandoffService(`nohup sh -lc "sleep ${ttlSeconds}; if [ -f /tmp/chusky-x11vnc.pid ]; then kill $(cat /tmp/chusky-x11vnc.pid) 2>/dev/null || true; fi; if [ -f /tmp/chusky-websockify.pid ]; then kill $(cat /tmp/chusky-websockify.pid) 2>/dev/null || true; fi" >/dev/null 2>&1 &`);
-    const host = sandbox.getHost(6080);
+    const host = sandbox.getHost(BROWSER_STREAM_PORT);
     const base = /^https?:\/\//i.test(host) ? host : `https://${host}`;
     // noVNC explicitly supports config in the URL fragment. Keep the VNC
     // password out of HTTP requests, reverse-proxy access logs, and referrers.
     const url = `${base.replace(/\/$/, "")}/vnc.html#autoconnect=1&resize=scale&password=${encodeURIComponent(token)}`;
-    return { sandboxId: record.sandboxId, url, expiresAt: Date.now() + ttlSeconds * 1000, message: `Open this private browser session to complete ${reason || "the website step"}. It expires soon. When you are done, return here and say continue; Chusky will inspect the same retained browser before it does anything else.` };
+    return { url, startedAt, expiresAt: startedAt + ttlSeconds * 1000, port: BROWSER_STREAM_PORT };
+  }
+
+  private async stopBrowserStream(sandbox: Sandbox): Promise<void> {
+    await sandbox.commands.run("if [ -f /tmp/chusky-x11vnc.pid ]; then kill $(cat /tmp/chusky-x11vnc.pid) 2>/dev/null || true; fi; if [ -f /tmp/chusky-websockify.pid ]; then kill $(cat /tmp/chusky-websockify.pid) 2>/dev/null || true; fi; pkill -x x11vnc 2>/dev/null || true; pkill -x websockify 2>/dev/null || true; rm -f /tmp/chusky-x11vnc.pid /tmp/chusky-websockify.pid", { envs: { DISPLAY: ":99", XDG_RUNTIME_DIR: "/tmp/chusky-runtime" }, requestTimeoutMs: config.e2bRequestTimeoutMs });
+  }
+
+  async browserHandoff(userId: number, reason?: string): Promise<{ sandboxId: string; url: string; expiresAt: number; message: string }> {
+    const { sandbox, record } = await this.sandbox(userId);
+    const requestedTtl = Number(config.e2bBrowserHandoffTtlSeconds);
+    const ttlSeconds = Number.isFinite(requestedTtl) ? Math.min(900, Math.max(60, Math.floor(requestedTtl))) : 300;
+    const stream = await this.startBrowserStream(sandbox, ttlSeconds);
+    await this.save(userId, { ...record, stream: { startedAt: stream.startedAt, expiresAt: stream.expiresAt, port: stream.port }, updatedAt: Date.now() });
+    return { sandboxId: record.sandboxId, url: stream.url, expiresAt: stream.expiresAt, message: `Open this private browser session to complete ${reason || "the website step"}. It expires soon. When you are done, return here and say continue; Chusky will inspect the same retained browser before it does anything else.` };
   }
 
   async vaultLogin(userId: number, input: { origin: string; loginUrl: string; usernameFieldLabel: string; passwordFieldLabel: string; submitButtonLabel: string; username: string; password: string; loginRecipe?: { steps?: Array<{ role?: string; name?: string; action?: string }>; failure?: Array<{ textIncludes?: string }> } }): Promise<{ workspaceId: string; authenticated: boolean; needsUserInteraction?: boolean; handoffOrigin?: string }> {

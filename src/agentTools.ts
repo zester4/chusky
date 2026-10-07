@@ -333,6 +333,8 @@ export const chuckTools = [...baseChuckTools, ...shoppingAndBrowserTools, ...too
 export const modelFacingChuckTools = chuckTools.filter((tool) => tool.function.name !== "CHUCK_MEDIA_BRIDGE");
 
 const browserToolParameters = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER")?.function.parameters as any;
+const browserTool = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER") as any;
+if (browserTool) browserTool.function.description += " The private stream_start, stream_status, and stream_stop actions expose the same retained Chromium display through a short-lived owner-only noVNC viewer; they never create a second browser backend.";
 if (browserToolParameters?.properties) {
   browserToolParameters.properties.count = { type: "integer", minimum: 1, maximum: 4, description: "Number of bounded E2B sandbox forks to create when action=fork." };
 }

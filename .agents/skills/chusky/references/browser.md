@@ -129,6 +129,15 @@ pooling is owner-scoped and refuses concurrency above the configured limit. The 
 fallback, tabs, frames, handoffs, checkpoints, and redesign recovery; live E2B
 coverage remains a separate release gate.
 
+The same retained headed Chromium display can also be viewed through the
+owner-only E2B noVNC stream. `CHUCK_BROWSER` actions `stream_start`,
+`stream_status`, and `stream_stop` start, inspect, and stop a short-lived viewer
+for the existing Playwright browser; they do not create a second browser
+backend. The password-bearing viewer URL is returned only by `stream_start`,
+is never persisted in the session record, and the stream is available only in a
+private owner conversation. A stream is observation/handoff infrastructure, not
+authorization to bypass CAPTCHA, 2FA, payment approval, or other policy gates.
+
 ## Transparent browser identity (optional)
 
 When `WEB_BOT_AUTH_ENABLED=true`, the service publishes a signed, public-only

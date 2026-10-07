@@ -40,13 +40,16 @@ export function resolveE2BBrowserCommandTimeout(requested: unknown, configuredRe
 }
 
 export function browserHandoffWaitingResult(error: E2BBrowserHandoffWaitingError, action: string) {
+  const screenshotAction = ["screenshot", "screenshot_full", "screenshot_region", "screenshot_region_full"].includes(action);
   return {
     provider: "e2b",
     action,
     status: "waiting_for_owner",
     handoffId: error.handoffId,
     expiresAt: error.expiresAt,
-    next: "The private browser handoff is still waiting for you. Do not retry browser actions. Complete the challenge in the private browser, return, and say continue; then resume the handoff and verify the page before proceeding.",
+    next: screenshotAction
+      ? "The private browser handoff is still waiting for you. This screenshot was captured from the retained page; use it as evidence if needed. Do not open, click, type, submit, or replay selectors until the owner completes the challenge, returns, and says continue; then resume the handoff and verify the page before proceeding."
+      : "The private browser handoff is still waiting for you. Do not retry browser actions. Complete the challenge in the private browser, return, and say continue; then resume the handoff and verify the page before proceeding.",
   };
 }
 
@@ -59,12 +62,12 @@ export function assertE2BBrowserHandoffAllowsAction(
 ): void {
   const active = handoffs.find((item) => item.workspaceId === workspaceId && item.expiresAt > now && (item.status === "waiting" || item.status === "awaiting_verification"));
   if (!active || ["status", "stop"].includes(action)) return;
-  if (active.status === "waiting") {
+  if (active.status === "waiting" && !["screenshot", "screenshot_full", "screenshot_region", "screenshot_region_full"].includes(action)) {
     throw new E2BBrowserHandoffWaitingError(active.id, active.expiresAt);
   }
   let currentOrigin = "";
   try { currentOrigin = currentUrl ? new URL(currentUrl).origin : ""; } catch { /* origin checked below */ }
-  if (!["state", "snapshot", "find", "form_inspect", "form_plan"].includes(action) || (active.origin && currentOrigin !== active.origin)) {
+  if (!["state", "snapshot", "find", "form_inspect", "form_plan", "screenshot", "screenshot_full", "screenshot_region", "screenshot_region_full"].includes(action) || (active.origin && currentOrigin !== active.origin)) {
     throw new Error("A private browser handoff is awaiting same-origin verification. Inspect only that retained page, then call CHUCK_BROWSER_VERIFY before any further action.");
   }
 }

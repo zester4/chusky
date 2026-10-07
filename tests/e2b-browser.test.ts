@@ -62,10 +62,10 @@ test("E2B runtime starts display and browser services through separate idempoten
   assert.doesNotMatch(browserEngine, /process\.exit\(2\)/);
   assert.doesNotMatch(browserEngine, /bash -lc '[^\n]*chusky-xvfb\.pid[^\n]*chusky-fluxbox\.pid[^\n]*chusky-browser\.pid/);
   assert.match(browserEngine, /x11vnc -display :99 -rfbport 5900/);
-  assert.match(browserEngine, /websockify --web=\/usr\/share\/novnc 6080 localhost:5900/);
+  assert.match(browserEngine, /websockify --web=\/usr\/share\/novnc \$\{BROWSER_STREAM_PORT\} localhost:5900/);
   assert.match(browserEngine, /vnc\.html#autoconnect=1&resize=scale&password=/);
   assert.doesNotMatch(browserEngine, /vnc\.html\?autoconnect=1&resize=scale&password=/);
-  assert.match(browserEngine, /127\.0\.0\.1:6080\/vnc\.html/);
+  assert.match(browserEngine, /BROWSER_STREAM_PORT.*vnc\.html/);
   assert.doesNotMatch(browserEngine, /pkill -f \\"x11vnc\.\*-rfbport 5900/);
 });
 
@@ -75,6 +75,16 @@ test("E2B template includes the desktop handoff dependencies", () => {
   assert.match(templateDockerfile, /\/usr\/share\/novnc\/package\.json/);
   assert.match(templateDockerfile, /COPY browser-agent\.mjs browser-client\.mjs web-bot-auth\.mjs/);
   assert.match(templateDockerfile, /npm ci --omit=dev/);
+});
+
+test("E2B browser exposes an owner-only live stream for the retained Chromium display", () => {
+  assert.match(browserEngine, /stream_start/);
+  assert.match(browserEngine, /stream_status/);
+  assert.match(browserEngine, /stream_stop/);
+  assert.match(browserEngine, /noVNC/);
+  assert.match(browserEngine, /stream: \{ startedAt: stream\.startedAt, expiresAt: stream\.expiresAt, port: stream\.port \}/);
+  assert.match(browserEngine, /Live browser streams are available only in the owner's private conversation/);
+  assert.ok(chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER")?.function.parameters.properties.action.enum.includes("stream_start"));
 });
 
 test("E2B browser configuration is opt-in and exposes the backend-neutral browser slug", () => {
