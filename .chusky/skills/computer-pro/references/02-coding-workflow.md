@@ -13,9 +13,10 @@ Professional engineering workflow inside the Daytona computer.
 1. Understand the goal and current state of the codebase or directory.
 2. Plan the minimal change that moves the work forward.
 3. Implement in focused edits.
-4. Run the relevant checks (build, test, lint, or manual verification).
-5. Fix issues before expanding scope.
-6. Summarize what changed and what remains.
+4. Use `CHUCK_DAYTONA_EXECUTE` for bounded commands and `CHUCK_DAYTONA_PTY`/`CHUCK_DAYTONA_SESSION` for servers, watchers, installs, or resumable work.
+5. Run the relevant checks (build, test, lint, or manual verification) and inspect exit state and logs.
+6. Fix issues before expanding scope.
+7. Summarize what changed, exact paths, evidence, and what remains.
 
 ## Practices
 
@@ -25,6 +26,7 @@ Professional engineering workflow inside the Daytona computer.
 - Write commands that are reproducible (scripts > one-off magic).
 - Capture important run instructions near the code when useful.
 - Do not claim “done” until verification has been attempted.
+- Do not share an app preview until production verification and visual review have passed.
 
 ## When Installing Dependencies
 

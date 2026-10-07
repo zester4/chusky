@@ -19,7 +19,7 @@ Clean transfer of control when the Daytona computer hits a human-only gate (CAPT
 ## How to Hand Off Well
 
 1. Explain exactly why human input is needed.
-2. Describe what the user should do on the VNC / preview session.
+2. Describe what the user should do on the owner-only Daytona desktop or preview session. For website challenges, use the private same-session E2B/browser-pro handoff instead.
 3. Keep the relevant page or app state ready.
 4. Respect the handoff TTL and do not thrash the session.
 5. After the user completes the step, verify the new state before continuing automation.
@@ -33,7 +33,7 @@ Clean transfer of control when the Daytona computer hits a human-only gate (CAPT
 
 ## After Handoff
 
-- Confirm the blocker is cleared.
+- Confirm the blocker is cleared from a fresh desktop or browser observation.
 - Resume from the verified state.
 - Avoid re-triggering the same gate carelessly.
 

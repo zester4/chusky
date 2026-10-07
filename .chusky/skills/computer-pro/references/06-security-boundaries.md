@@ -15,6 +15,8 @@ Safe operation of the Daytona computer under network and trust constraints.
 - Do not attempt to bypass network controls.
 - Do not exfiltrate private data to arbitrary external endpoints.
 - Treat browser cookies and session state as sensitive.
+- Keep workspaces, sandboxes, volumes, sessions, artifacts, previews, recordings, and desktop leases scoped to the owning account.
+- Never use Daytona Computer Use for ordinary websites; route website credentials, cookies, forms, and browser handoffs through browser-pro/E2B.
 
 ## Safe Practices
 
@@ -23,12 +25,15 @@ Safe operation of the Daytona computer under network and trust constraints.
 - Avoid downloading and executing untrusted code without a clear need.
 - Keep experimental scripts away from production credentials.
 - Clean up temporary credential material after use when you control it.
+- Use sandbox health/preflight before expensive desktop or renderer work and respect blocked-all/domain allow-list results.
+- Use exact workspace-relative paths returned by Daytona; do not guess paths or register arbitrary files.
 
 ## When Something Looks Unsafe
 
 - Stop and choose a narrower approach.
 - Prefer human confirmation for high-impact external actions that are not already authorized by policy.
 - Record what was attempted if an action was blocked by policy.
+- Treat remote Git push, permanent deployment, deletion, volume deletion, and permission changes as high-impact even when local edits are routine.
 
 ## Mind-Blowing Standard
 

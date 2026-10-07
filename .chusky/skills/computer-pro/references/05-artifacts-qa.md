@@ -17,11 +17,12 @@ Produce and verify high-quality outputs from the Daytona computer.
 
 ## QA Habits
 
-- Open or inspect the artifact after generation.
-- For documents and renders, use available rendering/QA paths when configured.
+- Generate the real file in Daytona, then run `CHUCK_ARTIFACT_QA` for independent structural and rendered-page evidence when supported.
+- Open or inspect rendered pages in `CHUCK_DAYTONA_COMPUTER` when layout matters: check clipping, overflow, missing images, broken tables, page breaks, and unreadable text.
+- Register only the exact workspace-relative path returned by generation with `CHUCK_ARTIFACT`; never invent or silently repair a filename.
 - For code, run the relevant build or test.
 - For data files, spot-check structure and a few values.
-- For web or UI outputs, verify the visible result.
+- For Daytona app outputs, use `CHUCK_DAYTONA_APP` verify → start → visual → review, then `CHUCK_DAYTONA_PREVIEW` for a temporary HTTPS link. Website QA belongs to browser-pro/E2B.
 
 ## Common Deliverable Types
 
@@ -35,7 +36,7 @@ Produce and verify high-quality outputs from the Daytona computer.
 
 - Empty or truncated files
 - Wrong paths or missing dependencies
-- “Success” messages with no real output
+- “Success” messages with no real output, render evidence, artifact registration, or preview URL
 - Artifacts that only work on the current machine with hidden local state
 
 ## Mind-Blowing Standard

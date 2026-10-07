@@ -11,10 +11,12 @@ The Daytona computer must stay clean, navigable, and recoverable.
 ## Always Do
 
 - Work inside a clear project or task directory.
+- Inspect workspace and sandbox health before assuming a workspace or process exists.
 - Use consistent, descriptive names for files and folders.
 - Keep source, build outputs, and temporary files separated when practical.
-- Remove or archive obvious junk after the task is done.
+- Stop task-owned PTY/session processes after verification; remove or archive obvious junk only when its scope is certain.
 - Prefer a single source of truth for configuration and scripts.
+- Keep Daytona artifacts, previews, recordings, and checkpoints owner-scoped and easy to locate.
 
 ## Project Layout Habits
 
@@ -22,6 +24,7 @@ The Daytona computer must stay clean, navigable, and recoverable.
 - Keep secrets out of the working tree.
 - Avoid scattering related files across the home directory.
 - Prefer relative paths and reproducible commands.
+- Record exact generated paths returned by Daytona; never guess an artifact filename.
 
 ## End-of-Task Checklist
 
@@ -29,6 +32,7 @@ The Daytona computer must stay clean, navigable, and recoverable.
 - Are temporary files cleaned or clearly marked?
 - Would a fresh session understand what this directory is for?
 - Is there a short note of status if the work is incomplete?
+- Are running servers, PTYs, previews, and leases intentionally retained or safely released?
 
 ## Anti-Patterns
 
