@@ -115,13 +115,18 @@ test("human handoff blocks browser mutation until same-origin verification", () 
   assert.throws(() => assertE2BBrowserHandoffAllowsAction("open", [handoff], "https://example.test/path", "sandbox", 100), E2BBrowserHandoffWaitingError);
   assert.doesNotThrow(() => assertE2BBrowserHandoffAllowsAction("status", [handoff], "https://example.test/path", "sandbox", 100));
   assert.doesNotThrow(() => assertE2BBrowserHandoffAllowsAction("stop", [handoff], "https://example.test/path", "sandbox", 100));
+  assert.doesNotThrow(() => assertE2BBrowserHandoffAllowsAction("screenshot", [handoff], "https://example.test/path", "sandbox", 100));
   const waitingResult = browserHandoffWaitingResult(new E2BBrowserHandoffWaitingError(handoff.id, handoff.expiresAt), "click");
   assert.equal(waitingResult.status, "waiting_for_owner");
   assert.equal(waitingResult.handoffId, handoff.id);
   assert.match(waitingResult.next, /Do not retry browser actions/);
   assert.equal("url" in waitingResult, false);
+  const screenshotResult = browserHandoffWaitingResult(new E2BBrowserHandoffWaitingError(handoff.id, handoff.expiresAt), "screenshot");
+  assert.match(screenshotResult.next, /screenshot was captured/);
+  assert.doesNotMatch(screenshotResult.next, /^.*Do not retry browser actions\./);
   const awaiting = { ...handoff, status: "awaiting_verification" as const };
   assert.doesNotThrow(() => assertE2BBrowserHandoffAllowsAction("snapshot", [awaiting], "https://example.test/path", "sandbox", 100));
+  assert.doesNotThrow(() => assertE2BBrowserHandoffAllowsAction("screenshot", [awaiting], "https://example.test/path", "sandbox", 100));
   assert.throws(() => assertE2BBrowserHandoffAllowsAction("open", [awaiting], "https://example.test/path", "sandbox", 100), /awaiting same-origin verification/);
   assert.throws(() => assertE2BBrowserHandoffAllowsAction("snapshot", [awaiting], "https://attacker.test/", "sandbox", 100), /awaiting same-origin verification/);
   assert.doesNotThrow(() => assertE2BBrowserHandoffAllowsAction("click", [handoff], "https://example.test", "sandbox", 20_000));

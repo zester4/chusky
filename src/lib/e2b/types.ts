@@ -10,6 +10,7 @@ export const E2B_BROWSER_ACTIONS = [
   "recording_list", "recording_get", "recording_delete", "recording_download",
   "desktop_click", "desktop_type", "desktop_press", "clipboard_read", "clipboard_write",
   "dialog_list", "dialog_dismiss", "diagnostics", "events", "pdf", "pause", "resume", "fork",
+  "stream_start", "stream_status", "stream_stop",
 ] as const;
 
 export type E2BBrowserAction = typeof E2B_BROWSER_ACTIONS[number];
@@ -49,6 +50,8 @@ export type E2BBrowserRecord = {
   health?: Record<string, unknown>;
   checkpoint?: E2BBrowserCheckpoint;
   paused?: boolean;
+  /** The live owner-only noVNC stream state. The password and URL are never persisted. */
+  stream?: { startedAt: number; expiresAt: number; port: number };
   evidence?: Array<{ action: string; at: number; url?: string; title?: string; observationId?: string; screenshotHash?: string; verified?: boolean }>;
 };
 
@@ -148,5 +151,6 @@ export type E2BCommandResult = {
   events?: Array<Record<string, unknown>>;
   pdf?: { filePath: string; name: string; size: number };
   forks?: Array<{ sandboxId?: string; error?: string }>;
+  stream?: { url?: string; startedAt?: number; expiresAt?: number; port?: number; ready?: boolean; active?: boolean };
   [key: string]: unknown;
 };

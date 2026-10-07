@@ -792,9 +792,11 @@ function approvalView(approval: { id: string; status: string; toolSlug: string; 
 }
 
 function threadView(thread: SdkThreadRecord) { return { id: thread.id, externalId: thread.externalId, metadata: thread.metadata, createdAt: new Date(thread.createdAt).toISOString(), updatedAt: new Date(thread.updatedAt).toISOString() }; }
-function runView(threadId: string, run: SdkRunRecord) {
+type PrivateRunLink = { url: string; expiresAt?: number; label: string };
+
+function runView(threadId: string, run: SdkRunRecord, privateLinks?: PrivateRunLink[]) {
   const { agentInstructions: _privateInstructions, companyProjectId: _privateCompanyProjectId, organizationId: _organizationId, ownerPrivateRun: _privateOwnerRun, durableVersion: _durableVersion, durablePayloadHash: _durablePayloadHash, ...visible } = run;
-  return { ...visible, threadId, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() };
+  return { ...visible, threadId, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString(), ...(privateLinks?.length ? { privateLinks } : {}) };
 }
 
 /** Keep a bounded, truthful failure closeout in the next model turn's history.
@@ -2583,13 +2585,14 @@ export function registerSdkApi(app: Hono): void {
         if (!workflowRunId) throw new Error("A task enqueue is already in progress; retry the request shortly."); run.taskId = task.id; run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, "run.queued", { threadId: thread.id, runId: run.id, taskId: task.id, status: run.status }); return c.json(response, 202);
       } catch (error) { if (task!) await cancelTask(owner.userId, task.id); if (quotaReservationId) await releaseExecutionQuota(owner.userId, quotaReservationId).catch(() => undefined); thread.runs = thread.runs.filter((item) => item.id !== run.id); await saveSession(owner.userId, session); await deleteSdkRun(owner.userId, thread.id, run.id); return apiError(c, 503, "run_enqueue_failed", error instanceof Error ? error.message : "The durable run could not be queued."); }
     }
-    try { const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions, dashboardRequest(c))); run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); appendSdkRunHistoryToSession(session, thread.id, run.id, [
+    let privateLinks: PrivateRunLink[] | undefined;
+    try { const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions, dashboardRequest(c))); privateLinks = result.privateLinks; run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); appendSdkRunHistoryToSession(session, thread.id, run.id, [
       { role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}`, createdAt: run.createdAt },
       { role: "assistant", content: result.text, createdAt: Date.now() },
     ]); }
     catch (error) { if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); } else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); } }
     if (run.status === "failed") appendSdkRunHistoryToSession(session, thread.id, run.id, failedSdkRunHistory(run));
-    run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await appendReliabilitySample({ ownerId: owner.userId, operation: "sdk.run", status: run.status === "completed" ? "success" : run.status === "requires_approval" ? "uncertain" : "failure", costUsd: run.cost, latencyMs: run.updatedAt - run.createdAt, at: run.updatedAt }); const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status }); return c.json(response, 201);
+    run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await appendReliabilitySample({ ownerId: owner.userId, operation: "sdk.run", status: run.status === "completed" ? "success" : run.status === "requires_approval" ? "uncertain" : "failure", costUsd: run.cost, latencyMs: run.updatedAt - run.createdAt, at: run.updatedAt }); const response = runView(thread.id, run, privateLinks); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response: runView(thread.id, run), createdAt: Date.now() }; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status }); return c.json(response, 201);
     } finally { await releaseUserLock(owner.userId, lockToken); }
   });
   app.post("/v1/threads/:threadId/runs/stream", async (c) => {
@@ -2650,7 +2653,7 @@ export function registerSdkApi(app: Hono): void {
           run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved."));
           send({ type: "run.cancelled", run: runView(thread.id, run) });
         } else {
-          run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; costIncrement = result.cost ?? 0; run.events.push(event("run.completed")); send({ type: "run.completed", run: runView(thread.id, run) });
+          run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; costIncrement = result.cost ?? 0; run.events.push(event("run.completed")); send({ type: "run.completed", run: runView(thread.id, run, result.privateLinks) });
         }
       } catch (error) {
         if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); const approval = await getApproval(owner.userId, error.approvalId); send({ type: "run.approval_required", run: runView(thread.id, run), approval }); }

@@ -217,9 +217,9 @@ test("loads and writes the release manifest", async () => {
 
 test("current upgrade manifest announces browser reliability", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.40.0");
-  assert.equal(notice?.version, "4.40.0");
-  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("browserReliability"));
+  assert.equal(notice?.id, "release-4.41.0");
+  assert.equal(notice?.version, "4.41.0");
+  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("browserLiveView"));
 });
 
 test("browser reliability preset covers planning, recovery, checkpoints, and visual freshness", () => {
@@ -236,6 +236,14 @@ test("browser frontier preset describes bounded primitives and verification boun
   assert.match(bullets[0]!, /fresh observation.*schema-bounded extraction.*per-step trace/i);
   assert.match(bullets[1]!, /accessibility.*visual-target ranking.*concurrency limits/i);
   assert.match(bullets[2]!, /internal E2B runtime contract.*explicit verification or a trusted site receipt/i);
+});
+
+test("browser live view preset describes the retained owner-only stream", () => {
+  const bullets = getAgentUpgradePreset("browserLiveView");
+  assert.equal(bullets.length, 3);
+  assert.match(bullets[0]!, /owner-only live viewing.*retained E2B.*noVNC/i);
+  assert.match(bullets[1]!, /start returns a private viewer URL.*status.*stop/i);
+  assert.match(bullets[2]!, /never persisted.*CAPTCHA.*2FA/i);
 });
 
 test("mission continuity preset documents automatic approval handoff and wake recovery", () => {
