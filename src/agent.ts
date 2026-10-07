@@ -2652,6 +2652,18 @@ export async function runAgent(
       logger.debug({ err: error }, "Persisted mission skill context unavailable");
     }
   }
+  if (skillContext) {
+    const skillNames = [...new Set([
+      ...(skillRoute?.binding.primary ?? []),
+      ...(skillRoute?.binding.supporting ?? []),
+      ...(persistedMissionRouting?.skillNames ?? []),
+    ])].slice(0, 8);
+    logger.info({
+      skillNames,
+      skillContextChars: skillContext.length,
+      skillContextLimitChars: 24_000,
+    }, "Skill context prepared for model");
+  }
   const tregRouteContext = tregTurnContext(tregRoute);
   if (tregRouteContext) composioRouteContext = composioRouteContext ? `${composioRouteContext}\n\n${tregRouteContext}` : tregRouteContext;
   if (persistedMissionRouting?.tregTools.length) {
@@ -2698,6 +2710,15 @@ export async function runAgent(
     ...promptHistory.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
     { role: "user", content: userMessage },
   ];
+  logger.info({
+    staticSystemPromptChars: staticSystemPrompt.length,
+    dynamicSystemContextChars: dynamicSystemContext.length,
+    composioRouteContextChars: composioRouteContext.length,
+    connectedAccountContextChars: accountContext.length,
+    memoryContextChars: memoryContext.length,
+    skillContextChars: skillContext.length,
+    promptHistoryChars: promptHistory.reduce((total, message) => total + message.content.length, 0),
+  }, "Model prompt context prepared");
 
   const toolsUsed: string[] = [];
   const toolsSucceeded: string[] = [];
@@ -2825,6 +2846,20 @@ export async function runAgent(
         };
       })
       : routedTools;
+    const toolCounts = modelAvailableTools.reduce((counts, tool) => {
+      const name = toolSchemaName(tool);
+      const key = name.startsWith("CHUCK_")
+        ? "native"
+        : name.startsWith("COMPOSIO_")
+          ? "composio"
+          : name.startsWith("MCP_")
+            ? "mcp"
+            : "other";
+      counts[key] += 1;
+      counts.schemaChars += JSON.stringify(tool).length;
+      return counts;
+    }, { native: 0, composio: 0, mcp: 0, other: 0, schemaChars: 0 });
+    logger.info({ round, finalModelToolCount: modelAvailableTools.length, ...toolCounts }, "Model tool payload prepared");
     const modelMessages = compactModelMessages(messages);
     if (modelMessages.length !== messages.length || modelMessages.some((message, index) => message.content !== messages[index]?.content)) {
       const contextChars = (items: ApiMessage[]) => items.reduce((total, message) => total + (typeof message.content === "string" ? message.content.length : JSON.stringify(message.content ?? "").length), 0);
