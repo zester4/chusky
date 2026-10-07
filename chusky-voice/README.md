@@ -174,7 +174,18 @@ VOICE_BARGE_IN_MIN_CHARS=2
 VOICE_GREETING=Hi, this is Chusky. How can I help?
 VOICE_TURN_START_BUDGET_MS=10000
 VOICE_TURN_FALLBACK_ENABLED=true
+VOICE_TOOL_PROGRESS_DELAY_MS=2500
+VOICE_TOOL_PROGRESS_MESSAGE=I’m still working on that, thanks for your patience.
 ```
+
+During a Twilio voice turn, the model can stream a natural setup sentence
+before requesting a tool. Once the request passes the normal allowlist,
+argument-validation, and approval gates, Chusky emits an authenticated
+`tool_start` event to the bridge immediately before dispatch. The bridge
+speaks that activity and schedules at most one bounded waiting update while the
+tool is still running; any new model text, completion, error, barge-in, or call
+shutdown cancels it. The waiting text is a configurable recovery fallback, not
+the model's normal dialogue and is never committed to voice history.
 
 The bridge uses Deepgram Flux conversational STT (`/v2/listen`) and streaming
 Flux TTS (`/v2/speak`) in Twilio's native raw 8 kHz μ-law format by default.

@@ -89,6 +89,8 @@ class Settings:
     greeting: str
     turn_start_budget_ms: int
     turn_fallback_enabled: bool
+    tool_progress_delay_ms: int
+    tool_progress_message: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -129,6 +131,8 @@ class Settings:
             os.getenv("VOICE_GREETING", "Hi, this is Chusky. How can I help?").strip()[:500],
             max(4_000, min(int(os.getenv("VOICE_TURN_START_BUDGET_MS", "10000")), 20_000)),
             os.getenv("VOICE_TURN_FALLBACK_ENABLED", "true").strip().lower() != "false",
+            max(500, min(int(os.getenv("VOICE_TOOL_PROGRESS_DELAY_MS", "2500")), 10_000)),
+            os.getenv("VOICE_TOOL_PROGRESS_MESSAGE", "I’m still working on that, thanks for your patience.").strip()[:500],
         )
 
 
@@ -265,6 +269,7 @@ class TwilioVoiceCall:
         self.elevenlabs_runtime_fallback = False
         self.tts_first_audio_recorded = False
         self.turn_first_audio_event: asyncio.Event | None = None
+        self.tool_progress_task: asyncio.Task[None] | None = None
         self.stt_resample_state: object | None = None
         self.tts_resample_state: object | None = None
         self.twilio_send_lock = asyncio.Lock()
@@ -299,6 +304,7 @@ class TwilioVoiceCall:
             if self.draft_task and not self.draft_task.done():
                 self.draft_task.cancel()
                 await asyncio.gather(self.draft_task, return_exceptions=True)
+            await self._cancel_tool_progress()
             await self._close_persistent_tts()
             await self.http.aclose()
             try:
@@ -454,6 +460,7 @@ class TwilioVoiceCall:
         if not active:
             return
         self.interrupted = True
+        await self._cancel_tool_progress()
         self.metrics.barge_ins += 1
         if self.tts_socket is not None:
             try:
@@ -624,6 +631,32 @@ class TwilioVoiceCall:
                 if flush:
                     await self.tts_socket.send(json.dumps({"type": "Flush"}))
 
+    async def _cancel_tool_progress(self) -> None:
+        task = self.tool_progress_task
+        self.tool_progress_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _delayed_tool_progress(self) -> None:
+        delay_ms = getattr(self.settings, "tool_progress_delay_ms", 2500)
+        await asyncio.sleep(max(0, int(delay_ms)) / 1000)
+        if self.interrupted or self.stop.is_set():
+            return
+        message = str(getattr(self.settings, "tool_progress_message", "I’m still working on that, thanks for your patience.")).strip()
+        if message:
+            await self._send_persistent_tts(normalize_voice_text(message), flush=True)
+
+    async def _speak_tool_start(self, text: str) -> None:
+        await self._cancel_tool_progress()
+        speech = normalize_voice_text(text)
+        if speech:
+            await self._send_persistent_tts(speech, flush=True)
+        self.tool_progress_task = asyncio.create_task(
+            self._delayed_tool_progress(),
+            name=f"twilio-tool-progress-{self.call_id}",
+        )
+
     async def _request_agent_stream(self, transcript: str, *, speculative: bool = False) -> VoiceTurnResult | None:
         """Stream one answer, guarding only the time before speech begins.
 
@@ -686,7 +719,14 @@ class TwilioVoiceCall:
                     if not line:
                         continue
                     event = json.loads(line)
-                    if event.get("type") == "delta":
+                    if event.get("type") == "tool_start":
+                        await self._cancel_tool_progress()
+                        if buffer.strip():
+                            await self._send_persistent_tts(normalize_voice_text(buffer), flush=True)
+                            buffer = ""
+                        await self._speak_tool_start(str(event.get("text") or ""))
+                    elif event.get("type") == "delta":
+                        await self._cancel_tool_progress()
                         delta = str(event.get("text") or "")
                         if delta and not first_delta_recorded:
                             self.metrics.agent_first_delta_samples.append(int((time.monotonic() - started) * 1000))
@@ -704,8 +744,10 @@ class TwilioVoiceCall:
                                 spoken, buffer = chunk
                                 await self._send_persistent_tts(normalize_voice_text(spoken))
                     elif event.get("type") == "done":
+                        await self._cancel_tool_progress()
                         cost = max(0, min(float(event.get("cost") or 0), 10))
                     elif event.get("type") == "error":
+                        await self._cancel_tool_progress()
                         raise RuntimeError("streaming voice turn failed")
             full_text = normalize_voice_text(full_text)
             if buffer:
@@ -718,8 +760,10 @@ class TwilioVoiceCall:
             self.metrics.agent_turns += 1
             return VoiceTurnResult(text=normalize_voice_text(full_text)[:5000], cost=cost)
         except asyncio.CancelledError:
+            await self._cancel_tool_progress()
             raise
         except Exception:
+            await self._cancel_tool_progress()
             self.metrics.agent_failures += 1
             raise
 

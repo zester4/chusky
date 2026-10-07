@@ -850,6 +850,7 @@ async function main(): Promise<void> {
                 ...(speculative ? { toolAllow: [] } : { ownerPrivateRun: true }),
                 voiceTurn: true,
                 voiceSessionId: `twilio:${callId}`,
+                onVoiceActivity: (activity) => send({ type: activity.type, toolSlug: activity.toolSlug, text: normalizeVoiceText(activity.message).slice(0, 4000) }),
               });
             });
             send({ type: "done", text: normalizeVoiceText(result.text).slice(0, 5000), cost: result.cost ?? 0, speculative });

@@ -2001,6 +2001,8 @@ export interface AgentRunOptions {
   missionToolHints?: string[];
   /** Link approval recovery to the exact autonomous reminder/job occurrence. */
   autonomyResume?: { kind: "reminder" | "job"; sourceId: string; occurrenceId?: string };
+  /** Voice-only activity emitted after authorization and immediately before a real tool dispatch. */
+  onVoiceActivity?: (activity: { type: "tool_start"; toolSlug: string; message: string }) => void | Promise<void>;
 }
 
 export interface AgentToolActivity {
@@ -3094,6 +3096,13 @@ export async function runAgent(
         // current proposal: otherwise an older/incomplete approval can bypass
         // the native schema and reach a provider with missing fields.
         if (slug.startsWith("CHUCK_") && executionArgs !== args) validateNativeToolArguments(slug, executionArgs);
+        if (voiceTurn && options?.onVoiceActivity) {
+          try {
+            await options.onVoiceActivity({ type: "tool_start", toolSlug: slug, message: activityMessage.slice(0, 4000) });
+          } catch (error) {
+            logger.debug({ err: error }, "Could not publish voice tool activity event");
+          }
+        }
         const autonomySource = options?.autonomyResume
           ? { kind: options.autonomyResume.kind, id: options.autonomyResume.sourceId, occurrenceId: options.autonomyResume.occurrenceId }
             : options?.missionId

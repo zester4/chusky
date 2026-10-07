@@ -133,6 +133,16 @@ class FakeAgentStreamResponse:
             yield line
 
 
+class ToolWaitAgentStreamResponse:
+    def raise_for_status(self):
+        return None
+
+    async def aiter_lines(self):
+        yield json.dumps({"type": "tool_start", "toolSlug": "CHUCK_ORDER_TRACK", "text": "Let me quickly check that for you."})
+        await asyncio.sleep(0.6)
+        yield json.dumps({"type": "done", "text": "", "cost": 0.01})
+
+
 class HangingAgentStreamResponse:
     def raise_for_status(self):
         return None
@@ -489,6 +499,27 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         fallback.assert_awaited_once()
         self.assertEqual(self.call.metrics.turn_start_budget_exceeded, 1)
+
+    async def test_tool_activity_speaks_immediately_and_emits_one_bounded_waiting_update(self):
+        class ToolWaitAgentHttp(FakeAgentHttp):
+            def stream(self, method, url, **kwargs):
+                self.stream_requests.append({"method": method, "url": url, **kwargs})
+                return FakeAgentStreamContext(ToolWaitAgentStreamResponse())
+
+        agent_http = ToolWaitAgentHttp()
+        self.call.http = agent_http
+        self.call.settings.tool_progress_delay_ms = 500
+        tts_socket = StreamingFakeTtsSocket()
+
+        async def fake_connect(_url, **_kwargs):
+            return tts_socket
+
+        with patch.object(voice_app, "connect", fake_connect):
+            result = await self.call._request_agent_stream("Please check that.")
+
+        self.assertIsNotNone(result)
+        speaks = [event["text"] for event in tts_socket.sent if event.get("type") == "Speak"]
+        self.assertEqual(speaks, ["Let me quickly check that for you.", "I’m still working on that, thanks for your patience."])
 
 
 if __name__ == "__main__":
