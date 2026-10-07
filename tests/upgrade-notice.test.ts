@@ -215,11 +215,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces browser reliability", async () => {
+test("current upgrade manifest announces Attention Pulse", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.41.0");
-  assert.equal(notice?.version, "4.41.0");
-  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("browserLiveView"));
+  assert.equal(notice?.id, "release-4.42.0");
+  assert.equal(notice?.version, "4.42.0");
+  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("attention"));
 });
 
 test("browser reliability preset covers planning, recovery, checkpoints, and visual freshness", () => {

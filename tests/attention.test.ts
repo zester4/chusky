@@ -76,7 +76,7 @@ test("personal and business autonomy profiles and watches stay explicit and owne
   const userId = 910008;
   const personal = await nativeTool(userId, "CHUCK_ATTENTION_STATE", { action: "create", kind: "autonomy_profile", mode: "personal", enabled: true, maxChecksPerDay: 12 });
   const business = await nativeTool(userId, "CHUCK_ATTENTION_STATE", { action: "create", kind: "autonomy_profile", mode: "business", enabled: true, defaultAuthority: "prepare", allowedDomains: ["gmail", "stripe"] }) as any;
-  const watch = await nativeTool(userId, "CHUCK_ATTENTION_STATE", { action: "create", kind: "autonomy_watch", name: "Unreplied client mail", domain: "gmail", objective: "Find messages awaiting a reply", cadenceSeconds: 900, authority: "prepare" }) as any;
+  const watch = await nativeTool(userId, "CHUCK_ATTENTION_STATE", { action: "create", kind: "autonomy_watch", name: "Unreplied client mail", domain: "gmail", objective: "Find messages awaiting a reply", cadenceSeconds: 900, authority: "observe" }) as any;
   assert.equal((personal as any).mode, "personal");
   assert.equal(business.mode, "business");
   assert.equal(watch.cadenceSeconds, 900);
