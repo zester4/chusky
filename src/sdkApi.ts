@@ -33,6 +33,7 @@ import type { VoiceCallProfileInput } from "./calls/voiceProfile.js";
 import { isBlandVoiceConfigured } from "./calls/bland.js";
 import { isTwilioVoiceConfigured } from "./calls/twilio.js";
 import { cancelJob, cancelReminder, nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow, scheduleJob, setReminder } from "./nativeTools.js";
+import { confirmRecallMeetingParticipant } from "./meetings/service.js";
 import { defaultMediaInstruction } from "./mediaInput.js";
 import { fetchPublicWebsite, normalizePublicWebsiteUrl } from "./onboardingWebsite.js";
 
@@ -654,7 +655,13 @@ function meetingRoomView(room: MeetingRoomRecord) {
   };
 }
 
-function meetingView(meeting: any) {
+function meetingView(meeting: any, includeParticipantIdentity = false) {
+  const publicTurnMetrics = meeting.turnMetrics
+    ? (() => {
+      const { latencySamples: _latencySamples, ...safeMetrics } = meeting.turnMetrics;
+      return safeMetrics;
+    })()
+    : undefined;
   return {
     id: meeting.id,
     ...(meeting.roomId ? { roomId: meeting.roomId } : {}),
@@ -669,14 +676,29 @@ function meetingView(meeting: any) {
     keyterms: meeting.keyterms ?? [],
     capabilities: meeting.capabilities,
     runtimeState: meeting.runtimeState ?? (meeting.status === "ended" ? "ended" : "healthy"),
-    turnMetrics: meeting.turnMetrics,
+    ...(publicTurnMetrics ? { turnMetrics: publicTurnMetrics } : {}),
     timeline: (meeting.timeline ?? []).map((entry: any) => ({ ...entry, at: new Date(entry.at).toISOString() })),
     status: meeting.status,
     title: meeting.title,
     joinAt: meeting.joinAt,
     error: meeting.error ? "The meeting assistant could not complete this step. Check the meeting link and provider status." : undefined,
     providerStatusAt: meeting.providerStatusAt ? new Date(meeting.providerStatusAt).toISOString() : undefined,
-    participantRoster: (meeting.participantRoster ?? []).map((person: any) => ({ ...person, updatedAt: new Date(person.updatedAt).toISOString() })),
+    screenShareUnderstanding: meeting.visualContextEnabled === true,
+    searchableTranscript: Boolean(meeting.transcriptRetentionDays && meeting.transcriptExpiresAt && meeting.transcriptExpiresAt > Date.now()),
+    ...(meeting.transcriptStatus && ["processing", "ready", "failed"].includes(meeting.transcriptStatus) ? { transcriptStatus: meeting.transcriptStatus } : {}),
+    ...(meeting.transcriptErrorCode && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? { transcriptErrorCode: meeting.transcriptErrorCode } : {}),
+    ...(meeting.transcriptRetentionDays && meeting.transcriptExpiresAt ? { transcriptExpiresAt: new Date(meeting.transcriptExpiresAt).toISOString() } : {}),
+    ...(meeting.mission ? { mission: { clientName: meeting.mission.clientName, objective: meeting.mission.objective, preparedAt: new Date(meeting.mission.preparedAt).toISOString() } } : {}),
+    participantRoster: (meeting.participantRoster ?? []).map((person: any) => ({
+      id: person.id,
+      name: person.name,
+      ...(person.identityStatus ? { identityStatus: person.identityStatus } : {}),
+      ...(person.isHost ? { isHost: true } : {}),
+      ...(includeParticipantIdentity && person.email ? { email: person.email, ...(person.emailSource ? { emailSource: person.emailSource } : {}) } : {}),
+      ...(includeParticipantIdentity && person.assurance ? { assurance: person.assurance } : {}),
+      status: person.status,
+      updatedAt: new Date(person.updatedAt).toISOString(),
+    })),
     speakerEvents: (meeting.speakerEvents ?? []).map((entry: any) => ({ ...entry, at: new Date(entry.at).toISOString() })),
     history: (meeting.history ?? []).filter((message: any) => (message.role === "user" || message.role === "assistant") && typeof message.content === "string").slice(-20).map((message: any) => ({ role: message.role, content: String(message.content).slice(0, 3_000), createdAt: message.createdAt ? new Date(message.createdAt).toISOString() : undefined })),
     outcome: meeting.outcome,
@@ -707,7 +729,7 @@ async function meetingWorkspaceView(c: any, owner: SdkOwner, organizationId = ""
   const personal = {
     rooms: [],
     preparations: prepared,
-    meetings: records.map(meetingView),
+    meetings: records.map((meeting) => meetingView(meeting, true)),
     contacts: contacts.map((contact) => ({
       ...contact,
       userId: undefined,
@@ -725,7 +747,7 @@ async function meetingWorkspaceView(c: any, owner: SdkOwner, organizationId = ""
   const pointers = (await listWorkspaceMeetingPointers(organizationId, 100)).filter((pointer) => visibleRoomIds.has(pointer.roomId));
   const sharedMeetings = (await Promise.all(pointers.map(async (pointer) => {
     const meeting = await getRecallMeeting(pointer.ownerUserId, pointer.meetingId);
-    return meeting ? meetingView(meeting) : undefined;
+    return meeting ? meetingView(meeting, false) : undefined;
   }))).flatMap((meeting) => meeting ? [meeting] : []);
   const known = new Set(personal.meetings.map((meeting) => meeting.id));
   return {
@@ -2125,9 +2147,27 @@ export function registerSdkApi(app: Hono): void {
     }
   });
 
+  app.post("/v1/meetings/:meetingId/participants/:participantId/confirm", async (c) => {
+    const owner = sdkUser(c)!;
+    const body = await c.req.json().catch(() => ({})) as { email?: unknown };
+    const session = await getSession(owner.userId);
+    const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
+    const prior = idempotency(c, session, fingerprint);
+    if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
+    if (prior.replay) return c.json(prior.replay);
+    try {
+      const result = await confirmRecallMeetingParticipant(owner.userId, c.req.param("meetingId"), c.req.param("participantId"), body.email);
+      if (prior.key) {
+        session.sdkIdempotency![prior.key] = { fingerprint, response: result, createdAt: Date.now() };
+        await saveSession(owner.userId, session);
+      }
+      return c.json(result);
+    } catch (error) { return apiError(c, 400, "meeting_participant_confirmation_failed", error instanceof Error ? error.message : "Participant identity could not be confirmed."); }
+  });
+
   app.get("/v1/meetings/:meetingId", async (c) => {
     const meeting = await getRecallMeetingForUser(sdkUser(c)!.userId, c.req.param("meetingId"));
-    return meeting ? c.json(meeting) : apiError(c, 404, "meeting_not_found", "Meeting not found.");
+    return meeting ? c.json(meetingView(meeting, true)) : apiError(c, 404, "meeting_not_found", "Meeting not found.");
   });
 
   app.post("/v1/meetings/:meetingId/leave", async (c) => {

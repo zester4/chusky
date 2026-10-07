@@ -146,6 +146,23 @@ paths:
     post: { summary: Join a verified calendar meeting preparation without returning its URL, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: preparationId, in: path, required: true, schema: { type: string } }], responses: { '201': { description: Meeting lifecycle record } } }
   /meetings/{meetingId}:
     get: { summary: Get one owner-scoped Recall meeting, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: meetingId, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Meeting lifecycle record }, '404': { description: Not found } } }
+  /meetings/{meetingId}/participants/{participantId}/confirm:
+    post:
+      summary: Confirm a present participant against an exact provider-matched email
+      parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: meetingId, in: path, required: true, schema: { type: string } }, { name: participantId, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email, maxLength: 320 }
+      responses:
+        '200': { description: Participant confirmed for the owner-private meeting }
+        '400': { description: Invalid, inactive, shared, or non-matching participant identity }
+        '409': { description: Idempotency key mismatch }
   /meetings/{meetingId}/leave:
     post: { summary: Ask Recall to leave an owner-scoped meeting, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: meetingId, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Updated meeting lifecycle record } } }
   /meetings/{meetingId}/context:

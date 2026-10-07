@@ -85,6 +85,51 @@ available in `meetings.list()` for the authenticated owner. Meeting context is
 available only for an active representative meeting and contains relevant
 owner-stored facts, not arbitrary private history.
 
+## Live dashboard synchronization
+
+Use the meeting stream when a dashboard or embedded operator console needs to
+stay current without polling. The stream emits an owner- or workspace-scoped
+snapshot followed by keepalive events. Reconnect with the last known snapshot
+when the transport closes; do not treat a disconnected stream as a completed
+meeting.
+
+```ts
+const stop = new AbortController();
+
+await chusky.meetings.stream(undefined, (event) => {
+  for (const meeting of event.meetings) {
+    console.log(meeting.id, meeting.status, meeting.runtimeState);
+  }
+}, stop.signal);
+
+// Call stop.abort() when the dashboard view unmounts.
+```
+
+Meeting preparation records include the calendar attendees when the calendar
+provider supplied them. A preparation's attendees are scheduling context, not
+authentication. The meeting roster may include a provider-matched email and an
+assurance level in an owner-private response; shared workspace projections
+omit those identity fields.
+
+For an owner-private meeting, the owner can confirm a present participant only
+when the supplied email exactly matches the provider-matched roster email. The
+endpoint refuses shared-room meetings, absent participants, duplicate email
+matches, and non-matching addresses. Use an idempotency key because the
+confirmation changes durable meeting state:
+
+```ts
+const confirmed = await chusky.meetings.confirmParticipant(
+  meeting.id,
+  participant.id,
+  "jordan@example.com",
+  { idempotencyKey: `confirm-${meeting.id}-${participant.id}` },
+);
+```
+
+Confirmation is an identity assurance signal, not a grant to unrelated private
+data. Sensitive connected-app lookups and external actions continue to use
+their normal authorization and approval boundaries.
+
 Use signed Recall webhooks and durable Redis/QStash in production. A successful
 join request means Chusky accepted and persisted the meeting lifecycle; use
 `get()` or `list()` to observe admission, in-call, ended, and failed states.

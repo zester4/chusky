@@ -550,6 +550,7 @@ export class MeetingsResource {
   }
   leave(meetingId: string, options?: RequestOptions): Promise<MeetingRecord & { alreadyFinished?: boolean }> { return this.client.request(`/meetings/${encodeURIComponent(meetingId)}/leave`, { method: "POST", body: "{}" }, options); }
   context(meetingId: string, query = "", options?: RequestOptions): Promise<MeetingContext> { const suffix = query ? `?query=${encodeURIComponent(query)}` : ""; return this.client.request(`/meetings/${encodeURIComponent(meetingId)}/context${suffix}`, {}, options); }
+  confirmParticipant(meetingId: string, participantId: string, email: string, options?: RequestOptions): Promise<{ confirmed: true; meetingId: string; participantId: string; email: string }> { return this.client.request(`/meetings/${encodeURIComponent(meetingId)}/participants/${encodeURIComponent(participantId)}/confirm`, { method: "POST", body: JSON.stringify({ email }) }, options); }
   deleteContact(contactId: string, options?: RequestOptions): Promise<void> { return this.client.request(`/meetings/contacts/${encodeURIComponent(contactId)}`, { method: "DELETE" }, options); }
 }
 export class MissionsResource {

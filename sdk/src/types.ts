@@ -149,7 +149,7 @@ export interface MeetingMission {
   preparedAt: number;
 }
 export interface MeetingMissionSummary { clientName: string; objective: string; preparedAt: string; }
-export interface MeetingParticipant { id: string; name: string; identityStatus?: "named" | "unknown"; isHost?: boolean; status: "present" | "left"; updatedAt: string; }
+export interface MeetingParticipant { id: string; name: string; identityStatus?: "named" | "unknown"; isHost?: boolean; email?: string; emailSource?: "recall_match"; assurance?: "unverified" | "calendar_matched" | "confirmed"; status: "present" | "left"; updatedAt: string; }
 export interface MeetingSpeakerEvent { type: "speech_on" | "speech_off"; participantId?: string; at: string; }
 export interface MeetingOutcomeActionItem { task: string; owner: string; dueDate?: string; }
 export interface MeetingOutcome { title: string; summary: string; decisions: string[]; actionItems: MeetingOutcomeActionItem[]; openQuestions: string[]; }
@@ -191,6 +191,8 @@ export interface MeetingPreparation {
   endAt?: string;
   status?: "prepared" | "auto_scheduled" | "cancelled" | "joined" | "expired";
   meetingUrlAvailable?: boolean;
+  participants?: string[];
+  attendees?: Array<{ name?: string; email?: string; responseStatus: "accepted" | "declined" | "tentative" | "needsAction" | "unknown" }>;
   brief?: string;
   briefStatus?: string;
   createdAt: string;

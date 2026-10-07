@@ -1792,8 +1792,8 @@ test("linked dashboard can read owner-scoped meeting preparation, outcomes, rost
   assert.equal(await redeemWebTelegramLinkCode(link.code, 820001), "linked");
   const now = Date.now();
   await createTriggerEvent({ eventId: "cal-trigger-820001", userId: 820001, triggerSlug: "GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CREATED_TRIGGER", summary: "Calendar meeting created", status: "completed", result: "Recommendation: review the last pricing discussion and ask about their launch date.", createdAt: now, updatedAt: now });
-  await saveCalendarMeetingPreparation(820001, { id: "cmp_owner_meeting_1", userId: 820001, sourceTriggerEventId: "cal-trigger-820001", calendarEventId: "event-820001", lifecycle: "created", status: "prepared", title: "Acme discovery", startAt: new Date(now + 60_000).toISOString(), participants: ["Avery", "client@example.com"], createdAt: now, updatedAt: now });
-  await addRecallMeeting(820001, { id: "mtg_owner_meeting_1", userId: 820001, platform: "google_meet", status: "in_call", interactionMode: "representative", meetingUrlHash: "a".repeat(64), title: "Acme discovery", participantRoster: [{ id: "p1", name: "Avery", isHost: true, status: "present", updatedAt: now }], history: [{ role: "user", content: "Can we schedule a test drive?", createdAt: now }, { role: "assistant", content: "I can check a time that works.", createdAt: now }], createdAt: now, updatedAt: now });
+  await saveCalendarMeetingPreparation(820001, { id: "cmp_owner_meeting_1", userId: 820001, sourceTriggerEventId: "cal-trigger-820001", calendarEventId: "event-820001", lifecycle: "created", status: "prepared", title: "Acme discovery", startAt: new Date(now + 60_000).toISOString(), participants: ["Avery", "client@example.com"], attendees: [{ name: "Avery", email: "avery@example.com", responseStatus: "accepted" }], createdAt: now, updatedAt: now });
+  await addRecallMeeting(820001, { id: "mtg_owner_meeting_1", userId: 820001, platform: "google_meet", status: "in_call", interactionMode: "representative", meetingUrlHash: "a".repeat(64), title: "Acme discovery", participantRoster: [{ id: "p1", name: "Avery", isHost: true, email: "avery@example.com", emailSource: "recall_match", assurance: "calendar_matched", status: "present", updatedAt: now }], history: [{ role: "user", content: "Can we schedule a test drive?", createdAt: now }, { role: "assistant", content: "I can check a time that works.", createdAt: now }], createdAt: now, updatedAt: now });
   await upsertMeetingContact(820001, "mtg_owner_meeting_1", { participantName: "Avery", email: "avery@example.com", contactPreference: "email", interest: "Test drive", nextStep: "Confirm a time" });
 
   const api = app();
@@ -1803,11 +1803,18 @@ test("linked dashboard can read owner-scoped meeting preparation, outcomes, rost
   const payload = await response.json() as { preparations: Array<Record<string, unknown>>; meetings: Array<Record<string, unknown>>; contacts: Array<Record<string, unknown>> };
   assert.equal(payload.preparations[0]?.brief, "Recommendation: review the last pricing discussion and ask about their launch date.");
   assert.deepEqual(payload.preparations[0]?.participants, ["Avery", "client@example.com"]);
-  assert.deepEqual(payload.meetings[0]?.participantRoster, [{ id: "p1", name: "Avery", isHost: true, status: "present", updatedAt: new Date(now).toISOString() }]);
+  assert.deepEqual(payload.preparations[0]?.attendees, [{ name: "Avery", email: "avery@example.com", responseStatus: "accepted" }]);
+  assert.deepEqual(payload.meetings[0]?.participantRoster, [{ id: "p1", name: "Avery", isHost: true, email: "avery@example.com", emailSource: "recall_match", assurance: "calendar_matched", status: "present", updatedAt: new Date(now).toISOString() }]);
   assert.equal((payload.meetings[0]?.history as Array<{ content: string }>)[0]?.content, "Can we schedule a test drive?");
   assert.equal(payload.contacts[0]?.email, "avery@example.com");
   assert.equal(JSON.stringify(payload).includes("sealedMeetingUrl"), false);
   assert.equal(JSON.stringify(payload).includes("meetingUrlHash"), false);
+
+  const confirmed = await api.fetch(new Request("http://local/v1/meetings/mtg_owner_meeting_1/participants/p1/confirm", { method: "POST", headers: { ...headers, "Idempotency-Key": "confirm-participant-once" }, body: JSON.stringify({ email: "avery@example.com" }) }));
+  assert.equal(confirmed.status, 200);
+  assert.deepEqual(await confirmed.json(), { confirmed: true, meetingId: "mtg_owner_meeting_1", participantId: "p1", email: "avery@example.com" });
+  const replayConfirmation = await api.fetch(new Request("http://local/v1/meetings/mtg_owner_meeting_1/participants/p1/confirm", { method: "POST", headers: { ...headers, "Idempotency-Key": "confirm-participant-once" }, body: JSON.stringify({ email: "avery@example.com" }) }));
+  assert.equal(replayConfirmation.status, 200);
 
   const otherLink = await createWebTelegramLinkCode("other-meeting-owner");
   assert.equal(await redeemWebTelegramLinkCode(otherLink.code, 820002), "linked");
