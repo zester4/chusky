@@ -409,6 +409,25 @@ test("SDK exposes native schedules, memory, scratchpad, app connections, channel
   assert.ok(calls.includes("GET:https://example.test/v1/devices"));
 });
 
+test("SDK exposes owner-scoped Attention Pulse settings with typed cadence and idempotency", async () => {
+  const calls: Array<{ method: string; url: string; body?: string; idempotency?: string }> = [];
+  const sdk = new Chusky({ apiKey: "key", userId: "customer", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {
+    calls.push({ method: init?.method ?? "GET", url, body: typeof init?.body === "string" ? init.body : undefined, idempotency: new Headers(init?.headers).get("Idempotency-Key") ?? undefined });
+    if (init?.method === "PUT") return new Response(JSON.stringify({ data: { enabled: true, cadence: "hourly", authority: "prepare", deliveryTargets: [], maxPerDay: 4, monitoredDomains: ["gmail", "calendar"] } }), { status: 200 });
+    return new Response(JSON.stringify({ enabled: false, cadence: "hourly", authority: "observe", deliveryTargets: [], maxPerDay: 4, monitoredDomains: ["gmail", "calendar"] }), { status: 200 });
+  }) });
+
+  const current = await sdk.attentionPulse.get();
+  const updated = await sdk.attentionPulse.update({ enabled: true, cadence: "hourly", authority: "prepare", deliveryTargets: [{ provider: "telegram" }], monitoredDomains: ["gmail", "calendar"] }, { idempotencyKey: "pulse-setup-1" });
+
+  assert.equal(current.enabled, false);
+  assert.equal(updated.data.authority, "prepare");
+  assert.equal(calls[0].url, "https://example.test/v1/account/attention-pulse");
+  assert.equal(calls[1].method, "PUT");
+  assert.equal(calls[1].idempotency, "pulse-setup-1");
+  assert.deepEqual(JSON.parse(calls[1].body ?? "{}"), { enabled: true, cadence: "hourly", authority: "prepare", deliveryTargets: [{ provider: "telegram" }], monitoredDomains: ["gmail", "calendar"] });
+});
+
 test("SDK exposes mission proof, context, department, and outcome resources", async () => {
   const calls: string[] = [];
   const sdk = new Chusky({ apiKey: "key", userId: "customer", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {

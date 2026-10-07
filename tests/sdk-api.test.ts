@@ -1434,6 +1434,34 @@ test("dashboard autonomy works before and after optional Telegram linking", asyn
   assert.equal(linkedReconcile.status, 200);
 });
 
+test("Attention Pulse settings enforce owner auth, validation, and idempotent replay", async () => {
+  const api = app();
+  const unauthenticated = await api.fetch(new Request("http://local/v1/account/attention-pulse"));
+  assert.equal(unauthenticated.status, 401);
+
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "pulse-owner", "Content-Type": "application/json", "Idempotency-Key": "pulse-settings-1" };
+  const invalid = await api.fetch(new Request("http://local/v1/account/attention-pulse", { method: "PUT", headers, body: JSON.stringify({ enabled: true, cadence: "never" }) }));
+  assert.equal(invalid.status, 400);
+  assert.equal((await invalid.json() as { error?: { code?: string } }).error?.code, "invalid_attention_pulse");
+
+  const body = { enabled: false, authority: "prepare", cadence: "hourly", deliveryTargets: [{ provider: "telegram" }], monitoredDomains: ["gmail", "calendar"], maxPerDay: 4 };
+  const updated = await api.fetch(new Request("http://local/v1/account/attention-pulse", { method: "PUT", headers, body: JSON.stringify(body) }));
+  assert.equal(updated.status, 200);
+  const first = await updated.json() as { data: { enabled: boolean; authority: string; monitoredDomains: string[] } };
+  assert.equal(first.data.enabled, false);
+  assert.equal(first.data.authority, "prepare");
+  assert.deepEqual(first.data.monitoredDomains, ["gmail", "calendar"]);
+  assert.equal("userId" in (first.data as Record<string, unknown>), false);
+  assert.equal("userId" in (first.data.deliveryTargets[0] as Record<string, unknown>), false);
+
+  const replay = await api.fetch(new Request("http://local/v1/account/attention-pulse", { method: "PUT", headers, body: JSON.stringify(body) }));
+  assert.equal(replay.status, 200);
+  assert.deepEqual(await replay.json(), first);
+
+  const mismatch = await api.fetch(new Request("http://local/v1/account/attention-pulse", { method: "PUT", headers, body: JSON.stringify({ ...body, maxPerDay: 5 }) }));
+  assert.equal(mismatch.status, 409);
+});
+
 test("verified dashboard users can only manage their own bounded project keys", async () => {
   (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
   setWebAuthSessionResolverForTests(async (headers) => {

@@ -275,6 +275,33 @@ test("recurring autonomous occurrences create and complete an inspectable ledger
   assert.equal(occurrence?.toolCalls, 2);
 });
 
+test("owner-facing pulse approval notices leave the occurrence waiting instead of completed", async () => {
+  let occurrence: JobOccurrenceRecord | undefined;
+  const state = deps({
+    getJob: async () => ({ ...deps().job, kind: "attention_pulse", mode: "act", workerBinding: { worker: "elena", objective: "Run the attention pulse", expectedOutput: "Pulse result", allowedTools: [], approvalPolicy: "require_chusky_approval" as const, timeoutSeconds: 60, maxToolCalls: 4 } }),
+    getJobOccurrence: async () => occurrence,
+    createJobOccurrence: async (record) => { occurrence = record; return record; },
+    updateJobOccurrence: async (_userId, _id, patch, expectedVersion) => {
+      assert.equal(expectedVersion, occurrence?.version);
+      occurrence = { ...occurrence!, ...patch, version: occurrence!.version + 1, updatedAt: Date.now() };
+      return occurrence;
+    },
+    runWorker: async () => ({
+      text: "The attention pulse needs approval for paying an invoice. Approve request appr_123.",
+      terminalStatus: "waiting" as const,
+      nextAction: "Approve request appr_123.",
+      waitReason: "The pulse reached an approval boundary and did not perform the external action.",
+    }),
+  });
+  const result = await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "occ-pulse-approval" }, state);
+  assert.deepEqual(result, { delivered: true });
+  assert.equal(state.sent.length, 1);
+  assert.equal(occurrence?.status, "waiting");
+  assert.equal(occurrence?.completedAt, undefined);
+  assert.equal(occurrence?.nextAction, "Approve request appr_123.");
+  assert.match(occurrence?.waitReason ?? "", /approval boundary/);
+});
+
 test("explicit notify jobs do not invoke the agent", async () => {
   let called = false;
   const state = deps({

@@ -157,6 +157,34 @@ The pulse must:
 delivery policy suppresses it. It must not hide a failed tool call or an
 unhandled open loop.
 
+### Proactive capability layer
+
+The provider-neutral proactive vocabulary lives in `src/proactive/`. The
+catalogue contains twenty bounded behaviors: priority inbox scanning,
+unanswered-message detection, important-person monitoring, email commitment
+extraction, attachment triage, tomorrow briefings, meeting preparation,
+calendar conflicts, post-meeting follow-through, deadline watches, invoice and
+subscription monitoring, expense organization, cash-flow warnings, stalled-task
+recovery, project inactivity, CRM follow-up, team communication summaries,
+document-change monitoring, and the daily operating briefing.
+
+Catalogue entries describe possible owner value; they do not grant provider
+access or write authority. `watches.ts` gives every capability a typed,
+read-only watch contract and creates only the two safe starter watches after
+explicit Pulse opt-in: the newest five Gmail inbox items and the next 24 hours
+of Calendar. Other provider domains require an owner-configured watch and an
+owned connected account; unconnected providers must never be silently polled.
+
+`detectors.ts` accepts only bounded normalized evidence and emits owner-scoped
+findings. Findings may create deduplicated attention candidates, but never
+send, spend, delete, change permissions, or treat email/document/provider text
+as authorization. `reconciliation.ts` remains the provider boundary: it
+resolves exact read-only tool slugs, enforces account ownership, profiles,
+leases, checkpoints, retries, and failure observations. Use
+`src/proactive/README.md` for the implementation map and run
+`npx.cmd tsx --test tests/proactive.test.ts tests/workflow.test.ts` after
+changing this layer.
+
 ## Context awareness
 
 Autonomous work should be context-aware without receiving the whole account.

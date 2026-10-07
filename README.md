@@ -727,6 +727,17 @@ completion, not when it merely starts or is inspected. Pulse runs use a narrower
 mission-inspection, and attention-state tool surface than ordinary Elena work; connected-app
 actions require an explicit capability expansion. Redis and QStash are required in production.
 
+The proactive operating layer in [`src/proactive/`](src/proactive/README.md) defines twenty
+typed, read-only behaviors for Elena: inbox priority, unanswered messages, important contacts,
+email commitments, attachments, tomorrow briefings, meeting preparation, calendar conflicts,
+post-meeting follow-through, deadlines, invoices, subscription renewals, expenses, cash flow,
+stalled tasks, inactive projects, CRM follow-up, team summaries, document changes, and a daily
+operating briefing. Each capability produces bounded normalized findings and owner-scoped
+candidates; it does not grant provider access. Explicit Pulse opt-in creates only the safe Gmail
+and Calendar starter watches, while other providers require an owner-configured watch and an
+owned connected account. Approval-required pulse work is reported to the owner and persisted as
+waiting until the approval or verified continuation is resolved.
+
 ### Event-driven Composio triggers
 
 Composio trigger events are verified, ownership-checked, deduplicated, stored as a bounded safe

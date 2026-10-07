@@ -2,6 +2,13 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.10.0 - 2026-10-07
+
+- Add typed `client.attentionPulse.get()` and `client.attentionPulse.update()`
+  for owner-scoped Elena/Attention Pulse settings.
+- Expose cadence, authority, delivery targets, daily limits, quiet hours, and
+  monitored domains through the SDK contract and OpenAPI description.
+
 ## 1.9.1 - 2026-10-03
 
 - Add an owner- and workspace-scoped SSE meeting stream for live dashboard and

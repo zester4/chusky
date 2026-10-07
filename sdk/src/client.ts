@@ -4,7 +4,7 @@ import type { A2AMessageInput } from "./types.js";
 import type { ImageDownload } from "./types.js";
 import type { McpConnectionCredentials } from "./types.js";
 import type { MeetingStreamEvent } from "./types.js";
-import type { A2AAgentCard, A2APushNotificationConfig, A2AStreamEvent, A2ATask, A2ATaskPage, AccountPreferences, Activity, AddCustomMcpServerParams, AppConnection, Approval, ApprovalDecision, ApprovalEscalation, Artifact, AuditEvent, AutonomySnapshot, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ComposerStageInput, Compensation, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, McpCatalogEntry, McpConnection, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionBudgetPatch, MissionCreateParams, MissionDoctorReport, MissionEvidence, MissionProof, MissionWorkSchedule, OperatorReadiness, OperatorTraceEvent, OutcomePackage, OutcomePlan, OutcomeVerification, Page, RecurringJob, ReliabilityHealth, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, ToolReliabilitySlug, Trigger, TriggerCatalogueItem, TriggerCreateParams, TriggerToolkit, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkflowComposerRecord, WorkPacket, Worker } from "./types.js";
+import type { A2AAgentCard, A2APushNotificationConfig, A2AStreamEvent, A2ATask, A2ATaskPage, AccountPreferences, Activity, AddCustomMcpServerParams, AppConnection, Approval, ApprovalDecision, ApprovalEscalation, Artifact, AttentionPulsePreferences, AttentionPulseUpdate, AuditEvent, AutonomySnapshot, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ComposerStageInput, Compensation, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, McpCatalogEntry, McpConnection, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionBudgetPatch, MissionCreateParams, MissionDoctorReport, MissionEvidence, MissionProof, MissionWorkSchedule, OperatorReadiness, OperatorTraceEvent, OutcomePackage, OutcomePlan, OutcomeVerification, Page, RecurringJob, ReliabilityHealth, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, ToolReliabilitySlug, Trigger, TriggerCatalogueItem, TriggerCreateParams, TriggerToolkit, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkflowComposerRecord, WorkPacket, Worker } from "./types.js";
 
 // Hosted SDK users do not need to configure an API origin. Keep `baseUrl` as
 // an explicit escape hatch for staging and self-hosted deployments.
@@ -45,6 +45,7 @@ export class Chusky {
   readonly departments: DepartmentsResource;
   readonly outcomes: OutcomesResource;
   readonly autonomy: AutonomyResource;
+  readonly attentionPulse: AttentionPulseResource;
   readonly operator: OperatorResource;
   readonly workflows: WorkflowsResource;
   readonly a2a: A2AResource;
@@ -100,6 +101,7 @@ export class Chusky {
     this.departments = new DepartmentsResource(this);
     this.outcomes = new OutcomesResource(this);
     this.autonomy = new AutonomyResource(this);
+    this.attentionPulse = new AttentionPulseResource(this);
     this.operator = new OperatorResource(this);
     this.workflows = new WorkflowsResource(this);
     this.a2a = new A2AResource(this);
@@ -597,6 +599,14 @@ export class AutonomyResource {
   reconcile(mode: "personal" | "business" = "personal", maxWatches?: number, options?: RequestOptions): Promise<{ data: Array<Record<string, unknown>> }> { return this.client.request("/account/autonomy/reconcile", { method: "POST", body: JSON.stringify({ mode, ...(maxWatches === undefined ? {} : { maxWatches }) }) }, options); }
   businessQueue(projectId: string, options?: RequestOptions): Promise<AutonomySnapshot> { return this.client.request(`/account/projects/${encodeURIComponent(projectId)}/autonomy/queue`, {}, options); }
   businessReconcile(projectId: string, maxWatches?: number, options?: RequestOptions): Promise<{ data: Array<Record<string, unknown>> }> { return this.client.request(`/account/projects/${encodeURIComponent(projectId)}/autonomy/reconcile`, { method: "POST", body: JSON.stringify({ ...(maxWatches === undefined ? {} : { maxWatches }) }) }, options); }
+}
+
+export class AttentionPulseResource {
+  constructor(private readonly client: Chusky) {}
+  get(options?: RequestOptions): Promise<AttentionPulsePreferences> { return this.client.request("/account/attention-pulse", {}, options); }
+  update(input: AttentionPulseUpdate, options?: RequestOptions): Promise<{ data: AttentionPulsePreferences }> {
+    return this.client.request("/account/attention-pulse", { method: "PUT", body: JSON.stringify(input) }, options);
+  }
 }
 
 export class OperatorResource {
