@@ -234,6 +234,8 @@ import { persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts } from "./sdkApi.
 import { recoverSdkWebhooks } from "./lib/webhookOutbox.js";
 import type { ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
 import { registerAuthRoutes } from "./authRoutes.js";
+import { registerBuilderAdmin } from "./builderAdmin.js";
+import { closeBuilderControl } from "./builderControl.js";
 import { initAuth } from "./auth.js";
 import { monitoringSnapshot, recordFailure } from "./monitoring.js";
 import { createLinkCode, listLinkedChannels, setProactivePreference } from "./channels/identity.js";
@@ -362,7 +364,10 @@ async function main(): Promise<void> {
       }
     }
   }
-  if (config.betterAuthEnabled) registerAuthRoutes(app);
+  if (config.betterAuthEnabled) {
+    registerAuthRoutes(app);
+    registerBuilderAdmin(app);
+  }
   const telegramWebhookUrl = `${config.webhookUrl.replace(/\/+$/, "")}/webhook`;
   const registerTelegramWebhook = async () => {
     await bot.api.setWebhook(telegramWebhookUrl, {
@@ -404,6 +409,7 @@ async function main(): Promise<void> {
       if (inFlightTelegramUpdates.size) logger.warn({ pending: inFlightTelegramUpdates.size }, "Stopping with Telegram updates still in flight");
       await bot.stop();
     } finally {
+      await closeBuilderControl();
       await posthog?.shutdown();
       process.exit(0);
     }

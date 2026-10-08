@@ -26,6 +26,7 @@
 import { Composio } from "@composio/core";
 import { Client as WorkflowClient } from "@upstash/workflow";
 import { config } from "./config.js";
+import { assertAgentExecutionEnabled } from "./builderControl.js";
 import { getTriggerTypeBySlug, getTriggerTypeByToken, listTriggerToolkits as listCatalogueToolkits, listTriggerTypesForToolkit, requiredTriggerConfigFields, triggerTypeForAgent, type TriggerCatalogueItem, type TriggerToolkit } from "./triggerCatalog.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { logger } from "./logger.js";
@@ -2190,6 +2191,8 @@ export async function runAgent(
   options?: AgentRunOptions
 ): Promise<AgentResult> {
 
+  await assertAgentExecutionEnabled();
+
   const reportToolActivity = async (activity: AgentToolActivity) => {
     try {
       await options?.onToolActivity?.(activity);
@@ -2822,6 +2825,7 @@ export async function runAgent(
   await persistRun("running", existingRun ? "run.resumed" : "run.started");
 
   for (let round = 0; round < config.maxToolRounds; round++) {
+    await assertAgentExecutionEnabled();
     logger.debug({ round, model: requestModel, messageCount: messages.length }, "Agent round");
     await persistRun("running", "run.round_started");
 
@@ -3108,6 +3112,7 @@ export async function runAgent(
           messages.push({ role: "tool", tool_call_id: call.id, content: result });
           continue;
         }
+        await assertAgentExecutionEnabled();
         await throwIfDurablyCancelled();
         if (browserTool) {
           if (browserToolCallsExecuted >= config.maxBrowserToolCalls) throw new BrowserRunLimitError();
