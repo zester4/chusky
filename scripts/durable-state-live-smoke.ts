@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import dotenv from "dotenv";
 import Redis from "ioredis";
 import { Pool } from "pg";
+import { securePostgresConnectionString } from "../src/postgresConnection.js";
 import { reserveDurableSmokeScope } from "../src/durableSmokeGuard.js";
 
 dotenv.config({ path: process.env.CHUSKY_ENV_FILE ?? resolve(process.cwd(), ".env") });
@@ -27,7 +28,7 @@ const sessionKey = `chuck:session:${userId}`;
 const domainsKey = `chuck:session-domains:${userId}`;
 const reservationKey = `chuck:durable-state-live-smoke:${userId}`;
 const reservationToken = randomUUID();
-const pool = new Pool({ connectionString: databaseUrl, max: 1, connectionTimeoutMillis: 10_000 });
+const pool = new Pool({ connectionString: securePostgresConnectionString(databaseUrl), max: 1, connectionTimeoutMillis: 10_000 });
 const redis = new Redis(process.env.REDIS_URL, { maxRetriesPerRequest: 1, connectTimeout: 10_000 });
 
 async function main(): Promise<void> {

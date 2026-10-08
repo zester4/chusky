@@ -2,6 +2,7 @@ import "dotenv/config";
 import { Pool } from "pg";
 import Redis from "ioredis";
 import { config } from "../src/config.js";
+import { securePostgresConnectionString } from "../src/postgresConnection.js";
 import { durableImageObjectId, isAuthorizedDurableImage, registerDurableImageAsset } from "../src/durableImageCatalog.js";
 import { validateImageCatalogBackfillCandidate } from "../src/durableImageCatalogBackfill.js";
 import { createObjectMetadata, getDurableObjectMetadata, initStore, closeStore } from "../src/store.js";
@@ -29,7 +30,7 @@ if (process.env.DURABLE_OBJECT_CATALOG_ENABLED !== "true") throw new Error("DURA
 if (!config.redisUrl || !config.durableStateDatabaseUrl || !r2Configured()) throw new Error("Redis, the durable-state database, and R2 must be configured.");
 
 const redis = new Redis(config.redisUrl, { maxRetriesPerRequest: 1, connectTimeout: 10_000 });
-const database = new Pool({ connectionString: config.durableStateDatabaseUrl, max: 2, connectionTimeoutMillis: 10_000 });
+const database = new Pool({ connectionString: securePostgresConnectionString(config.durableStateDatabaseUrl), max: 2, connectionTimeoutMillis: 10_000 });
 const sessionKeyPattern = /^chuck:session:(\d+)$/;
 
 function parseImageAssets(value: unknown): unknown[] | undefined {

@@ -3,12 +3,13 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Pool } from "pg";
 import { config } from "./config.js";
+import { securePostgresConnectionString } from "./postgresConnection.js";
 
 const connectionString = config.durableMemoryMigrationDatabaseUrl || config.durableStateMigrationDatabaseUrl || config.betterAuthMigrationDatabaseUrl;
 if (!connectionString) throw new Error("Set a direct migration URL (DURABLE_MEMORY_MIGRATION_DATABASE_URL, DURABLE_STATE_MIGRATION_DATABASE_URL, or BETTER_AUTH_MIGRATION_DATABASE_URL) before running durable-memory:migrate");
 const parsedUrl = new URL(connectionString);
 if (parsedUrl.hostname.includes("-pooler")) throw new Error("Durable memory migrations require a direct, non-pooler Neon connection URL");
-const pool = new Pool({ connectionString, max: 1, connectionTimeoutMillis: 10_000 });
+const pool = new Pool({ connectionString: securePostgresConnectionString(connectionString), max: 1, connectionTimeoutMillis: 10_000 });
 Promise.all([
   readFile(join(process.cwd(), "migrations", "0007_durable_memory.sql"), "utf8"),
   readFile(join(process.cwd(), "migrations", "0013_durable_memory_reflection.sql"), "utf8"),

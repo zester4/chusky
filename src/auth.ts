@@ -10,6 +10,7 @@ import { redisStorage } from "@better-auth/redis-storage";
 import Redis from "ioredis";
 import { config } from "./config.js";
 import { sendAuthEmail } from "./auth-email.js";
+import { securePostgresConnectionString } from "./postgresConnection.js";
 
 // The Redis storage package and Better Auth core currently expose separate
 // structural versions of the same SecondaryStorage type. Keep that adapter
@@ -48,7 +49,7 @@ function createDatabase(): AuthDatabase {
   if (process.env.NODE_ENV === "production" && !databaseUrl) {
     throw new Error("BETTER_AUTH_DATABASE_URL must be configured in production; use Neon Postgres instead of local SQLite.");
   }
-  if (databaseUrl) return postgres = new Pool({ connectionString: databaseUrl, max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 });
+  if (databaseUrl) return postgres = new Pool({ connectionString: securePostgresConnectionString(databaseUrl), max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 });
   mkdirSync(dirname(resolve(config.betterAuthDatabasePath)), { recursive: true });
   return sqlite = new Database(config.betterAuthDatabasePath);
 }
@@ -152,7 +153,7 @@ export async function initAuth(): Promise<void> {
 export async function migrateAuthDatabase(): Promise<void> {
   const migrationUrl = config.betterAuthMigrationDatabaseUrl;
   if (!migrationUrl) throw new Error("BETTER_AUTH_MIGRATION_DATABASE_URL must be set to Neon's direct connection string before running auth migrations.");
-  const migrationPool = new Pool({ connectionString: migrationUrl, max: 1, connectionTimeoutMillis: 10_000 });
+  const migrationPool = new Pool({ connectionString: securePostgresConnectionString(migrationUrl), max: 1, connectionTimeoutMillis: 10_000 });
   try {
     const migrationAuth = betterAuth(authConfig(migrationPool));
     const { runMigrations } = await getMigrations(migrationAuth.options);

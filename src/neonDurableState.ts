@@ -979,5 +979,6 @@ export async function createNeonDurableState(databaseUrl: string): Promise<NeonD
   // Keep the dependency dormant unless the explicit durable-state feature is
   // enabled. This also lets memory-only test runs exercise domain logic.
   const { Pool } = await import("pg");
-  return new NeonDurableState(new Pool({ connectionString, max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 }));
+  const { securePostgresConnectionString } = await import("./postgresConnection.js");
+  return new NeonDurableState(new Pool({ connectionString: securePostgresConnectionString(connectionString), max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 }));
 }

@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { Pool } from "pg";
 import { config } from "./config.js";
+import { securePostgresConnectionString } from "./postgresConnection.js";
 import { applyDurableStateMigrations } from "./durableStateMigrations.js";
 
 async function main(): Promise<void> {
@@ -10,7 +11,7 @@ async function main(): Promise<void> {
   const connectionString = config.durableStateMigrationDatabaseUrl || config.betterAuthMigrationDatabaseUrl;
   if (!connectionString) throw new Error("Set DURABLE_STATE_MIGRATION_DATABASE_URL or BETTER_AUTH_MIGRATION_DATABASE_URL to Neon's direct connection string before running durable-state migrations.");
   const migrationsDirectory = resolve(process.cwd(), "migrations");
-  const pool = new Pool({ connectionString, max: 1, connectionTimeoutMillis: 10_000 });
+  const pool = new Pool({ connectionString: securePostgresConnectionString(connectionString), max: 1, connectionTimeoutMillis: 10_000 });
   try {
     const result = await applyDurableStateMigrations(pool, migrationsDirectory);
     console.log(JSON.stringify({ migrationsApplied: result.applied.length, migrationsAlreadyApplied: result.skipped.length }));

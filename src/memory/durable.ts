@@ -4,6 +4,7 @@ import { config } from "../config.js";
 import { logger } from "../logger.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "../lib/knowledge/vector.js";
 import { getHotMemoryBrief, invalidateHotMemoryBriefs, setHotMemoryBrief } from "./hotCache.js";
+import { securePostgresConnectionString } from "../postgresConnection.js";
 import type { MemoryCategory, MemoryBrief, MemoryEdge, MemoryEntity, MemoryEntityType, MemoryPurpose, MemoryScopeKind, DurableMemoryRecord } from "./types.js";
 
 const memoryPool = new Map<string, Pool>();
@@ -22,7 +23,7 @@ function pool(): Pool {
   if (!url) throw new Error("A Neon database URL is required for durable memory");
   let existing = memoryPool.get(url);
   if (!existing) {
-    existing = new Pool({ connectionString: url, max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 });
+    existing = new Pool({ connectionString: securePostgresConnectionString(url), max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 });
     existing.on("error", (error) => logger.error({ errorType: error instanceof Error ? error.name : "PostgresError" }, "Durable memory database pool error"));
     memoryPool.set(url, existing);
   }
