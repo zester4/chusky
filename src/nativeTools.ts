@@ -2250,7 +2250,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_DAYTONA_LIST_FILES": return daytonaCall(runtime, () => daytonaEngine.listFiles(userId, args.path ? text(args.path) : undefined, args.depth === undefined ? undefined : Number(args.depth)));
     case "CHUCK_DAYTONA_READ_FILE": return daytonaCall(runtime, () => daytonaEngine.readFile(userId, text(args.path), args.maxChars === undefined ? undefined : Number(args.maxChars)));
     case "CHUCK_DAYTONA_WRITE_FILE": return daytonaCall(runtime, () => daytonaEngine.writeFile(userId, text(args.path), fileContent(args.content)));
-    case "CHUCK_ARTIFACT_QA": return daytonaCall(runtime, () => daytonaEngine.qaArtifact(userId, args));
+    case "CHUCK_ARTIFACT_QA": return daytonaCall(runtime, () => daytonaEngine.qaArtifact(userId, { ...args, _runId: runtime.currentRunId }));
     case "CHUCK_FILE_BRIDGE": throw new Error("CHUCK_FILE_BRIDGE must be executed by the authenticated agent Composio-session dispatcher; it cannot run outside an active connected-app session.");
     case "CHUCK_DAYTONA_REPLACE_FILES": return daytonaCall(runtime, () => daytonaEngine.replaceFiles(userId, args.files, args.pattern, args.newValue));
     case "CHUCK_DAYTONA_SET_FILE_PERMISSIONS": return daytonaCall(runtime, () => daytonaEngine.setFilePermissions(userId, args.path, args.permissions));
@@ -2262,9 +2262,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_DAYTONA_DELETE_FILE": return daytonaCall(runtime, () => daytonaEngine.deleteFile(userId, text(args.path), args.recursive === true));
     case "CHUCK_DAYTONA_DELETE_WORKSPACE": return daytonaCall(runtime, () => daytonaEngine.deleteWorkspace(userId));
     case "CHUCK_DAYTONA_PREVIEW": return daytonaCall(runtime, () => daytonaEngine.preview(userId, Number(args.port)));
-    case "CHUCK_DAYTONA_APP": return daytonaCall(runtime, () => daytonaEngine.app(userId, args));
+    case "CHUCK_DAYTONA_APP": return daytonaCall(runtime, () => daytonaEngine.app(userId, { ...args, _runId: runtime.currentRunId }));
     case "CHUCK_DAYTONA_CREATE_SNAPSHOT": return daytonaCall(runtime, () => daytonaEngine.createSnapshot(userId, text(args.name)));
-    case "CHUCK_DAYTONA_COMPUTER": return daytonaCall(runtime, () => daytonaEngine.computer(userId, args));
+    case "CHUCK_DAYTONA_COMPUTER": return daytonaCall(runtime, () => daytonaEngine.computer(userId, { ...args, _runId: runtime.currentRunId }));
     case "CHUCK_DAYTONA_PAUSE": return daytonaCall(runtime, () => daytonaEngine.pause(userId));
     case "CHUCK_DAYTONA_PTY": return (async () => {
       const result = await daytonaCall(runtime, () => daytonaEngine.pty(userId, args));
@@ -2569,11 +2569,11 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_SHOPPING_SAVE_SITE": return saveShoppingSitePreference(userId, args);
     case "CHUCK_SHOPPING_LIST_SITES": return listSavedShoppingSites(userId, args.limit === undefined ? undefined : Number(args.limit));
     case "CHUCK_SHOPPING_REMOVE_SITE": return removeSavedShoppingSite(userId, text(args.id));
-    case "CHUCK_CREATE_PDF": return daytonaCall(runtime, () => daytonaEngine.createPdf(userId, args));
-    case "CHUCK_CREATE_PRESENTATION": return daytonaCall(runtime, () => daytonaEngine.createPresentation(userId, args));
-    case "CHUCK_CREATE_DOCUMENT": return daytonaCall(runtime, () => daytonaEngine.createDocument(userId, args));
-    case "CHUCK_CREATE_SPREADSHEET": return daytonaCall(runtime, () => daytonaEngine.createSpreadsheet(userId, args));
-    case "CHUCK_ARTIFACT": return daytonaCall(runtime, () => daytonaEngine.artifact(userId, args));
+    case "CHUCK_CREATE_PDF": return daytonaCall(runtime, () => daytonaEngine.createPdf(userId, { ...args, _runId: runtime.currentRunId }));
+    case "CHUCK_CREATE_PRESENTATION": return daytonaCall(runtime, () => daytonaEngine.createPresentation(userId, { ...args, _runId: runtime.currentRunId }));
+    case "CHUCK_CREATE_DOCUMENT": return daytonaCall(runtime, () => daytonaEngine.createDocument(userId, { ...args, _runId: runtime.currentRunId }));
+    case "CHUCK_CREATE_SPREADSHEET": return daytonaCall(runtime, () => daytonaEngine.createSpreadsheet(userId, { ...args, _runId: runtime.currentRunId }));
+    case "CHUCK_ARTIFACT": return daytonaCall(runtime, () => daytonaEngine.artifact(userId, { ...args, _runId: runtime.currentRunId }));
     case "CHUCK_DELEGATE_SUBAGENT":
       return runPlannedDelegation(userId, args as any, runtime);
     case "CHUCK_HANDOFF_SUBAGENT":

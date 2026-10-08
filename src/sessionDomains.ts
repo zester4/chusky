@@ -76,12 +76,12 @@ export function splitSessionDomains(session: UserSession, separateSdkRuns = fals
     ["profile", { model: session.model, totalMessages: session.totalMessages, totalCost: session.totalCost, ...(typeof session.telegramChatId === "number" ? { telegramChatId: session.telegramChatId } : {}), ...(typeof session.voiceReplies === "boolean" ? { voiceReplies: session.voiceReplies } : {}), ...(session.voicePreferences ? { voicePreferences: session.voicePreferences } : {}), createdAt: session.createdAt }],
     ["conversation", { summaries: session.summaries }],
     ["memories", { memories: session.memories }],
-    ["assets", { imageAssets: session.imageAssets, sdkFiles: session.sdkFiles ?? [], artifacts: session.artifacts ?? [] }],
+    ["assets", { imageAssets: session.imageAssets, sdkFiles: session.sdkFiles ?? [], artifacts: session.artifacts ?? [], artifactRegistrationIntents: session.artifactRegistrationIntents ?? [] }],
     ["sdk", { sdkThreads, sdkIdempotency: session.sdkIdempotency ?? {}, sdkAudit: session.sdkAudit ?? [], sdkWebhooks: session.sdkWebhooks ?? [], sdkProjects: session.sdkProjects ?? [] }],
   ]);
   const core = {
     ...sessionCore,
-    history: (session.history ?? []).slice(-HOT_CONVERSATION_MESSAGES), summaries: [], memories: [], imageAssets: [], sdkFiles: [], artifacts: [], sdkThreads: [], sdkIdempotency: {}, sdkAudit: [], sdkWebhooks: [], sdkProjects: [],
+    history: (session.history ?? []).slice(-HOT_CONVERSATION_MESSAGES), summaries: [], memories: [], imageAssets: [], sdkFiles: [], artifacts: [], artifactRegistrationIntents: [], sdkThreads: [], sdkIdempotency: {}, sdkAudit: [], sdkWebhooks: [], sdkProjects: [],
     durableSessionFormat: DURABLE_SESSION_FORMAT,
   } as SessionWithDurableMarker;
   return { core, domains, sdkRuns };
@@ -115,6 +115,7 @@ export function joinSessionDomains(core: UserSession, documents: ReadonlyMap<Dur
     imageAssets: Array.isArray(assets.imageAssets) ? assets.imageAssets as ImageAsset[] : [],
     sdkFiles: Array.isArray(assets.sdkFiles) ? assets.sdkFiles as SdkFileRecord[] : [],
     artifacts: Array.isArray(assets.artifacts) ? assets.artifacts as ArtifactRecord[] : [],
+    artifactRegistrationIntents: Array.isArray(assets.artifactRegistrationIntents) ? assets.artifactRegistrationIntents as UserSession["artifactRegistrationIntents"] : [],
     sdkThreads: Array.isArray(sdk.sdkThreads) ? sdk.sdkThreads as SdkThreadRecord[] : [],
     sdkIdempotency: object(sdk.sdkIdempotency) as UserSession["sdkIdempotency"],
     sdkAudit: Array.isArray(sdk.sdkAudit) ? sdk.sdkAudit as UserSession["sdkAudit"] : [],
