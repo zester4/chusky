@@ -280,7 +280,10 @@ export async function searchSkills(query: string, limit = 5, root = DEFAULT_SKIL
     }
     return { skill, score };
   }).filter(({ score }) => !requested.length || score > 0).sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name));
-  const boundedLimit = Math.max(1, Math.min(Math.floor(Number(limit) || 5), 20));
+  // The dashboard needs to browse the complete installed catalogue. Keep the
+  // bound finite for callers that accidentally pass an unbounded value, but do
+  // not silently truncate the repository's installed skills at twenty.
+  const boundedLimit = Math.max(1, Math.min(Math.floor(Number(limit) || 5), 250));
   return scored.slice(0, boundedLimit).map(({ skill, score }) => ({ name: skill.name, description: skill.description, path: `.chusky/skills/${path.basename(skill.directory)}/SKILL.md`, score, files: 0 }));
 }
 
