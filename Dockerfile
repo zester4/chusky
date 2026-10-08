@@ -6,7 +6,7 @@ RUN npm ci --legacy-peer-deps
 COPY tsconfig.json ./
 COPY src ./src
 COPY agent-upgrade.json ./agent-upgrade.json
-RUN npm run build
+RUN NODE_OPTIONS=--max-old-space-size=8192 npm run build
 
 # ── Stage 2: production ───────────────────────────────────────────────────────
 FROM node:22-alpine AS production
