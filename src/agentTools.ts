@@ -348,10 +348,18 @@ export function canonicalNativeToolSlug(name: string): string {
   return name;
 }
 
+const skillGuidedToolDescriptions: Record<string, string> = {
+  CHUCK_CREATE_PDF: "Create and deliver a verified PDF in Daytona. Before calling, read `.chusky/skills/pdf-generation/SKILL.md` and the relevant task reference it routes to; follow that skill for content planning, workspace-relative images, layout, structural preflight, page-by-page rendering, visual QA, and delivery. Use the named Zawiatul templates only when the user's request calls for them. Do not hand-write raw PDF bytes.",
+  CHUCK_CREATE_DOCUMENT: "Create and deliver a verified DOCX in Daytona. Before calling, read `.chusky/skills/docx-generation/SKILL.md` and the relevant task/reference it routes to; follow that skill for structured authoring, images, tables, page breaks, rendering every page, visual QA, and delivery. Use workspace-relative paths and do not hand-write a DOCX package.",
+  CHUCK_CREATE_PRESENTATION: "Create and deliver a verified PPTX in Daytona. Before calling, read `.chusky/skills/pptx/SKILL.md` and its relevant sections; follow that skill for slide composition, images, charts, safe fonts, structural validation, rendering, visual QA, and delivery. Use workspace-relative image paths and do not hand-write raw OOXML.",
+  CHUCK_CREATE_SPREADSHEET: "Create and deliver a verified XLSX in Daytona. Before calling, read `.chusky/skills/xlsx-generation/SKILL.md` and the relevant task reference it routes to; follow that skill for typed cells, formulas, tables, charts, formatting, recalculation, rendering, visual QA, and delivery. Use workspace-relative image paths where supported and do not hand-write an unverified workbook.",
+  CHUCK_ARTIFACT: "Create, register, reconcile, retain, clean, inspect, and deliver owner-scoped Daytona artifacts. For PDF, DOCX, PPTX, or XLSX work, first read the corresponding runtime skill under `.chusky/skills/` and follow its authoring and QA gates. Use workspace-relative paths, preserve returned artifact IDs, and treat previews/download URLs as temporary handoffs unless the tool explicitly says otherwise.",
+};
+
 export const chuckTools = [...baseChuckTools, ...shoppingAndBrowserTools, ...toolReliabilityTools]
   .map((tool) => {
-  const name = canonicalNativeToolSlug(tool.function.name);
-  const description = normalizeOwnerPrivatePolicyDescription(tool.function.description);
+    const name = canonicalNativeToolSlug(tool.function.name);
+    const description = skillGuidedToolDescriptions[name] ?? normalizeOwnerPrivatePolicyDescription(tool.function.description);
   const parameters: any = tool.function.parameters && typeof tool.function.parameters === "object"
     ? { ...tool.function.parameters, properties: { ...tool.function.parameters.properties } }
     : tool.function.parameters;
