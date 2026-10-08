@@ -49,6 +49,19 @@ test("the model sees a private computer, not the infrastructure provider", () =>
   assert.equal(image.destination, "daytona");
 });
 
+test("document tools route the model to runtime skills instead of embedding authoring manuals", () => {
+  const expected = new Map([
+    ["CHUCK_CREATE_PDF", "pdf-generation/SKILL.md"],
+    ["CHUCK_CREATE_DOCUMENT", "docx-generation/SKILL.md"],
+    ["CHUCK_CREATE_PRESENTATION", "pptx/SKILL.md"],
+    ["CHUCK_CREATE_SPREADSHEET", "xlsx-generation/SKILL.md"],
+  ]);
+  for (const [name, skillPath] of expected) {
+    const tool = modelFacingChuckTools.find((item) => item.function.name === name);
+    assert.ok((tool?.function.description ?? "").includes(`.chusky/skills/${skillPath}`), name);
+  }
+});
+
 test("memory and scratchpad writes declare bounded text and reject blank required values", () => {
   for (const [toolName, fields, requiredFields] of [
     ["CHUCK_UPDATE_MEMORY", ["id", "key", "newKey", "value", "source", "projectId", "personKey"], ["value"]],
