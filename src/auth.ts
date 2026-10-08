@@ -1,4 +1,5 @@
 import { mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { Pool } from "pg";
@@ -11,6 +12,7 @@ import Redis from "ioredis";
 import { config } from "./config.js";
 import { sendAuthEmail } from "./auth-email.js";
 import { securePostgresConnectionString } from "./postgresConnection.js";
+import { clearPersonalMemories, clearSession, getTelegramUserIdForWebAuth } from "./store.js";
 
 // The Redis storage package and Better Auth core currently expose separate
 // structural versions of the same SecondaryStorage type. Keep that adapter
@@ -54,6 +56,10 @@ function createDatabase(): AuthDatabase {
   return sqlite = new Database(config.betterAuthDatabasePath);
 }
 
+function webOwnerId(userId: string): number {
+  return Number.parseInt(createHash("sha256").update(`sdk:web:${userId}`).digest("hex").slice(0, 12), 16);
+}
+
 function authConfig(database: AuthDatabase) {
   if (process.env.BETTER_AUTH_ENABLED !== "true") throw new Error("Better Auth is disabled; set BETTER_AUTH_ENABLED=true");
   const secret = process.env.BETTER_AUTH_SECRET?.trim() ?? "";
@@ -85,6 +91,20 @@ function authConfig(database: AuthDatabase) {
       autoSignInAfterVerification: true,
       sendVerificationEmail: async ({ user, url }: { user: { email: string; name: string }; url: string }) => {
         await sendAuthEmail("verification", { email: user.email, name: user.name, url });
+      },
+    },
+    user: {
+      deleteUser: {
+        enabled: true,
+        beforeDelete: async (user: { id: string }) => {
+          const owners = new Set([webOwnerId(user.id)]);
+          const linked = await getTelegramUserIdForWebAuth(user.id);
+          if (linked) owners.add(linked);
+          for (const ownerId of owners) {
+            await clearPersonalMemories(ownerId);
+            await clearSession(ownerId);
+          }
+        },
       },
     },
     plugins: [

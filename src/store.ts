@@ -19,7 +19,7 @@ import { recordFailure, recordVectorFailure } from "./monitoring.js";
 import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channels/contracts.js";
 import type { ApprovalPolicy, HandoffRecord, WorkerDuration } from "./subagents/contracts.js";
 import type { CapabilityWorkerName } from "./memory/types.js";
-import { durableMemoryConfigured, forgetDurableMemory, getDurableMemoryByKey, saveDurableMemory, saveMemoryEntity, searchDurableMemory } from "./memory/durable.js";
+import { durableMemoryConfigured, forgetAllPersonalDurableMemories, forgetDurableMemory, getDurableMemoryByKey, saveDurableMemory, saveMemoryEntity, searchDurableMemory } from "./memory/durable.js";
 import { queueConversationReflection } from "./memory/reflection.js";
 import { classifyMemory } from "./memory/classifier.js";
 import { deriveMissionToolHints } from "./missionWorker.js";
@@ -6620,6 +6620,19 @@ export async function clearSession(uid: number): Promise<void> {
   s.history = [];
   s.composioSessionId = undefined;
   await saveSession(uid, s);
+}
+
+/** Remove personal memories and their best-effort vector projections. */
+export async function clearPersonalMemories(uid: number): Promise<number> {
+  const session = await getSession(uid);
+  const memories = [...session.memories.filter((memory) => !memory.projectId && !memory.organizationId)];
+  let removed = 0;
+  for (const memory of memories) if (await forgetMemory(uid, memory.id)) removed += 1;
+  if (durableMemoryConfigured()) removed += await forgetAllPersonalDurableMemories(uid);
+  const latest = await getSession(uid);
+  latest.contextNodes = (latest.contextNodes ?? []).filter((node) => node.scope !== "user" || node.kind !== "memory");
+  await saveSession(uid, latest);
+  return removed;
 }
 
 export async function setModel(uid: number, model: string): Promise<void> {
