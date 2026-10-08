@@ -9,7 +9,9 @@ organizations, onboarding, developer project keys, and the existing root-key
 
 1. Run `npm run auth:migrate` with the existing direct
    `BETTER_AUTH_MIGRATION_DATABASE_URL` before deploying the new auth config.
-   Better Auth adds its two-factor schema; existing accounts are preserved.
+   Better Auth adds its two-factor and admin-user-management schema; existing
+   accounts are preserved. This is a deliberate production migration, not a
+   startup DDL operation.
 2. Set `CHUSKY_BUILDER_ADMIN_IDS` to a comma-separated list of existing,
    verified Better Auth user IDs. Optional `CHUSKY_BUILDER_VIEWER_IDS`
    grants read-only access. Do not use emails or organization IDs.
@@ -29,6 +31,14 @@ migrations. Builder access is denied by default when the allowlist is empty.
 - Existing application storage telemetry and Neon schema/reachability checks.
 - Failure counters and process uptime, explicitly labeled as process-local.
 - Builder roles with `view_metrics` and `manage_flags` permissions.
+- The People view lists bounded Better Auth account metadata through the
+  server-side Admin plugin. It never returns passwords, sessions, memories,
+  provider data, or secret values. The same immutable builder allowlist is used
+  by the Admin plugin; the dashboard still requires MFA step-up before calling
+  the endpoint.
+- Workspace invitations continue to use Better Auth's organization invitation
+  flow from the customer workspace. The builder console links to that flow
+  instead of creating a second invitation system.
 - Authenticator verification bound to a hashed session token for 15 minutes.
   Expired, revoked, impersonated, unverified, or unallowlisted sessions cannot
   enter. Mutations also require a session created within the last 15 minutes.
@@ -53,7 +63,9 @@ provider-wide cancellation or billing kill switch.
 Storage telemetry is not Upstash/Neon billing and may omit auth Redis traffic.
 Configuration presence is not a live provider certification. Durable audit
 export/long-term retention, per-provider/channel switches, global queue
-inspection, user management, and deployment/secret rotation are future work.
+inspection, and deployment/secret rotation are future work. Runtime feature
+flags must be added as explicit allowlisted controls; Railway environment
+variables and secrets are intentionally not editable from the browser.
 
 Disabling the builder feature in Railway bypasses its runtime controls and
 restores the previous agent behavior; it is an operator rollback mechanism.

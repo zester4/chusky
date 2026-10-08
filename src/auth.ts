@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { Pool } from "pg";
 import { betterAuth } from "better-auth";
-import { organization } from "better-auth/plugins";
+import { admin as adminPlugin, organization } from "better-auth/plugins";
 import { twoFactor } from "better-auth/plugins/two-factor";
 import { createAccessControl } from "better-auth/plugins/access";
 import { getMigrations } from "better-auth/db/migration";
@@ -70,6 +70,7 @@ function authConfig(database: AuthDatabase) {
     .split(",").map((origin) => origin.trim()).filter(Boolean);
   const webOrigin = new URL(process.env.CHUSKY_WEB_ORIGIN?.trim() || trustedOrigins.find((origin) => origin.startsWith("https://")) || trustedOrigins[0] || baseURL).origin;
   const redisUrl = process.env.REDIS_URL?.trim();
+  const builderAdminIds = (process.env.CHUSKY_BUILDER_ADMIN_IDS ?? "").split(",").map((id) => id.trim()).filter(Boolean);
   if (redisUrl) redis = new Redis(redisUrl, { lazyConnect: true, maxRetriesPerRequest: 2 });
 
   return {
@@ -110,6 +111,10 @@ function authConfig(database: AuthDatabase) {
     },
     plugins: [
       twoFactor({ issuer: "Chusky", backupCodeOptions: { storeBackupCodes: "encrypted" } }),
+      // Better Auth's user-management endpoints are only enabled for the
+      // immutable builder allowlist. The dashboard still applies its own
+      // MFA/session freshness checks before exposing any of them.
+      adminPlugin({ adminUserIds: builderAdminIds }),
       organization({
         ac: organizationAc,
         roles: { owner: organizationOwner, admin: organizationAdmin, member: organizationMember },

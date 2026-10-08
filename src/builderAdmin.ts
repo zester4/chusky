@@ -96,7 +96,7 @@ export function registerBuilderAdmin(app: Hono, dependencies: BuilderDependencie
   });
   builder.get("/access", async (c) => {
     const { session, role } = c.get("principal");
-    return c.json({ name: session.user.name || "Builder", role, permissions: role === "builder_admin" ? ["view_metrics", "manage_flags"] : ["view_metrics"], mfaEnabled: session.user.twoFactorEnabled === true, verified: session.user.twoFactorEnabled === true && await repository().verified(session.session.token), fresh: freshBuilderSession(session) });
+    return c.json({ name: session.user.name || "Builder", role, permissions: role === "builder_admin" ? ["view_metrics", "view_users", "manage_users", "manage_flags"] : ["view_metrics"], mfaEnabled: session.user.twoFactorEnabled === true, verified: session.user.twoFactorEnabled === true && await repository().verified(session.session.token), fresh: freshBuilderSession(session) });
   });
   builder.post("/verify", async (c) => {
     const { session } = c.get("principal");
@@ -112,6 +112,23 @@ export function registerBuilderAdmin(app: Hono, dependencies: BuilderDependencie
     return c.json({ verified: true, expiresInSeconds: 900 });
   });
   builder.get("/overview", async (c) => c.json({ data: await (dependencies.snapshot ?? systemSnapshot)() }));
+  builder.get("/people", async (c) => {
+    if (c.get("principal").role !== "builder_admin") return c.json(error("permission_denied", "User directory access is restricted to builder administrators."), 403);
+    const result = await getAuth().api.listUsers({
+      headers: c.req.raw.headers,
+      query: { limit: 100, offset: 0, sortBy: "createdAt", sortDirection: "desc" },
+    });
+    const users = (result?.users ?? []).map((user: Record<string, unknown>) => ({
+      id: typeof user.id === "string" ? user.id : "",
+      name: typeof user.name === "string" ? user.name : "",
+      email: typeof user.email === "string" ? user.email : "",
+      emailVerified: user.emailVerified === true,
+      createdAt: user.createdAt instanceof Date ? user.createdAt.toISOString() : typeof user.createdAt === "string" ? user.createdAt : null,
+      role: typeof user.role === "string" ? user.role : "user",
+      banned: user.banned === true,
+    }));
+    return c.json({ data: users, total: typeof result?.total === "number" ? result.total : users.length });
+  });
   builder.get("/controls", async (c) => c.json(await repository().read()));
   builder.get("/audit", async (c) => c.json({ data: await repository().events(), retention: "Most recent 1,000 events; returns latest 100." }));
   builder.patch("/controls", async (c) => {
