@@ -1354,6 +1354,7 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `COMPOSIO_API_KEY` | ✅ | — | From app.composio.dev |
 | `WEBHOOK_URL` | prod | — | Public URL (blank = polling) |
 | `DASHBOARD_URL` | dashboard | — | Public Next.js dashboard URL; `/dashboard` opens its `/app` route |
+| `COMPOSIO_CALLBACK_URL` | — | — | Optional explicit post-connect URL; otherwise dashboard connections return to `/app/apps` when `DASHBOARD_URL` is configured |
 | `WEBHOOK_SECRET` | — | — | Secures Telegram webhook |
 | `DEFAULT_MODEL` | — | `minimax/minimax-m3:free` | Any OpenRouter model ID |
 | `GROUP_DEFAULT_MODEL` | — | same as `DEFAULT_MODEL` | Model for shared group conversations; `/group-model default` restores this value |

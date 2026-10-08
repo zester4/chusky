@@ -1710,7 +1710,7 @@ async function getOrCreateComposioSession(userId: number): Promise<ComposioSessi
   const createSession = () => composio.create(userId_str, {
     manageConnections: {
       enable: config.enableManageConnections,
-      ...(config.composioCallbackUrl ? { callbackUrl: config.composioCallbackUrl } : {}),
+      ...(composioConnectionCallbackUrl() ? { callbackUrl: composioConnectionCallbackUrl() } : {}),
     },
     sandbox: {
       enable: config.enableSandbox,
@@ -3777,6 +3777,24 @@ function connectionRedirectUrl(value: unknown, description: string): string {
   return parsed.toString();
 }
 
+/**
+ * Prefer an explicit Composio callback, but give dashboard-visible connection
+ * flows a useful return destination by default.
+ */
+export function composioConnectionCallbackUrl(): string | undefined {
+  const explicit = config.composioCallbackUrl.trim();
+  if (explicit) return explicit;
+  const dashboard = config.dashboardUrl.trim();
+  if (!dashboard) return undefined;
+  try {
+    const url = new URL("/app/apps", dashboard);
+    url.searchParams.set("connection", "complete");
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 export async function getConnectionUrl(
   userId: number,
   toolkit: string,
@@ -3785,7 +3803,7 @@ export async function getConnectionUrl(
   const { sessionObj } = await getOrCreateComposioSession(userId);
   const req = await sessionObj.authorize(toolkit, {
     ...(alias ? { alias } : {}),
-    ...(config.composioCallbackUrl ? { callbackUrl: config.composioCallbackUrl } : {}),
+    ...(composioConnectionCallbackUrl() ? { callbackUrl: composioConnectionCallbackUrl() } : {}),
   });
   return connectionRedirectUrl(req, "connection");
 }
@@ -3804,7 +3822,7 @@ export async function getReconnectUrl(userId: number, connectedAccountId: string
   const refresh = composio.connectedAccounts?.refresh;
   if (typeof refresh !== "function") throw new Error("This Composio client cannot reauthorize an existing account without creating a duplicate.");
   const request = await refresh.call(composio.connectedAccounts, account.id, {
-    ...(config.composioCallbackUrl ? { redirectUrl: config.composioCallbackUrl } : {}),
+    ...(composioConnectionCallbackUrl() ? { redirectUrl: composioConnectionCallbackUrl() } : {}),
   });
   const url = connectionRedirectUrl(request, "reconnect");
   invalidateSession(userId);
