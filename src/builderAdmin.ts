@@ -116,8 +116,15 @@ export function registerBuilderAdmin(app: Hono, dependencies: BuilderDependencie
     if (c.get("principal").role !== "builder_admin") return c.json(error("permission_denied", "User directory access is restricted to builder administrators."), 403);
     const result = await getAuth().api.listUsers({
       headers: c.req.raw.headers,
-      query: { limit: 100, offset: 0, sortBy: "createdAt", sortDirection: "desc" },
+      // Keep this query to the provider-neutral pagination contract. The
+      // optional sort fields can make Better Auth's internal adapter return
+      // its indistinguishable empty fallback on older auth schemas.
+      query: { limit: "100", offset: "0" },
     });
+    if (!result || typeof result.total !== "number" || result.total < 1) {
+      logger.error({ total: result?.total ?? null }, "Builder user directory returned no authenticated accounts");
+      return c.json(error("directory_unavailable", "The user directory could not read the Better Auth accounts. Check the configured auth database and migrations."), 503);
+    }
     const users = (result?.users ?? []).map((user: Record<string, unknown>) => ({
       id: typeof user.id === "string" ? user.id : "",
       name: typeof user.name === "string" ? user.name : "",
