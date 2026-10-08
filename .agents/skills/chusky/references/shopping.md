@@ -40,6 +40,21 @@ Amazon-only logic or as a list of hard-coded login instructions.
 7. Present cart total, delivery options, substitutions, and any uncertainty.
    Checkout, payment, and placing an order require the existing approval path.
 
+## Workflow-specific behavior
+
+Do not use one generic cart recipe for every shopping category:
+
+- Product carts use search, product, variant/options, add-to-cart, cart
+  verification, and checkout review.
+- Meal plans use dietary preferences, servings, meal/menu selection, delivery
+  date, and a plan summary. Subscription and final confirmation remain gated.
+- Dining reservations use restaurant, date, time, party size, availability,
+  and reservation review. Confirmation remains gated.
+
+Every selected option must be verified from a fresh browser observation. A
+meal plan or reservation is not complete merely because a button was clicked;
+the provider summary must show the requested choices.
+
 ## Human website steps without losing browser state
 
 For CAPTCHA, 2FA/MFA, consent, age verification, or a website-only login step:

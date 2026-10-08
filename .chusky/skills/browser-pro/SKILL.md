@@ -152,6 +152,20 @@ The browser must stop before payment/order submission unless the exact approved
 action authorizes it. A “Place order” or “Pay now” control is evidence for
 approval, never permission to click it.
 
+Use the workflow that matches the user's goal; do not force every site through
+the product-cart recipe:
+
+- `product_cart`: search → product → variant/options → add to cart → cart
+  verification → checkout review.
+- `meal_plan`: plan/diet → servings → menu or meals → delivery date → plan
+  summary. Subscription or final order confirmation remains approval-gated.
+- `reservation`: restaurant → date → time → party size → availability →
+  reservation review. Confirming the reservation remains approval-gated.
+
+For all three workflows, verify the selected choices from a fresh observation,
+preserve the checkpoint across login or challenge handoff, and report whether
+the result is discovered, prepared, review-ready, or actually confirmed.
+
 ## 9. Completion contract
 
 Before claiming completion, report the goal and exact boundary reached, final

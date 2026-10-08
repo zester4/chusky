@@ -60,6 +60,23 @@ test("retailer suggestions and checkout policy remain safe", () => {
   assert.equal(shoppingActionPolicy("place_order"), "approval_required");
 });
 
+test("food delivery, meal kits, and dining reservations have first-class platforms", () => {
+  const usDelivery = suggestRetailers({ country: "US", category: "restaurant_delivery", deliveryPreference: "delivery" });
+  assert.equal(usDelivery.some((retailer) => retailer.id === "doordash" || retailer.id === "ubereats"), true);
+  assert.equal(usDelivery.some((retailer) => retailer.id === "dominos"), true);
+  assert.equal(suggestRetailers({ country: "US", category: "meal_kit", deliveryPreference: "delivery" }).some((retailer) => retailer.id === "hellofresh"), true);
+  assert.equal(suggestRetailers({ country: "US", category: "dining_reservations" }).some((retailer) => retailer.id === "opentable"), true);
+});
+
+test("shopping plans expose distinct meal-plan and reservation workflows", async () => {
+  const meal = await startShopping(9010, { items: ["vegetarian dinners"], category: "meal_kit", retailer: "HelloFresh", country: "US", deliveryPreference: "delivery" });
+  assert.equal(meal.retailer?.workflow, "meal_plan");
+  assert.match(meal.nextStep, /meal plans/i);
+  const reservation = await startShopping(9011, { items: ["dinner for two"], category: "dining_reservations", retailer: "OpenTable", country: "US" });
+  assert.equal(reservation.retailer?.workflow, "reservation");
+  assert.match(reservation.nextStep, /dates, times/i);
+});
+
 test("catalogue covers Jumia Ghana and users can save a private retailer preference", async () => {
   const ghana = suggestRetailers({ country: "GH", category: "electronics", deliveryPreference: "delivery" });
   assert.equal(ghana.some((retailer) => retailer.id === "jumia-ghana"), true);

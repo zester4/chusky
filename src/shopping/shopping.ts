@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { createShoppingRun, findShoppingSite, getShoppingRun, listShoppingRuns, listShoppingSites, removeShoppingSite, saveShoppingSite, updateShoppingRun } from "../store.js";
-import { getRetailer, suggestRetailers } from "./retailers.js";
+import { getRetailer, shoppingWorkflowFor, suggestRetailers } from "./retailers.js";
 import type { ShoppingCategory, ShoppingPauseReason, ShoppingRetailer, ShoppingRun, ShoppingSite } from "./types.js";
 
-const CATEGORIES: ShoppingCategory[] = ["groceries", "household", "meal_kit", "fashion", "electronics", "health_beauty", "home", "other"];
+const CATEGORIES: ShoppingCategory[] = ["groceries", "household", "restaurant_delivery", "meal_kit", "dining_reservations", "fashion", "electronics", "health_beauty", "home", "other"];
 const DELIVERY = ["delivery", "pickup", "either"] as const;
 
 function text(value: unknown, field: string, max: number): string | undefined {
@@ -78,7 +78,7 @@ function bool(value: unknown, fallback: boolean, field: string): boolean {
 }
 
 function savedAsRetailer(site: ShoppingSite): ShoppingRetailer {
-  return { id: site.id, name: site.name, origin: site.origin, countries: [...site.countries], categories: [...site.categories], supportsDelivery: site.supportsDelivery, supportsPickup: site.supportsPickup };
+  return { id: site.id, name: site.name, origin: site.origin, countries: [...site.countries], categories: [...site.categories], workflow: shoppingWorkflowFor(site), supportsDelivery: site.supportsDelivery, supportsPickup: site.supportsPickup };
 }
 
 function questions(run: ShoppingRun): string[] {
@@ -96,7 +96,11 @@ function view(run: ShoppingRun) {
     suggestions,
     questions: questions(run),
     nextStep: run.retailer
-      ? "Use CHUCK_BROWSER to browse the retailer publicly first: search, compare, and inspect product pages. Ask only for missing variant details when a candidate requires them. Use CHUCK_VAULT_LOGIN or CHUCK_VAULT_SAVE only if the live site requires authentication for the next step; then continue in the same retained browser."
+      ? run.retailer.workflow === "reservation"
+        ? "Use CHUCK_BROWSER to search restaurants, dates, times, party size, and availability publicly first. Verify the selected reservation details before asking for approval to confirm it."
+        : run.retailer.workflow === "meal_plan"
+          ? "Use CHUCK_BROWSER to inspect meal plans, dietary preferences, servings, delivery dates, and menu choices. Verify the plan summary before asking for approval to subscribe or place the order."
+          : "Use CHUCK_BROWSER to browse the retailer publicly first: search, compare, and inspect product pages. Ask only for missing variant details when a candidate requires them. Use CHUCK_VAULT_LOGIN or CHUCK_VAULT_SAVE only if the live site requires authentication for the next step; then continue in the same retained browser."
       : "Ask the user to choose a retailer from the suggestions or name another HTTPS retailer. Do not ask for login credentials in chat.",
   };
 }
@@ -217,6 +221,7 @@ SHOPPING ENGINE
 - Ask only for missing decision-critical details: delivery country/area, retailer when more than one fits, delivery versus pickup, and budget or substitutions when relevant. If the user has named a retailer, respect it; otherwise use the shopping suggestions and, when necessary, live web research to propose current local options.
 - After a retailer is chosen, call CHUCK_SHOPPING_SELECT_RETAILER. A user-owned saved site may be selected by name; use CHUCK_SHOPPING_SAVE_SITE to remember a clean HTTPS origin for future plans. Use CHUCK_BROWSER to browse publicly first: search, compare, inspect product pages, and identify the required variant. Do not start vault setup merely because the retailer has an account flow. Use CHUCK_VAULT_LOGIN or CHUCK_VAULT_SAVE only when the live page requires authentication for the next step; never request a password in chat. Continue the same shopping plan and retained browser after authentication.
 - Use browser vaultAction=browse or search for ordinary navigation, and vaultAction=add_to_cart for cart changes. Verify every browser interaction with a snapshot or find result. A cart total, delivery slot, substitution, checkout, or order is not complete until the page confirms it.
+- Match the retailer workflow to the request: product_cart uses search → variant → cart → checkout review; meal_plan uses plan → dietary/servings → menu → delivery summary; reservation uses restaurant → date/time → party size → availability → reservation review. Do not force meal plans or reservations through a product-cart recipe.
 - In an authenticated owner-private interactive run, a clear direct request authorizes ordinary browsing and cart preparation. Checkout, payment, placing an order, changing an address, adding a payment method, and deletions retain their exact approval or blocked policy. Clarify genuinely missing transaction details, and never claim a purchase succeeded unless the retailer confirmation page proves it. Other run types follow their configured approval policy.
 - If CAPTCHA, 2FA, age verification, or another user-only challenge appears, call CHUCK_SHOPPING_PAUSE and CHUCK_BROWSER_HANDOFF. Send the returned short-lived private browser link only in the user's direct conversation. The user completes the website challenge in the same retained browser and replies “continue”; then call CHUCK_BROWSER_HANDOFF_COMPLETE with the returned handoffId, inspect the same-origin page, call CHUCK_BROWSER_VERIFY with the required detectors, and only then call CHUCK_SHOPPING_RESUME. Do not expose credentials, cookies, or session URLs in a shared group.
 - If the user asks to see the browser, check progress, or take a screenshot without asking for another action, call CHUCK_BROWSER with action=screenshot and stop. The screenshot is delivered through the active private channel; do not browse, click, or change the page beyond the explicit request.
