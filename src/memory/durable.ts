@@ -173,6 +173,46 @@ export async function getDurableMemoryByKey(input: { ownerUserId: number; key: s
   } finally { client.release(); }
 }
 
+/**
+ * Reconcile private durable memory after a verified web-to-channel account link.
+ * The linked channel owner becomes canonical for runtime reads, so missing or
+ * older records from the authenticated web owner must be projected into that
+ * owner's personal Neon scope. Never merge across unverified identities.
+ */
+export async function mergeDurablePersonalMemories(sourceUserId: number, targetUserId: number): Promise<number> {
+  if (!durableMemoryConfigured() || !Number.isSafeInteger(sourceUserId) || sourceUserId <= 0 || !Number.isSafeInteger(targetUserId) || targetUserId <= 0 || sourceUserId === targetUserId) return 0;
+
+  const sourceMemories = await searchDurableMemory({
+    ownerUserId: sourceUserId,
+    scopes: [{ kind: "personal", externalId: String(sourceUserId) }],
+    limit: MAX_LIMIT,
+    includeSensitive: true,
+  });
+  let merged = 0;
+  for (const memory of sourceMemories) {
+    if (memory.status !== "active") continue;
+    const target = await getDurableMemoryByKey({ ownerUserId: targetUserId, key: memory.key });
+    if (target && target.updatedAt >= memory.updatedAt) continue;
+    await saveDurableMemory({
+      ownerUserId: targetUserId,
+      scope: { kind: "personal", externalId: String(targetUserId) },
+      category: memory.category,
+      key: memory.key,
+      value: memory.value,
+      confidence: memory.confidence,
+      sensitivity: memory.sensitivity,
+      ...(memory.meetingSafe !== undefined ? { meetingSafe: memory.meetingSafe } : {}),
+      ...(memory.meetingVerdict ? { meetingVerdict: memory.meetingVerdict } : {}),
+      ...(memory.reviewAt ? { reviewAt: memory.reviewAt } : {}),
+      ...(memory.validUntil ? { expiresAt: memory.validUntil } : {}),
+      metadata: { ...memory.metadata, linkedFromOwner: sourceUserId },
+      source: { type: "verified_web_account_link", ref: `${sourceUserId}:${memory.id}`, capturedAt: memory.updatedAt },
+    });
+    merged++;
+  }
+  return merged;
+}
+
 export async function searchDurableMemory(input: { ownerUserId: number; scopes: Array<{ kind: MemoryScopeKind; externalId: string }>; query?: string; category?: MemoryCategory; limit?: number; includeSensitive?: boolean }): Promise<DurableMemoryRecord[]> {
   if (!durableMemoryConfigured()) return [];
   const client = await pool().connect();
