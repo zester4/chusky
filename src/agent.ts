@@ -36,7 +36,7 @@ import { MissionDurationApprovalRequiredError } from "./missionApproval.js";
 import { beginExternalAction, externalArgumentsHash, failExternalAction, finishExternalAction, isExternalWriteTool, reconcileExternalActionByRead, type ExternalActionClaim, type TrustedProviderAction } from "./autonomy/actions.js";
 import { isReadOnlyToolSlug, isRiskyToolSlug, requiresToolApproval, humanProgressStatus, humanToolStatus } from "./policy.js";
 import { registerComposioToolMetadata } from "./composioRisk.js";
-import { canonicalNativeToolSlug, chuckTools, modelFacingChuckTools, validateNativeToolArguments, validateToolArgumentsAgainstSchema } from "./agentTools.js";
+import { canonicalNativeToolSlug, chuckTools, modelFacingChuckTools, sanitizeModelFacingText, validateNativeToolArguments, validateToolArgumentsAgainstSchema } from "./agentTools.js";
 import type { ApiMessage, ContentPart, TaskWaitRequest, ToolCall } from "./types.js";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { buildTemporalContext, type TemporalContext } from "./temporal.js";
@@ -333,7 +333,7 @@ function malformedToolArgumentsResult(slug: string): string {
   const schema = local?.function.parameters as { required?: readonly string[] } | undefined;
   const required = schema?.required ?? [];
   const requiredHint = required.length ? ` Include every required field: ${required.join(", ")}.` : "";
-  return `Tool call discarded: ${slug} received malformed or truncated JSON and was not executed. Reissue the same tool once with one complete JSON object only—no prose, code fence, or partial object.${requiredHint}`;
+  return `Tool call discarded: the computer capability received malformed or truncated JSON and was not executed. Reissue the same tool once with one complete JSON object only—no prose, code fence, or partial object.${requiredHint}`;
 }
 
 function decodeLegacyDsml(value: string): string {
@@ -769,7 +769,7 @@ export async function dispatchComposioActionWithImageContext(
 }
 
 function toolSchemaName(tool: any): string {
-  return String(tool?.function?.name ?? tool?.name ?? "");
+  return canonicalNativeToolSlug(String(tool?.function?.name ?? tool?.name ?? ""));
 }
 
 async function resolveMediaBridgeSchema(sessionObj: any, availableTools: any[], toolSlug: string, signal?: AbortSignal): Promise<unknown> {
@@ -2099,7 +2099,7 @@ export function appendPreviewLinks(text: string, links: string[]): string {
   const cleaned = cleanModelText(text);
   const missing = [...new Set(links)].filter((url) => !cleaned.includes(url));
   if (!missing.length) return cleaned;
-  const suffix = missing.map((url) => `🔗 Daytona preview: ${url}`).join("\n");
+  const suffix = missing.map((url) => `🔗 Computer preview: ${url}`).join("\n");
   return [cleaned, suffix].filter(Boolean).join("\n\n");
 }
 
@@ -2214,7 +2214,7 @@ export async function runAgent(
   let allow = options?.toolAllow === undefined ? undefined : new Set(options.toolAllow);
   let meetingComposioAccountAliases = options?.meetingComposioAccountAliases;
   const toolsDisabled = allow?.size === 0;
-  const toolName = (tool: any): string => String(tool?.function?.name ?? tool?.name ?? "");
+  const toolName = (tool: any): string => canonicalNativeToolSlug(String(tool?.function?.name ?? tool?.name ?? ""));
   if (voiceTurn && !ownerPrivateRun && (!allow || [...allow].some((name) => !VOICE_TURN_TOOL_NAMES.has(name)))) {
     throw new Error("Voice turns require an explicit allowlist of read-only Chusky tools");
   }
@@ -3510,7 +3510,7 @@ export async function runAgent(
               messages.push({
                 role: "user",
                 content: [
-                  { type: "text", text: `Live app visual-QA screenshot${screenshot.app?.id ? ` for ${screenshot.app.id}` : ""}. Inspect the actual rendered UI. If it meets the requested design and is readable, call CHUCK_DAYTONA_APP with action=review, passed=true and concise evidence. If it does not, call review with passed=false, then fix the app; never claim a visual pass without inspecting this image.` },
+                  { type: "text", text: `Live app visual-QA screenshot${screenshot.app?.id ? ` for ${screenshot.app.id}` : ""}. Inspect the actual rendered UI. If it meets the requested design and is readable, call CHUCK_COMPUTER_APP with action=review, passed=true and concise evidence. If it does not, call review with passed=false, then fix the app; never claim a visual pass without inspecting this image.` },
                   { type: "image_url", image_url: { url: `data:${screenshot.mediaType};base64,${screenshot.base64}` } },
                 ],
               });
@@ -3554,6 +3554,7 @@ export async function runAgent(
         result = typeof modelResult === "string"
           ? modelResult
           : JSON.stringify(modelResult) ?? "undefined";
+        result = sanitizeModelFacingText(result);
         // Starting a mission is a supervisor handoff. Once the durable worker
         // has been scheduled, the interactive model turn must end instead of
         // trying to execute the mission (or its internal wait) itself.
@@ -3662,6 +3663,7 @@ export async function runAgent(
         result = String(e).includes("Tool arguments are malformed or truncated JSON")
           ? malformedToolArgumentsResult(slug)
           : `Error executing ${slug}: ${String(e)}`;
+        result = sanitizeModelFacingText(result);
         if (e instanceof DaytonaInputError && ["CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"].includes(slug)) {
           result += "\nNo artifact was registered by this failed call. Fix the reported cause before retrying. If rendering setup failed, reuse the exact file path in the error; do not invent a replacement path or claim delivery.";
         }

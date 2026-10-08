@@ -50,6 +50,13 @@ test("routes game requests to game-scaffold", () => {
   }
 });
 
+test("sanitizes provider names from model-facing skill context", async () => {
+  const context = await routedSkillContext("Build an app in Daytona and use the computer workspace");
+  assert.doesNotMatch(context, /daytona/i);
+  assert.doesNotMatch(context, /CHUCK_DAYTONA_/i);
+  assert.match(context, /private computer|computer workspace/i);
+});
+
 test("app-building requests preload product design and fullstack design guidance", async () => {
   const routed = routedSkillNames("Scaffold a new web app dashboard in Daytona");
   assert.ok(routed.includes("fullstack-guardian"));

@@ -1,5 +1,6 @@
 //src/policy.ts
 import { composioMetadataPolicy } from "./composioRisk.js";
+import { canonicalNativeToolSlug } from "./agentTools.js";
 
 // Restricted/background runs use risk classification and explicit grants.
 // Authenticated owner-private interactive runs get broad tool access while
@@ -31,7 +32,7 @@ const TINYFISH_AUTONOMOUS_TOOLS = new Set([
 ]);
 
 function canonicalPolicySlug(slug: string): string {
-  return slug;
+  return canonicalNativeToolSlug(slug);
 }
 
 const PRIVATE_NATIVE_TOOLS = new Set([
@@ -270,7 +271,7 @@ const STATUSES: Record<string, string> = {
   CHUCK_SET_TRIGGER_STATE: "🔔 I’m updating that automation…",
   CHUCK_UPDATE_TRIGGER_INSTRUCTIONS: "📝 I’m updating how that automation should handle events…",
   CHUCK_DAYTONA_WORKSPACE: "🖥️ I’m opening my private computer workspace…",
-  CHUCK_DAYTONA_SANDBOX: "🧭 I’m checking the private Daytona sandbox…",
+  CHUCK_DAYTONA_SANDBOX: "🧭 I’m checking my computer environment…",
   CHUCK_DAYTONA_EXECUTE: "🖥️ I’m working in my private computer workspace…",
   CHUCK_DAYTONA_LIST_FILES: "📁 I’m checking my workspace files…",
   CHUCK_DAYTONA_READ_FILE: "📄 I’m opening that workspace file…",
@@ -290,9 +291,9 @@ const STATUSES: Record<string, string> = {
   CHUCK_DAYTONA_COMPUTER: "🖥️ I’m using my private computer…",
   CHUCK_DAYTONA_PAUSE: "⏸️ I’m putting my computer workspace on standby…",
   CHUCK_DAYTONA_PTY: "⌨️ I’m working in your persistent terminal…",
-  CHUCK_DAYTONA_SESSION: "⌨️ I’m using your durable Daytona process session…",
-  CHUCK_DAYTONA_CODE: "🐍 I’m running code in your isolated Daytona interpreter…",
-  CHUCK_DAYTONA_LSP: "🧩 I’m inspecting the workspace with Daytona code intelligence…",
+  CHUCK_DAYTONA_SESSION: "⌨️ I’m using my durable terminal session…",
+  CHUCK_DAYTONA_CODE: "🐍 I’m running code in my computer workspace…",
+  CHUCK_DAYTONA_LSP: "🧩 I’m inspecting my workspace with code intelligence…",
   CHUCK_DAYTONA_GIT: "🔀 I’m working with the repository…",
   CHUCK_BROWSER: "🌐 I’m browsing with my private browser workspace…",
   CHUCK_VAULT_SAVE: "🔐 I’m opening a private encrypted website-login form…",
@@ -456,6 +457,7 @@ export function isReadOnlyToolSlug(slug: string): boolean {
 }
 
 export function humanToolStatus(slug: string): string {
+  slug = canonicalPolicySlug(slug);
   if (STATUSES[slug]) return STATUSES[slug];
   // Internal tools must never become part of the product's voice when a new
   // capability is added before its user-facing copy is mapped above.

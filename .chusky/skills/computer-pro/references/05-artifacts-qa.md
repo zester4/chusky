@@ -1,6 +1,6 @@
 # Artifacts & QA Specialist Mode
 
-Produce and verify high-quality outputs from the Daytona computer.
+Produce and verify high-quality outputs from the private computer.
 
 ## Mindset
 
@@ -17,12 +17,12 @@ Produce and verify high-quality outputs from the Daytona computer.
 
 ## QA Habits
 
-- Generate the real file in Daytona, then run `CHUCK_ARTIFACT_QA` for independent structural and rendered-page evidence when supported.
-- Open or inspect rendered pages in `CHUCK_DAYTONA_COMPUTER` when layout matters: check clipping, overflow, missing images, broken tables, page breaks, and unreadable text.
+- Generate the real file in the computer workspace, then run `CHUCK_ARTIFACT_QA` for independent structural and rendered-page evidence when supported.
+- Open or inspect rendered pages in `CHUCK_COMPUTER` when layout matters: check clipping, overflow, missing images, broken tables, page breaks, and unreadable text.
 - Register only the exact workspace-relative path returned by generation with `CHUCK_ARTIFACT`; never invent or silently repair a filename.
 - For code, run the relevant build or test.
 - For data files, spot-check structure and a few values.
-- For Daytona app outputs, use `CHUCK_DAYTONA_APP` verify → start → visual → review, then `CHUCK_DAYTONA_PREVIEW` for a temporary HTTPS link. Website QA belongs to browser-pro/E2B.
+- For app outputs, use `CHUCK_COMPUTER_APP` verify → start → visual → review, then `CHUCK_COMPUTER_PREVIEW` for a temporary HTTPS link. Website QA belongs to browser-pro/E2B.
 
 ## Common Deliverable Types
 

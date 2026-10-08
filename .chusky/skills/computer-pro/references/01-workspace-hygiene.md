@@ -1,6 +1,6 @@
 # Workspace Hygiene Specialist Mode
 
-The Daytona computer must stay clean, navigable, and recoverable.
+The private computer must stay clean, navigable, and recoverable.
 
 ## Mindset
 
@@ -16,7 +16,7 @@ The Daytona computer must stay clean, navigable, and recoverable.
 - Keep source, build outputs, and temporary files separated when practical.
 - Stop task-owned PTY/session processes after verification; remove or archive obvious junk only when its scope is certain.
 - Prefer a single source of truth for configuration and scripts.
-- Keep Daytona artifacts, previews, recordings, and checkpoints owner-scoped and easy to locate.
+- Keep artifacts, previews, recordings, and checkpoints owner-scoped and easy to locate.
 
 ## Project Layout Habits
 
@@ -24,7 +24,7 @@ The Daytona computer must stay clean, navigable, and recoverable.
 - Keep secrets out of the working tree.
 - Avoid scattering related files across the home directory.
 - Prefer relative paths and reproducible commands.
-- Record exact generated paths returned by Daytona; never guess an artifact filename.
+- Record exact generated paths returned by the computer; never guess an artifact filename.
 
 ## End-of-Task Checklist
 

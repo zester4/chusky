@@ -114,7 +114,7 @@ function inferBundle(slug: string, description: string): NativeToolBundle {
   if (/^CHUCK_(?:CREATE_(?:PDF|DOCUMENT|SPREADSHEET|PRESENTATION)|GENERATE_(?:IMAGE|VIDEO)|ARTIFACT(?:_|$)|IMAGE_ASSET_|DAYTONA_IMAGE$|EMAIL_ARTIFACT$|FILE_BRIDGE$|VIDEO_(?:STATUS|CANCEL)$)/.test(name)) return "artifacts";
   if (/^CHUCK_(?:MISSION_|TASK_|AUTONOMY_|ATTENTION_|.*SUBAGENT|HANDOFF_SUBAGENT|OUTCOME_)/.test(name) || /^CHUCK_(?:SCHEDULE_JOB|LIST_JOBS|RESUME_JOB|CANCEL_JOB|RUN_JOB_NOW|PAUSE_JOB)$/.test(name)) return "autonomy";
   if (/^CHUCK_(?:SHOPPING_|LINK_)/.test(name)) return "shopping";
-  if (/^CHUCK_DAYTONA_/.test(name)) return "code";
+  if (/^CHUCK_(?:DAYTONA_|COMPUTER(?:_|$))/.test(name)) return "code";
   if (/^CHUCK_TREG_/.test(name)) return "intelligence";
   if (/^CHUCK_(?:CONVERSATION_|.*TRIGGER|LIST_CONNECTED_ACCOUNTS|INTEGRATION_HEALTH)/.test(name)) return "workspace";
   const text = `${slug} ${description}`.toLowerCase();
@@ -122,7 +122,7 @@ function inferBundle(slug: string, description: string): NativeToolBundle {
   if (/browser|vault|checkout|login|webpage|website/.test(text)) return "browser";
   if (/meeting|zoom|teams|webex|transcript|phone|call/.test(text)) return "meetings";
   if (/pdf|document|spreadsheet|presentation|artifact|image|video/.test(text)) return "artifacts";
-  if (/daytona|code|file|folder|sandbox|workspace|terminal|git|repository|\bapp\b/.test(text)) return "code";
+  if (/computer|code|file|folder|sandbox|workspace|terminal|git|repository|\bapp\b/.test(text)) return "code";
   if (/mission|task|reminder|attention|autonomy|subagent|delegate|follow.?up|schedule/.test(text)) return "autonomy";
   if (/shopping|order|payment|merchant|wallet|cart/.test(text)) return "shopping";
   if (/email|calendar|slack|github|notion|trigger|webhook|account|connection|message/.test(text)) return "workspace";

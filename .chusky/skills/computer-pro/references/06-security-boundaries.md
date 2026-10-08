@@ -1,6 +1,6 @@
 # Security Boundaries Specialist Mode
 
-Safe operation of the Daytona computer under network and trust constraints.
+Safe operation of the private computer under network and trust constraints.
 
 ## Mindset
 
@@ -11,12 +11,12 @@ Safe operation of the Daytona computer under network and trust constraints.
 ## Hard Rules
 
 - Do not store long-lived passwords, API keys, or tokens in ordinary project files.
-- Respect `DAYTONA_NETWORK_BLOCK_ALL` and domain allow-lists.
+- Respect the computer network block policy and domain allow-lists.
 - Do not attempt to bypass network controls.
 - Do not exfiltrate private data to arbitrary external endpoints.
 - Treat browser cookies and session state as sensitive.
 - Keep workspaces, sandboxes, volumes, sessions, artifacts, previews, recordings, and desktop leases scoped to the owning account.
-- Never use Daytona Computer Use for ordinary websites; route website credentials, cookies, forms, and browser handoffs through browser-pro/E2B.
+- Never use Computer Use for ordinary websites; route website credentials, cookies, forms, and browser handoffs through browser-pro/E2B.
 
 ## Safe Practices
 
@@ -26,7 +26,7 @@ Safe operation of the Daytona computer under network and trust constraints.
 - Keep experimental scripts away from production credentials.
 - Clean up temporary credential material after use when you control it.
 - Use sandbox health/preflight before expensive desktop or renderer work and respect blocked-all/domain allow-list results.
-- Use exact workspace-relative paths returned by Daytona; do not guess paths or register arbitrary files.
+- Use exact workspace-relative paths returned by the computer; do not guess paths or register arbitrary files.
 
 ## When Something Looks Unsafe
 

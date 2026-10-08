@@ -24,7 +24,7 @@ function toolResponse(name: string, args: string, id = "call-1", finishReason = 
 
 test("preview links are included exactly once even when the model omits them", () => {
   const url = "https://preview.test/app";
-  assert.equal(appendPreviewLinks("The app is ready.", [url]), `The app is ready.\n\n🔗 Daytona preview: ${url}`);
+  assert.equal(appendPreviewLinks("The app is ready.", [url]), `The app is ready.\n\n🔗 Computer preview: ${url}`);
   assert.equal(appendPreviewLinks(`The app is ready at ${url}.`, [url]), `The app is ready at ${url}.`);
 });
 
