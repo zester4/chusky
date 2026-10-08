@@ -51,6 +51,7 @@ import { recordMeetingTurn } from "./decisions/telemetry.js";
 import { twilioVoiceInstructions } from "./calls/twilioContext.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
 import { attentionPulseCloseoutOutput, attentionPulseDeliveredToday, attentionPulseDeliveryConfirmation, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, attentionPulseRefreshOwnerState, attentionPulseRequireDueWatchReport, buildAttentionPulsePlan, getAttentionPulseWatchCoverage, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "./attentionPulse.js";
+import { connectedWatchInput, connectedWatchSpecs } from "./proactive/watches.js";
 import { hasExternalRecallParticipants, resolveRecallMeetingSpeaker } from "./meetings/participants.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import { createSignedWebBotAuthDirectory, WEB_BOT_AUTH_DIRECTORY_CONTENT_TYPE, WEB_BOT_AUTH_DIRECTORY_PATH, webBotAuthConfigurationIssue, webBotAuthConfigurationStatus, webBotAuthSigningEnabled } from "./webBotAuth.js";
@@ -230,6 +231,22 @@ async function sdkTaskSkillInstructions(skills: string[] | undefined): Promise<s
   return blocks.length ? blocks.join("\n\n").slice(0, 24000) : undefined;
 }
 function sdkDurationSeconds(value: string | undefined): number | undefined { return ({ "5m": 300, "30m": 1800, "1h": 3600, "3h": 10800, "6h": 21600, "3d": 259200, "1w": 604800 } as Record<string, number>)[value ?? ""]; }
+
+async function ensureConnectedProactiveWatches(
+  userId: number,
+  accounts: Awaited<ReturnType<typeof listConnectedAccounts>>,
+  now: number,
+): Promise<void> {
+  const specs = connectedWatchSpecs(accounts.map((account) => ({ id: account.id, toolkit: account.toolkit, alias: account.alias, status: account.status })));
+  if (!specs.length) return;
+  const existing = await listAttentionRecords(userId, "autonomy_watch", { limit: 200 });
+  const watches = existing as Array<{ connectedAccountId?: string; name: string; domain: string; status: string }>;
+  for (const spec of specs) {
+    const alreadyExists = watches.some((watch) => watch.status !== "revoked" && watch.connectedAccountId === spec.connectedAccountId && watch.domain === spec.domain && watch.name === spec.name);
+    if (alreadyExists) continue;
+    await createAttentionRecord(userId, "autonomy_watch", connectedWatchInput(spec, now));
+  }
+}
 import { persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts } from "./sdkApi.js";
 import { recoverSdkWebhooks } from "./lib/webhookOutbox.js";
 import type { ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
@@ -2352,11 +2369,31 @@ async function main(): Promise<void> {
             const deliveredToday = attentionPulseDeliveredToday(job.attentionPulse, now);
             const delivery = attentionPulseDeliveryDecision(preferences as DeliveryPreferenceRecord[], now, deliveredToday, job.deliveryTarget);
             if (delivery.suppressed) return { text: "", suppressDelivery: true };
-            const plan = await buildAttentionPulsePlan(payload.userId);
+            let connectedAccounts: Awaited<ReturnType<typeof listConnectedAccounts>> = [];
+            let connectedAccountsVerified = false;
+            let connectedActions: Array<{ toolkit: string; slug: string; name?: string; description?: string }> = [];
+            let connectedActionsVerified = false;
+            try {
+              connectedAccounts = await listConnectedAccounts(payload.userId);
+              connectedAccountsVerified = true;
+              await ensureConnectedProactiveWatches(payload.userId, connectedAccounts, now);
+              const activeToolkits = [...new Set(connectedAccounts.filter((account) => account.status.toUpperCase() === "ACTIVE").map((account) => account.toolkit))].slice(0, 8);
+              const actionResults = await Promise.all(activeToolkits.map(async (toolkit) => ({ toolkit, actions: await listComposioToolkitActions(toolkit) })));
+              connectedActions = actionResults.flatMap((result) => result.actions.map((action) => ({ toolkit: result.toolkit, slug: action.slug, name: action.name, description: action.description })));
+              connectedActionsVerified = true;
+            } catch (error) {
+              logger.warn({ err: error, userId: payload.userId, jobId: job.id }, "Could not verify connected accounts for proactive capability discovery");
+            }
+            const plan = await buildAttentionPulsePlan(payload.userId, now, {
+              connectedAccounts,
+              connectedAccountsVerified,
+              connectedActions,
+              connectedActionsVerified,
+            });
             if (!plan.hasWork) return { text: "", suppressDelivery: true };
             if (job.attentionPulse?.lastDigestKey === plan.dedupeKey) return { text: "", suppressDelivery: true };
             const proactiveRoute = await routeProactiveWork(plan.prompt, plan.decisionContext, {
-              accounts: config.jevMode === "off" ? [] : await listConnectedAccounts(payload.userId).catch(() => []),
+              accounts: config.jevMode === "off" ? [] : connectedAccounts,
               listActions: listComposioToolkitActions,
               listToolkits: listComposioToolkitCatalogue,
             }).catch((error) => {

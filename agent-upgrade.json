@@ -1,11 +1,11 @@
 {
-  "id": "release-4.45.0",
-  "version": "4.45.0",
+  "id": "release-4.46.0",
+  "version": "4.46.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added distinct product-cart, meal-plan, and dining-reservation workflows so shopping tasks use the correct end-to-end interaction model.",
-    "Meal-kit and reservation plans now expose the required choices and review checkpoints instead of forcing generic cart behavior.",
-    "Preserved challenge handoff and approval gates for subscriptions, reservations, payment, and final order confirmation."
+    "Attention Pulse records owner-private change, failure, and recovery observations plus verified missing-capability suggestions, deduplicates replays, and surfaces them as durable events.",
+    "Pulse status reports current, scheduled, stale, failed, and never-checked coverage for explicitly configured watches; it does not claim to monitor every connected app.",
+    "New observations stay pending until confirmed delivery, and a deterministic digest prevents NO_ACTION from hiding an update while existing approval and personal/business boundaries remain."
   ],
-  "createdAt": "2026-10-08T01:21:45.865Z"
+  "createdAt": "2026-10-08T22:55:21.569Z"
 }

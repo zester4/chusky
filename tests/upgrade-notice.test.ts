@@ -70,7 +70,7 @@ test("attention upgrade preset describes evidence-based proactive reconciliation
   const bullets = getAgentUpgradePreset("attention");
   assert.equal(bullets.length, 3);
   assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.attention]);
-  assert.match(bullets[0], /change, failure, and recovery observations/);
+  assert.match(bullets[0], /change, failure, and recovery observations plus verified missing-capability suggestions/);
   assert.match(bullets[1], /current, scheduled, stale, failed, and never-checked coverage/);
   assert.match(bullets[2], /pending until confirmed delivery/);
   assert.match(bullets[2], /NO_ACTION from hiding an update/);
@@ -215,13 +215,12 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the shopping workflow release", async () => {
+test("current upgrade manifest announces the attention capability discovery release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.45.0");
-  assert.equal(notice?.version, "4.45.0");
-  assert.match(notice?.bullets.join(" ") ?? "", /meal-plan/i);
-  assert.match(notice?.bullets.join(" ") ?? "", /reservation/i);
-  assert.match(notice?.bullets.join(" ") ?? "", /approval gates/i);
+  assert.equal(notice?.id, "release-4.46.0");
+  assert.equal(notice?.version, "4.46.0");
+  assert.match(notice?.bullets.join(" ") ?? "", /missing-capability/i);
+  assert.match(notice?.bullets.join(" ") ?? "", /missing-capability suggestions/i);
 });
 
 test("browser reliability preset covers planning, recovery, checkpoints, and visual freshness", () => {

@@ -785,7 +785,7 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
       health: { lastOccurrence: latestOccurrence, recentFailures: occurrences.filter((item) => item.status === "failed" || item.status === "blocked").length, neverRun: Boolean(pulseJobs[0] && !latestActivityAt), stale: Boolean(pulseJobs[0] && (!latestActivityAt || Date.now() - latestActivityAt > 2 * 60 * 60_000)) },
       occurrences,
       watchCoverage: {
-        scope: "owner-configured watches only; not a full sweep of connected apps",
+        scope: "owner-configured watches plus bounded read-only starter watches for active connected apps; not an unrestricted provider sweep",
         active: watchCoverage.length,
         current: watchCoverage.filter((watch) => watch.status === "current").length,
         scheduled: watchCoverage.filter((watch) => watch.status === "scheduled").length,

@@ -254,6 +254,7 @@ export async function listSkillSummaries(root = DEFAULT_SKILLS_ROOT): Promise<Ar
 export const ROUTED_SKILL_REFERENCES: Record<string, string[]> = {
   "fullstack-guardian": ["references/design-template.md"],
   "ui-ux-pro-max": ["references/pro-rules.md", "references/quick-reference.md"],
+  "browser-pro": ["references/retailer-playbook.md", "references/tool-contract.md", "references/recovery-matrix.md"],
 };
 
 /** Installed trusted skills, using their frontmatter names. */

@@ -14,7 +14,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
@@ -1546,7 +1546,7 @@ export function registerSdkApi(app: Hono): void {
     const owner = sdkUser(c)!;
     const webAuthUserId = (c as any).get("webAuthUserId") as string | undefined;
     const session = await getSession(owner.userId);
-    const [channels, devices, reminders, jobs, workspace, deliveries, memory, triggerEvents, approvals] = await Promise.all([
+    const [channels, devices, reminders, jobs, workspace, deliveries, memory, triggerEvents, approvals, attentionCandidates] = await Promise.all([
       listChannelIdentities(owner.userId),
       listCliDevices(owner.userId),
       listReminders(owner.userId),
@@ -1558,12 +1558,14 @@ export function registerSdkApi(app: Hono): void {
       searchMemories(owner.userId, undefined, { limit: 20 }),
       listTriggerEvents(owner.userId, 50),
       listApprovals(owner.userId, 100),
+      listAttentionRecords(owner.userId, "attention_candidate", { limit: 50 }),
     ]);
     return c.json({
       model: session.model,
       voiceReplies: Boolean(session.voiceReplies),
       voicePreferences: session.voicePreferences ?? {},
       approvals: approvals.filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map((item) => ({ id: item.id, toolSlug: item.toolSlug, request: item.request, status: item.status, ...(item.missionId ? { missionId: item.missionId } : {}), channelProvider: item.channelProvider, createdAt: new Date(item.createdAt).toISOString(), expiresAt: new Date(item.expiresAt).toISOString() })),
+      attentionCandidates: (attentionCandidates as AttentionCandidateRecord[]).filter((item) => item.status === "pending" && (!item.availableAt || item.availableAt <= Date.now()) && (!item.expiresAt || item.expiresAt > Date.now())).slice(0, 12).map((item) => ({ id: item.id, candidateType: item.candidateType, reason: item.reason.replace(/^\[(connection-gap|action-gap):[^\]]+\]\s*/, ""), proposedAction: item.proposedAction, providerSlug: item.providerSlug, suggestedActions: item.suggestedActions, score: item.score, createdAt: new Date(item.createdAt).toISOString() })),
       channels: channels.filter((item) => !item.disabledAt).map((item) => ({ id: identityFingerprint(item), provider: item.provider, externalUserId: item.externalUserId, workspaceId: item.workspaceId, displayName: item.displayName, verifiedAt: new Date(item.verifiedAt).toISOString(), proactiveOptIn: item.proactiveOptIn !== false })),
       reminders: reminders.map((item) => ({ ...item, runAt: new Date(item.runAt).toISOString(), createdAt: new Date(item.createdAt).toISOString() })),
       jobs: jobs.map((item) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
@@ -2266,6 +2268,25 @@ export function registerSdkApi(app: Hono): void {
     catch (error) { return apiError(c, 503, "attention_pulse_unavailable", error instanceof Error ? error.message : "Attention Pulse settings are unavailable."); }
   });
 
+  app.post("/v1/account/attention-candidates/:id/activate", async (c) => {
+    const owner = sdkUser(c);
+    if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before opening an Elena suggestion.");
+    const candidateId = c.req.param("id");
+    const body = await c.req.json().catch(() => ({})) as { actionId?: unknown };
+    const actionId = typeof body.actionId === "string" ? body.actionId.trim().slice(0, 80) : undefined;
+    const candidate = await getAttentionRecord(owner.userId, "attention_candidate", candidateId) as AttentionCandidateRecord | undefined;
+    if (!candidate) return apiError(c, 404, "attention_candidate_not_found", "This Elena suggestion is no longer available.");
+    if (candidate.status !== "pending" && candidate.status !== "delivered" && candidate.status !== "accepted") return apiError(c, 409, "attention_candidate_unavailable", "This Elena suggestion is no longer actionable.");
+    const validAction = !actionId || candidate.suggestedActions?.some((action) => action.id === actionId);
+    if (!validAction) return apiError(c, 400, "invalid_attention_action", "That suggestion action is not valid for this candidate.");
+    const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify({ actionId })}`).digest("hex");
+    return sdkAutonomyMutation(c, owner.userId, fingerprint, async () => {
+      if (candidate.status === "accepted") return { data: { candidate, alreadyActivated: true } };
+      const updated = await updateAttentionRecord(owner.userId, "attention_candidate", candidateId, { status: "accepted" }) as AttentionCandidateRecord | undefined;
+      return { data: { candidate: updated ?? candidate, actionId } };
+    });
+  });
+
   app.put("/v1/account/attention-pulse", async (c) => {
     const owner = sdkUser(c);
     if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before changing Attention Pulse settings.");
@@ -2786,6 +2807,23 @@ export function registerSdkApi(app: Hono): void {
   });
   app.get("/v1/threads/:threadId/runs", async (c) => { const thread = (await getSessionWithSdkRuns(sdkUser(c)!.userId, c.req.param("threadId"))).sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found."); const result = page(thread.runs, c.req.query("cursor"), c.req.query("limit")); return c.json({ data: result.data.map((run) => runView(thread.id, run)), ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) }); });
   app.get("/v1/threads/:threadId/runs/:runId", async (c) => { const thread = (await getSessionWithSdkRuns(sdkUser(c)!.userId, c.req.param("threadId"))).sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); return thread && run ? c.json(runView(thread.id, run)) : apiError(c, 404, "not_found", "Run not found."); });
+  app.patch("/v1/threads/:threadId/runs/:runId/feedback", async (c) => {
+    const owner = sdkUser(c)!;
+    const threadId = c.req.param("threadId");
+    const runId = c.req.param("runId");
+    const body = await c.req.json().catch(() => ({})) as { feedback?: unknown };
+    if (body.feedback !== undefined && body.feedback !== null && body.feedback !== "positive" && body.feedback !== "negative") return apiError(c, 400, "invalid_feedback", "feedback must be positive, negative, or null.");
+    const session = await getSessionWithSdkRuns(owner.userId, threadId);
+    const thread = session.sdkThreads!.find((item) => item.id === threadId);
+    const run = thread?.runs.find((item) => item.id === runId);
+    if (!thread || !run) return apiError(c, 404, "not_found", "Run not found.");
+    if (body.feedback === null || body.feedback === undefined) delete run.feedback;
+    else run.feedback = body.feedback;
+    run.updatedAt = Date.now();
+    thread.updatedAt = run.updatedAt;
+    await saveSession(owner.userId, session);
+    return c.json(runView(thread.id, run));
+  });
    app.get("/v1/threads/:threadId/runs/:runId/events", async (c) => { const thread = (await getSessionWithSdkRuns(sdkUser(c)!.userId, c.req.param("threadId"))).sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); const cursor = Number(c.req.query("after") ?? 0) || 0; return thread && run ? c.json({ data: run.events.filter((item) => item.at > cursor) }) : apiError(c, 404, "not_found", "Run not found."); });
    app.get("/v1/threads/:threadId/runs/:runId/trace", async (c) => { const owner = sdkUser(c)!; const session = await getSessionWithSdkRuns(owner.userId, c.req.param("threadId")); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); if (!thread || !run) return apiError(c, 404, "not_found", "Run not found."); const trace = await getAgentRun(owner.userId, run.id); if (!trace) return c.json({ runId: run.id, data: [], state: undefined }); const includeState = c.req.query("include_state") === "true"; return c.json({ runId: run.id, status: trace.status, version: trace.version, createdAt: new Date(trace.createdAt).toISOString(), updatedAt: new Date(trace.updatedAt).toISOString(), events: trace.events, ...(includeState ? { state: trace.state } : {}) }); });
   app.post("/v1/threads/:threadId/runs/:runId/resume", async (c) => {
@@ -3227,11 +3265,12 @@ export function registerSdkApi(app: Hono): void {
     // Activity is a hot dashboard feed. Read approvals through their bounded,
     // owner-scoped index instead of loading the full session (which may be a
     // large durable Neon session-domain read) on every refresh.
-    const [approvals, tasks, reminders, jobs] = await Promise.all([
+    const [approvals, tasks, reminders, jobs, attentionCandidates] = await Promise.all([
       listApprovals(userId, 50),
       listTasks(userId),
       listReminders(userId),
       listJobs(userId),
+      listAttentionRecords(userId, "attention_candidate", { limit: 50 }),
     ]);
     return c.json({
       now,
@@ -3239,6 +3278,7 @@ export function registerSdkApi(app: Hono): void {
       tasks: tasks.filter((item) => item.updatedAt > since).slice(0, 50),
       reminders: reminders.filter((item) => item.createdAt > since).slice(0, 50),
       jobs: jobs.filter((item) => item.createdAt > since).slice(0, 50),
+      attentionCandidates: (attentionCandidates as AttentionCandidateRecord[]).filter((item) => item.updatedAt > since && item.status === "pending").slice(0, 20).map((item) => ({ id: item.id, reason: item.reason.replace(/^\[(connection-gap|action-gap):[^\]]+\]\s*/, ""), suggestedActions: item.suggestedActions, updatedAt: item.updatedAt })),
     });
   });
   app.get("/v1/operator/trace", async (c) => { const owner = sdkUser(c)!; return c.json({ data: await listTraceEvents(owner.userId, c.req.query("correlation_id"), Number(c.req.query("limit") ?? 500) || 500) }); });

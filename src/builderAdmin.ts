@@ -114,14 +114,22 @@ export function registerBuilderAdmin(app: Hono, dependencies: BuilderDependencie
   builder.get("/overview", async (c) => c.json({ data: await (dependencies.snapshot ?? systemSnapshot)() }));
   builder.get("/people", async (c) => {
     if (c.get("principal").role !== "builder_admin") return c.json(error("permission_denied", "User directory access is restricted to builder administrators."), 403);
+    const url = new URL(c.req.url);
+    const rawLimit = Number(url.searchParams.get("limit") ?? "25");
+    const rawOffset = Number(url.searchParams.get("offset") ?? "0");
+    const limit = Number.isSafeInteger(rawLimit) ? Math.max(1, Math.min(50, rawLimit)) : 25;
+    const offset = Number.isSafeInteger(rawOffset) ? Math.max(0, Math.min(100000, rawOffset)) : 0;
+    const search = (url.searchParams.get("search") ?? "").trim().slice(0, 120);
     const result = await getAuth().api.listUsers({
       headers: c.req.raw.headers,
       // Keep this query to the provider-neutral pagination contract. The
       // optional sort fields can make Better Auth's internal adapter return
       // its indistinguishable empty fallback on older auth schemas.
-      query: { limit: "100", offset: "0" },
+      query: { limit: String(limit), offset: String(offset), ...(search ? { searchValue: search, searchField: "email", searchOperator: "contains" } : {}) },
     });
-    if (!result || typeof result.total !== "number" || result.total < 1) {
+    // An empty search is a valid result; only an absent/invalid provider
+    // response means the auth directory itself is unavailable.
+    if (!result || typeof result.total !== "number") {
       logger.error({ total: result?.total ?? null }, "Builder user directory returned no authenticated accounts");
       return c.json(error("directory_unavailable", "The user directory could not read the Better Auth accounts. Check the configured auth database and migrations."), 503);
     }
@@ -134,7 +142,25 @@ export function registerBuilderAdmin(app: Hono, dependencies: BuilderDependencie
       role: typeof user.role === "string" ? user.role : "user",
       banned: user.banned === true,
     }));
-    return c.json({ data: users, total: typeof result?.total === "number" ? result.total : users.length });
+    return c.json({ data: users, total: typeof result?.total === "number" ? result.total : users.length, limit, offset });
+  });
+  builder.post("/people/:userId/action", async (c) => {
+    const { session, role } = c.get("principal");
+    if (role !== "builder_admin") return c.json(error("permission_denied", "Manage-users permission is required."), 403);
+    const userId = c.req.param("userId");
+    if (!/^[A-Za-z0-9_-]{1,160}$/.test(userId) || userId === session.user.id) return c.json(error("invalid_user", "This user cannot be managed from the builder console."), 400);
+    const body = await c.req.json().catch(() => null) as Record<string, unknown> | null;
+    const action = body && typeof body.action === "string" ? body.action : "";
+    const authApi = getAuth().api as any;
+    const request = { headers: c.req.raw.headers, body: { userId } };
+    if (action === "suspend") await authApi.banUser({ ...request, body: { userId, banReason: "Suspended by a builder administrator." } });
+    else if (action === "restore") await authApi.unbanUser(request);
+    else if (action === "revoke_sessions") await authApi.revokeUserSessions(request);
+    else if (action === "remove") await authApi.removeUser(request);
+    else return c.json(error("invalid_action", "Use suspend, restore, revoke_sessions, or remove."), 400);
+    const auditAction = action === "suspend" ? "user_suspended" : action === "restore" ? "user_restored" : action === "remove" ? "user_removed" : "user_sessions_revoked";
+    await repository().record({ ...newBuilderEvent(session.user.id, auditAction), targetUserId: userId });
+    return c.json({ ok: true, action });
   });
   builder.get("/controls", async (c) => c.json(await repository().read()));
   builder.get("/audit", async (c) => c.json({ data: await repository().events(), retention: "Most recent 1,000 events; returns latest 100." }));

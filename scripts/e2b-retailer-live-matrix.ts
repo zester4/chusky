@@ -32,7 +32,8 @@ const apiKey = process.env.E2B_API_KEY?.trim();
 const template = process.env.E2B_BROWSER_TEMPLATE?.trim() || "chusky-browser-playwright";
 if (!apiKey) throw new Error("E2B_API_KEY is required");
 const requestedRetailer = process.argv.slice(2).find((value) => !value.startsWith("--"));
-const foodOnly = process.argv.includes("--food");
+const orderReview = process.argv.includes("--order-review");
+const foodOnly = process.argv.includes("--food") || orderReview;
 const selectedPool = foodOnly ? foodRetailers : retailRetailers;
 const selectedRetailers = requestedRetailer ? allRetailers.filter((retailer) => retailer.id === requestedRetailer) : selectedPool;
 if (requestedRetailer && selectedRetailers.length === 0) throw new Error(`Unknown retailer '${requestedRetailer}'. Choose: ${allRetailers.map((retailer) => retailer.id).join(", ")}`);
@@ -210,6 +211,7 @@ async function main() {
           // never permission for this harness to click it.
           stoppedBeforePurchase = true;
           check("cart opened and contents reviewed", cartOpened && cartContentsVerified && checkoutReviewReached, { checkoutControlFound: Boolean(checkout), checkoutReviewReached, purchaseControlVisible: Boolean(purchaseControl), stoppedBeforePurchase });
+          check("final order control observed without submission", checkoutReviewReached && Boolean(purchaseControl) && stoppedBeforePurchase, { purchaseControl: purchaseControl?.name || "none", stoppedBeforePurchase });
         } else check("checkout approval boundary", false, { checkoutControlFound: Boolean(checkout), stoppedBeforePurchase });
       }
       const handoffHost = sandbox.getHost(6080);
@@ -221,7 +223,8 @@ async function main() {
       const diagnostics = await requestBrowser({ action: "diagnostics" }, "handoff").catch((error) => ({ error: safeDetail(error) }));
       const diagnosticsCaptured = !((diagnostics as Record<string, unknown>).error);
       check("diagnostics captured before cleanup", diagnosticsCaptured, { available: diagnosticsCaptured });
-      const flowVerified = productOpened && cartPrepared && cartOpened && cartContentsVerified && checkoutReviewReached && stoppedBeforePurchase;
+      const purchaseControlVisible = checks.some((item) => item.name === "final order control observed without submission" && item.ok);
+      const flowVerified = productOpened && cartPrepared && cartOpened && cartContentsVerified && checkoutReviewReached && purchaseControlVisible && stoppedBeforePurchase;
       const outcome = challengeDetected ? "challenge_required" : flowVerified ? "verified" : "failed";
       results.push({ retailer: retailer.id, ok: checks.every((item) => item.ok), outcome, flowVerified, challengeDetected, productOpened, cartPrepared, cartOpened, cartContentsVerified, checkoutReviewReached, stoppedBeforePurchase, liveUrl: keepAlive ? liveUrl : undefined, checks, sandboxId: sandbox.sandboxId, durationMs: Date.now() - startedAt });
       if (keepAlive) {
@@ -252,7 +255,7 @@ async function main() {
       await sandbox?.kill().catch(() => undefined);
     }
   }
-  const report = { ok: results.every((item) => item.ok), allFlowsVerified: results.every((item) => item.flowVerified === true), template, neverSubmitPayment: true, results };
+  const report = { ok: results.every((item) => item.ok), allFlowsVerified: results.every((item) => item.flowVerified === true), orderReview, template, neverSubmitOrder: true, neverSubmitPayment: true, results };
   const reportPath = path.join(artifactDir, "retailer-matrix.json");
   await writeFile(reportPath, JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ ...report, reportPath }));

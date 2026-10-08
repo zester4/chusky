@@ -331,7 +331,113 @@ async function selectControl(page, locator, value, root) {
   return state;
 }
 
-async function fillControl(page, locator, value) {
+function normalizeAutocompleteText(value) {
+  return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
+}
+
+async function clickVisibleAutocompleteCard(page, locator, value, root) {
+  const token = `chusky-autocomplete-${randomUUID()}`;
+  const marked = await locator.evaluate((input, details) => {
+    const normalize = (text) => String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
+    const requested = normalize(details.value);
+    const inputRect = input.getBoundingClientRect();
+    const inputStyle = getComputedStyle(input);
+    if (!requested || inputStyle.display === "none" || inputStyle.visibility === "hidden" || inputRect.width < 1 || inputRect.height < 1) return false;
+    const candidates = [];
+    for (const element of Array.from(document.querySelectorAll("body *")).slice(-1_200)) {
+      if (element === input || input.contains(element) || element.contains(input)) continue;
+      const text = String(element.textContent || "").replace(/\s+/g, " ").trim();
+      if (!text || text.length > 500) continue;
+      const lines = String(element.textContent || "").split(/\r?\n/).map((line) => normalize(line)).filter(Boolean);
+      if (!lines.some((line) => line === requested || line.includes(requested))) continue;
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity || 1) === 0 || rect.width < 8 || rect.height < 8) continue;
+      if (rect.top < inputRect.bottom - 4 || rect.top > inputRect.bottom + 900) continue;
+      const horizontallyNear = rect.right >= inputRect.left - 500 && rect.left <= inputRect.right + 500;
+      if (!horizontallyNear) continue;
+      if (rect.width > Math.max(inputRect.width * 1.8, 620) || rect.height > 280) continue;
+      const clickable = /^(A|BUTTON|LI)$/.test(element.tagName) || element.getAttribute("role") === "option" || element.getAttribute("role") === "listitem" || style.cursor === "pointer" || element.tabIndex >= 0;
+      const normalized = normalize(text);
+      const exactLine = lines.includes(requested) || normalized === requested || normalized.startsWith(`${requested} `);
+      candidates.push({ element, top: rect.top, area: rect.width * rect.height, clickable, exactLine });
+    }
+    candidates.sort((left, right) => Number(right.exactLine) - Number(left.exactLine) || Number(right.clickable) - Number(left.clickable) || left.top - right.top || left.area - right.area);
+    const chosen = candidates[0]?.element;
+    if (!chosen) return false;
+    chosen.setAttribute("data-chusky-autocomplete-target", details.token);
+    return true;
+  }, { value: String(value), token }).catch(() => false);
+  if (!marked) return { selected: false };
+  const candidate = root.locator(`[data-chusky-autocomplete-target=${JSON.stringify(token)}]`).first();
+  try {
+    const label = normalizeAutocompleteText(await candidate.innerText().catch(() => String(value)));
+    await clickControl(page, candidate);
+    return { selected: true, label: label || normalizeAutocompleteText(value), visual: true };
+  } finally {
+    await candidate.evaluate((element) => element.removeAttribute("data-chusky-autocomplete-target")).catch(() => {});
+  }
+}
+
+async function selectUniqueAutocomplete(page, locator, value, root) {
+  const metadata = await locator.evaluate((element) => ({
+    role: element.getAttribute("role") || "",
+    autocomplete: element.getAttribute("aria-autocomplete") || "",
+    controls: element.getAttribute("aria-controls") || "",
+  })).catch(() => ({ role: "", autocomplete: "", controls: "" }));
+  const detected = metadata.role === "combobox" || metadata.autocomplete || metadata.controls;
+  if (!detected) return { selected: false, autocompleteDetected: false };
+  const requested = normalizeAutocompleteText(value);
+  if (requested.length < 2) return { selected: false, autocompleteDetected: true, candidates: 0 };
+  const optionLocators = [root.getByRole("option")];
+  for (const controlId of String(metadata.controls || "").split(/\s+/).filter(Boolean).slice(0, 4)) {
+    const controlled = `[id=${JSON.stringify(controlId)}]`;
+    optionLocators.push(root.locator(`${controlled} [role="option"], ${controlled} option`));
+    optionLocators.push(root.locator(controlled).getByRole("option"));
+  }
+  const inspectOptions = async () => {
+    const visible = [];
+    const seen = new Set();
+    for (const options of optionLocators) {
+      const count = Math.min(await options.count(), 40);
+      for (let index = 0; index < count; index += 1) {
+        const option = options.nth(index);
+        if (!(await option.isVisible().catch(() => false))) continue;
+        const label = normalizeAutocompleteText(await option.innerText().catch(() => ""));
+        if (!label || seen.has(label)) continue;
+        seen.add(label);
+        const exact = label === requested || (requested.length >= 4 && label.includes(requested));
+        if (exact) visible.push({ option, label });
+      }
+    }
+    return visible;
+  };
+  let visible = await inspectOptions();
+  // Some production comboboxes only open their popup for keyboard-generated
+  // input events. Playwright fill is preferred, but retype once through the
+  // control when the popup did not react; this remains bounded and idempotent.
+  if (!visible.length) {
+    await locator.focus().catch(() => {});
+    await locator.press("ControlOrMeta+A").catch(() => {});
+    await locator.pressSequentially(String(value), { delay: 15 }).catch(() => {});
+  }
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    visible = await inspectOptions();
+    if (visible.length >= 1) {
+      await clickControl(page, visible[0].option);
+      return { selected: true, autocompleteDetected: true, autocompleteCandidates: visible.length, autocompleteAmbiguous: visible.length > 1, label: visible[0].label };
+    }
+    if (visible.length === 0 && attempt % 2 === 0) {
+      const visual = await clickVisibleAutocompleteCard(page, locator, value, root);
+      if (visual.selected) return { selected: true, autocompleteDetected: true, autocompleteVisualFallback: true, label: visual.label };
+    }
+    if (attempt < 4) await page.waitForTimeout(300);
+  }
+  return { selected: false, autocompleteDetected: true, candidates: visible.length };
+}
+
+async function fillControl(page, locator, value, root = page.mainFrame()) {
+  const beforeUrl = page.url();
   try {
     await locator.fill(value);
   } catch (error) {
@@ -340,16 +446,34 @@ async function fillControl(page, locator, value) {
     await page.keyboard.type(value, { delay: 10 });
     if (!String(error?.message || error).trim()) throw error;
   }
+  // A few custom widgets listen for a native input event but do not react to
+  // programmatic value assignment alone. Re-dispatch the bounded event before
+  // inspecting their popup; this does not bypass the widget's own selection
+  // logic and keeps verification anchored to the resulting option.
+  await locator.dispatchEvent("input").catch(() => {});
+  const autocomplete = await selectUniqueAutocomplete(page, locator, value, root);
+  const navigatedAfterSelection = autocomplete.selected && page.url() !== beforeUrl;
+  if (navigatedAfterSelection) return { controlRole: "combobox", value, valueLength: value.length, required: false, disabled: false, checked: false, autocompleteDetected: true, autocompleteSelected: true, autocompleteNavigated: true, autocompleteLabel: autocomplete.label, ...(autocomplete.autocompleteCandidates !== undefined ? { autocompleteCandidates: autocomplete.autocompleteCandidates } : {}) };
+  if (autocomplete.selected) {
+    const normalizedValue = normalizeAutocompleteText(value);
+    const currentPageText = await page.locator("body").innerText({ timeout: 2_000 }).catch(() => "");
+    if (normalizedValue && normalizeAutocompleteText(currentPageText).includes(normalizedValue)) {
+      return { controlRole: "combobox", value, valueLength: value.length, required: false, disabled: false, checked: false, autocompleteDetected: true, autocompleteSelected: true, autocompleteCommittedByPage: true, autocompleteLabel: autocomplete.label, ...(autocomplete.autocompleteCandidates !== undefined ? { autocompleteCandidates: autocomplete.autocompleteCandidates } : {}) };
+    }
+  }
   const state = await controlState(locator);
-  if (state.value !== value && state.valueLength !== value.length) throw new Error("Field value did not persist after fill");
-  return state;
+  if (state.value !== value && state.valueLength !== value.length) {
+    if (autocomplete.selected) return { ...state, autocompleteDetected: true, autocompleteSelectionFailed: true, ...(autocomplete.autocompleteVisualFallback ? { autocompleteVisualFallback: true } : {}), ...(autocomplete.autocompleteCandidates !== undefined ? { autocompleteCandidates: autocomplete.autocompleteCandidates } : {}) };
+    throw new Error("Field value did not persist after fill");
+  }
+  return { ...state, ...(autocomplete.autocompleteDetected ? { autocompleteDetected: true } : {}), ...(autocomplete.candidates !== undefined ? { autocompleteCandidates: autocomplete.candidates } : {}), ...(autocomplete.autocompleteCandidates !== undefined ? { autocompleteCandidates: autocomplete.autocompleteCandidates } : {}), ...(autocomplete.autocompleteAmbiguous ? { autocompleteAmbiguous: true } : {}), ...(autocomplete.selected ? { autocompleteSelected: true, autocompleteLabel: autocomplete.label } : {}) };
 }
 
 async function applyFormControl(page, control) {
   const locator = await resolveLocator(page, control);
   await locator.waitFor({ state: "attached", timeout: 10_000 });
   const action = String(control.action || "fill");
-  if (action === "fill") return fillControl(page, locator, String(control.value ?? ""));
+  if (action === "fill") return fillControl(page, locator, String(control.value ?? ""), frameFor(page, control));
   if (action === "select_option") return selectControl(page, locator, String(control.value ?? ""), frameFor(page, control));
   if (action === "check") return setCheckbox(locator, true);
   if (action === "uncheck") return setCheckbox(locator, false);
@@ -583,6 +707,14 @@ async function runSmokeFixture(context, pageState) {
       </fieldset>
       <button id="survey-submit" type="submit">Submit survey</button>
     </form>
+    <form id="ride-form">
+      <label for="pickup-location">Pickup location</label>
+      <input id="pickup-location" role="combobox" aria-autocomplete="list" aria-controls="pickup-options" autocomplete="street-address" />
+      <ul id="pickup-options" role="listbox" hidden></ul>
+      <label for="dropoff-location">Dropoff location</label>
+      <input id="dropoff-location" role="combobox" aria-autocomplete="list" aria-controls="dropoff-options" autocomplete="street-address" />
+      <ul id="dropoff-options" role="listbox" hidden></ul>
+    </form>
     <label for="upload">Attach fixture file</label><input id="upload" type="file" aria-label="Attach fixture file" />
     <a id="download" download="fixture.txt" href="data:text/plain;base64,Q2h1c2t5IEUyQiBkb3dubG9hZCBmaXh0dXJl">Download fixture</a>
     <div style="height:2400px">End of long page</div></main>
@@ -591,6 +723,9 @@ async function runSmokeFixture(context, pageState) {
       document.querySelector('#account-form').addEventListener('submit',(event)=>{event.preventDefault();const form=event.currentTarget;document.querySelector('#output').textContent='Account submitted: '+form.elements['first-name'].value+' '+form.elements['last-name'].value+' '+form.elements['business-email'].value+' '+form.elements.country.value+' terms='+form.elements.terms.checked});
       document.querySelector('#survey-form').addEventListener('submit',(event)=>{event.preventDefault();const form=event.currentTarget;document.querySelector('#output').textContent='Survey submitted: '+(form.elements['survey-name'].value||'Anonymous')+' topics='+[...form.querySelectorAll('input[name="topic"]:checked')].map((input)=>input.value).join(',')+' rating='+form.elements.rating.value});
       document.querySelector('#upload').addEventListener('change',(event)=>{document.querySelector('#output').textContent+='; Uploaded: '+(event.target.files?.[0]?.name||'none')});
+      const locations=['Los Angeles International Airport','Santa Monica Pier','Union Station Los Angeles'];
+      const wireLocation=(inputId,listId)=>{const input=document.querySelector('#'+inputId);const list=document.querySelector('#'+listId);input.addEventListener('input',()=>{const query=input.value.toLowerCase();list.replaceChildren(...locations.filter((item)=>item.toLowerCase().includes(query)).map((item)=>{const option=document.createElement('li');option.setAttribute('role','option');option.textContent=item;option.addEventListener('click',()=>{input.value=item;list.hidden=true});return option;}));list.hidden=!query||!list.children.length});};
+      wireLocation('pickup-location','pickup-options');wireLocation('dropoff-location','dropoff-options');
     </script>
   </body></html>`);
   const output = await result(page, context, { matches: await roleMatches(page) }, true);
@@ -790,6 +925,7 @@ async function execute(context, pageState, request) {
   if (request.action === "tab_close") { if (context.pages().length > 1) await page.close(); page = context.pages()[0] || await context.newPage(); }
   if (request.currentUrl && (() => { try { return /^https?:$/.test(new URL(String(request.currentUrl)).protocol); } catch { return false; } })() && (!page.url() || page.url() === "about:blank")) await page.goto((await safeHttpUrl(request.currentUrl)).toString(), { waitUntil: "domcontentloaded", timeout: 45_000 });
   const action = request.action;
+  let actionFormState;
   if (action === "diagnostics") { const pages = await Promise.all(context.pages().map(async (item, index) => ({ index, url: clean(item.url(), 1_000), title: clean(item.url() ? await item.title().catch(() => "") : "", 160), closed: item.isClosed() }))); return result(page, context, { diagnostics: { console: boundedRecords(diagnostics.console), errors: boundedRecords(diagnostics.errors), dialogs: boundedRecords(diagnostics.dialogs), pages }, events: boundedRecords(eventLog) }); }
   if (action === "events") return result(page, context, { events: boundedRecords(eventLog, 100) });
   if (action === "dialog_list") return result(page, context, { dialogs: boundedRecords(diagnostics.dialogs) });
@@ -892,11 +1028,11 @@ async function execute(context, pageState, request) {
     if (action === "focus") await target.focus();
     if (action === "fill") {
       const value = String(request.value ?? request.text ?? "");
-      await fillControl(page, target, value);
+      actionFormState = await fillControl(page, target, value, frameFor(page, request.selector));
     }
-    if (action === "select_option") await selectControl(page, target, request.value ?? "", frameFor(page, request.selector));
-    if (action === "check") await setCheckbox(target, true);
-    if (action === "uncheck") await setCheckbox(target, false);
+    if (action === "select_option") actionFormState = await selectControl(page, target, request.value ?? "", frameFor(page, request.selector));
+    if (action === "check") actionFormState = await setCheckbox(target, true);
+    if (action === "uncheck") actionFormState = await setCheckbox(target, false);
   } else if (["upload", "upload_files"].includes(action)) {
     if (!target || !request.uploadPath || !/^\/tmp\/chusky-browser-upload\/[A-Za-z0-9_-]+-[^/]{1,120}$/.test(String(request.uploadPath))) throw new Error("Upload requires a fresh file-input node and an owner file reference");
     if (!(await target.count())) throw new Error("The selected file input is no longer available");
@@ -952,16 +1088,21 @@ async function execute(context, pageState, request) {
   } else if (["tabs", "windows"].includes(action)) return result(page, context);
   await page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
   const formState = target && ["fill", "select_option", "check", "uncheck"].includes(action) ? await controlState(target) : undefined;
+  const reportedFormState = formState ? { ...formState, ...(actionFormState || {}) } : actionFormState;
   const formMutation = ["fill", "select_option", "check", "uncheck", "click", "press"].includes(action);
   const afterUrl = page.url();
   const afterTitle = await page.title().catch(() => "");
   const afterGeneration = await pageGeneration(page);
   const actionVerification = beforeAction ? { attempted: true, observed: true, urlChanged: beforeAction.url !== afterUrl, titleChanged: beforeAction.title !== afterTitle, pageGenerationChanged: beforeAction.generation !== afterGeneration } : undefined;
-  return result(page, context, { matches: await roleMatches(page), ...(formState ? { formState } : {}), ...(formMutation ? { forms: await inspectForms(page) } : {}), ...(actionVerification ? { actionVerification } : {}) }, request.includePageContent === true);
+  return result(page, context, { matches: await roleMatches(page), ...(reportedFormState ? { formState: reportedFormState } : {}), ...(formMutation ? { forms: await inspectForms(page) } : {}), ...(actionVerification ? { actionVerification } : {}) }, request.includePageContent === true);
 }
 
 async function vaultLogin(context, request) {
-  const page = context.pages()[0] || await context.newPage();
+  const pages = context.pages();
+  const requestedIndex = Number(request.activeIndex);
+  const page = Number.isSafeInteger(requestedIndex) && requestedIndex >= 0 && requestedIndex < pages.length
+    ? pages[requestedIndex]
+    : pages[0] || await context.newPage();
   if (request.smokeFixture === true && process.env.CHUSKY_E2B_SMOKE_TESTS === "1") {
     await page.setContent(`<!doctype html><html><head><title>Chusky vault login fixture</title></head><body>
       <main><label for="email">Email</label><input id="email" type="email" autocomplete="username" />

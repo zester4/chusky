@@ -83,6 +83,66 @@ function normalizeMatches(raw: E2BCommandResult, url: string, now: number): E2BB
   });
 }
 
+const LOCATION_INTENTS = [
+  { key: "pickup", phrases: ["pickup", "pick up", "origin", "starting point", "starting location", "from", "where should we pick you up"] },
+  { key: "dropoff", phrases: ["dropoff", "drop off", "destination", "ending point", "ending location", "to", "where are you going"] },
+] as const;
+
+function normalizedControlText(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
+}
+
+function controlIntent(value: string): string | undefined {
+  const normalized = normalizedControlText(value);
+  return LOCATION_INTENTS.find(({ phrases }) => phrases.some((phrase) => normalized === phrase || normalized.includes(phrase)))?.key;
+}
+
+/**
+ * Score a current control against the label from an older observation.
+ * This is intentionally generic: transport sites commonly rename or change
+ * the role of location controls during a SPA re-render, but the intent of
+ * pickup/dropoff remains stable. A caller must still require a unique winner.
+ */
+export function scoreBrowserControlRemap(requested: E2BBrowserNode, candidate: E2BBrowserNode): number {
+  const requestedText = normalizedControlText(requested.name);
+  const candidateText = normalizedControlText(candidate.name);
+  if (!requestedText || !candidateText) return 0;
+  if (requestedText === candidateText) return 100;
+  let score = 0;
+  const requestedWords = new Set(requestedText.split(" "));
+  const candidateWords = new Set(candidateText.split(" "));
+  score += [...requestedWords].filter((word) => candidateWords.has(word)).length * 8;
+  const requestedIntent = controlIntent(requestedText);
+  if (requestedIntent && requestedIntent === controlIntent(candidateText)) score += 28;
+  // Ride sites often render both location inputs with the same generic label
+  // (for example, "Search for a location"). Keep the intent from the prior
+  // observation, then let the unique prior index disambiguate the pair.
+  if (requestedIntent && /\b(?:location|address)\b/.test(candidateText)) score += 36;
+  if (candidateText.includes(requestedText) || requestedText.includes(candidateText)) score += 16;
+  for (const field of ["id", "nameAttr", "placeholder", "autocomplete"] as const) {
+    if (requested[field] && requested[field] === candidate[field]) score += 24;
+  }
+  return score;
+}
+
+export function selectBrowserControlRemapCandidate(requested: E2BBrowserNode, candidates: E2BBrowserNode[]): E2BBrowserNode | undefined {
+  const scored = candidates
+    .map((item) => ({ item, score: scoreBrowserControlRemap(requested, item) }))
+    .filter(({ score }) => score >= 28)
+    .sort((left, right) => right.score - left.score);
+  if (!scored.length) return undefined;
+  if (scored.length === 1 || scored[0].score > (scored[1]?.score ?? 0)) return scored[0].item;
+  // Some responsive pages render two equivalent controls in one frame. If
+  // semantic scores tie, preserve observed accessible order rather than guess.
+  const indexed = Number.isSafeInteger(requested.index) ? scored.filter(({ item }) => item.index === requested.index) : [];
+  return indexed.length === 1 ? indexed[0].item : undefined;
+}
+
+function compatibleControlRole(requested: string, candidate: string): boolean {
+  if (requested === candidate) return true;
+  return [requested, candidate].every((role) => ["textbox", "combobox"].includes(role));
+}
+
 const INTERACTIVE_ACTIONS = ["invoke", "fill", "focus", "click", "move", "hover", "select_option", "check", "uncheck", "type", "press", "upload", "upload_files"] as const;
 const SAFE_REPLAN_ACTIONS = ["fill", "select_option", "check", "uncheck", "focus", "hover", "wait"] as const;
 
@@ -390,8 +450,12 @@ export class E2BBrowserEngine {
       const field = key as keyof E2BBrowserNode;
       return typeof saved[field] === "string" && saved[field] === candidate[field];
     }));
-    const matching = nodes.filter((candidate) => candidate.role === role && (sameStableIdentity(candidate) || candidate.name === name));
-    let candidate = saved && Number.isSafeInteger(saved.index) ? matching.find((item) => item.index === saved.index) ?? (matching.length === 1 ? matching[0] : undefined) : matching.length === 1 ? matching[0] : undefined;
+    const matching = nodes.filter((candidate) => compatibleControlRole(role, candidate.role) && (sameStableIdentity(candidate) || candidate.name === name));
+    const sameFrame = (item: E2BBrowserNode) => saved?.frameIndex === undefined || item.frameIndex === saved.frameIndex;
+    const scopedMatching = matching.filter(sameFrame);
+    let candidate = saved && Number.isSafeInteger(saved.index)
+      ? scopedMatching.find((item) => item.index === saved.index) ?? (scopedMatching.length === 1 ? scopedMatching[0] : undefined)
+      : scopedMatching.length === 1 ? scopedMatching[0] : undefined;
     if (!candidate && saved) {
       // Accessible names often change after a product card, menu, or SPA
       // re-render. Reinspect the full accessible tree and prefer the stable
@@ -400,8 +464,12 @@ export class E2BBrowserEngine {
       const stateUrl = typeof state.url === "string" ? state.url : url;
       const stateNodes = normalizeMatches(state, stateUrl, Date.now());
       next = await this.persistResult(userId, next, state, stateNodes, "state");
-      const stable = stateNodes.filter((item) => item.role === role && sameStableIdentity(item));
+      const stable = stateNodes.filter((item) => compatibleControlRole(role, item.role) && sameStableIdentity(item) && sameFrame(item));
       if (stable.length === 1) candidate = stable[0];
+      if (!candidate) {
+        const semanticCandidates = stateNodes.filter((item) => compatibleControlRole(role, item.role) && ["textbox", "combobox"].includes(item.role) && sameFrame(item));
+        candidate = selectBrowserControlRemapCandidate(saved, semanticCandidates);
+      }
     }
     if (!candidate) throw new E2BBrowserError(`Browser recovery could not safely remap ${action} to a unique current ${role} control named ${name}`);
     return { record: next, selector: selectorForNode(candidate) };

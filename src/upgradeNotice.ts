@@ -33,7 +33,7 @@ export const AGENT_UPGRADE_PRESETS = {
     "Extended the governed runtime across meetings, A2A, E2B browser, Daytona computer/artifact execution, Telegram, the CLI, SDK/API, dashboard, and MCP with the same owner-scoped durable state.",
   ],
   attention: [
-    "Attention Pulse records owner-private change, failure, and recovery observations from configured read-only watches, deduplicates replays, and surfaces them as durable events.",
+    "Attention Pulse records owner-private change, failure, and recovery observations plus verified missing-capability suggestions, deduplicates replays, and surfaces them as durable events.",
     "Pulse status reports current, scheduled, stale, failed, and never-checked coverage for explicitly configured watches; it does not claim to monitor every connected app.",
     "New observations stay pending until confirmed delivery, and a deterministic digest prevents NO_ACTION from hiding an update while existing approval and personal/business boundaries remain.",
   ],

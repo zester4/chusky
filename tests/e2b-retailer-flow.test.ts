@@ -34,5 +34,8 @@ test("live retailer harness includes a separate food-flow suite and preserves th
   assert.match(source, /const foodRetailers/);
   assert.match(source, /process\.argv\.includes\("--food"\)/);
   assert.match(source, /neverSubmitPayment/);
+  assert.match(source, /neverSubmitOrder/);
+  assert.match(source, /final order control observed without submission/);
+  assert.match(source, /--order-review/);
   assert.match(source, /stoppedBeforePurchase = true/);
 });

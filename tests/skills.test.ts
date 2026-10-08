@@ -42,6 +42,8 @@ test("routes browser and shopping requests to browser-pro and loads its guidance
   const context = await routedSkillContext("Browse Walmart and add two sweaters to my cart");
   assert.match(context, /### browser-pro \((?:primary|supporting)\)/);
   assert.match(context, /classify → plan → acquire → observe → act → verify → checkpoint/);
+  assert.match(context, /Domino's/);
+  assert.match(context, /final order\/payment control/);
 });
 
 test("routes game requests to game-scaffold", () => {

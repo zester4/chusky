@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { PROACTIVE_CAPABILITIES, proactiveCataloguePrompt } from "../src/proactive/catalog.js";
-import { DEFAULT_PROACTIVE_WATCHES, PROACTIVE_WATCH_DEFINITIONS, defaultWatchInput, missingDefaultWatchKeys, normalizeProactiveCapabilityIds, proactiveWatchDefinition, watchCapabilityIds } from "../src/proactive/watches.js";
+import { DEFAULT_PROACTIVE_WATCHES, PROACTIVE_WATCH_DEFINITIONS, connectedWatchInput, connectedWatchSpecs, defaultWatchInput, missingDefaultWatchKeys, normalizeProactiveCapabilityIds, proactiveWatchDefinition, watchCapabilityIds } from "../src/proactive/watches.js";
 import { proactiveHeartbeatText } from "../src/proactive/heartbeat.js";
 import { buildDailyOperatingBriefing, detectProactiveFindings, PROACTIVE_RUN_LEVEL_CAPABILITY_IDS, PROACTIVE_SIGNAL_CAPABILITY_IDS } from "../src/proactive/detectors.js";
 import { attentionPulseDeliveryDecision } from "../src/attentionPulse.js";
@@ -9,6 +9,7 @@ import { configureAttentionPulse } from "../src/nativeTools.js";
 import { addJob, createAttentionRecord, initStore, listAttentionRecords } from "../src/store.js";
 import { runDueAutonomyWatches } from "../src/autonomy/reconciliation.js";
 import { nativeTool } from "../src/nativeTools.js";
+import { attentionChecklistPrompt } from "../src/proactive/checklist.js";
 
 test("proactive catalogue contains all twenty bounded behaviors", () => {
   assert.equal(PROACTIVE_CAPABILITIES.length, 20);
@@ -32,6 +33,26 @@ test("default watches are read-only and idempotently discoverable", () => {
   assert.deepEqual(watchCapabilityIds({ capabilityIds: ["invoice_detection", "invoice_detection"], domain: "gmail" }), ["invoice_detection"]);
   assert.deepEqual(missingDefaultWatchKeys([]).map((item) => item.key), ["gmail-recent", "calendar-upcoming"]);
   assert.deepEqual(missingDefaultWatchKeys([{ id: "w1", userId: 1, name: "Recent inbox", domain: "gmail", objective: "x", mode: "personal", cadenceSeconds: 3600, authority: "observe", status: "active", maxItems: 5, createdAt: 1, updatedAt: 1 }]).map((item) => item.key), [DEFAULT_PROACTIVE_WATCHES[1]!.key]);
+});
+
+test("connected app starter watches are bounded, account-scoped, and read-only", () => {
+  const specs = connectedWatchSpecs([
+    { id: "slack-1", toolkit: "slack", alias: "Work Slack", status: "ACTIVE" },
+    { id: "github-1", toolkit: "github", status: "ACTIVE" },
+    { id: "disabled", toolkit: "notion", status: "DISABLED" },
+  ]);
+  assert.deepEqual(specs.map((spec) => spec.key), ["slack-attention", "github-work"]);
+  const input = connectedWatchInput(specs[0]!, 1_000);
+  assert.equal(input.connectedAccountId, "slack-1");
+  assert.equal(input.accountAlias, "Work Slack");
+  assert.equal(input.authority, "observe");
+  assert.equal(input.nextCheckAt, 1_000);
+});
+
+test("Elena's checklist is continuity context, not a closed task list", () => {
+  assert.match(attentionChecklistPrompt(undefined), /create a concise initial working checklist/);
+  assert.match(attentionChecklistPrompt({ content: "- Review Gmail next\n- Look for anything urgent", updatedAt: 1_000 }), /Review Gmail next/);
+  assert.match(attentionChecklistPrompt({ content: "- Review Gmail next", updatedAt: 1_000 }), /last updated/);
 });
 
 test("heartbeat reports completed, blocked, and failed runs without overstating provider effects", () => {

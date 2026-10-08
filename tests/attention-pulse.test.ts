@@ -112,6 +112,58 @@ test("attention pulse cannot suppress a new observation and only checkpoints it 
   assert.equal((await listAttentionRecords(userId, "observation") as any[])[0]?.status, "processed");
 });
 
+test("attention pulse creates an owner-visible capability suggestion when no apps are connected", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910023;
+  const now = Date.UTC(2026, 8, 30, 12);
+  const plan = await buildAttentionPulsePlan(userId, now, {
+    connectedAccounts: [],
+    connectedAccountsVerified: true,
+  });
+
+  assert.equal(plan.hasWork, true);
+  assert.equal(plan.mustReport, true);
+  assert.match(plan.prompt, /Connect Gmail/);
+  assert.match(plan.prompt, /what the missing connection would unlock/);
+  assert.match(plan.fallbackDigest ?? "", /inbox reviews/);
+  const candidates = await listAttentionRecords(userId, "attention_candidate") as any[];
+  assert.equal(candidates.filter((candidate) => candidate.reason.startsWith("[connection-gap:")).length, 3);
+
+  const second = await buildAttentionPulsePlan(userId, now, {
+    connectedAccounts: [],
+    connectedAccountsVerified: true,
+  });
+  assert.equal((await listAttentionRecords(userId, "attention_candidate") as any[]).length, candidates.length);
+  assert.equal(second.candidateIds.length, plan.candidateIds.length);
+});
+
+test("attention pulse reveals the next capability suggestions after the first window is delivered", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910025;
+  const discovery = { connectedAccounts: [], connectedAccountsVerified: true } as const;
+  const first = await buildAttentionPulsePlan(userId, Date.now(), discovery);
+  assert.equal(first.candidateIds.length, 3);
+  await markAttentionPulseDelivered(userId, first.candidateIds, Date.now());
+  const second = await buildAttentionPulsePlan(userId, Date.now() + 1, discovery);
+  assert.equal(second.candidateIds.length, 3);
+  const candidates = await listAttentionRecords(userId, "attention_candidate") as any[];
+  assert.equal(new Set(candidates.filter((candidate) => candidate.reason.startsWith("[connection-gap:")).map((candidate) => candidate.reason.match(/^\[connection-gap:([^\]]+)/)?.[1])).size, 6);
+});
+
+test("attention pulse resolves a pending capability suggestion after the app is connected", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910024;
+  const now = Date.UTC(2026, 8, 30, 12);
+  await buildAttentionPulsePlan(userId, now, { connectedAccounts: [], connectedAccountsVerified: true });
+  await buildAttentionPulsePlan(userId, now + 1, {
+    connectedAccounts: [{ toolkit: "GMAIL", status: "ACTIVE" }, { toolkit: "GOOGLECALENDAR", status: "ACTIVE" }],
+    connectedAccountsVerified: true,
+  });
+  const candidates = await listAttentionRecords(userId, "attention_candidate") as any[];
+  assert.equal(candidates.filter((candidate) => candidate.reason.startsWith("[connection-gap:gmail]") && candidate.status === "pending").length, 0);
+  assert.equal(candidates.some((candidate) => candidate.reason.startsWith("[connection-gap:gmail]") && candidate.status === "dismissed"), true);
+});
+
 test("attention pulse reports skipped due checks and captures observations created during reconciliation", async () => {
   await initStore({ memoryOnly: true });
   const userId = 910022;
@@ -149,7 +201,7 @@ test("attention pulse status shows configured watch coverage honestly", async ()
     lastCheckedAt: now - 120_000, lastObservedAt: now - 120_000, nextCheckAt: now + 60_000,
   });
   const status = await configureAttentionPulse(userId, { action: "status" }) as any;
-  assert.equal(status.watchCoverage.scope, "owner-configured watches only; not a full sweep of connected apps");
+  assert.equal(status.watchCoverage.scope, "owner-configured watches plus bounded read-only starter watches for active connected apps; not an unrestricted provider sweep");
   assert.equal(status.watchCoverage.stale, 1);
   assert.equal(status.watchCoverage.watches[0].status, "stale");
 });

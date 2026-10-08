@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import Redis from "ioredis";
 
 export interface BuilderControl { version: number; agentEnabled: boolean; changedAt?: number }
-export interface BuilderAuditEvent { id: string; actorId: string; action: "agent_execution_changed" | "builder_verified"; at: number; enabled?: boolean; reason?: "incident" | "maintenance" | "release"; version?: number }
+export interface BuilderAuditEvent { id: string; actorId: string; action: "agent_execution_changed" | "builder_verified" | "user_suspended" | "user_restored" | "user_sessions_revoked" | "user_removed"; at: number; enabled?: boolean; reason?: "incident" | "maintenance" | "release"; version?: number; targetUserId?: string }
 export interface BuilderRepository {
   read(): Promise<BuilderControl>;
   change(expected: number, enabled: boolean, event: BuilderAuditEvent): Promise<BuilderControl | undefined>;

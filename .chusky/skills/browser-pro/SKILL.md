@@ -15,7 +15,9 @@ The browser is an execution system, not a text scraper. Every task must follow:
 
 Read [references/tool-contract.md](references/tool-contract.md) for the exact
 Chusky tool sequence and [references/recovery-matrix.md](references/recovery-matrix.md)
-for failure handling. These references describe the current implementation;
+for failure handling. For stores, restaurant delivery, groceries, meal kits,
+reservations, or checkout, also read [references/retailer-playbook.md](references/retailer-playbook.md).
+These references describe the current implementation;
 do not invent tool names or bypass the native browser boundary.
 
 ## 1. Classify the requested outcome
@@ -165,6 +167,11 @@ the product-cart recipe:
 For all three workflows, verify the selected choices from a fresh observation,
 preserve the checkpoint across login or challenge handoff, and report whether
 the result is discovered, prepared, review-ready, or actually confirmed.
+
+For a food or retail order-review task, the final order/payment control must be
+observed before the result is called review-ready. Seeing a cart or checkout
+URL alone is not enough. Stop before `Place order`, `Pay now`, `Submit payment`,
+`Confirm and pay`, `Order now`, or equivalent controls.
 
 ## 9. Completion contract
 

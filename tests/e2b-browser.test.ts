@@ -108,6 +108,8 @@ test("E2B browser configuration is opt-in and exposes the backend-neutral browse
   assert.ok(chuckTools.some((tool) => tool.function.name === "CHUCK_BROWSER"));
   const browserTool = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER");
   assert.ok(browserTool);
+  assert.match(browserTool.function.description, /browser-pro/);
+  assert.match(browserTool.function.description, /retailer-playbook/);
   assert.doesNotMatch(browserTool.function.description, /Daytona browser/i);
 });
 
@@ -133,6 +135,9 @@ test("retailer live failures are classified and checkout mutations stop at appro
   assert.equal(classifyRetailerFailure("Cloudflare verify you are human"), "challenge");
   assert.equal(classifyRetailerFailure("locator.click: button not found"), "action_error");
   assert.equal(isPurchaseControlLabel("Place order"), true);
+  assert.equal(isPurchaseControlLabel("Proceed to payment"), true);
+  assert.equal(isPurchaseControlLabel("Continue to payment"), true);
+  assert.equal(isPurchaseControlLabel("Continue to checkout"), false);
   assert.equal(isPurchaseControlLabel("Add to cart"), false);
   assert.equal(pageLooksUsable({ url: "https://shop.example/product/1", title: "Product", pageContent: "Add to cart" }), true);
   assert.equal(pageLooksUsable({ url: "chrome-error://chromewebdata/", title: "", pageContent: "" }), false);
@@ -143,6 +148,8 @@ test("retailer live failures are classified and checkout mutations stop at appro
   assert.match(retailerMatrix, /checkout approval/i);
   assert.match(retailerMatrix, /never.*(click|submit|place|payment)/i);
   assert.match(retailerMatrix, /allFlowsVerified/);
+  assert.match(retailerMatrix, /final order control observed without submission/);
+  assert.match(retailerMatrix, /orderReview/);
   assert.match(retailerMatrix, /browser daemon readiness/);
 });
 

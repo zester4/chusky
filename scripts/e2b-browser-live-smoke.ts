@@ -135,6 +135,17 @@ async function main() {
     await requestBrowser({ action: "click", selector: selectorFor(surveySubmit) });
     const surveySubmitted = await requestBrowser({ action: "snapshot", includePageContent: true });
     assertCheck("generic survey form submission", String(surveySubmitted.pageContent).includes("Survey submitted: Anonymous topics=technology,sports rating=5"));
+    const rideSnapshot = await requestBrowser({ action: "snapshot" });
+    const rideMatches = rideSnapshot.matches as Array<any>;
+    const pickup = rideMatches.find((item) => item.role === "combobox" && item.name === "Pickup location");
+    const dropoff = rideMatches.find((item) => item.role === "combobox" && item.name === "Dropoff location");
+    if (!pickup || !dropoff) throw new Error("Smoke fixture did not expose pickup and dropoff comboboxes");
+    const pickupValue = "Los Angeles International Airport";
+    const dropoffValue = "Santa Monica Pier";
+    const pickupFilled = await requestBrowser({ action: "fill", selector: selectorFor(pickup), value: pickupValue });
+    const dropoffFilled = await requestBrowser({ action: "fill", selector: selectorFor(dropoff), value: dropoffValue });
+    assertCheck("generic autocomplete commits a unique pickup suggestion", pickupFilled.formState?.value === pickupValue && pickupFilled.formState?.autocompleteSelected === true, JSON.stringify(pickupFilled.formState));
+    assertCheck("generic autocomplete commits a unique dropoff suggestion", dropoffFilled.formState?.value === dropoffValue && dropoffFilled.formState?.autocompleteSelected === true, JSON.stringify(dropoffFilled.formState));
     await requestBrowser({ action: "scroll", direction: "down", amount: 3 });
 
     const uploadInput = fixtureMatches.find((item) => item.role === "file" && item.name === "Attach fixture file");
@@ -157,7 +168,7 @@ async function main() {
     assertCheck("download capture and byte integrity", downloaded.toString("utf8") === "Chusky E2B download fixture");
     await requestBrowser({ action: "download_ack", id: waited.download.id });
 
-    const login = await requestBrowser({ action: "vault_login", smokeFixture: true, url: "https://vault-smoke.invalid/login", usernameFieldLabel: "Email", passwordFieldLabel: "Password", submitButtonLabel: "Sign in", username: "smoke-user@example.invalid", password: "not-a-real-password" });
+    const login = await requestBrowser({ action: "vault_login", activeIndex: Number(rideSnapshot.activeIndex ?? 0), smokeFixture: true, url: "https://vault-smoke.invalid/login", usernameFieldLabel: "Email", passwordFieldLabel: "Password", submitButtonLabel: "Sign in", username: "smoke-user@example.invalid", password: "not-a-real-password" });
     const loginState = {
       authenticated: login.authenticated === true,
       needsUserInteraction: login.needsUserInteraction === true,

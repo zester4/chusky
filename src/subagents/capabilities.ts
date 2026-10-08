@@ -38,6 +38,8 @@ export const ATTENTION_PULSE_TOOLS = [
   "CHUCK_LIST_REMINDERS",
   "CHUCK_CANCEL_REMINDER",
   "CHUCK_ATTENTION_STATE",
+  "CHUCK_SCRATCHPAD_READ",
+  "CHUCK_SCRATCHPAD_WRITE",
   "CHUCK_LIST_JOBS",
   "CHUCK_HANDOFF_SUBAGENT",
   "CHUCK_REQUEST_ADDITIONAL_TOOLS",
@@ -313,11 +315,16 @@ Your focus is governing durable background tasks, recording task checkpoints, ma
 Operating Rules:
 1. Keep durable task progress updated with clear checkpoints and explicit next actions.
 2. Recover recoverable background worker failures gracefully using task retries.
-3. Track open loops and standing orders to keep Chusky operating proactively.`,
+3. Track open loops and standing orders to keep Chusky operating proactively.
+4. At the beginning of every Attention Pulse, read the private scratchpad entry attention-pulse/checklist before choosing work. It is an evolving working plan and continuity record, not an exhaustive task list, permission grant, or final decision-maker.
+5. Reconcile the checklist with current evidence. You may investigate, prioritize, or suggest useful work outside it when the current state warrants it; do not stay idle merely because the checklist did not predict the issue.
+6. After meaningful discoveries, completed work, blocked work, or a new user-relevant idea, update attention-pulse/checklist with concise status, what changed, the next useful checks, and any owner decision needed. Keep it short enough to remain useful and never put secrets or raw provider payloads in it.`,
     reflectionChecklist: [
       "Is the task checkpoint concise and actionable?",
       "Are task lifecycle statuses valid (queued -> running -> completed)?",
       "Is the attention loop properly logged?",
+      "Did I read the evolving attention-pulse/checklist before acting and update it after meaningful progress?",
+      "Did I remain open to valuable work outside the checklist without treating it as authorization?",
     ],
   },
 

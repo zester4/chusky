@@ -10,6 +10,7 @@ import { initStore, saveBrowserHandoff } from "../src/store.js";
 import { chuckTools } from "../src/agentTools.js";
 import { pendingVaultInspectionOrigins } from "../src/vault/browserGuard.js";
 import { auxiliaryBrowserRequest } from "../src/lib/e2b/auxiliaryActions.js";
+import { scoreBrowserControlRemap, selectBrowserControlRemapCandidate } from "../src/lib/e2b/browser.js";
 
 test("the model schema and dispatcher expose exactly the supported E2B browser actions", () => {
   const schema = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER")?.function.parameters as { properties?: { action?: { enum?: string[] } } } | undefined;
@@ -56,6 +57,10 @@ test("form inspection is a structured, safe browser capability", () => {
   assert.match(agent, /Dropdown option/);
   assert.match(agent, /async function clickControl/);
   assert.match(agent, /force: true/);
+  assert.match(agent, /selectUniqueAutocomplete/);
+  assert.match(agent, /aria-autocomplete/);
+  assert.match(agent, /autocompleteCommittedByPage/);
+    assert.match(agent, /setAttribute\(['"]role['"],\s*['"]option['"]\)/);
   const engine = readFileSync("src/lib/e2b/browser.ts", "utf8");
   assert.match(engine, /activeTabIndex/);
   assert.match(engine, /result\.tabs/);
@@ -137,6 +142,31 @@ test("human handoff blocks browser mutation until same-origin verification", () 
   assert.throws(() => assertE2BBrowserHandoffAllowsAction("open", [awaiting], "https://example.test/path", "sandbox", 100), /awaiting same-origin verification/);
   assert.throws(() => assertE2BBrowserHandoffAllowsAction("snapshot", [awaiting], "https://attacker.test/", "sandbox", 100), /awaiting same-origin verification/);
   assert.doesNotThrow(() => assertE2BBrowserHandoffAllowsAction("click", [handoff], "https://example.test", "sandbox", 20_000));
+});
+
+test("browser recovery remaps re-rendered transportation location controls without guessing", () => {
+  const pickup = { nodeId: "old-pickup", role: "textbox", name: "Pickup location", index: 0, frameIndex: 0, url: "https://ride.example", capturedAt: 1 };
+  const currentPickup = { nodeId: "new-pickup", role: "combobox", name: "Where should we pick you up?", index: 1, frameIndex: 0, url: "https://ride.example", capturedAt: 2 };
+  const currentDropoff = { ...currentPickup, nodeId: "new-dropoff", name: "Where are you going?", index: 2 };
+  assert.ok(scoreBrowserControlRemap(pickup, currentPickup) >= 28);
+  assert.equal(scoreBrowserControlRemap(pickup, currentDropoff), 0);
+  const genericPickup = { ...pickup, nodeId: "generic-pickup", role: "combobox", name: "Search for a location", index: 0 };
+  const genericDropoff = { ...genericPickup, nodeId: "generic-dropoff", index: 1 };
+  assert.ok(scoreBrowserControlRemap(pickup, genericPickup) >= 28);
+  assert.equal(selectBrowserControlRemapCandidate(pickup, [genericPickup, genericDropoff])?.nodeId, "generic-pickup");
+  assert.equal(scoreBrowserControlRemap(pickup, { ...currentPickup, frameIndex: 1 }), scoreBrowserControlRemap(pickup, currentPickup));
+  const engine = readFileSync("src/lib/e2b/browser.ts", "utf8");
+  assert.match(engine, /LOCATION_INTENTS/);
+  assert.match(engine, /compatibleControlRole/);
+  assert.match(engine, /scoreBrowserControlRemap/);
+  assert.match(engine, /sameFrame/);
+  assert.match(engine, /semantic scores tie/);
+});
+
+test("browser recovery chooses the unique semantic location candidate and preserves the prior index on ties", async () => {
+  const engine = readFileSync("src/lib/e2b/browser.ts", "utf8");
+  assert.match(engine, /selectBrowserControlRemapCandidate/);
+  assert.match(engine, /scoreBrowserControlRemap/);
 });
 
 test("resuming an incomplete handoff returns a waiting state without touching E2B", async () => {

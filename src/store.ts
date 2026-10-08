@@ -742,6 +742,8 @@ export interface SdkRunRecord {
   /** Persisted generated images made available by this run. Only safe metadata is persisted. */
   images?: SdkRunImage[];
   output?: string;
+  /** Owner-scoped end-user feedback for the assistant result. */
+  feedback?: "positive" | "negative";
   cost?: number;
   approvalId?: string;
   taskId?: string;
@@ -1398,6 +1400,8 @@ export interface AttentionCandidateRecord {
   status: "pending" | "delivered" | "accepted" | "dismissed" | "snoozed" | "expired";
   observationId?: string; openLoopId?: string; sourceTriggerEventId?: string; score: number; reason: string;
   proposedAction?: string; channel?: ChannelProvider; availableAt?: number; expiresAt?: number;
+  suggestedActions?: Array<{ id: string; label: string; prompt: string }>;
+  providerSlug?: string;
   createdAt: number; updatedAt: number;
 }
 export interface StandingOrderRecord {
@@ -9256,7 +9260,14 @@ function attentionRecord(collection: AttentionCollection, raw: Record<string, un
       ...base, candidateType: attentionStatus(raw.candidateType, ["nudge", "digest", "prepare", "ask", "act"], "nudge") as AttentionCandidateRecord["candidateType"],
       status: attentionStatus(raw.status, ["pending", "delivered", "accepted", "dismissed", "snoozed", "expired"], "pending") as AttentionCandidateRecord["status"],
       observationId: attentionText(raw.observationId, "observationId", 160), openLoopId: attentionText(raw.openLoopId, "openLoopId", 160), sourceTriggerEventId: attentionText(raw.sourceTriggerEventId, "sourceTriggerEventId", 200), score: attentionNumber(raw.score, "score", 0.5, 0, 1),
-      reason: attentionText(raw.reason, "reason", 1000, true)!, proposedAction: attentionText(raw.proposedAction, "proposedAction"), channel: attentionProvider(raw.channel, "channel"),
+      reason: attentionText(raw.reason, "reason", 1000, true)!, proposedAction: attentionText(raw.proposedAction, "proposedAction"), providerSlug: attentionText(raw.providerSlug, "providerSlug", 120), suggestedActions: Array.isArray(raw.suggestedActions) ? raw.suggestedActions.slice(0, 4).flatMap((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+        const action = item as Record<string, unknown>;
+        const id = attentionText(action.id, "suggestedActions.id", 80, true);
+        const label = attentionText(action.label, "suggestedActions.label", 80, true);
+        const prompt = attentionText(action.prompt, "suggestedActions.prompt", 2000, true);
+        return id && label && prompt ? [{ id, label, prompt }] : [];
+      }) : undefined, channel: attentionProvider(raw.channel, "channel"),
       availableAt: attentionTimestamp(raw.availableAt, "availableAt"), expiresAt: attentionTimestamp(raw.expiresAt, "expiresAt"),
     };
     case "standing-orders": return {

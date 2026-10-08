@@ -1219,6 +1219,27 @@ test("SDK conversation lifecycle is owned, archive-aware, and protects active ru
   assert.equal(missing.status, 404);
 });
 
+test("SDK run feedback is durable, owner-scoped, and removable", async () => {
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "feedback-owner", "Content-Type": "application/json" };
+  const created = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers, body: "{}" }));
+  assert.equal(created.status, 201);
+  const thread = await created.json() as { id: string };
+  const queued = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs`, { method: "POST", headers: { ...headers, "Idempotency-Key": "feedback-run" }, body: JSON.stringify({ input: "Persist this feedback.", wait: false }) }));
+  assert.equal(queued.status, 202);
+  const run = await queued.json() as { id: string; feedback?: string };
+  const saved = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/${run.id}/feedback`, { method: "PATCH", headers, body: JSON.stringify({ feedback: "positive" }) }));
+  assert.equal(saved.status, 200);
+  assert.equal((await saved.json() as { feedback?: string }).feedback, "positive");
+  const readBack = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/${run.id}`, { headers }));
+  assert.equal((await readBack.json() as { feedback?: string }).feedback, "positive");
+  const cleared = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/${run.id}/feedback`, { method: "PATCH", headers, body: JSON.stringify({ feedback: null }) }));
+  assert.equal(cleared.status, 200);
+  assert.equal("feedback" in (await cleared.json() as Record<string, unknown>), false);
+  const invalid = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/${run.id}/feedback`, { method: "PATCH", headers, body: JSON.stringify({ feedback: "maybe" }) }));
+  assert.equal(invalid.status, 400);
+});
+
 test("SDK file intents enforce the configured allowlist and maximum size before storage access", async () => {
   const api = app();
   const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json" };

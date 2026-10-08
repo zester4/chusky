@@ -17,7 +17,7 @@ export function classifyRetailerFailure(value: unknown): RetailerFailureClass {
 }
 
 export function isPurchaseControlLabel(value: unknown): boolean {
-  return /(^|\b)(place order|submit order|buy now|pay now|complete purchase|confirm purchase|submit payment|finish order)(\b|$)/i.test(String(value ?? ""));
+  return /(^|\b)(place (?:my )?order|submit order|buy now|pay now|complete (?:the )?purchase|confirm (?:and )?(?:pay|purchase|order)|submit payment|finish (?:the )?order|order now|proceed to (?:place )?(?:the )?(?:order|payment|purchase)|continue to payment)(\b|$)/i.test(String(value ?? ""));
 }
 
 export function pageLooksUsable(value: { url?: unknown; title?: unknown; pageContent?: unknown }): boolean {
