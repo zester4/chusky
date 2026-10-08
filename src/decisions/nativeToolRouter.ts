@@ -168,6 +168,18 @@ function relevance(query: string, descriptor: NativeToolDescriptor): number {
   for (const word of requestWords) if (bundleWords.includes(word)) score += 3;
   if (requestWords.has(descriptor.slug.toLowerCase().replace(/^chuck_/, "").replace(/_/g, " "))) score += 8;
   if (descriptor.slug === "CHUCK_SET_REMINDER" && /\b(?:remind me|set (?:a )?reminder|schedule (?:a )?reminder)\b/i.test(query)) score += 100;
+  // Prefer the purpose-built generator when the request names a concrete
+  // document format. CHUCK_ARTIFACT owns lifecycle/registration, but should
+  // not outrank the generator that creates the requested file.
+  if (/\b(?:create|make|generate|produce|build|draft)\b/i.test(query)) {
+    const formatByTool: Record<string, RegExp> = {
+      CHUCK_CREATE_PDF: /\bpdf\b/i,
+      CHUCK_CREATE_DOCUMENT: /\b(?:docx|word document|word file)\b/i,
+      CHUCK_CREATE_PRESENTATION: /\b(?:pptx|powerpoint|presentation|slides?)\b/i,
+      CHUCK_CREATE_SPREADSHEET: /\b(?:xlsx|excel|spreadsheet|workbook)\b/i,
+    };
+    if (formatByTool[descriptor.slug]?.test(query)) score += 100;
+  }
   return score;
 }
 
