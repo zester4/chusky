@@ -215,11 +215,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces Attention Pulse", async () => {
+test("current upgrade manifest announces the shopping workflow release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.42.0");
-  assert.equal(notice?.version, "4.42.0");
-  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("attention"));
+  assert.equal(notice?.id, "release-4.45.0");
+  assert.equal(notice?.version, "4.45.0");
+  assert.match(notice?.bullets.join(" ") ?? "", /meal-plan/i);
+  assert.match(notice?.bullets.join(" ") ?? "", /reservation/i);
+  assert.match(notice?.bullets.join(" ") ?? "", /approval gates/i);
 });
 
 test("browser reliability preset covers planning, recovery, checkpoints, and visual freshness", () => {

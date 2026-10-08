@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "dashboard": "npm --prefix chusky-web run dev",
-    "build": "tsc",
+    "build": "node --max-old-space-size=8192 ./node_modules/typescript/bin/tsc",
     "build:sdk": "tsc -p sdk/tsconfig.json",
     "sdk:check": "npm run typecheck && npm run build:sdk && npm run test:sdk",
     "sdk:version": "node scripts/bump-sdk-version.mjs",
@@ -38,9 +38,12 @@
     "e2b:template:build": "tsx scripts/build-e2b-browser-template.ts",
     "web-bot-auth:generate-key": "tsx scripts/generate-web-bot-auth-key.ts",
     "e2b:browser:live-smoke": "tsx scripts/e2b-browser-live-smoke.ts",
+    "e2b:shopping:platform-smoke": "tsx scripts/e2b-shopping-platform-smoke.ts",
+    "browser:benchmark": "tsx scripts/browser-benchmark.ts",
     "e2b:browser:retailer-matrix": "tsx scripts/e2b-retailer-live-matrix.ts",
+    "e2b:shopping:flow": "tsx scripts/e2b-retailer-live-matrix.ts --food",
     "benchmark:e2e-sales-cycle": "tsx scripts/prepare-e2e-sales-cycle.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "node --max-old-space-size=8192 ./node_modules/typescript/bin/tsc --noEmit",
     "test": "tsx --test --test-concurrency=1 tests/*.test.ts",
     "test:sdk": "tsx --test --test-concurrency=1 sdk/tests/*.test.ts",
     "test:mission:crash": "tsx --test --test-concurrency=1 tests/mission-process-crash.proof.ts"

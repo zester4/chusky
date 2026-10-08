@@ -1,4 +1,5 @@
-export type ShoppingCategory = "groceries" | "household" | "meal_kit" | "fashion" | "electronics" | "health_beauty" | "home" | "other";
+export type ShoppingCategory = "groceries" | "household" | "restaurant_delivery" | "meal_kit" | "dining_reservations" | "fashion" | "electronics" | "health_beauty" | "home" | "other";
+export type ShoppingWorkflow = "product_cart" | "meal_plan" | "reservation";
 export type ShoppingRunStatus = "awaiting_details" | "awaiting_retailer" | "awaiting_connection" | "awaiting_user_interaction" | "ready_to_shop" | "shopping" | "cart_ready" | "completed" | "cancelled";
 
 export type ShoppingPauseReason = "captcha" | "two_factor" | "age_verification" | "site_challenge" | "login" | "user_requested";
@@ -9,6 +10,7 @@ export interface ShoppingRetailer {
   origin: string;
   countries: string[];
   categories: ShoppingCategory[];
+  workflow?: ShoppingWorkflow;
   supportsDelivery: boolean;
   supportsPickup: boolean;
 }
