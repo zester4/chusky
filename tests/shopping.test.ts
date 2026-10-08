@@ -29,6 +29,12 @@ test("shopping starts retailer-neutral and suggests local options", async () => 
   assert.deepEqual(await listShopping(9002), []);
 });
 
+test("shopping treats a model-supplied zero budget placeholder as no budget cap", async () => {
+  const result = await startShopping(9002, { items: ["coffee"], retailer: "Walmart", country: "US", budget: 0 });
+  assert.equal(result.budget, undefined);
+  assert.equal(result.status, "ready_to_shop");
+});
+
 test("shopping supports any clean HTTPS retailer after selection", async () => {
   const started = await startShopping(9003, { items: ["dog food"], category: "household" });
   const selected = await selectShoppingRetailer(9003, { id: started.id, retailer: "Pet Store", origin: "https://shop.example.com" });

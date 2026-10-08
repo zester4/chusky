@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { beforeEach } from "node:test";
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { requestDelegationCancellation, executeDelegation } from "../src/subagents/executor.js";
-import { getTask, initStore, listHandoffRecords } from "../src/store.js";
+import { getTask, initStore, isAgentRunCancellationRequested, listHandoffRecords, requestAgentRunCancellation, saveAgentRun } from "../src/store.js";
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
 
@@ -47,4 +47,13 @@ test("cancels an in-flight Composio call and preserves redacted audit metadata",
   assert.deepEqual(result.toolCallsLog[0]?.argumentKeys, ["owner", "repo"]);
   assert.equal("args" in (result.toolCallsLog[0] ?? {}), false);
   assert.equal((await getTask(userId, result.taskId!))?.status, "cancelled");
+});
+
+test("agent run cancellation is visible through the durable store boundary", async () => {
+  const userId = 992002;
+  const now = Date.now();
+  await saveAgentRun({ id: "run_cross_replica_cancel", userId, kind: "supervisor", objective: "Browse a page", status: "running", version: 0, events: [], createdAt: now, updatedAt: now });
+  assert.equal(await isAgentRunCancellationRequested(userId, "run_cross_replica_cancel"), false);
+  assert.equal(await requestAgentRunCancellation(userId, "run_cross_replica_cancel"), true);
+  assert.equal(await isAgentRunCancellationRequested(userId, "run_cross_replica_cancel"), true);
 });

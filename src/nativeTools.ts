@@ -1119,10 +1119,23 @@ async function resumeBrowserHandoff(userId: number, id: string, ownerPrivateRun:
   if (["expired", "cancelled"].includes(handoff.status)) throw new Error(`This browser handoff is ${handoff.status}. Request a new private handoff.`);
   if (handoff.status === "completed") return { id, status: "completed", alreadyCompleted: true };
 
-  // Moving to awaiting_verification before reading the page makes the resume
-  // operation durable and lets the normal browser guard permit only the bound
-  // same-origin inspection. No website mutation occurs in this function.
-  if (handoff.status === "waiting") await updateBrowserHandoff(userId, id, "awaiting_verification");
+  // A model may call resume immediately after the owner says "continue",
+  // before the explicit handoff-complete acknowledgement has been recorded.
+  // This is a normal protocol state, not a browser failure. Do not touch the
+  // retained page or convert the handoff to awaiting_verification here.
+  if (handoff.status === "waiting") {
+    return {
+      id,
+      status: "waiting_for_owner",
+      needsUserInteraction: true,
+      expiresAt: handoff.expiresAt,
+      next: "The private browser handoff is still waiting for the owner. After the owner finishes the website step, call CHUCK_BROWSER_HANDOFF_COMPLETE, then inspect and verify the same-origin page before resuming browser actions.",
+    };
+  }
+
+  // The owner has explicitly completed the handoff. The retained page may now
+  // be inspected for same-origin verification; no website mutation occurs in
+  // this function.
   const browser = automatedBrowserEngine("state");
   const observed = await browser.browser(userId, { action: "state", maxDepth: 8 }, { ownerPrivateRun: true }) as {
     provider?: unknown; observedUrl?: unknown; observationMethod?: unknown; title?: unknown; challenge?: unknown; needsUserInteraction?: unknown;

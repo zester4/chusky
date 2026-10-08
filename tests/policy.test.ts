@@ -92,6 +92,10 @@ test("uses explicit native policies and gates only side-effecting Composio batch
     assert.equal(requiresToolApproval(name, { id: "bh_existing" }, true, true), false, `${name} must ignore force approval`);
     assert.equal(requiresToolApproval(name, { id: "bh_existing" }, true, false), false, `${name} must ignore force approval outside owner mode`);
   }
+  for (const name of ["CHUCK_BROWSER_OBSERVE", "CHUCK_BROWSER_ACT", "CHUCK_BROWSER_EXTRACT", "CHUCK_BROWSER_AGENT"]) {
+    assert.equal(toolApprovalPolicy(name), "private", name);
+    assert.equal(requiresToolApproval(name, {}, true, true), false, `${name} must not become approval-gated by a generic run override`);
+  }
   for (const name of ["CHUCK_MEETING_CONTEXT_LOOKUP", "CHUCK_MEETING_CONTACT_CAPTURE", "CHUCK_MEETING_CONTACTS_LIST", "CHUCK_MEETING_FOLLOWUP_SCHEDULE"]) {
     assert.equal(toolApprovalPolicy(name), "private", name);
   }

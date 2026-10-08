@@ -1732,6 +1732,8 @@ interface Backend {
   getAgentRun(userId: number, id: string): Promise<AgentRunRecord | undefined>;
   saveAgentRun(record: AgentRunRecord, expectedVersion?: number): Promise<AgentRunRecord>;
   listAgentRuns(userId: number, limit?: number): Promise<AgentRunRecord[]>;
+  requestAgentRunCancellation(userId: number, id: string): Promise<boolean>;
+  isAgentRunCancellationRequested(userId: number, id: string): Promise<boolean>;
   getHandoffRecord(userId: number, id: string): Promise<HandoffRecord | undefined>;
   saveHandoffRecord(record: HandoffRecord & { userId: number }): Promise<HandoffRecord>;
   claimHandoffBudget(userId: number, id: string, kind: "tool" | "peer"): Promise<boolean>;
@@ -2130,6 +2132,7 @@ class RedisBackend implements Backend {
   private brandingKey = (organizationId: string) => `chuck:organization:branding:${createHash("sha256").update(organizationId).digest("hex")}`;
   private brandingDomainKey = (hostname: string) => `chuck:organization:branding-domain:${createHash("sha256").update(hostname).digest("hex")}`;
   private runKey = (id: string) => `chuck:run:${id}`;
+  private runCancellationKey = (id: string) => `chuck:run-cancel:${id}`;
   private runIndexKey = (id: number) => `chuck:user:${id}:runs`;
   private handoffKey = (id: string) => `chuck:handoff:${id}`;
   private handoffIndexKey = (id: number) => `chuck:user:${id}:handoffs`;
@@ -2701,6 +2704,17 @@ class RedisBackend implements Backend {
     const ids = await this.r.zrevrange(this.runIndexKey(userId), 0, Math.max(0, limit - 1));
     const records = await Promise.all(ids.map((id) => this.getAgentRun(userId, id)));
     return records.filter((record): record is AgentRunRecord => Boolean(record));
+  }
+  async requestAgentRunCancellation(userId: number, id: string): Promise<boolean> {
+    const record = await this.getAgentRun(userId, id);
+    if (!record || ["completed", "cancelled", "failed"].includes(record.status)) return false;
+    await this.r.setex(this.runCancellationKey(id), Math.max(60, agentRunTtlSeconds(record)), "1");
+    return true;
+  }
+  async isAgentRunCancellationRequested(userId: number, id: string): Promise<boolean> {
+    const record = await this.getAgentRun(userId, id);
+    if (!record || record.userId !== userId) return false;
+    return (await this.r.get(this.runCancellationKey(id))) === "1";
   }
   async getHandoffRecord(userId: number, id: string): Promise<HandoffRecord | undefined> {
     const raw = await this.r.get(this.handoffKey(id));
@@ -4025,6 +4039,17 @@ class MemoryBackend implements Backend {
   }
   async listAgentRuns(userId: number, limit = 50) {
     return [...this.agentRuns.values()].filter((record) => record.userId === userId).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, limit);
+  }
+  private agentRunCancellation = new Set<string>();
+  async requestAgentRunCancellation(userId: number, id: string) {
+    const record = await this.getAgentRun(userId, id);
+    if (!record || ["completed", "cancelled", "failed"].includes(record.status)) return false;
+    this.agentRunCancellation.add(id);
+    return true;
+  }
+  async isAgentRunCancellationRequested(userId: number, id: string) {
+    const record = await this.getAgentRun(userId, id);
+    return Boolean(record && record.userId === userId && this.agentRunCancellation.has(id));
   }
   async getHandoffRecord(userId: number, id: string) {
     const record = this.handoffs.get(id);
@@ -5481,27 +5506,29 @@ export async function releaseTregSpendLock(userId: number, dayKey: string, token
 /**
  * Serialize a read/modify/write mutation for the durable session blob. Redis
  * session writes are otherwise vulnerable to lost updates when a worker and a
- * webhook update the same owner at the same time. The lease is deliberately
- * short; callers should keep the mutator CPU-only and never perform provider
- * I/O while holding it.
+ * webhook update the same owner at the same time. Loading SDK run state and
+ * reconciling Neon domains can exceed a short fixed lease, so this uses the
+ * same renewable lease discipline as durable session writes.
  */
 export async function mutateSession<T>(uid: number, mutator: (session: UserSession) => T | Promise<T>, options: { sdkThreadId?: string; allSdkRuns?: boolean } = {}): Promise<T> {
   const token = randomUUID();
   const key = `session-mutate:${uid}`;
-  let acquired = false;
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    if (await backend.acquireKeyLock(key, token, 15)) { acquired = true; break; }
-    await new Promise((resolve) => setTimeout(resolve, 25 + Math.floor(Math.random() * 50)));
-  }
-  if (!acquired) throw new Error("Session mutation is busy; retry shortly.");
-  try {
+  return withDistributedLease({
+    acquire: async () => backend.acquireKeyLock(key, token, 60),
+    renew: async () => backend.renewKeyLock(key, token, 60),
+    release: async () => backend.releaseKeyLock(key, token),
+  }, async () => {
     const session = options.allSdkRuns ? await getSessionWithSdkRuns(uid) : options.sdkThreadId ? await getSessionWithSdkRuns(uid, options.sdkThreadId) : await getSession(uid);
     const result = await mutator(session);
     await saveSession(uid, session);
     return result;
-  } finally {
-    await backend.releaseKeyLock(key, token);
-  }
+  }, {
+    acquisitionAttempts: 20,
+    retryDelayMs: 50,
+    renewalIntervalMs: 10_000,
+    busyMessage: "Session mutation is busy; retry shortly.",
+    lostMessage: "Session mutation lease was lost; verify the session before retrying.",
+  });
 }
 
 export async function listProviderProofs(now = Date.now()): Promise<ProviderProof[]> {
@@ -5615,6 +5642,16 @@ export async function saveAgentRun(record: AgentRunRecord, expectedVersion?: num
 
 export async function listAgentRuns(userId: number, limit = 50): Promise<AgentRunRecord[]> {
   return backend.listAgentRuns(userId, Math.max(1, Math.min(100, limit)));
+}
+
+/** Set a durable cancellation marker that is visible across service replicas. */
+export async function requestAgentRunCancellation(userId: number, id: string): Promise<boolean> {
+  return backend.requestAgentRunCancellation(userId, id);
+}
+
+/** Read the cross-replica cancellation marker for an active agent run. */
+export async function isAgentRunCancellationRequested(userId: number, id: string): Promise<boolean> {
+  return backend.isAgentRunCancellationRequested(userId, id);
 }
 
 export async function addPhoneCall(uid: number, record: PhoneCallRecord): Promise<PhoneCallRecord> {

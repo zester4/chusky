@@ -110,9 +110,9 @@ Use the retained owner-only E2B stream when the owner needs to watch or act:
 3. keep the same browser session and page alive;
 4. let the owner complete CAPTCHA, 2FA, passkey, age verification, or another
    user-only step;
-5. call `CHUCK_BROWSER_HANDOFF_COMPLETE` or `CHUCK_BROWSER_HANDOFF_RESUME`;
-6. inspect the same-origin page and call `CHUCK_BROWSER_VERIFY` with required
-   detectors before any further mutation;
+5. call `CHUCK_BROWSER_HANDOFF_COMPLETE`, inspect the same-origin page, and
+   call `CHUCK_BROWSER_VERIFY` with the handoff ID and required detectors;
+6. only after verification, resume browser mutation;
 7. stop and request another handoff if the challenge remains.
 
 CAPTCHA detection may identify and display a challenge, but the agent must not

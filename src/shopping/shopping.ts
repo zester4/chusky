@@ -47,6 +47,9 @@ function delivery(value: unknown): "delivery" | "pickup" | "either" | undefined 
 
 function money(value: unknown): number | undefined {
   if (value === undefined || value === null || value === "") return undefined;
+  // Models commonly serialize an unspecified optional numeric constraint as 0.
+  // Treat that placeholder as absent; never turn it into a real spending cap.
+  if (value === 0) return undefined;
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 1_000_000) throw new Error("budget must be a positive number up to 1,000,000");
   return value;
 }

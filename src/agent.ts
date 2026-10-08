@@ -29,7 +29,7 @@ import { config } from "./config.js";
 import { getTriggerTypeBySlug, getTriggerTypeByToken, listTriggerToolkits as listCatalogueToolkits, listTriggerTypesForToolkit, requiredTriggerConfigFields, triggerTypeForAgent, type TriggerCatalogueItem, type TriggerToolkit } from "./triggerCatalog.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { logger } from "./logger.js";
-import { createApproval, createVideoJob, getAgentRun, getApproval, getImageAsset, getSession, recordTrustedMissionEvidence, saveAgentRun, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
+import { createApproval, createVideoJob, getAgentRun, getApproval, getImageAsset, getSession, isAgentRunCancellationRequested, recordTrustedMissionEvidence, saveAgentRun, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
 import type { AgentRunRecord, Message } from "./store.js";
 import { nativeTool, type MissionWaitRequest, type NativeToolRuntime } from "./nativeTools.js";
 import { MissionDurationApprovalRequiredError } from "./missionApproval.js";
@@ -100,6 +100,13 @@ const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
 const MAX_TOOL_RESULT_CHARS = 20_000;
 const MAX_IMAGE_TRANSFER_BYTES = 25 * 1024 * 1024;
 const MAX_BROWSER_FILE_TRANSFER_BYTES = 100 * 1024 * 1024;
+
+class BrowserRunLimitError extends Error {
+  constructor() {
+    super(`Browser safety stop: this run reached the ${config.maxBrowserToolCalls}-call browser budget.`);
+    this.name = "BrowserRunLimitError";
+  }
+}
 
 function likelyNeedsActionRouting(query: string): boolean {
   return /\b(?:call|send|email|message|post|publish|create|make|build|generate|edit|upload|download|search|find|look up|research|check|review|open|visit|browse|click|fill|book|schedule|remind|remember|save|update|delete|cancel|run|execute|deploy|push|commit|meeting|calendar|invoice|order|buy|purchase|image|video|file|pdf|spreadsheet|presentation|code|github|slack|gmail|notion|crm|browser|website|company|person|seo|mission|task|accounts?)\b/i.test(query);
@@ -2211,6 +2218,13 @@ export async function runAgent(
 
   let requestModel = model;
 
+  const throwIfDurablyCancelled = async (): Promise<void> => {
+    throwIfAborted(signal);
+    if (!options?.ephemeral && !voiceTurn && await isAgentRunCancellationRequested(userId, durableRunId)) {
+      throw new DOMException("Request cancelled", "AbortError");
+    }
+  };
+
   let allow = options?.toolAllow === undefined ? undefined : new Set(options.toolAllow);
   let meetingComposioAccountAliases = options?.meetingComposioAccountAliases;
   const toolsDisabled = allow?.size === 0;
@@ -2736,6 +2750,8 @@ export async function runAgent(
   const toolsSucceeded: string[] = [];
   const toolOutcomes: AgentResult["toolOutcomes"] = [];
   let toolCallsExecuted = 0;
+  let browserToolCallsExecuted = 0;
+  let browserRunStopped = false;
   let totalCost = 0;
   const generatedImages: AgentResult["generatedImages"] = [];
   // Keep generated media available as an in-turn reference even when the
@@ -2804,7 +2820,7 @@ export async function runAgent(
     logger.debug({ round, model: requestModel, messageCount: messages.length }, "Agent round");
     await persistRun("running", "run.round_started");
 
-    if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
+    await throwIfDurablyCancelled();
     const roundMediaSelection = selectMediaForAction(generatedReferenceImages.length);
     if (roundMediaSelection && !imageComposioDirectActionGuidanceAdded) {
       messages.splice(2, 0, {
@@ -2999,6 +3015,7 @@ export async function runAgent(
 
     for (const call of toolCalls) {
       const slug = canonicalNativeToolSlug(call.function.name);
+      const browserTool = slug === "CHUCK_BROWSER" || slug.startsWith("CHUCK_BROWSER_");
       if (!toolsUsed.includes(slug)) toolsUsed.push(slug);
 
       if (onStatus) await onStatus(toolStatus(slug));
@@ -3060,6 +3077,11 @@ export async function runAgent(
           toolResultsByCallId.set(call.id, result);
           messages.push({ role: "tool", tool_call_id: call.id, content: result });
           continue;
+        }
+        await throwIfDurablyCancelled();
+        if (browserTool) {
+          if (browserToolCallsExecuted >= config.maxBrowserToolCalls) throw new BrowserRunLimitError();
+          browserToolCallsExecuted += 1;
         }
         const args = parseToolArguments(call.function.arguments);
         activityPresentation = composioToolPresentations.get(slug);
@@ -3646,7 +3668,7 @@ export async function runAgent(
           await reportToolActivity({ toolSlug: slug, callId: call.id, status: "approval_required", message: activityMessage, ...toolPresentationActivityFields(activityPresentation), ...(batchActivityActions.length ? { batchActions: batchActivityActions } : {}), durationMs: Math.max(0, Date.now() - toolStartedAt) });
           throw e;
         }
-        if (signal?.aborted) {
+        if (signal?.aborted || (e instanceof DOMException && e.name === "AbortError")) {
           batchActivityActions = batchActivityActions.map((action) => ({ ...action, status: "unknown", summary: "Batch was interrupted; provider outcomes may be partial" }));
           await reportToolActivity({ toolSlug: slug, callId: call.id, status: "cancelled", message: activityMessage, ...toolPresentationActivityFields(activityPresentation), ...(batchActivityActions.length ? { batchActions: batchActivityActions } : {}), durationMs: Math.max(0, Date.now() - toolStartedAt) });
           throw e;
@@ -3667,6 +3689,7 @@ export async function runAgent(
         if (e instanceof DaytonaInputError && ["CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"].includes(slug)) {
           result += "\nNo artifact was registered by this failed call. Fix the reported cause before retrying. If rendering setup failed, reuse the exact file path in the error; do not invent a replacement path or claim delivery.";
         }
+        if (e instanceof BrowserRunLimitError) browserRunStopped = true;
       }
 
       const outcomeStatus = !toolFailed
@@ -3723,6 +3746,11 @@ export async function runAgent(
           messages.push({ role: "user", content: [{ type: "text", text: `Retrieved saved image asset ${String(asset.name ?? "image")}. Inspect it as visual reference for the current task.` }, { type: "image_url", image_url: { url: `data:${mediaType};base64,${bytes.toString("base64")}` } }] });
         }
       }
+    }
+    if (browserRunStopped) {
+      const message = `I stopped the browser loop after ${browserToolCallsExecuted} browser calls to prevent repeated actions on a dynamic page. The latest verified browser evidence is preserved${generatedImages.length ? " and attached" : ""}; inspect it before retrying with a narrower next step.`;
+      await persistRun("completed", "run.browser_safety_stop", message, { browserToolCallsExecuted, maxBrowserToolCalls: config.maxBrowserToolCalls });
+      return { text: message, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionRoutingCache: missionRoutingResult, ...(privateLinks.length ? { privateLinks } : {}) };
     }
     if (taskWaitRequest) {
       const message = "I’m waiting for the external task to finish, then I’ll check its status and continue.";

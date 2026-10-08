@@ -14,7 +14,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
@@ -2729,7 +2729,7 @@ export function registerSdkApi(app: Hono): void {
         }
       } catch (error) {
         if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); const approval = await getApproval(owner.userId, error.approvalId); send({ type: "run.approval_required", run: runView(thread.id, run), approval }); }
-        else if (abort.signal.aborted) { run.status = "cancelled"; run.events.push(event("run.cancelled")); send({ type: "run.cancelled", run: runView(thread.id, run) }); }
+        else if (abort.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) { run.status = "cancelled"; run.events.push(event("run.cancelled")); send({ type: "run.cancelled", run: runView(thread.id, run) }); }
         else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); send({ type: "run.failed", run: runView(thread.id, run), error: run.error }); }
       } finally {
         c.req.raw.signal.removeEventListener("abort", markClientDisconnected);
@@ -2767,7 +2767,34 @@ export function registerSdkApi(app: Hono): void {
     if (run.status === "failed") appendSdkRunHistoryToSession(session, thread.id, run.id, failedSdkRunHistory(run));
     run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await appendReliabilitySample({ ownerId: owner.userId, operation: "sdk.run", status: run.status === "completed" ? "success" : "failure", costUsd: run.cost, latencyMs: run.updatedAt - run.createdAt, at: run.updatedAt }); await saveSession(owner.userId, session); await persistSdkCompanyRun(run); return c.json(runView(thread.id, run), 201);
   });
-  app.post("/v1/threads/:threadId/runs/:runId/cancel", async (c) => { const owner = sdkUser(c)!; const session = await getSessionWithSdkRuns(owner.userId, c.req.param("threadId")); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); if (!thread || !run) return apiError(c, 404, "not_found", "Run not found."); if (!["queued", "running"].includes(run.status)) return apiError(c, 409, "run_not_cancellable", "Only a queued or running run can be cancelled."); if (run.taskId) await cancelTask(owner.userId, run.taskId); activeRuns.get(run.id)?.abort(); run.status = "cancelled"; run.events.push(event("run.cancelled")); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); return c.json(runView(thread.id, run)); });
+  app.post("/v1/threads/:threadId/runs/:runId/cancel", async (c) => {
+    const owner = sdkUser(c)!;
+    const threadId = c.req.param("threadId");
+    const runId = c.req.param("runId");
+    const session = await getSessionWithSdkRuns(owner.userId, threadId);
+    const thread = session.sdkThreads!.find((item) => item.id === threadId);
+    const run = thread?.runs.find((item) => item.id === runId);
+    if (!thread || !run) return apiError(c, 404, "not_found", "Run not found.");
+    if (!["queued", "running"].includes(run.status)) return apiError(c, 409, "run_not_cancellable", "Only a queued or running run can be cancelled.");
+    if (run.taskId) await cancelTask(owner.userId, run.taskId);
+    await requestAgentRunCancellation(owner.userId, run.id);
+    activeRuns.get(run.id)?.abort();
+    const cancelled = await mutateSession(owner.userId, (latestSession) => {
+      const latestThread = latestSession.sdkThreads!.find((item) => item.id === threadId);
+      const latestRun = latestThread?.runs.find((item) => item.id === runId);
+      if (!latestThread || !latestRun) return { kind: "not_found" as const };
+      if (!["queued", "running"].includes(latestRun.status)) return { kind: "not_cancellable" as const };
+      latestRun.status = "cancelled";
+      latestRun.events.push(event("run.cancelled", "Cancellation requested; the active worker will stop at its next safe boundary."));
+      latestRun.updatedAt = Date.now();
+      latestThread.updatedAt = latestRun.updatedAt;
+      return { kind: "cancelled" as const, threadId: latestThread.id, run: structuredClone(latestRun) };
+    }, { sdkThreadId: threadId });
+    if (cancelled.kind === "not_found") return apiError(c, 404, "not_found", "Run not found.");
+    if (cancelled.kind === "not_cancellable") return apiError(c, 409, "run_not_cancellable", "Only a queued or running run can be cancelled.");
+    await persistSdkCompanyRun(cancelled.run);
+    return c.json(runView(cancelled.threadId, cancelled.run));
+  });
   app.get("/v1/approvals", async (c) => { const data = (await listApprovals(sdkUser(c)!.userId, 100)).filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map(approvalView); return c.json({ data }); });
   app.get("/v1/tools", async (c) => {
     const query = (c.req.query("query") ?? "").trim(); const source = c.req.query("source"); const toolkit = (c.req.query("toolkit") ?? "").toLowerCase();
@@ -3601,7 +3628,7 @@ export function registerSdkApi(app: Hono): void {
         if (approvedActivity) { approvedActivity.status = "failed"; approvedActivity.message = "Approval accepted, but the action could not be completed."; }
         await setApprovalStatus(owner.userId, approval.id, "consumed");
         if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required", "Another action needs your approval.")); }
-        else if (abort.signal.aborted) { run.status = "cancelled"; run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved.")); }
+        else if (abort.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) { run.status = "cancelled"; run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved.")); }
         else { run.status = "failed"; run.error = { code: "resume_failed", message: error instanceof Error ? error.message : "Approval resume failed" }; run.events.push(event("run.failed", run.error.message)); }
       }
       run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt;

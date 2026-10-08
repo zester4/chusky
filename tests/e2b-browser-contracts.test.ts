@@ -5,6 +5,8 @@ import { E2B_BROWSER_ACTIONS } from "../src/lib/e2b/types.js";
 import { assertE2BBrowserHandoffAllowsAction, browserHandoffWaitingResult, isTrustedBrowserUrlObservation, normalizeE2BBrowserFileName, normalizeE2BPageContent, resolveE2BBrowserCommandTimeout } from "../src/lib/e2b/contracts.js";
 import { E2BBrowserHandoffWaitingError } from "../src/lib/e2b/errors.js";
 import { shouldUseE2BBrowser } from "../src/nativeTools.js";
+import { nativeTool } from "../src/nativeTools.js";
+import { initStore, saveBrowserHandoff } from "../src/store.js";
 import { chuckTools } from "../src/agentTools.js";
 import { pendingVaultInspectionOrigins } from "../src/vault/browserGuard.js";
 import { auxiliaryBrowserRequest } from "../src/lib/e2b/auxiliaryActions.js";
@@ -52,11 +54,16 @@ test("form inspection is a structured, safe browser capability", () => {
   assert.match(agent, /workflowCheckpoint/);
   assert.match(agent, /page\.keyboard\.press\("Control\+A"\)/);
   assert.match(agent, /Dropdown option/);
+  assert.match(agent, /async function clickControl/);
+  assert.match(agent, /force: true/);
   const engine = readFileSync("src/lib/e2b/browser.ts", "utf8");
   assert.match(engine, /activeTabIndex/);
   assert.match(engine, /result\.tabs/);
   assert.match(engine, /Only replay idempotent control operations/);
   assert.match(engine, /replanInteraction/);
+  assert.match(engine, /sameStableIdentity/);
+  assert.match(engine, /const stale =/);
+  assert.match(engine, /SAFE_REPLAN_ACTIONS as readonly string\[\]\)\.includes\(action\)/);
   assert.match(engine, /stale_observation.*action_timeout.*browser_action_failed/);
   assert.match(engine, /recovery needs the control role and accessible name/);
   assert.match(engine, /retryableCode/);
@@ -130,6 +137,26 @@ test("human handoff blocks browser mutation until same-origin verification", () 
   assert.throws(() => assertE2BBrowserHandoffAllowsAction("open", [awaiting], "https://example.test/path", "sandbox", 100), /awaiting same-origin verification/);
   assert.throws(() => assertE2BBrowserHandoffAllowsAction("snapshot", [awaiting], "https://attacker.test/", "sandbox", 100), /awaiting same-origin verification/);
   assert.doesNotThrow(() => assertE2BBrowserHandoffAllowsAction("click", [handoff], "https://example.test", "sandbox", 20_000));
+});
+
+test("resuming an incomplete handoff returns a waiting state without touching E2B", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 991_701;
+  const id = "bh_waiting_regression";
+  await saveBrowserHandoff(userId, {
+    id,
+    userId,
+    workspaceId: "sandbox-waiting-regression",
+    origin: "https://example.test",
+    reason: "captcha",
+    status: "waiting",
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 60_000,
+  });
+  const result = await nativeTool(userId, "CHUCK_BROWSER_HANDOFF_RESUME", { id }, { ownerPrivateRun: true }) as Record<string, unknown>;
+  assert.equal(result.status, "waiting_for_owner");
+  assert.equal(result.needsUserInteraction, true);
+  assert.match(String(result.next), /CHUCK_BROWSER_HANDOFF_COMPLETE/);
 });
 
 test("handoff verification trusts direct Playwright URL observations but rejects unproven browser URLs", () => {

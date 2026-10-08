@@ -262,6 +262,29 @@ async function controlState(locator) {
   }).catch(() => ({}));
 }
 
+async function clickControl(page, locator) {
+  try {
+    await locator.click({ timeout: 15_000 });
+    return;
+  } catch (firstError) {
+    // Custom controls can remain visible while an animation or transparent
+    // wrapper blocks Playwright's normal actionability check. Use one bounded
+    // fallback and let the caller verify the resulting state or transition.
+    await locator.scrollIntoViewIfNeeded({ timeout: 3_000 }).catch(() => {});
+    try {
+      await locator.click({ timeout: 5_000, force: true });
+      return;
+    } catch {
+      const box = await locator.boundingBox().catch(() => null);
+      if (box && box.width > 0 && box.height > 0) {
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        return;
+      }
+      throw firstError;
+    }
+  }
+}
+
 async function setCheckbox(locator, desired) {
   const native = await locator.evaluate((element) => element instanceof HTMLInputElement && element.type === "checkbox").catch(() => false);
   if (native) {
@@ -283,13 +306,13 @@ async function selectControl(page, locator, value, root) {
     catch { await locator.selectOption(String(value)); }
   } else {
     try {
-      await locator.click({ timeout: 15_000 });
+      await clickControl(page, locator);
       const option = root.getByRole("option", { name: String(value), exact: true }).first();
-      if (await option.count()) await option.click({ timeout: 15_000 });
+      if (await option.count()) await clickControl(page, option);
       else {
         const visibleText = root.getByText(String(value), { exact: true }).first();
         if (!(await visibleText.count())) throw new Error(`Dropdown option "${String(value).slice(0, 120)}" was not found`);
-        await visibleText.click({ timeout: 15_000 });
+        await clickControl(page, visibleText);
       }
     } catch (error) {
       // Many custom comboboxes expose keyboard semantics even when their
@@ -840,7 +863,7 @@ async function execute(context, pageState, request) {
     const validationErrors = forms.flatMap((form) => form.controls.filter((control) => control.invalid).map((control) => ({ label: control.name, message: control.validationMessage || "The field is invalid" })));
     let submitted = false;
     if (request.submit === true && !actionErrors.length && !validationErrors.length && request.submitControl) {
-      try { const submitLocator = await resolveLocator(page, request.submitControl); await submitLocator.click({ timeout: 15_000 }); submitted = true; }
+      try { const submitLocator = await resolveLocator(page, request.submitControl); await clickControl(page, submitLocator); submitted = true; }
       catch (error) { actionErrors.push({ label: clean(request.submitControl.name || "Submit", 200), message: clean(error?.message || error, 300) }); }
     }
     const allErrors = [...actionErrors, ...validationErrors];
@@ -864,7 +887,7 @@ async function execute(context, pageState, request) {
   } else if (["invoke", "click", "focus", "fill", "move", "hover", "select_option", "check", "uncheck"].includes(action)) {
     if (!target) throw new Error("This browser action requires a fresh accessible node selector");
     await target.waitFor({ state: "attached", timeout: 10_000 });
-    if (["invoke", "click"].includes(action)) await target.click({ timeout: 15_000 });
+    if (["invoke", "click"].includes(action)) await clickControl(page, target);
     if (["move", "hover"].includes(action)) await target.hover({ timeout: 15_000 });
     if (action === "focus") await target.focus();
     if (action === "fill") {

@@ -385,13 +385,24 @@ export class E2BBrowserEngine {
     const inspected = await this.run(sandbox, { action: "find", currentUrl: record.lastUrl, role, name, nameMatch: args.nameMatch, limit: 12 }, commandTimeoutMs);
     const url = typeof inspected.url === "string" ? inspected.url : record.lastUrl ?? "";
     const nodes = normalizeMatches(inspected, url, Date.now());
-    const next = await this.persistResult(userId, record, inspected, nodes, "find");
+    let next = await this.persistResult(userId, record, inspected, nodes, "find");
     const sameStableIdentity = (candidate: E2BBrowserNode) => Boolean(saved && ["id", "nameAttr", "placeholder", "autocomplete"].some((key) => {
       const field = key as keyof E2BBrowserNode;
       return typeof saved[field] === "string" && saved[field] === candidate[field];
     }));
     const matching = nodes.filter((candidate) => candidate.role === role && (sameStableIdentity(candidate) || candidate.name === name));
-    const candidate = saved && Number.isSafeInteger(saved.index) ? matching.find((item) => item.index === saved.index) ?? (matching.length === 1 ? matching[0] : undefined) : matching.length === 1 ? matching[0] : undefined;
+    let candidate = saved && Number.isSafeInteger(saved.index) ? matching.find((item) => item.index === saved.index) ?? (matching.length === 1 ? matching[0] : undefined) : matching.length === 1 ? matching[0] : undefined;
+    if (!candidate && saved) {
+      // Accessible names often change after a product card, menu, or SPA
+      // re-render. Reinspect the full accessible tree and prefer the stable
+      // identity captured earlier before declaring the control ambiguous.
+      const state = await this.run(sandbox, { action: "state", currentUrl: url, includePageContent: false }, commandTimeoutMs);
+      const stateUrl = typeof state.url === "string" ? state.url : url;
+      const stateNodes = normalizeMatches(state, stateUrl, Date.now());
+      next = await this.persistResult(userId, next, state, stateNodes, "state");
+      const stable = stateNodes.filter((item) => item.role === role && sameStableIdentity(item));
+      if (stable.length === 1) candidate = stable[0];
+    }
     if (!candidate) throw new E2BBrowserError(`Browser recovery could not safely remap ${action} to a unique current ${role} control named ${name}`);
     return { record: next, selector: selectorForNode(candidate) };
   }
@@ -572,8 +583,15 @@ export class E2BBrowserEngine {
       if (["state", "snapshot", "find", "form_inspect", "open", "wait", "back", "forward", "refresh"].includes(action)) request.includePageContent = internal.ownerPrivateRun === true;
       if ((INTERACTIVE_ACTIONS as readonly string[]).includes(action) && args.nodeId) {
         const saved = record.nodes?.find((item) => item.nodeId === args.nodeId);
-        if (!saved || Date.now() - saved.capturedAt > NODE_TTL_MS) throw new E2BBrowserError("E2B browser interaction requires a fresh find/state result");
-        Object.assign(request, { selector: selectorForNode(saved), ...(action === "fill" || action === "select_option" ? { value: args.value ?? args.text } : {}) });
+        const stale = !saved || Date.now() - saved.capturedAt > NODE_TTL_MS;
+        if (stale) {
+          if (!saved || !(SAFE_REPLAN_ACTIONS as readonly string[]).includes(action) || !saved.role || !saved.name) throw new E2BBrowserError("E2B browser interaction requires a fresh find/state result");
+          const replanned = await this.replanInteraction(userId, sandbox, record, { ...args, role: saved.role, name: saved.name }, action, commandTimeoutMs);
+          record = replanned.record;
+          Object.assign(request, { selector: replanned.selector, ...(action === "fill" || action === "select_option" ? { value: args.value ?? args.text } : {}) });
+        } else {
+          Object.assign(request, { selector: selectorForNode(saved), ...(action === "fill" || action === "select_option" ? { value: args.value ?? args.text } : {}) });
+        }
       }
       if ((INTERACTIVE_ACTIONS as readonly string[]).includes(action) && !request.selector && (args.role || args.name)) {
         const replanned = await this.replanInteraction(userId, sandbox, record, args, action, commandTimeoutMs);
