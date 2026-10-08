@@ -14,7 +14,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
@@ -1589,6 +1589,40 @@ export function registerSdkApi(app: Hono): void {
       telegramLink: { linked: Boolean(webAuthUserId && await getTelegramUserIdForWebAuth(webAuthUserId)) },
       deliveries: deliveries.filter((item) => item.userId === owner.userId && !item.webhook).sort((a, b) => b.createdAt - a.createdAt).slice(0, 20).map((item) => ({ id: item.id, provider: item.provider, status: item.status, kind: item.kind, attempts: item.attempts, providerStatus: item.providerStatus, lastError: item.lastError, durationMs: item.deliveredAt ? Math.max(0, item.deliveredAt - item.createdAt) : undefined, createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString(), deliveredAt: item.deliveredAt ? new Date(item.deliveredAt).toISOString() : undefined })),
     });
+  });
+
+  app.get("/v1/account/export", async (c) => {
+    const owner = sdkUser(c)!;
+    const session = await getSession(owner.userId);
+    const [channels, reminders, jobs, memory] = await Promise.all([
+      listChannelIdentities(owner.userId),
+      listReminders(owner.userId),
+      listJobs(owner.userId),
+      searchMemories(owner.userId, undefined, { limit: 200 }),
+    ]);
+    return c.json({
+      exportedAt: new Date().toISOString(),
+      account: { userId: owner.externalId },
+      preferences: { model: session.model, voiceReplies: Boolean(session.voiceReplies), voicePreferences: session.voicePreferences ?? {} },
+      conversation: session.history,
+      memories: memory,
+      scratchpad: session.scratchpad ?? [],
+      channels,
+      reminders,
+      jobs,
+    });
+  });
+
+  app.post("/v1/account/memory/clear", async (c) => {
+    const owner = sdkUser(c)!;
+    const removed = await clearPersonalMemories(owner.userId);
+    return c.json({ removed, message: removed ? "Personal memory cleared." : "No personal memory was stored." });
+  });
+
+  app.post("/v1/account/session/clear", async (c) => {
+    const owner = sdkUser(c)!;
+    await clearSession(owner.userId);
+    return c.json({ message: "Conversation context cleared." });
   });
 
   app.get("/v1/account/models", async (c) => {

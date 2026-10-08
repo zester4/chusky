@@ -139,6 +139,26 @@ export async function forgetDurableMemory(input: { ownerUserId: number; keyOrId:
   } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
 }
 
+/** Tombstone every active personal memory for an owner and enqueue vector deletes. */
+export async function forgetAllPersonalDurableMemories(ownerUserId: number): Promise<number> {
+  if (!durableMemoryConfigured()) return 0;
+  if (!Number.isSafeInteger(ownerUserId) || ownerUserId <= 0) throw new Error("Memory owner is invalid");
+  const client = await pool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(`UPDATE chusky_memory_items m SET status='deleted',updated_at=now() FROM chusky_memory_scopes s WHERE m.scope_id=s.id AND m.owner_user_id=$1 AND s.kind='personal' AND s.external_id=$2 AND m.status='active' RETURNING m.id`, [ownerUserId, String(ownerUserId)]);
+    for (const row of result.rows as Array<{ id: string }>) await client.query(`INSERT INTO chusky_memory_outbox (memory_id,operation) VALUES ($1,'delete')`, [row.id]);
+    await client.query("COMMIT");
+    await invalidateHotMemoryBriefs(ownerUserId);
+    return result.rowCount ?? 0;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 /** Read the current active record for an exact key in the owner's personal scope. */
 export async function getDurableMemoryByKey(input: { ownerUserId: number; key: string }): Promise<DurableMemoryRecord | undefined> {
   if (!durableMemoryConfigured()) return undefined;
