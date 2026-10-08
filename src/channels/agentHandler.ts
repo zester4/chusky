@@ -214,7 +214,7 @@ async function handleApproval(message: InboundMessage, conversation: ChuskyConve
       conversationId: approvalConversation.conversationId,
       scope: approvalConversation.scope,
       deliveryTarget: conversation.replyTarget,
-    }, channelAgentRunOptions(approvalConversation, message.receivedAt));
+    }, { ...channelAgentRunOptions(approvalConversation, message.receivedAt), forceApprovedAction: true });
     await saveConversation(approvalConversation, message, approval.request, result.text);
     if (result.cost) await addUsage(conversation.userId, result.cost);
     const outboundImages = [...(result.generatedImages ?? []), ...(result.retrievedImages ?? [])];

@@ -3590,6 +3590,7 @@ export function registerSdkApi(app: Hono): void {
         } else {
         const result = await runAgent(owner.userId, approval.request, approval.history, approval.model, undefined, abort.signal, undefined, approval.id, undefined, {
           ...await sdkAgentOptions({ budget: run.budget, tools: run.tools, skills: run.skills }, run.id, thread.id, run.agentInstructions, run.ownerPrivateRun === true),
+          forceApprovedAction: true,
           onToolActivity: async (activity: AgentToolActivity) => {
             const activityEvent = { id: `evt_${randomUUID()}`, type: "run.tool_activity", at: Date.now(), ...activity };
             run.events.push(activityEvent);

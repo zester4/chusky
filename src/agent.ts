@@ -2017,6 +2017,8 @@ export interface AgentRunOptions {
   autonomyResume?: { kind: "reminder" | "job"; sourceId: string; occurrenceId?: string };
   /** Voice-only activity emitted after authorization and immediately before a real tool dispatch. */
   onVoiceActivity?: (activity: { type: "tool_start"; toolSlug: string; message: string }) => void | Promise<void>;
+  /** Resume an approval by dispatching its exact stored action before asking the model to continue. */
+  forceApprovedAction?: boolean;
 }
 
 export interface AgentToolActivity {
@@ -2373,6 +2375,9 @@ export async function runAgent(
   const durable = options?.ephemeral && !ownerPrivateRun
     ? { summaries: [], imageAssets: [], history: [] as Message[], approvals: [] as Awaited<ReturnType<typeof getSession>>["approvals"] }
     : await getSession(userId);
+  const forcedApproval = options?.forceApprovedAction && approvedApprovalId
+    ? durable.approvals.find((approval) => approval.id === approvedApprovalId && approval.status === "approved" && approval.expiresAt > Date.now())
+    : undefined;
   const ownerMeetingHistory = ownerPrivateRun && options?.meetingId
     ? durable.history.slice(-8).map((message) => {
       const content = typeof message.content === "string" ? message.content : "[previous attachment omitted]";
@@ -2856,9 +2861,15 @@ export async function runAgent(
         ? [...missionRoutedNativeTools, ...preloadedMissionTools, ...missionDiscoveryTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed]
         : [...nativeToolRoute.tools, ...preloadedMissionTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed])
       .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index);
-    const imageSafeTools = roundMediaSelection
-      ? routedTools.filter((tool) => toolSchemaName(tool) !== "COMPOSIO_MULTI_EXECUTE_TOOL")
+    const approvalResumeTool = forcedApproval
+      ? availableTools.find((tool) => toolSchemaName(tool) === forcedApproval.toolSlug)
+      : undefined;
+    const routedToolsWithApproval = approvalResumeTool
+      ? [...routedTools, approvalResumeTool].filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index)
       : routedTools;
+    const imageSafeTools = roundMediaSelection
+      ? routedToolsWithApproval.filter((tool) => toolSchemaName(tool) !== "COMPOSIO_MULTI_EXECUTE_TOOL")
+      : routedToolsWithApproval;
     const modelAvailableTools = roundMediaSelection
       ? imageSafeTools.map((tool) => {
         const slug = toolSchemaName(tool);
@@ -2895,15 +2906,34 @@ export async function runAgent(
     }
     let response: ChatResponse;
     try {
-      await persistRun("running", "run.model_requested", undefined, { model: requestModel, round, messageCount: messages.length });
-      response = await orChat(requestModel, modelMessages, modelAvailableTools, signal, streamModelText, undefined, voiceTurn ? {
-        preferredMaxLatencySeconds: 2,
-        preferredMinThroughput: 50,
-        fallbackModels: config.voiceFallbackModels,
-        maxTokens: config.voiceMaxTokens,
-        sessionId: options?.voiceSessionId,
-        latencyOptimized: true,
-      } : (structuredArtifactRequest || malformedToolCallPending ? { maxTokens: config.openRouterArtifactMaxTokens } : undefined));
+      if (forcedApproval && round === 0) {
+        if (!approvalResumeTool) throw new Error(`The approved action ${forcedApproval.toolSlug} is no longer available in this run.`);
+        await persistRun("running", "run.approved_action_requested", undefined, { approvalId: forcedApproval.id, tool: forcedApproval.toolSlug });
+        response = {
+          choices: [{
+            finish_reason: "tool_calls",
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: `approved_${forcedApproval.id}`,
+                type: "function",
+                function: { name: forcedApproval.toolSlug, arguments: JSON.stringify(forcedApproval.args) },
+              }],
+            },
+          }],
+        } as ChatResponse;
+      } else {
+        await persistRun("running", "run.model_requested", undefined, { model: requestModel, round, messageCount: messages.length });
+        response = await orChat(requestModel, modelMessages, modelAvailableTools, signal, streamModelText, undefined, voiceTurn ? {
+          preferredMaxLatencySeconds: 2,
+          preferredMinThroughput: 50,
+          fallbackModels: config.voiceFallbackModels,
+          maxTokens: config.voiceMaxTokens,
+          sessionId: options?.voiceSessionId,
+          latencyOptimized: true,
+        } : (structuredArtifactRequest || malformedToolCallPending ? { maxTokens: config.openRouterArtifactMaxTokens } : undefined));
+      }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       const modality = requiredModality(userMessage);

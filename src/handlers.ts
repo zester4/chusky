@@ -2784,7 +2784,7 @@ export function registerHandlers(bot: Bot): void {
         await ctx.reply(`📞 ${label} started. I’m joining the call now.`);
         return;
       }
-      const result = await runAgent(ctx.from.id, approval.request, approval.history, approval.model, undefined, undefined, undefined, id, undefined, { ownerPrivateRun: true });
+      const result = await runAgent(ctx.from.id, approval.request, approval.history, approval.model, undefined, undefined, undefined, id, undefined, { ownerPrivateRun: true, forceApprovedAction: true });
       await appendMessages(ctx.from.id, [{ role: "user", content: approval.request }, { role: "assistant", content: result.text }]);
       await replyHtml(ctx, mdToTelegramHtml(result.text));
       await sendVoiceReply(ctx, result.text, (await getSession(ctx.from.id)).voiceReplies === true);

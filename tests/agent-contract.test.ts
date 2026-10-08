@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { addRecallMeeting, claimAgentUpgrade, completeMissionStep, createMission, finalizeMissionIfReady, getApproval, getMission, getSession, initStore, listAgentRuns, listMissions, listTasks, saveSession, startMission, updateMeetingRepresentativeProfile } from "../src/store.js";
+import { addRecallMeeting, claimAgentUpgrade, completeMissionStep, createMission, finalizeMissionIfReady, getApproval, getMission, getSession, initStore, listAgentRuns, listMissions, listTasks, saveSession, setApprovalStatus, startMission, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { appendPreviewLinks, cleanModelText, getReconnectUrl, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { formatAgentUpgradeNotice, loadAgentUpgrade } from "../src/upgradeNotice.js";
 import { config } from "../src/config.js";
@@ -1558,6 +1558,51 @@ test("owner-private deletion pauses before provider execution and stores an exac
     assert.deepEqual(approval?.args, { owner: "owner", repo: "archive" });
     assert.equal((await getApproval(userId, approval!.id))?.userId, userId);
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test("approval resume executes the stored action before model regeneration", async () => {
+  const userId = 830059;
+  const originalDurableMemoryEnabled = config.durableMemoryEnabled;
+  config.durableMemoryEnabled = false;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  let providerCalls = 0;
+  let chatCalls = 0;
+  const session = {
+    sessionId: "approval-resume-exact-action",
+    tools: async () => [{ type: "function", function: { name: "GITHUB_DELETE_REPOSITORY", parameters: { type: "object", required: ["owner", "repo"], properties: { owner: { type: "string" }, repo: { type: "string" } } } } }],
+    execute: async (_slug: string, args: Record<string, unknown>) => { providerCalls++; assert.deepEqual(args, { owner: "owner", repo: "archive" }); return { successful: true, data: { deleted: true } }; },
+  };
+  const originalFetch = globalThis.fetch;
+  setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/chat/completions")) {
+      chatCalls++;
+      const request = JSON.parse(String(init?.body));
+      if (chatCalls === 1) return toolResponse("GITHUB_DELETE_REPOSITORY", JSON.stringify({ owner: "owner", repo: "archive" }));
+      assert.equal(request.messages.at(-1)?.role, "tool");
+      return chatResponse({ role: "assistant", content: "The approved repository action completed." });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      () => runAgent(userId, "Delete the archived repository.", [], "test/model", undefined, undefined, undefined, undefined,
+        { accountId: `account_${userId}`, provider: "telegram", conversationId: "approval-resume", scope: "private" },
+        { ownerPrivateRun: true }),
+      (error: unknown) => error instanceof ApprovalRequiredError && error.toolSlug === "GITHUB_DELETE_REPOSITORY",
+    );
+    const approval = (await getSession(userId)).approvals.at(-1);
+    assert.ok(approval);
+    await setApprovalStatus(userId, approval!.id, "approved");
+    const result = await runAgent(userId, approval!.request, approval!.history, approval!.model, undefined, undefined, undefined, approval!.id,
+      { accountId: `account_${userId}`, provider: "telegram", conversationId: "approval-resume", scope: "private" },
+      { ownerPrivateRun: true, forceApprovedAction: true });
+    assert.match(result.text, /The approved repository action completed\.$/);
+    assert.equal(providerCalls, 1);
+    assert.equal(chatCalls, 2, "the resumed run should add only one closeout model call after the approved action runs");
+    assert.equal((await getApproval(userId, approval!.id))?.status, "consumed");
+  } finally { globalThis.fetch = originalFetch; config.durableMemoryEnabled = originalDurableMemoryEnabled; }
 });
 
 test("shared meeting rooms expose only explicitly granted connected actions", async () => {
