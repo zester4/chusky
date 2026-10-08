@@ -1,4 +1,4 @@
-import { browserBenchmarkCases } from "../../../benchmarks/browser-cases.js";
+import { browserBenchmarkCases } from "./browserCases.js";
 
 export type BrowserBenchmarkStatus = "verified" | "failed" | "blocked" | "unverified";
 
@@ -38,7 +38,7 @@ export function scoreBrowserBenchmark(
     throw new Error("targetPercent must be between 0 and 100");
   }
 
-  const knownIds = new Set(browserBenchmarkCases.map((item) => item.id));
+  const knownIds = new Set<string>(browserBenchmarkCases.map((item) => item.id));
   const byId = new Map<string, BrowserBenchmarkResult>();
   for (const result of results) {
     if (!knownIds.has(result.id)) throw new Error(`Unknown browser benchmark case: ${result.id}`);

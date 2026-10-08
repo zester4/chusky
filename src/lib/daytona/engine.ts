@@ -7,7 +7,7 @@ import JSZip from "jszip";
 import PptxGenJS from "pptxgenjs";
 import { config } from "../../config.js";
 import { guardVaultWorkspaceAccess } from "../../vault/browserGuard.js";
-import { acquireDaytonaComputerLeaseLock, clearDaytonaWorkspace, getDaytonaWorkspace, getSession, releaseDaytonaComputerLeaseLock, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactProvenance, type ArtifactRetention, type ArtifactRegistrationIntent, type ArtifactType, type DaytonaAppCheck, type DaytonaAppFramework, type DaytonaAppRecord, type DaytonaAppVerification } from "../../store.js";
+import { acquireDaytonaComputerLeaseLock, clearDaytonaWorkspace, getDaytonaWorkspace, getSession, releaseDaytonaComputerLeaseLock, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactProvenance, type ArtifactRetention, type ArtifactRegistrationIntent, type ArtifactType, type DaytonaAppCheck, type DaytonaAppFramework, type DaytonaAppRecord, type DaytonaAppVerification, type DaytonaWorkspaceRecord } from "../../store.js";
 import { buildAppTemplateFiles, DAYTONA_APP_ARCHETYPES, DAYTONA_APP_STYLES, resolveAppDesign, type DaytonaAppArchetype, type DaytonaAppStyle } from "./appTemplates.js";
 import { DaytonaInputError } from "./errors.js";
 import { artifactVisualQaScript } from "./artifactQa.js";
@@ -20,6 +20,7 @@ import type { DaytonaAppResult, DaytonaArtifactDelivery, DaytonaCodeResult, Dayt
 
 const createPromises = new Map<number, Promise<Sandbox>>();
 const rendererDependencyInstallPromises = new Map<string, Promise<void>>();
+type DaytonaRecording = NonNullable<DaytonaWorkspaceRecord["recordings"]>[number];
 const configuredAutoPauseMinutes = Number.parseInt(config.daytonaAutoPauseInterval, 10);
 // Daytona rejects autoPauseInterval for container sandboxes. Keep it disabled
 // by default and let deployments opt in after choosing a pausable target.
@@ -2803,7 +2804,7 @@ export class DaytonaEngine {
     };
     const reconcileRecordings = async (providerValue: unknown) => {
       const current = await getDaytonaWorkspace(userId);
-      if (!current) return { provider: [], local: [] as NonNullable<typeof current.recordings> };
+      if (!current) return { provider: [], local: [] as DaytonaRecording[] };
       const provider = Array.isArray(providerValue) ? providerValue : providerValue && typeof providerValue === "object" && Array.isArray((providerValue as any).recordings) ? (providerValue as any).recordings : [];
       const now = Date.now();
       const known = new Map<string, NonNullable<typeof current.recordings>[number]>();
@@ -2904,7 +2905,7 @@ export class DaytonaEngine {
         if (current) {
           const now = Date.now();
           const ttlSeconds = args.ttlSeconds === undefined ? DAYTONA_RECORDING_DEFAULT_TTL_SECONDS : Math.min(Math.max(Math.floor(Number(args.ttlSeconds)), 60), 365 * 24 * 60 * 60);
-          await saveDaytonaWorkspace(userId, { ...current, recordings: [...(current.recordings ?? []).filter((entry) => entry.id !== id), { id, sandboxId: sandbox.id, ...(args.label ? { label: boundedText(args.label, "label", 200) } : {}), createdAt: now, updatedAt: now, expiresAt: now + ttlSeconds * 1000, providerStatus: "known" }].slice(-100), updatedAt: now });
+          await saveDaytonaWorkspace(userId, { ...current, recordings: [...(current.recordings ?? []).filter((entry) => entry.id !== id), { id, sandboxId: sandbox.id, ...(args.label ? { label: boundedText(args.label, "label", 200) } : {}), createdAt: now, updatedAt: now, expiresAt: now + ttlSeconds * 1000, providerStatus: "known" as const }].slice(-100), updatedAt: now });
         }
         return { result, recordingId: id, expiresAt: Date.now() + (args.ttlSeconds === undefined ? DAYTONA_RECORDING_DEFAULT_TTL_SECONDS : Math.min(Math.max(Math.floor(Number(args.ttlSeconds)), 60), 365 * 24 * 60 * 60)) * 1000 };
       }
