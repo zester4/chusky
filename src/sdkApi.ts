@@ -3186,7 +3186,27 @@ export function registerSdkApi(app: Hono): void {
     return c.json(await companyUsageView(project.id));
   });
   app.get("/v1/audit-events", async (c) => { const session = await getSession(sdkUser(c)!.userId); const after = Number(c.req.query("after") ?? 0) || 0; return c.json({ data: session.sdkAudit!.filter((item) => item.at > after) }); });
-  app.get("/v1/activity", async (c) => { const userId = sdkUser(c)!.userId; const since = Number(c.req.query("since") ?? 0) || 0; const session = await getSession(userId); return c.json({ now: Date.now(), approvals: session.approvals.filter((item) => item.status === "pending" && item.expiresAt > Date.now()), tasks: (await listTasks(userId)).filter((item) => item.updatedAt > since).slice(0, 50), reminders: (await listReminders(userId)).filter((item) => item.createdAt > since).slice(0, 50), jobs: (await listJobs(userId)).filter((item) => item.createdAt > since).slice(0, 50) }); });
+  app.get("/v1/activity", async (c) => {
+    const userId = sdkUser(c)!.userId;
+    const since = Number(c.req.query("since") ?? 0) || 0;
+    const now = Date.now();
+    // Activity is a hot dashboard feed. Read approvals through their bounded,
+    // owner-scoped index instead of loading the full session (which may be a
+    // large durable Neon session-domain read) on every refresh.
+    const [approvals, tasks, reminders, jobs] = await Promise.all([
+      listApprovals(userId, 50),
+      listTasks(userId),
+      listReminders(userId),
+      listJobs(userId),
+    ]);
+    return c.json({
+      now,
+      approvals: approvals.filter((item) => item.status === "pending" && item.expiresAt > now),
+      tasks: tasks.filter((item) => item.updatedAt > since).slice(0, 50),
+      reminders: reminders.filter((item) => item.createdAt > since).slice(0, 50),
+      jobs: jobs.filter((item) => item.createdAt > since).slice(0, 50),
+    });
+  });
   app.get("/v1/operator/trace", async (c) => { const owner = sdkUser(c)!; return c.json({ data: await listTraceEvents(owner.userId, c.req.query("correlation_id"), Number(c.req.query("limit") ?? 500) || 500) }); });
   app.get("/v1/operator/timeline", async (c) => {
     const owner = sdkUser(c)!;

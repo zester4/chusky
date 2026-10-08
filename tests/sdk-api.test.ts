@@ -59,6 +59,23 @@ test("post-response SDK audit failures do not replace a completed route response
   assert.equal(typeof (await response.json() as { id?: unknown }).id, "string");
 });
 
+test("activity feed returns owner-scoped pending approvals", async () => {
+  const externalUserId = "activity-approval-owner";
+  const ownerId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalUserId}`).digest("hex").slice(0, 12), 16);
+  const approval = await createApproval({
+    userId: ownerId,
+    toolSlug: "CHUCK_SEARCH_SKILLS",
+    args: { query: "sales" },
+    request: "Search the relevant guidance.",
+    history: [],
+    model: "test/model",
+  });
+  const response = await app().fetch(new Request("http://local/v1/activity?since=0", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalUserId } }));
+  assert.equal(response.status, 200);
+  const activity = await response.json() as { approvals: Array<{ id: string; status: string }> };
+  assert.deepEqual(activity.approvals.map(({ id, status }) => ({ id, status })), [{ id: approval.id, status: "pending" }]);
+});
+
 test("older account history requires a valid cursor and durable history backend", async () => {
   const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "history-pagination-owner" };
   const invalid = await app().fetch(new Request("http://local/v1/account/history?before=not-a-cursor", { headers }));
