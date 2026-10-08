@@ -134,6 +134,16 @@ test("durable domain merge combines independent edits and additive profile count
   ), /overlapping concurrent changes/);
 });
 
+test("durable SDK domain merge preserves independent concurrent thread additions", () => {
+  const baseline = { sdkThreads: [] };
+  const current = { sdkThreads: [{ id: "thr_current", metadata: {}, history: [], runs: [] }] };
+  const desired = { sdkThreads: [{ id: "thr_desired", metadata: {}, history: [], runs: [] }] };
+
+  assert.deepEqual(mergeDurableSessionDomain(baseline, current, desired, "sdk"), {
+    sdkThreads: [current.sdkThreads[0], desired.sdkThreads[0]],
+  });
+});
+
 test("durable session snapshots never leak into the Redis core payload", () => {
   const value = { ...session(), durableDomainSnapshots: { profile: { totalMessages: 1 } } } as UserSession & { durableDomainSnapshots: Record<string, unknown> };
   const { core } = splitSessionDomains(value);

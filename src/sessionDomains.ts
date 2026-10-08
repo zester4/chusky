@@ -39,6 +39,39 @@ export function mergeDurableSessionDomain(base: unknown, current: unknown, desir
     }
 
     const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
+    if (domain === "sdk" && Array.isArray(before) && Array.isArray(latest) && Array.isArray(next)) {
+      const identified = (items: unknown[]): items is Array<Record<string, unknown> & { id: string }> => {
+        const ids = items.map((item) => isRecord(item) && typeof item.id === "string" && item.id ? item.id : undefined);
+        return ids.every((id): id is string => Boolean(id)) && new Set(ids).size === ids.length;
+      };
+      if (identified(before) && identified(latest) && identified(next) && (before.length || latest.length || next.length)) {
+        const beforeById = new Map(before.map((item) => [item.id, item]));
+        const latestById = new Map(latest.map((item) => [item.id, item]));
+        const nextById = new Map(next.map((item) => [item.id, item]));
+        const ids = [...new Set([...latest, ...next].map((item) => item.id))];
+        const output: unknown[] = [];
+        for (const id of ids) {
+          const prior = beforeById.get(id) ?? MISSING;
+          const current = latestById.get(id) ?? MISSING;
+          const desired = nextById.get(id) ?? MISSING;
+          if (current === MISSING) {
+            if (desired !== MISSING && (prior === MISSING || isDeepStrictEqual(desired, prior))) output.push(desired);
+            continue;
+          }
+          if (desired === MISSING) {
+            if (prior === MISSING || isDeepStrictEqual(current, prior)) output.push(current);
+            continue;
+          }
+          if (prior === MISSING) {
+            if (!isDeepStrictEqual(current, desired)) throw new Error(`Durable session domain has overlapping concurrent changes: ${domain}.${path.join(".")}.${id}.`);
+            output.push(current);
+            continue;
+          }
+          output.push(merge(prior, current, desired, [...path, id], depth + 1));
+        }
+        return output;
+      }
+    }
     if (isRecord(before) && isRecord(latest) && isRecord(next)) {
       const output: Record<string, unknown> = {};
       const keys = new Set([...Object.keys(before), ...Object.keys(latest), ...Object.keys(next)]);
