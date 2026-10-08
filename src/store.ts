@@ -19,7 +19,7 @@ import { recordFailure, recordVectorFailure } from "./monitoring.js";
 import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channels/contracts.js";
 import type { ApprovalPolicy, HandoffRecord, WorkerDuration } from "./subagents/contracts.js";
 import type { CapabilityWorkerName } from "./memory/types.js";
-import { durableMemoryConfigured, forgetAllPersonalDurableMemories, forgetDurableMemory, getDurableMemoryByKey, saveDurableMemory, saveMemoryEntity, searchDurableMemory } from "./memory/durable.js";
+import { durableMemoryConfigured, forgetAllPersonalDurableMemories, forgetDurableMemory, getDurableMemoryByKey, mergeDurablePersonalMemories, saveDurableMemory, saveMemoryEntity, searchDurableMemory } from "./memory/durable.js";
 import { queueConversationReflection } from "./memory/reflection.js";
 import { classifyMemory } from "./memory/classifier.js";
 import { deriveMissionToolHints } from "./missionWorker.js";
@@ -287,7 +287,7 @@ export interface UserSession {
   /** Owner-scoped context graph nodes. Sensitive values are never returned to models unless selected by purpose. */
   contextNodes?: ContextNodeRecord[];
   /** Web sessions already merged into this canonical owner session, keyed by source snapshot time. */
-  linkedWebSessionImports?: Array<{ sourceUserId: number; sourceUpdatedAt: number; sourceMessageIds?: string[] }>;
+  linkedWebSessionImports?: Array<{ sourceUserId: number; sourceUpdatedAt: number; sourceDurableMemoryUpdatedAt?: number; sourceMessageIds?: string[] }>;
   /** Existing first-party dashboard runs copied into canonical private history. */
   sdkPrivateHistoryBackfilled?: boolean;
   /** Department operating spaces and typed handoff packets for company workflows. */
@@ -5250,6 +5250,7 @@ export async function getSession(uid: number): Promise<UserSession> {
   s.linkedWebSessionImports = Array.isArray(s.linkedWebSessionImports) ? s.linkedWebSessionImports.filter((item) => Boolean(item) && Number.isSafeInteger(item.sourceUserId) && item.sourceUserId > 0 && Number.isFinite(item.sourceUpdatedAt)).slice(-20).map((item) => ({
     sourceUserId: item.sourceUserId,
     sourceUpdatedAt: item.sourceUpdatedAt,
+    ...(Number.isFinite(item.sourceDurableMemoryUpdatedAt) ? { sourceDurableMemoryUpdatedAt: item.sourceDurableMemoryUpdatedAt } : {}),
     sourceMessageIds: Array.isArray(item.sourceMessageIds) ? item.sourceMessageIds.filter((id): id is string => typeof id === "string" && id.startsWith("web-import:") && id.length <= 100).slice(-400) : [],
   })) : [];
   s.sdkPrivateHistoryBackfilled = s.sdkPrivateHistoryBackfilled === true;
@@ -5758,13 +5759,17 @@ export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId
   if (!Number.isSafeInteger(sourceUserId) || sourceUserId <= 0 || !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 || sourceUserId === telegramUserId) return;
   const source = await getSessionWithSdkRuns(sourceUserId);
   const existingTarget = await getSession(telegramUserId);
-  if (existingTarget.linkedWebSessionImports?.some((item) => item.sourceUserId === sourceUserId && item.sourceUpdatedAt === source.updatedAt)) return;
+  const priorImport = existingTarget.linkedWebSessionImports?.find((item) => item.sourceUserId === sourceUserId);
+  const durableMemoryNeedsMerge = durableMemoryConfigured() && priorImport?.sourceDurableMemoryUpdatedAt !== source.updatedAt;
+  if (priorImport?.sourceUpdatedAt === source.updatedAt && !durableMemoryNeedsMerge) return;
   let importedMemories: MemoryFact[] = [];
 
+  if (durableMemoryNeedsMerge) await mergeDurablePersonalMemories(sourceUserId, telegramUserId);
+
   await mutateSession(telegramUserId, (target) => {
-    const priorImport = target.linkedWebSessionImports?.find((item) => item.sourceUserId === sourceUserId);
-    if (priorImport?.sourceUpdatedAt === source.updatedAt) return;
-    const previouslyImportedSourceIds = new Set(priorImport?.sourceMessageIds ?? []);
+    const currentPriorImport = target.linkedWebSessionImports?.find((item) => item.sourceUserId === sourceUserId);
+    if (currentPriorImport?.sourceUpdatedAt === source.updatedAt && !durableMemoryNeedsMerge) return;
+    const previouslyImportedSourceIds = new Set(currentPriorImport?.sourceMessageIds ?? []);
 
     const canonicalCounts = new Map<string, number>();
     const contentKey = (message: Pick<Message, "role" | "content">) => `${message.role}\u0000${message.content}`;
@@ -5786,7 +5791,7 @@ export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId
       .filter((run) => run.status === "completed" && typeof run.output === "string" && !run.companyProjectId)
       .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
     const legacyRunImports: Message[] = [];
-    for (const run of priorImport ? [] : runs) {
+    for (const run of currentPriorImport ? [] : runs) {
       const userMessage: Message = {
         role: "user",
         content: `${run.input || "Attached file(s)"}${run.attachments?.length ? `\n[Attachments: ${run.attachments.map((file) => file.name).join(", ")}]` : ""}`,
@@ -5834,7 +5839,9 @@ export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId
     if (importedContext.length) target.contextNodes = [...(target.contextNodes ?? []), ...importedContext].slice(-1000);
 
     target.linkedWebSessionImports = [...(target.linkedWebSessionImports ?? []).filter((item) => item.sourceUserId !== sourceUserId), {
-      sourceUserId, sourceUpdatedAt: source.updatedAt, sourceMessageIds: historyImports.map((message) => message.sourceId!).slice(-400),
+      sourceUserId, sourceUpdatedAt: source.updatedAt,
+      ...(durableMemoryConfigured() ? { sourceDurableMemoryUpdatedAt: source.updatedAt } : {}),
+      sourceMessageIds: historyImports.map((message) => message.sourceId!).slice(-400),
     }].slice(-20);
   });
 
