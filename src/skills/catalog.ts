@@ -7,6 +7,17 @@ const MAX_SKILL_FILE_BYTES = 256 * 1024;
 const MAX_CONTEXT_CHARS = 24_000;
 const STOP_WORDS = new Set(["a", "an", "and", "are", "can", "create", "for", "how", "i", "in", "is", "it", "make", "of", "on", "the", "to", "use", "with"]);
 
+/** Skill source is trusted code, but its text is model-facing context. Keep
+ * infrastructure names and internal workspace slugs out of the agent's mental
+ * model while preserving the source files for developers and dispatch. */
+function sanitizeSkillText(value: string): string {
+  return value
+    .replace(/\bCHUCK_DAYTONA_COMPUTER\b/g, "CHUCK_COMPUTER")
+    .replace(/\bCHUCK_DAYTONA_/g, "CHUCK_COMPUTER_")
+    .replace(/\bDAYTONA_/g, "COMPUTER_")
+    .replace(/\bdaytona\b/gi, "computer");
+}
+
 export type SkillManifest = {
   name: string;
   description: string;
@@ -236,7 +247,7 @@ async function loadCatalog(root = DEFAULT_SKILLS_ROOT): Promise<SkillManifest[]>
 
 /** Name and description of every installed trusted skill (routing metadata only). */
 export async function listSkillSummaries(root = DEFAULT_SKILLS_ROOT): Promise<Array<{ name: string; description: string }>> {
-  return (await loadCatalog(root)).map((skill) => ({ name: skill.name, description: skill.description })).sort((a, b) => a.name.localeCompare(b.name));
+  return (await loadCatalog(root)).map((skill) => ({ name: skill.name, description: sanitizeSkillText(skill.description) })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /** Required reference files that must accompany a routed skill. */
@@ -284,7 +295,7 @@ export async function searchSkills(query: string, limit = 5, root = DEFAULT_SKIL
   // bound finite for callers that accidentally pass an unbounded value, but do
   // not silently truncate the repository's installed skills at twenty.
   const boundedLimit = Math.max(1, Math.min(Math.floor(Number(limit) || 5), 250));
-  return scored.slice(0, boundedLimit).map(({ skill, score }) => ({ name: skill.name, description: skill.description, path: `.chusky/skills/${path.basename(skill.directory)}/SKILL.md`, score, files: 0 }));
+  return scored.slice(0, boundedLimit).map(({ skill, score }) => ({ name: skill.name, description: sanitizeSkillText(skill.description), path: `.chusky/skills/${path.basename(skill.directory)}/SKILL.md`, score, files: 0 }));
 }
 
 async function getSkill(name: string, root: string): Promise<SkillManifest> {
@@ -331,7 +342,8 @@ export async function readSkillFile(name: string, requestedPath = "SKILL.md", ma
   if (binary) return { name: skill.name, path: relative, bytes: info.size, binary: true, truncated: false };
   const max = Math.max(1, Math.min(Math.floor(Number(maxChars) || 12_000), MAX_SKILL_FILE_BYTES));
   const content = bytes.toString("utf8");
-  return { name: skill.name, path: relative, bytes: info.size, binary: false, content: content.slice(0, max), truncated: content.length > max };
+  const sanitized = sanitizeSkillText(content);
+  return { name: skill.name, path: relative, bytes: info.size, binary: false, content: sanitized.slice(0, max), truncated: sanitized.length > max };
 }
 
 export async function relevantSkillContext(query: string, root = DEFAULT_SKILLS_ROOT): Promise<string> {
@@ -343,7 +355,7 @@ export async function relevantSkillContext(query: string, root = DEFAULT_SKILLS_
   for (const match of matches) {
     const skill = skills.find((candidate) => candidate.name === match.name);
     if (!skill || remaining <= 0) continue;
-    const content = skill.body.slice(0, Math.min(12_000, remaining));
+    const content = sanitizeSkillText(skill.body).slice(0, Math.min(12_000, remaining));
     blocks.push(`### ${skill.name}\n${content}`);
     remaining -= content.length;
   }
@@ -388,7 +400,7 @@ export async function skillContextForBinding(binding: SkillBinding, query = "", 
     const referenceText = referenceBlocks.join("\n");
     const bodyBudget = Math.max(1_000, skillBudget - referenceText.length);
     const role = primary.includes(skill.name) ? "primary" : "supporting";
-    const block = `### ${skill.name} (${role})\n${skill.body.slice(0, bodyBudget)}${referenceText}`;
+    const block = `### ${skill.name} (${role})\n${sanitizeSkillText(skill.body).slice(0, bodyBudget)}${referenceText}`;
     blocks.push(block.slice(0, remaining));
     remaining -= Math.min(remaining, block.length);
   }

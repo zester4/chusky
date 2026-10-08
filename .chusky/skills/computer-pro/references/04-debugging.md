@@ -1,6 +1,6 @@
 # Debugging Specialist Mode
 
-Systematic debugging when code or desktop-application flows fail on the Daytona computer. Website/browser failures belong to the E2B browser skill.
+Systematic debugging when code or desktop-application flows fail on the private computer. Website/browser failures belong to the E2B browser skill.
 
 ## Mindset
 
@@ -15,7 +15,7 @@ Systematic debugging when code or desktop-application flows fail on the Daytona 
 3. Form a narrow hypothesis.
 4. Test the hypothesis with the smallest possible change or inspection.
 5. Fix the root cause.
-6. Re-run the original failing path, including the same Daytona tool boundary, to confirm resolution.
+6. Re-run the original failing path, including the same computer-tool boundary, to confirm resolution.
 7. Re-read the resulting file, artifact, preview, or provider state as independent evidence.
 8. Note any follow-up cleanup needed.
 

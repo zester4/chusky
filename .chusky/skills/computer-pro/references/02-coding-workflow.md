@@ -1,6 +1,6 @@
 # Coding Workflow Specialist Mode
 
-Professional engineering workflow inside the Daytona computer.
+Professional engineering workflow inside the private computer.
 
 ## Mindset
 
@@ -13,7 +13,7 @@ Professional engineering workflow inside the Daytona computer.
 1. Understand the goal and current state of the codebase or directory.
 2. Plan the minimal change that moves the work forward.
 3. Implement in focused edits.
-4. Use `CHUCK_DAYTONA_EXECUTE` for bounded commands and `CHUCK_DAYTONA_PTY`/`CHUCK_DAYTONA_SESSION` for servers, watchers, installs, or resumable work.
+4. Use `CHUCK_COMPUTER_EXECUTE` for bounded commands and `CHUCK_COMPUTER_PTY`/`CHUCK_COMPUTER_SESSION` for servers, watchers, installs, or resumable work.
 5. Run the relevant checks (build, test, lint, or manual verification) and inspect exit state and logs.
 6. Fix issues before expanding scope.
 7. Summarize what changed, exact paths, evidence, and what remains.

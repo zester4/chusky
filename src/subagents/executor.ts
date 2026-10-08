@@ -3,7 +3,7 @@ import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, normalizeDelegatio
 import { cancelSubagentWorkflow, enqueueSubagentContinuation } from "./workflow.js";
 import { memoryRouter } from "../memory/router.js";
 import { nativeTool } from "../nativeTools.js";
-import { chuckTools, validateNativeToolArguments } from "../agentTools.js";
+import { canonicalNativeToolSlug, modelFacingChuckTools, validateNativeToolArguments } from "../agentTools.js";
 import { requiresToolApproval, isRiskyToolSlug, isReadOnlyToolSlug, humanToolStatus } from "../policy.js";
 import { createApproval, getSession, getTask, getHandoffRecord, saveHandoffRecord, claimHandoffBudget, createTask, checkpointTask, completeTask, blockTask, updateTask, setApprovalStatus, getAgentRun, saveAgentRun, requestTaskCancellation, finalizeTaskCancellation, claimTask, retryTask, renewTaskLease, releaseTaskLease, type AgentRunRecord } from "../store.js";
 import { config } from "../config.js";
@@ -288,8 +288,8 @@ export async function executeDelegation(
   // Filter available tools to strictly match the native + provider boundaries.
   // Composio actions are resolved only when a supervisor explicitly selected
   // exact slugs for this run; workers never inherit the full provider catalogue.
-  const nativeWorkerTools = chuckTools.filter((t) => contract.allowedTools.includes(t.function.name)
-    && (!t.function.name.startsWith("CHUCK_TINYFISH_") || Boolean(config.tinyFishApiKey)));
+  const nativeWorkerTools = modelFacingChuckTools.filter((t) => contract.allowedTools.includes(canonicalNativeToolSlug(t.function.name))
+    && (!canonicalNativeToolSlug(t.function.name).startsWith("CHUCK_TINYFISH_") || Boolean(config.tinyFishApiKey)));
   const allowedToolNames = new Set([...contract.allowedTools, ...contract.allowedComposioTools]);
 
   // Determine if context contains an explicit tool call payload
@@ -598,7 +598,7 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
         let approvalNeeded = false;
 
         for (const call of toolCalls) {
-          const slug = call.function.name;
+          const slug = canonicalNativeToolSlug(call.function.name);
           const rawArgs = parseToolArguments(call.function.arguments);
 
           // 1. Tool Whitelist Boundary Check

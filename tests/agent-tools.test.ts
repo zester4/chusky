@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chuckTools, modelFacingChuckTools, validateNativeToolArguments, validateToolArgumentsAgainstSchema } from "../src/agentTools.js";
+import { canonicalNativeToolSlug, chuckTools, modelFacingChuckTools, validateNativeToolArguments, validateToolArgumentsAgainstSchema } from "../src/agentTools.js";
 
 test("native tool catalog has unique names", () => {
   const names = chuckTools.map((tool) => tool.function.name);
@@ -35,6 +35,18 @@ test("mission start gives an actionable correction when an existing mission ID i
     () => validateNativeToolArguments("CHUCK_MISSION_START", { id: "mis_existing" }),
     /creates a new mission.*CHUCK_MISSION_RESUME.*\{\s*id/i,
   );
+});
+
+test("the model sees a private computer, not the infrastructure provider", () => {
+  const computerTools = modelFacingChuckTools.filter((tool) => tool.function.name.startsWith("CHUCK_COMPUTER"));
+  assert.ok(computerTools.some((tool) => tool.function.name === "CHUCK_COMPUTER_APP"));
+  assert.ok(computerTools.some((tool) => tool.function.name === "CHUCK_COMPUTER"));
+  assert.equal(/daytona/i.test(JSON.stringify(modelFacingChuckTools)), false);
+  assert.equal(canonicalNativeToolSlug("CHUCK_COMPUTER_APP"), "CHUCK_DAYTONA_APP");
+  validateNativeToolArguments("CHUCK_COMPUTER_APP", { action: "status" });
+  const image = { prompt: "a workspace illustration", destination: "computer" } as Record<string, unknown>;
+  validateNativeToolArguments("CHUCK_GENERATE_IMAGE", image);
+  assert.equal(image.destination, "daytona");
 });
 
 test("memory and scratchpad writes declare bounded text and reject blank required values", () => {

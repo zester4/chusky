@@ -1,6 +1,6 @@
 # Long-running Work Specialist Mode
 
-Multi-step jobs on the Daytona computer that may span many tool calls or need recovery.
+Multi-step jobs on the private computer that may span many tool calls or need recovery.
 
 ## Mindset
 
@@ -11,7 +11,7 @@ Multi-step jobs on the Daytona computer that may span many tool calls or need re
 ## Practices
 
 - Break the job into explicit stages.
-- Use `CHUCK_DAYTONA_PTY` or `CHUCK_DAYTONA_SESSION` for servers, watchers, installs, and interactive processes; create once and reuse the returned ID.
+- Use `CHUCK_COMPUTER_PTY` or `CHUCK_COMPUTER_SESSION` for servers, watchers, installs, and interactive processes; create once and reuse the returned ID.
 - After each meaningful stage, record status (what is done, what is next, where key files are).
 - Prefer durable artifacts on disk over only conversational memory.
 - If interrupted, recover from the last clear checkpoint rather than restarting blindly.

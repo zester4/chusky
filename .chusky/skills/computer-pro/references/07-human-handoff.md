@@ -1,6 +1,6 @@
 # Human Handoff Specialist Mode
 
-Clean transfer of control when the Daytona computer hits a human-only gate (CAPTCHA, 2FA, complex verification, or fragile UI).
+Clean transfer of control when the private computer hits a human-only gate (CAPTCHA, 2FA, complex verification, or fragile UI).
 
 ## Mindset
 
@@ -19,7 +19,7 @@ Clean transfer of control when the Daytona computer hits a human-only gate (CAPT
 ## How to Hand Off Well
 
 1. Explain exactly why human input is needed.
-2. Describe what the user should do on the owner-only Daytona desktop or preview session. For website challenges, use the private same-session E2B/browser-pro handoff instead.
+2. Describe what the user should do on the owner-only desktop or preview session. For website challenges, use the private same-session E2B/browser-pro handoff instead.
 3. Keep the relevant page or app state ready.
 4. Respect the handoff TTL and do not thrash the session.
 5. After the user completes the step, verify the new state before continuing automation.

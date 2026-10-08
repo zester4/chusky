@@ -309,8 +309,42 @@ function normalizeOwnerPrivatePolicyDescription(description: string): string {
   );
 }
 
+/**
+ * Keep provider-specific workspace slugs for dispatch, policy, persisted runs,
+ * and SDK compatibility, but expose the capability to the model as its own
+ * computer. The model should not need to know which infrastructure provides it.
+ */
+function modelFacingNativeToolSlug(name: string): string {
+  if (name === "CHUCK_DAYTONA_COMPUTER") return "CHUCK_COMPUTER";
+  if (name.startsWith("CHUCK_DAYTONA_")) return `CHUCK_COMPUTER_${name.slice("CHUCK_DAYTONA_".length)}`;
+  return name;
+}
+
+function sanitizeComputerProviderText(value: string): string {
+  return value
+    .replace(/\bCHUCK_DAYTONA_COMPUTER\b/g, "CHUCK_COMPUTER")
+    .replace(/\bCHUCK_DAYTONA_/g, "CHUCK_COMPUTER_")
+    .replace(/\bDaytona\b/gi, "private computer");
+}
+
+function sanitizeModelFacingSchema(value: unknown): unknown {
+  if (typeof value === "string") {
+    if (value.toLowerCase() === "daytona") return "computer";
+    return sanitizeComputerProviderText(value);
+  }
+  if (Array.isArray(value)) return value.map(sanitizeModelFacingSchema);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, nested]) => [key, sanitizeModelFacingSchema(nested)]));
+}
+
+export function sanitizeModelFacingText(value: string): string {
+  return sanitizeComputerProviderText(value);
+}
+
 /** Browser operations are exposed only through the E2B-backed CHUCK_BROWSER tools. */
 export function canonicalNativeToolSlug(name: string): string {
+  if (name === "CHUCK_COMPUTER") return "CHUCK_DAYTONA_COMPUTER";
+  if (name.startsWith("CHUCK_COMPUTER_")) return `CHUCK_DAYTONA_${name.slice("CHUCK_COMPUTER_".length)}`;
   return name;
 }
 
@@ -332,7 +366,17 @@ export const chuckTools = [...baseChuckTools, ...shoppingAndBrowserTools, ...too
 
 // Kept in the native catalog for existing SDK/API clients and resumed runs,
 // but image transfer is now resolved transparently at Composio dispatch.
-export const modelFacingChuckTools = chuckTools.filter((tool) => tool.function.name !== "CHUCK_MEDIA_BRIDGE");
+export const modelFacingChuckTools = chuckTools
+  .filter((tool) => tool.function.name !== "CHUCK_MEDIA_BRIDGE")
+  .map((tool) => ({
+    ...tool,
+    function: {
+      ...tool.function,
+      name: modelFacingNativeToolSlug(tool.function.name),
+      description: sanitizeComputerProviderText(tool.function.description),
+      parameters: sanitizeModelFacingSchema(tool.function.parameters),
+    },
+  }));
 
 const browserToolParameters = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER")?.function.parameters as any;
 const browserTool = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER") as any;
@@ -382,6 +426,9 @@ export function validateNativeToolArguments(name: string, args: Record<string, u
   }
   if (canonicalName === "CHUCK_TASK_CREATE" && Object.hasOwn(args, "id")) {
     throw new Error("CHUCK_TASK_CREATE creates a new task and does not accept an existing task ID. Call CHUCK_TASK_GET to inspect it, then use the lifecycle action appropriate to its status. No task was created.");
+  }
+  if ((canonicalName === "CHUCK_GENERATE_IMAGE" || canonicalName === "CHUCK_GENERATE_VIDEO") && args.destination === "computer") {
+    args.destination = "daytona";
   }
   const schema = tool.function.parameters as JsonSchema;
   // A Python payload plus an existing interpreter context unambiguously means
