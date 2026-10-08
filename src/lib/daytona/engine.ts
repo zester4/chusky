@@ -1,5 +1,5 @@
 import { DaytonaProcessExecutionTimeoutError, type FileInfo, type Sandbox, type PtyHandle, type VolumeMount } from "@daytona/sdk";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { posix as pathPosix } from "node:path";
 import { AlignmentType, BorderStyle, Document, Footer, Header, HeadingLevel, ImageRun, Packer, PageNumber, Paragraph, ShadingType, Table, TableCell, TableLayoutType, TableRow, TextRun, WidthType } from "docx";
 import ExcelJS from "exceljs";
@@ -7,7 +7,7 @@ import JSZip from "jszip";
 import PptxGenJS from "pptxgenjs";
 import { config } from "../../config.js";
 import { guardVaultWorkspaceAccess } from "../../vault/browserGuard.js";
-import { acquireDaytonaComputerLeaseLock, clearDaytonaWorkspace, getDaytonaWorkspace, getSession, releaseDaytonaComputerLeaseLock, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactType, type DaytonaAppCheck, type DaytonaAppFramework, type DaytonaAppRecord, type DaytonaAppVerification } from "../../store.js";
+import { acquireDaytonaComputerLeaseLock, clearDaytonaWorkspace, getDaytonaWorkspace, getSession, releaseDaytonaComputerLeaseLock, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactProvenance, type ArtifactRetention, type ArtifactRegistrationIntent, type ArtifactType, type DaytonaAppCheck, type DaytonaAppFramework, type DaytonaAppRecord, type DaytonaAppVerification } from "../../store.js";
 import { buildAppTemplateFiles, DAYTONA_APP_ARCHETYPES, DAYTONA_APP_STYLES, resolveAppDesign, type DaytonaAppArchetype, type DaytonaAppStyle } from "./appTemplates.js";
 import { DaytonaInputError } from "./errors.js";
 import { artifactVisualQaScript } from "./artifactQa.js";
@@ -15,6 +15,7 @@ import { artifactRendererImage } from "./renderer.js";
 import { getDaytonaClient } from "./client.js";
 import { CancellationError, throwIfAborted } from "../../cancellation.js";
 import { e2bBrowserEngine } from "../e2b/browser.js";
+import { isExpired, retentionFromSeconds, visualDiffStatus } from "./retention.js";
 import type { DaytonaAppResult, DaytonaArtifactDelivery, DaytonaCodeResult, DaytonaCommandResult, DaytonaComputerLease, DaytonaFileInfo, DaytonaGitResult, DaytonaPreviewResult, DaytonaPtyResult, DaytonaSandboxMetrics, DaytonaSessionResult, DaytonaScreenshotResult, DaytonaSnapshotResult, DaytonaVolumeResult, DaytonaWorkspaceInfo } from "./types.js";
 
 const createPromises = new Map<number, Promise<Sandbox>>();
@@ -46,6 +47,23 @@ const DAYTONA_COMPUTER_START_TIMEOUT_MS = 30_000;
 const DAYTONA_COMPUTER_READ_TIMEOUT_MS = 8_000;
 const DAYTONA_COMPUTER_MUTATION_TIMEOUT_MS = 15_000;
 const DAYTONA_COMPUTER_INSPECTION_TIMEOUT_MS = 2_000;
+const DAYTONA_RECORDING_DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+function artifactMetadata(args: Record<string, unknown>, sandbox: Sandbox, action: string): { provenance: ArtifactProvenance; retention: ArtifactRetention } {
+  const sourcePaths = Array.isArray(args.sourcePaths)
+    ? args.sourcePaths.filter((value): value is string => typeof value === "string").slice(0, 100).map((value) => safeDaytonaPath(value, "sourcePaths entry"))
+    : [];
+  return {
+    provenance: {
+      ...(typeof args._runId === "string" && args._runId ? { runId: args._runId.slice(0, 160) } : {}),
+      workspaceId: sandbox.id,
+      sourcePaths,
+      createdByAction: action,
+      qaEvidenceIds: [],
+    },
+    retention: retentionFromSeconds(args.retentionSeconds),
+  };
+}
 
 function isTransientComputerConnection(error: unknown): boolean {
   return DAYTONA_TRANSIENT_COMPUTER_CONNECTION.test(String((error as { message?: unknown })?.message ?? error));
@@ -2701,6 +2719,32 @@ export class DaytonaEngine {
     return { sandboxId: sandbox.id, name: normalizedName, created: true };
   }
 
+  /** Bounded background retention sweep. It never creates a replacement workspace for an owner. */
+  async retentionSweep(userId: number): Promise<{ artifacts: number; recordings: number; failures: number }> {
+    const workspace = await getDaytonaWorkspace(userId);
+    if (!workspace) return { artifacts: 0, recordings: 0, failures: 0 };
+    const session = await getSession(userId);
+    const now = Date.now();
+    let artifacts = 0; let recordings = 0; let failures = 0;
+    let sandbox: Sandbox | undefined;
+    const getProvider = async () => sandbox ??= await this.clientFactory().get(workspace.sandboxId);
+    const keptArtifacts: ArtifactRecord[] = [];
+    for (const artifact of session.artifacts ?? []) {
+      if (!isExpired(artifact.retention, now)) { keptArtifacts.push(artifact); continue; }
+      try { await (await getProvider()).fs.deleteFile(artifact.path, false); artifacts++; }
+      catch (error) { if (!isMissingDaytonaFile(error)) { failures++; keptArtifacts.push({ ...artifact, status: "expired", reconciliation: { status: "expired", checkedAt: now, lastError: String(error).slice(0, 500) }, updatedAt: now }); } else artifacts++; }
+    }
+    if (keptArtifacts.length !== (session.artifacts ?? []).length) { session.artifacts = keptArtifacts; await saveSession(userId, session); }
+    const keptRecordings = [...(workspace.recordings ?? [])];
+    for (const recording of workspace.recordings ?? []) {
+      if (recording.expiresAt === undefined || recording.expiresAt > now) continue;
+      try { await (await getProvider()).computerUse.recording.delete(recording.id); const index = keptRecordings.findIndex((item) => item.id === recording.id); if (index >= 0) keptRecordings.splice(index, 1); recordings++; }
+      catch (error) { if (isMissingDaytonaFile(error)) { const index = keptRecordings.findIndex((item) => item.id === recording.id); if (index >= 0) keptRecordings.splice(index, 1); recordings++; } else failures++; }
+    }
+    if (keptRecordings.length !== (workspace.recordings ?? []).length) await saveDaytonaWorkspace(userId, { ...workspace, recordings: keptRecordings, updatedAt: now });
+    return { artifacts, recordings, failures };
+  }
+
   async computer(userId: number, args: Record<string, unknown>, internal: { trustedVaultFlow?: boolean } = {}): Promise<unknown> {
     const action = boundedText(args.action, "action", 40);
     const sandbox = await this.getOrCreateWorkspace(userId);
@@ -2751,6 +2795,30 @@ export class DaytonaEngine {
     };
     const mutation = <T>(operation: () => Promise<T>, description: string, timeoutMs = DAYTONA_COMPUTER_MUTATION_TIMEOUT_MS): Promise<T> =>
       boundedPromise(operation(), timeoutMs, `Daytona ${description} timed out; retry after the desktop reconnects.`);
+    const recordingId = (value: unknown): string | undefined => {
+      if (!value || typeof value !== "object") return undefined;
+      const item = value as Record<string, unknown>;
+      for (const candidate of [item.id, item.recordingId, item.recording_id]) if (typeof candidate === "string" && candidate.length > 0) return candidate.slice(0, 200);
+      return undefined;
+    };
+    const reconcileRecordings = async (providerValue: unknown) => {
+      const current = await getDaytonaWorkspace(userId);
+      if (!current) return { provider: [], local: [] as NonNullable<typeof current.recordings> };
+      const provider = Array.isArray(providerValue) ? providerValue : providerValue && typeof providerValue === "object" && Array.isArray((providerValue as any).recordings) ? (providerValue as any).recordings : [];
+      const now = Date.now();
+      const known = new Map<string, NonNullable<typeof current.recordings>[number]>();
+      for (const item of provider) {
+        const id = recordingId(item);
+        if (!id) continue;
+        const raw = item as Record<string, unknown>;
+        const previous = current.recordings?.find((entry) => entry.id === id);
+        known.set(id, { id, sandboxId: sandbox.id, ...(typeof raw.label === "string" ? { label: raw.label.slice(0, 200) } : previous?.label ? { label: previous.label } : {}), createdAt: previous?.createdAt ?? now, updatedAt: now, ...(previous?.expiresAt ? { expiresAt: previous.expiresAt } : {}), providerStatus: "known", ...(Number.isFinite(raw.sizeBytes) ? { sizeBytes: Number(raw.sizeBytes) } : previous?.sizeBytes ? { sizeBytes: previous.sizeBytes } : {}) });
+      }
+      for (const previous of current.recordings ?? []) if (!known.has(previous.id)) known.set(previous.id, { ...previous, providerStatus: "missing", updatedAt: now });
+      const recordings = [...known.values()].slice(-100);
+      await saveDaytonaWorkspace(userId, { ...current, recordings, updatedAt: now });
+      return { provider, local: recordings };
+    };
     if (action === "lease_acquire") {
       const current = await getDaytonaWorkspace(userId);
       const now = Date.now();
@@ -2787,10 +2855,20 @@ export class DaytonaEngine {
     }
     if (action === "process_status") return readOnly(() => computer.getProcessStatus(computerProcessName(args.processName, "novnc")));
     if (action === "process_logs" || action === "process_errors") await guardVaultWorkspaceAccess(userId, sandbox.id, action, "desktop diagnostics");
-    if (action === "recording_list") return readOnly(() => computer.recording.list());
+    if (action === "recording_list") {
+      const listed = await readOnly(() => computer.recording.list());
+      const reconciled = await reconcileRecordings(listed);
+      return { recordings: listed, reconciliation: reconciled.local };
+    }
     if (action === "recording_get") return readOnly(() => computer.recording.get(boundedText(args.recordingId, "recordingId", 200)));
-    if (action === "recording_stop") return mutation(() => computer.recording.stop(boundedText(args.recordingId, "recordingId", 200)), "recording stop");
-    if (action === "recording_delete") { await mutation(() => computer.recording.delete(boundedText(args.recordingId, "recordingId", 200)), "recording delete"); return { deleted: true }; }
+    if (action === "recording_stop") {
+      const id = boundedText(args.recordingId, "recordingId", 200);
+      const result = await mutation(() => computer.recording.stop(id), "recording stop");
+      const current = await getDaytonaWorkspace(userId);
+      if (current?.recordings) await saveDaytonaWorkspace(userId, { ...current, recordings: current.recordings.map((entry) => entry.id === id ? { ...entry, updatedAt: Date.now(), providerStatus: "known" } : entry), updatedAt: Date.now() });
+      return result;
+    }
+    if (action === "recording_delete") { const id = boundedText(args.recordingId, "recordingId", 200); await mutation(() => computer.recording.delete(id), "recording delete"); const current = await getDaytonaWorkspace(userId); if (current?.recordings) await saveDaytonaWorkspace(userId, { ...current, recordings: current.recordings.filter((entry) => entry.id !== id), updatedAt: Date.now() }); return { deleted: true }; }
     // Daytona's Computer Use transport can occasionally be closed while the
     // sandbox itself remains healthy. Retry only this idempotent startup
     // handshake, before any click/type/invoke action is issued, so a recovery
@@ -2818,7 +2896,37 @@ export class DaytonaEngine {
       case "process_logs": return readOnly(() => computer.getProcessLogs(computerProcessName(args.processName)));
       case "process_errors": return readOnly(() => computer.getProcessErrors(computerProcessName(args.processName)));
       case "mouse_position": return readOnly(() => computer.mouse.getPosition());
-      case "recording_start": return mutation(() => computer.recording.start(args.label ? boundedText(args.label, "label", 200) : undefined), "recording start");
+      case "recording_start": {
+        const result = await mutation(() => computer.recording.start(args.label ? boundedText(args.label, "label", 200) : undefined), "recording start");
+        const id = recordingId(result);
+        if (!id) return result;
+        const current = await getDaytonaWorkspace(userId);
+        if (current) {
+          const now = Date.now();
+          const ttlSeconds = args.ttlSeconds === undefined ? DAYTONA_RECORDING_DEFAULT_TTL_SECONDS : Math.min(Math.max(Math.floor(Number(args.ttlSeconds)), 60), 365 * 24 * 60 * 60);
+          await saveDaytonaWorkspace(userId, { ...current, recordings: [...(current.recordings ?? []).filter((entry) => entry.id !== id), { id, sandboxId: sandbox.id, ...(args.label ? { label: boundedText(args.label, "label", 200) } : {}), createdAt: now, updatedAt: now, expiresAt: now + ttlSeconds * 1000, providerStatus: "known" }].slice(-100), updatedAt: now });
+        }
+        return { result, recordingId: id, expiresAt: Date.now() + (args.ttlSeconds === undefined ? DAYTONA_RECORDING_DEFAULT_TTL_SECONDS : Math.min(Math.max(Math.floor(Number(args.ttlSeconds)), 60), 365 * 24 * 60 * 60)) * 1000 };
+      }
+      case "recording_reconcile": {
+        const listed = await readOnly(() => computer.recording.list());
+        const reconciled = await reconcileRecordings(listed);
+        return { reconciled: true, recordings: reconciled.local };
+      }
+      case "recording_cleanup": {
+        const current = await getDaytonaWorkspace(userId);
+        const now = Date.now();
+        const expired = (current?.recordings ?? []).filter((entry) => entry.expiresAt !== undefined && entry.expiresAt <= now);
+        const retained = [...(current?.recordings ?? [])];
+        const removed: string[] = [];
+        const failed: Array<{ id: string; error: string }> = [];
+        for (const entry of expired) {
+          try { await mutation(() => computer.recording.delete(entry.id), "recording cleanup"); retained.splice(retained.findIndex((item) => item.id === entry.id), 1); removed.push(entry.id); }
+          catch (error) { failed.push({ id: entry.id, error: String(error).slice(0, 500) }); }
+        }
+        if (current) await saveDaytonaWorkspace(userId, { ...current, recordings: retained, updatedAt: now });
+        return { checked: current?.recordings?.length ?? 0, removed, failed };
+      }
       case "recording_download": {
         const recordingId = boundedText(args.recordingId, "recordingId", 200);
         const path = safeDaytonaPath(args.path ?? `recordings/${recordingId}.mp4`, "path");
@@ -3024,7 +3132,19 @@ export class DaytonaEngine {
     await this.validateArtifactStructure(sandbox, path, type);
     const verification = await this.validateArtifactVisual(sandbox, path, type, expectedTitle, expectedFormulaValues, false);
     if (!verification) throw new DaytonaInputError("Artifact QA completed without independent verification evidence; do not register it as verified.");
-    return { status: "passed", path, type, size, verification, registered: false, sourceChanged: false };
+    const qaEvidenceId = `qa_${randomUUID()}`;
+    const session = await getSession(userId);
+    const existing = (session.artifacts ?? []).find((item) => item.sandboxId === sandbox.id && item.path === path);
+    if (existing) {
+      const fingerprint = createHash("sha256").update(JSON.stringify({ workspaceId: sandbox.id, path, size, verification })).digest("hex");
+      const previousFingerprint = existing.visualDiffHistory.at(-1)?.fingerprint;
+      existing.provenance.qaEvidenceIds = [...existing.provenance.qaEvidenceIds, qaEvidenceId].slice(-100);
+      existing.visualDiffHistory = [...existing.visualDiffHistory, { id: `visual_diff_${randomUUID()}`, at: Date.now(), status: visualDiffStatus(previousFingerprint, fingerprint), fingerprint, ...(previousFingerprint ? { previousFingerprint } : {}), qaEvidenceId, checks: Object.keys(verification).slice(0, 20) }].slice(-20);
+      existing.reconciliation = { status: "verified", checkedAt: Date.now() };
+      existing.updatedAt = Date.now();
+      await saveSession(userId, session);
+    }
+    return { status: "passed", path, type, size, verification, qaEvidenceId, registered: false, sourceChanged: false };
   }
 
   /**
@@ -3212,7 +3332,7 @@ export class DaytonaEngine {
     const doc = new Document({ creator: style.author ?? "Chusky", title, sections: [{ properties: {}, headers: headerChildren.length ? { default: new Header({ children: headerChildren }) } : undefined, footers: { default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: style.footer ?? "Created by Chusky", color: color(style.muted), size: 16 }), ...(style.includePageNumbers ? [new TextRun({ text: "  •  Page " }), new TextRun({ children: [PageNumber.CURRENT] })] : [])] })] }) }, children: body }] });
     const attemptPath = artifactAttemptPath(path);
     await sandbox.fs.uploadFile(Buffer.from(await Packer.toBuffer(doc)), attemptPath);
-    const artifact = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "document.docx"), "docx", ARTIFACT_MIME.docx, path, title);
+    const artifact = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "document.docx"), "docx", ARTIFACT_MIME.docx, path, title, {}, artifactMetadata(args, sandbox, "CHUCK_CREATE_DOCUMENT"));
     return { ...artifact, generated: true };
   }
 
@@ -3269,7 +3389,7 @@ export class DaytonaEngine {
     const attemptPath = artifactAttemptPath(path);
     await sandbox.fs.uploadFile(Buffer.from(await workbook.xlsx.writeBuffer()), attemptPath);
     const expectedFormulaValues = Object.fromEntries(sheets.flatMap((spec, sheetIndex) => spec.formulas.filter((formula) => formula.expectedValue !== undefined).map((formula) => [`sheet${sheetIndex + 1}.xml!${formula.cell}`, formula.expectedValue!] as const)));
-    const artifact = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "workbook.xlsx"), "spreadsheet", ARTIFACT_MIME.spreadsheet, path, title, expectedFormulaValues);
+    const artifact = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "workbook.xlsx"), "spreadsheet", ARTIFACT_MIME.spreadsheet, path, title, expectedFormulaValues, artifactMetadata(args, sandbox, "CHUCK_CREATE_SPREADSHEET"));
     return { ...artifact, generated: true };
   }
 
@@ -3301,7 +3421,7 @@ export class DaytonaEngine {
     } finally {
       try { await sandbox.fs.deleteFile(scriptPath, false); } catch { /* temporary generator cleanup is best effort */ }
     }
-    const artifact = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "document.pdf"), "pdf", ARTIFACT_MIME.pdf, path, title);
+    const artifact = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "document.pdf"), "pdf", ARTIFACT_MIME.pdf, path, title, {}, artifactMetadata(args, sandbox, "CHUCK_CREATE_PDF"));
     return { ...artifact, generated: true };
   }
 
@@ -3361,7 +3481,7 @@ export class DaytonaEngine {
     const bytes = await presentationBytes(sandbox, title, slides, style);
     const attemptPath = artifactAttemptPath(path);
     await sandbox.fs.uploadFile(bytes, attemptPath);
-    const result = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "presentation.pptx"), "presentation", ARTIFACT_MIME.presentation, path);
+    const result = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "presentation.pptx"), "presentation", ARTIFACT_MIME.presentation, path, undefined, {}, artifactMetadata(args, sandbox, "CHUCK_CREATE_PRESENTATION"));
     return { ...result, generated: true, slideCount: slides.length + 1 };
   }
 
@@ -3372,20 +3492,74 @@ export class DaytonaEngine {
     if (action === "list") return artifacts.slice(-100).reverse();
     if (action === "reconcile") {
       const missing: string[] = [];
-      const retained: ArtifactRecord[] = [];
+      const verified: string[] = [];
+      const recovered: string[] = [];
+      const pending: string[] = [];
+      const reconciled: ArtifactRecord[] = [];
       for (const artifact of artifacts) {
         try {
-          const sandbox = await this.clientFactory().get(artifact.sandboxId);
+          const sandbox = await this.getOwnedSandbox(userId, artifact.sandboxId, { ensureStarted: false });
           const details = await sandbox.fs.getFileDetails(artifact.path) as { isDir?: boolean; size?: number };
-          if (details.isDir || Number(details.size ?? artifact.size) < 1) missing.push(artifact.id);
-          else retained.push(artifact);
+          if (details.isDir || Number(details.size ?? artifact.size) < 1) {
+            missing.push(artifact.id);
+            reconciled.push({ ...artifact, status: "missing", reconciliation: { status: "missing", checkedAt: Date.now(), lastError: "Provider file is empty or a directory" }, updatedAt: Date.now() });
+          } else {
+            verified.push(artifact.id);
+            reconciled.push({ ...artifact, status: "available", size: Number(details.size ?? artifact.size), reconciliation: { status: "verified", checkedAt: Date.now() }, updatedAt: Date.now() });
+          }
         } catch (error) {
-          if (isMissingDaytonaFile(error) || /not found|404|destroyed/i.test(String(error))) missing.push(artifact.id);
+          if (isMissingDaytonaFile(error) || /not found|404|destroyed/i.test(String(error))) {
+            missing.push(artifact.id);
+            reconciled.push({ ...artifact, status: "missing", reconciliation: { status: "missing", checkedAt: Date.now(), lastError: "Provider file is missing" }, updatedAt: Date.now() });
+          }
           else throw error;
         }
       }
-      if (missing.length) { session.artifacts = retained; await saveSession(userId, session); }
-      return { checked: artifacts.length, retained: retained.length, removedMissing: missing };
+      for (const intent of session.artifactRegistrationIntents ?? []) {
+        try {
+          const sandbox = await this.getOwnedSandbox(userId, intent.sandboxId, { ensureStarted: false });
+          const recoveredArtifact = await this.registerArtifact(userId, sandbox, intent.path, intent.name, intent.type, intent.contentType, intent.destinationPath, intent.expectedText, intent.expectedFormulaValues ?? {}, { provenance: intent.provenance, retention: intent.retention, action: intent.provenance.createdByAction, skipJournal: true });
+          recovered.push(intent.id);
+        } catch (error) {
+          if (isMissingDaytonaFile(error) || /not found|404|destroyed/i.test(String(error))) pending.push(intent.id);
+          else throw error;
+        }
+      }
+      const latest = recovered.length ? await getSession(userId) : session;
+      const merged = [...reconciled, ...(latest.artifacts ?? [])];
+      session.artifacts = [...new Map(merged.map((item) => [item.id, item])).values()].slice(-100);
+      const recoveredIds = new Set(recovered);
+      session.artifactRegistrationIntents = (session.artifactRegistrationIntents ?? []).filter((intent) => !recoveredIds.has(intent.id));
+      await saveSession(userId, session);
+      return { checked: artifacts.length, verified, missing, recovered, pending, retained: reconciled.length };
+    }
+    if (action === "visual_history") {
+      const id = boundedText(args.id, "id", 160);
+      const existing = artifacts.find((item) => item.id === id);
+      if (!existing) throw new DaytonaInputError("Artifact not found or not owned by you");
+      return { id, name: existing.name, path: existing.path, history: existing.visualDiffHistory };
+    }
+    if (action === "cleanup") {
+      const now = Date.now();
+      const expired: string[] = [];
+      const failed: Array<{ id: string; error: string }> = [];
+      const retained: ArtifactRecord[] = [];
+      for (const artifact of artifacts) {
+        if (!isExpired(artifact.retention, now)) { retained.push(artifact); continue; }
+        try {
+          const sandbox = await this.getOwnedSandbox(userId, artifact.sandboxId, { ensureStarted: false });
+          await sandbox.fs.deleteFile(artifact.path, false);
+          expired.push(artifact.id);
+        } catch (error) {
+          const message = isMissingDaytonaFile(error) ? "Provider file already missing" : String(error).slice(0, 500);
+          if (isMissingDaytonaFile(error)) expired.push(artifact.id);
+          else { failed.push({ id: artifact.id, error: message }); retained.push({ ...artifact, status: "expired", reconciliation: { status: "expired", checkedAt: now, lastError: message }, updatedAt: now }); }
+        }
+      }
+      session.artifacts = retained;
+      session.artifactRegistrationIntents = (session.artifactRegistrationIntents ?? []).filter((intent) => !isExpired(intent.retention, now));
+      await saveSession(userId, session);
+      return { checked: artifacts.length, expired, failed };
     }
     if (action === "download_url") {
       const id = boundedText(args.id, "id", 120);
@@ -3420,13 +3594,13 @@ export class DaytonaEngine {
       const encoded = Buffer.from(script, "utf8").toString("base64");
       const result = await sandbox.process.executeCommand(`python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`, undefined, undefined, 120);
       if (result.exitCode !== 0) throw new DaytonaInputError(`ZIP creation failed: ${String(result.result ?? "unknown error").slice(0, 500)}`);
-      return this.registerArtifact(userId, sandbox, attemptPath, name, "zip", "application/zip", path);
+      return this.registerArtifact(userId, sandbox, attemptPath, name, "zip", "application/zip", path, undefined, {}, artifactMetadata(args, sandbox, "CHUCK_ARTIFACT_PACKAGE"));
     }
     const type = artifactType(args.type);
     if (action === "create") {
       if (args.path) {
         const path = safeDaytonaPath(args.path, "path");
-        return this.registerArtifact(userId, sandbox, path, String(args.name ?? String(path).split(/[\\/]/).pop() ?? "artifact"), type, args.contentType ? boundedText(args.contentType, "contentType", 120) : ARTIFACT_MIME[type]);
+        return this.registerArtifact(userId, sandbox, path, String(args.name ?? String(path).split(/[\\/]/).pop() ?? "artifact"), type, args.contentType ? boundedText(args.contentType, "contentType", 120) : ARTIFACT_MIME[type], undefined, undefined, {}, artifactMetadata(args, sandbox, "CHUCK_ARTIFACT_CREATE"));
       }
       if (typeof args.content !== "string") throw new DaytonaInputError("create requires content for text artifacts or path for generated binary artifacts");
       if (!["website", "report"].includes(type)) throw new DaytonaInputError("Binary artifacts must be generated in Daytona and passed by path; only website and report accept text content directly");
@@ -3435,16 +3609,16 @@ export class DaytonaEngine {
       const path = safeDaytonaPath(`artifacts/${name}`, "output path");
       const attemptPath = artifactAttemptPath(path);
       await sandbox.fs.uploadFile(Buffer.from(args.content, "utf8"), attemptPath);
-      return this.registerArtifact(userId, sandbox, attemptPath, name, type, args.contentType ? boundedText(args.contentType, "contentType", 120) : ARTIFACT_MIME[type], path);
+      return this.registerArtifact(userId, sandbox, attemptPath, name, type, args.contentType ? boundedText(args.contentType, "contentType", 120) : ARTIFACT_MIME[type], path, undefined, {}, artifactMetadata(args, sandbox, "CHUCK_ARTIFACT_CREATE"));
     }
     if (action === "register") {
       const path = safeDaytonaPath(args.path, "path");
-      return this.registerArtifact(userId, sandbox, path, String(args.name ?? String(path).split(/[\\/]/).pop() ?? "artifact"), type, args.contentType ? boundedText(args.contentType, "contentType", 120) : ARTIFACT_MIME[type]);
+      return this.registerArtifact(userId, sandbox, path, String(args.name ?? String(path).split(/[\\/]/).pop() ?? "artifact"), type, args.contentType ? boundedText(args.contentType, "contentType", 120) : ARTIFACT_MIME[type], undefined, undefined, {}, artifactMetadata(args, sandbox, "CHUCK_ARTIFACT_REGISTER"));
     }
     throw new DaytonaInputError(`Unsupported artifact action: ${action}`);
   }
 
-  private async registerArtifact(userId: number, sandbox: Sandbox, path: string, name: string, type: ArtifactType, contentType: string, destinationPath?: string, expectedText?: string, expectedFormulaValues: Record<string, string | number | boolean> = {}): Promise<ArtifactRecord & { __chuskyArtifactReady: true; verification?: Record<string, unknown> }> {
+  private async registerArtifact(userId: number, sandbox: Sandbox, path: string, name: string, type: ArtifactType, contentType: string, destinationPath?: string, expectedText?: string, expectedFormulaValues: Record<string, string | number | boolean> = {}, metadata: { provenance?: ArtifactProvenance; retention?: ArtifactRetention; action?: string; skipJournal?: boolean } = {}): Promise<ArtifactRecord & { __chuskyArtifactReady: true; verification?: Record<string, unknown> }> {
     const extension = `.${ARTIFACT_EXTENSION[type]}`;
     let normalizedPath = path.toLowerCase().endsWith(extension) ? path : `${path}${extension}`;
     const normalizedDestination = destinationPath === undefined
@@ -3456,6 +3630,14 @@ export class DaytonaEngine {
     const stagingPath = normalizedPath;
     let verification: Record<string, unknown> | undefined;
     const normalizedName = artifactNameForType(name, type);
+    const provenance = metadata.provenance ?? { workspaceId: sandbox.id, sourcePaths: [], createdByAction: metadata.action ?? "artifact.register", qaEvidenceIds: [] };
+    const retention = metadata.retention ?? { mode: "forever" as const, policyName: "owner-retained" };
+    const intent: ArtifactRegistrationIntent = { id: `artifact_intent_${randomUUID()}`, userId, sandboxId: sandbox.id, name: normalizedName, type, path: normalizedPath, contentType, ...(normalizedDestination ? { destinationPath: normalizedDestination } : {}), ...(expectedText ? { expectedText } : {}), ...(Object.keys(expectedFormulaValues).length ? { expectedFormulaValues } : {}), provenance, retention, createdAt: Date.now(), updatedAt: Date.now() };
+    if (!metadata.skipJournal) {
+      const journal = await getSession(userId);
+      journal.artifactRegistrationIntents = [...(journal.artifactRegistrationIntents ?? []), intent].slice(-50);
+      await saveSession(userId, journal);
+    }
     let details: { size?: number; isDir?: boolean } | undefined;
     // Preserve the historical extension-normalization behavior for files
     // created without an extension, while still allowing a pre-existing
@@ -3501,8 +3683,26 @@ export class DaytonaEngine {
       }
     }
     const now = Date.now();
-    const artifact: ArtifactRecord = { id: `artifact_${randomUUID()}`, userId, sandboxId: sandbox.id, name: normalizedName, type, path: normalizedPath, contentType, size, status: "available", createdAt: now, updatedAt: now };
+    // Keep registration single-read: generators may have already consumed the
+    // source image/file through Daytona, and a second provider download makes
+    // large presentations unnecessarily expensive. The QA evidence, path,
+    // size, and workspace identity form a stable bounded visual checkpoint;
+    // the next registration records a changed checkpoint when its QA evidence
+    // or shape changes.
+    const fingerprint = createHash("sha256").update(JSON.stringify({ workspaceId: sandbox.id, path: normalizedPath, size, verification })).digest("hex");
+    const existing = (await getSession(userId)).artifacts?.find((item) => item.userId === userId && item.sandboxId === sandbox.id && item.path === normalizedPath);
+    const previousFingerprint = existing?.visualDiffHistory.at(-1)?.fingerprint;
+    const qaEvidenceId = verification ? `qa_${randomUUID()}` : undefined;
+    const diff = { id: `visual_diff_${randomUUID()}`, at: now, status: visualDiffStatus(previousFingerprint, fingerprint), fingerprint, ...(previousFingerprint ? { previousFingerprint } : {}), ...(qaEvidenceId ? { qaEvidenceId } : {}), checks: verification ? Object.keys(verification).slice(0, 20) : ["content-fingerprint"] } as const;
+    const artifact: ArtifactRecord = { id: `artifact_${randomUUID()}`, userId, sandboxId: sandbox.id, name: normalizedName, type, path: normalizedPath, contentType, size, status: "available", reconciliation: { status: "verified", checkedAt: now }, retention, provenance: { ...provenance, ...(qaEvidenceId ? { qaEvidenceIds: [...provenance.qaEvidenceIds, qaEvidenceId].slice(-100) } : {}) }, visualDiffHistory: [...(existing?.visualDiffHistory ?? []), diff].slice(-20), createdAt: now, updatedAt: now };
     const persisted = await this.saveArtifact(userId, artifact);
+    try {
+      const completed = await getSession(userId);
+      completed.artifactRegistrationIntents = (completed.artifactRegistrationIntents ?? []).filter((item) => item.id !== intent.id);
+      await saveSession(userId, completed);
+    } catch {
+      // The durable intent deliberately remains recoverable when its cleanup write fails.
+    }
     return { ...persisted, ...(verification ? { verification } : {}), __chuskyArtifactReady: true };
   }
 

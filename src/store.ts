@@ -250,6 +250,7 @@ export interface UserSession {
   sdkThreads?: SdkThreadRecord[];
   sdkFiles?: SdkFileRecord[];
   artifacts?: ArtifactRecord[];
+  artifactRegistrationIntents?: ArtifactRegistrationIntent[];
   sdkIdempotency?: Record<string, { fingerprint: string; response: unknown; createdAt: number }>;
   sdkAudit?: Array<{ id: string; action: string; requestId: string; status: number; at: number }>;
   sdkWebhooks?: Array<{ id: string; url: string; secretCiphertext: string; createdAt: number; disabledAt?: number }>;
@@ -840,7 +841,13 @@ export interface SdkThreadRecord {
 }
 export interface SdkFileRecord { id: string; key: string; /** Temporary owner-scoped key used only by an expiring signed upload URL. */ uploadKey?: string; name: string; contentType: string; size: number; status: "pending" | "available" | "rejected"; createdAt: number; }
 export type ArtifactType = "website" | "report" | "docx" | "presentation" | "pdf" | "spreadsheet" | "image" | "video" | "zip" | "project";
-export interface ArtifactRecord { id: string; userId: number; sandboxId: string; name: string; type: ArtifactType; path: string; contentType: string; size: number; status: "available"; createdAt: number; updatedAt: number; }
+export type ArtifactRetentionMode = "forever" | "ttl";
+export type ArtifactReconciliationStatus = "unknown" | "verified" | "missing" | "expired" | "recovery_pending";
+export interface ArtifactVisualDiffRecord { id: string; at: number; status: "baseline" | "unchanged" | "changed"; fingerprint: string; previousFingerprint?: string; qaEvidenceId?: string; checks: string[]; }
+export interface ArtifactProvenance { runId?: string; workspaceId: string; sourcePaths: string[]; createdByAction: string; qaEvidenceIds: string[]; }
+export interface ArtifactRetention { mode: ArtifactRetentionMode; expiresAt?: number; policyName?: string; }
+export interface ArtifactRegistrationIntent { id: string; userId: number; sandboxId: string; name: string; type: ArtifactType; path: string; contentType: string; destinationPath?: string; expectedText?: string; expectedFormulaValues?: Record<string, string | number | boolean>; provenance: ArtifactProvenance; retention: ArtifactRetention; createdAt: number; updatedAt: number; lastError?: string; }
+export interface ArtifactRecord { id: string; userId: number; sandboxId: string; name: string; type: ArtifactType; path: string; contentType: string; size: number; status: "available" | "missing" | "expired"; reconciliation: { status: ArtifactReconciliationStatus; checkedAt?: number; lastError?: string }; retention: ArtifactRetention; provenance: ArtifactProvenance; visualDiffHistory: ArtifactVisualDiffRecord[]; createdAt: number; updatedAt: number; }
 
 export interface DaytonaWorkspaceRecord {
   sandboxId: string;
@@ -864,6 +871,8 @@ export interface DaytonaWorkspaceRecord {
   /** Safe browser evidence only; never persist page bodies, cookies, or credentials. */
   browser?: { lastUrl?: string; requestedUrl?: string; sessionId?: string; observedAt?: number; observationMethod?: "address_bar" | "requested_only"; updatedAt: number };
   computerLease?: { leaseId: string; runId?: string; acquiredAt: number; expiresAt: number };
+  /** Provider recording metadata used for reconciliation and expiry cleanup. */
+  recordings?: Array<{ id: string; label?: string; sandboxId: string; createdAt: number; updatedAt: number; expiresAt?: number; providerStatus: "known" | "missing" | "expired"; sizeBytes?: number; path?: string; lastError?: string }>;
 }
 
 export type DaytonaAppFramework = "vite-react" | "nextjs";
@@ -1766,6 +1775,7 @@ interface Backend {
   getDaytonaWorkspace(userId: number): Promise<DaytonaWorkspaceRecord | undefined>;
   saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord): Promise<void>;
   clearDaytonaWorkspace(userId: number): Promise<void>;
+  listSessionOwnerIds(limit?: number): Promise<number[]>;
   getTasks(userId: number): Promise<TaskRecord[]>;
   getTask(userId: number, id: string): Promise<TaskRecord | undefined>;
   /** Small, per-task cancellation signal for active workers. */
@@ -3010,6 +3020,20 @@ class RedisBackend implements Backend {
   }
   async clearDaytonaWorkspace(userId: number): Promise<void> {
     await this.r.del(this.dk(userId));
+  }
+  async listSessionOwnerIds(limit = 1000): Promise<number[]> {
+    const owners = new Set<number>();
+    let cursor = "0";
+    do {
+      const [next, keys] = await this.r.scan(cursor, "MATCH", "chuck:session:*", "COUNT", Math.min(200, Math.max(1, limit)));
+      cursor = String(next);
+      for (const key of keys) {
+        const match = String(key).match(/^chuck:session:(\d+)$/);
+        if (match) owners.add(Number(match[1]));
+        if (owners.size >= limit) break;
+      }
+    } while (cursor !== "0" && owners.size < limit);
+    return [...owners].sort((a, b) => a - b).slice(0, limit);
   }
   private async ensureTaskMigration(userId: number): Promise<void> {
     if (this.migratedTaskOwners.has(userId)) return;
@@ -4308,6 +4332,7 @@ class MemoryBackend implements Backend {
   async getDaytonaWorkspace(userId: number) { return this.daytona.get(userId); }
   async saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord) { this.daytona.set(userId, workspace); }
   async clearDaytonaWorkspace(userId: number) { this.daytona.delete(userId); }
+  async listSessionOwnerIds(limit = 1000) { return [...new Set([...this.sessions.keys(), ...this.daytona.keys()])].filter((id) => id >= 0).sort((a, b) => a - b).slice(0, limit); }
   async getTasks(userId: number) { return this.tasks.get(userId) ?? []; }
   async getTask(userId: number, id: string) { return (this.tasks.get(userId) ?? []).find((task) => task.id === id); }
   async isTaskCancellationRequested(userId: number, id: string) { return this.taskCancellationRequests.has(`${userId}:${id}`); }
@@ -4637,7 +4662,7 @@ class MemoryBackend implements Backend {
 
 function fresh(): UserSession {
   const now = Date.now();
-  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], autonomyRuns: [], jobOccurrences: [], externalActions: [], reliabilitySamples: [], executionReservations: [], outcomeVerifications: [], compensations: [], reliabilityTrace: [], providerProofs: [], approvalEscalations: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], phoneCalls: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], mcpConnections: [], mcpOAuthStates: [], tregOAuthStates: [], linkOAuthStates: [], linkSpendRequests: [], workflowComposers: [], recallMeetings: [], calendarMeetingPreparations: [], meetingRooms: [], createdAt: now, updatedAt: now };
+  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], autonomyRuns: [], jobOccurrences: [], externalActions: [], reliabilitySamples: [], executionReservations: [], outcomeVerifications: [], compensations: [], reliabilityTrace: [], providerProofs: [], approvalEscalations: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], artifactRegistrationIntents: [], phoneCalls: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], mcpConnections: [], mcpOAuthStates: [], tregOAuthStates: [], linkOAuthStates: [], linkSpendRequests: [], workflowComposers: [], recallMeetings: [], calendarMeetingPreparations: [], meetingRooms: [], createdAt: now, updatedAt: now };
 }
 
 let backend: Backend;
@@ -5060,6 +5085,34 @@ function normalizeMcpConnectionRecord(value: unknown): McpConnectionRecord | und
   return { serverId: item.serverId, enabled: item.enabled, createdAt: Number(item.createdAt), updatedAt: Number(item.updatedAt), ...(Number.isSafeInteger(item.verifiedToolCount) && Number(item.verifiedToolCount) >= 0 ? { verifiedToolCount: Number(item.verifiedToolCount) } : {}), ...(customServer ? { customServer } : {}), ...(item.credential && typeof item.credential === "object" ? { credential: item.credential as EncryptedCredential } : {}) };
 }
 
+function normalizeArtifactRecords(uid: number, raw: unknown): ArtifactRecord[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((value): ArtifactRecord[] => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const item = value as Partial<ArtifactRecord>;
+    if (item.userId !== uid || typeof item.id !== "string" || typeof item.sandboxId !== "string" || typeof item.name !== "string" || typeof item.path !== "string" || typeof item.type !== "string" || typeof item.contentType !== "string" || !Number.isFinite(item.size)) return [];
+    const retention = item.retention && typeof item.retention === "object" && (item.retention.mode === "ttl" || item.retention.mode === "forever")
+      ? { mode: item.retention.mode, ...(Number.isFinite(item.retention.expiresAt) ? { expiresAt: Number(item.retention.expiresAt) } : {}), ...(typeof item.retention.policyName === "string" ? { policyName: item.retention.policyName.slice(0, 80) } : {}) }
+      : { mode: "forever" as const };
+    const provenance = item.provenance && typeof item.provenance === "object"
+      ? { ...(typeof item.provenance.runId === "string" ? { runId: item.provenance.runId.slice(0, 160) } : {}), workspaceId: typeof item.provenance.workspaceId === "string" ? item.provenance.workspaceId.slice(0, 200) : item.sandboxId, sourcePaths: Array.isArray(item.provenance.sourcePaths) ? item.provenance.sourcePaths.filter((path): path is string => typeof path === "string").slice(0, 100).map((path) => path.slice(0, 500)) : [], createdByAction: typeof item.provenance.createdByAction === "string" ? item.provenance.createdByAction.slice(0, 100) : "artifact.register", qaEvidenceIds: Array.isArray(item.provenance.qaEvidenceIds) ? item.provenance.qaEvidenceIds.filter((id): id is string => typeof id === "string").slice(0, 100) : [] }
+      : { workspaceId: item.sandboxId, sourcePaths: [], createdByAction: "artifact.register", qaEvidenceIds: [] };
+    const history = Array.isArray(item.visualDiffHistory) ? item.visualDiffHistory.filter((entry): entry is ArtifactVisualDiffRecord => Boolean(entry) && typeof entry.id === "string" && typeof entry.fingerprint === "string" && ["baseline", "unchanged", "changed"].includes(entry.status as string) && Number.isFinite(entry.at)).slice(-20) : [];
+    return [{ id: item.id.slice(0, 160), userId: uid, sandboxId: item.sandboxId.slice(0, 200), name: item.name.slice(0, 240), type: item.type as ArtifactType, path: item.path.slice(0, 1000), contentType: item.contentType.slice(0, 160), size: Math.max(0, Math.floor(Number(item.size))), status: item.status === "missing" || item.status === "expired" ? item.status : "available", reconciliation: item.reconciliation && typeof item.reconciliation === "object" && ["unknown", "verified", "missing", "expired", "recovery_pending"].includes(item.reconciliation.status as string) ? { status: item.reconciliation.status as ArtifactReconciliationStatus, ...(Number.isFinite(item.reconciliation.checkedAt) ? { checkedAt: Number(item.reconciliation.checkedAt) } : {}), ...(typeof item.reconciliation.lastError === "string" ? { lastError: item.reconciliation.lastError.slice(0, 500) } : {}) } : { status: "unknown" }, retention, provenance, visualDiffHistory: history, createdAt: Number.isFinite(item.createdAt) ? Number(item.createdAt) : Date.now(), updatedAt: Number.isFinite(item.updatedAt) ? Number(item.updatedAt) : Date.now() }];
+  }).slice(-100);
+}
+
+function normalizeArtifactRegistrationIntents(uid: number, raw: unknown): ArtifactRegistrationIntent[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((value): ArtifactRegistrationIntent[] => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const item = value as Partial<ArtifactRegistrationIntent>;
+    if (item.userId !== uid || typeof item.id !== "string" || typeof item.sandboxId !== "string" || typeof item.path !== "string" || typeof item.name !== "string" || typeof item.type !== "string") return [];
+    if (!item.provenance || typeof item.provenance !== "object" || !item.retention || typeof item.retention !== "object") return [];
+    return [{ ...item as ArtifactRegistrationIntent, id: item.id.slice(0, 160), sandboxId: item.sandboxId.slice(0, 200), path: item.path.slice(0, 1000), name: item.name.slice(0, 240), contentType: typeof item.contentType === "string" ? item.contentType.slice(0, 160) : "application/octet-stream", ...(typeof item.lastError === "string" ? { lastError: item.lastError.slice(0, 500) } : {}) }];
+  }).slice(-50);
+}
+
 export async function getSession(uid: number): Promise<UserSession> {
   const raw = await backend.getSession(uid) as UserSession & { faceTimeCalls?: Array<Record<string, unknown>> };
   // Read and migrate the old persisted field once, without carrying the obsolete
@@ -5070,6 +5123,8 @@ export async function getSession(uid: number): Promise<UserSession> {
   s.history = persistedHistory.history;
   s.sdkThreads = compactSdkThreads(s.sdkThreads);
   s.sdkIdempotency = compactSdkIdempotency(s.sdkIdempotency);
+  s.artifacts = normalizeArtifactRecords(uid, s.artifacts);
+  s.artifactRegistrationIntents = normalizeArtifactRegistrationIntents(uid, s.artifactRegistrationIntents);
   s.triggerIds = Array.isArray(s.triggerIds) ? s.triggerIds.filter((id): id is string => typeof id === "string") : [];
   s.triggerInstructions = Object.fromEntries(Object.entries(s.triggerInstructions ?? {})
     .filter(([id, value]) => s.triggerIds.includes(id) && typeof value === "string")
@@ -6632,6 +6687,10 @@ export async function saveDaytonaWorkspace(uid: number, workspace: DaytonaWorksp
 export async function clearDaytonaWorkspace(uid: number): Promise<void> {
   await backend.clearDaytonaWorkspace(uid);
   await clearDaytonaWorkspaceId(uid);
+}
+
+export async function listSessionOwnerIds(limit = 1000): Promise<number[]> {
+  return backend.listSessionOwnerIds(Math.max(1, Math.min(10_000, Math.floor(limit))));
 }
 
 function normalizeTask(task: TaskRecord): TaskRecord {

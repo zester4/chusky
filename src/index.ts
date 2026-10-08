@@ -237,7 +237,7 @@ import { registerAuthRoutes } from "./authRoutes.js";
 import { initAuth } from "./auth.js";
 import { monitoringSnapshot, recordFailure } from "./monitoring.js";
 import { createLinkCode, listLinkedChannels, setProactivePreference } from "./channels/identity.js";
-import { setVoiceReplies, setLiveVoicePreference } from "./store.js";
+import { listSessionOwnerIds, setVoiceReplies, setLiveVoicePreference } from "./store.js";
 import { isWorkflowControlFlow } from "./workflowControl.js";
 import { daytonaEngine, safeDaytonaPath } from "./lib/daytona/index.js";
 import { videoDownloadUrl, videoPollingUrl, type VideoStatusResponse } from "./video.js";
@@ -255,6 +255,7 @@ async function main(): Promise<void> {
   let memoryProjectionRecovery: ReturnType<typeof setInterval> | undefined;
   let memoryReflectionRecovery: ReturnType<typeof setInterval> | undefined;
   let telegramWebhookRecovery: ReturnType<typeof setInterval> | undefined;
+  let daytonaRetentionSweep: ReturnType<typeof setInterval> | undefined;
   let httpServer: ServerType | undefined;
   let shuttingDown = false;
   const inFlightTelegramUpdates = new Set<Promise<unknown>>();
@@ -271,6 +272,10 @@ async function main(): Promise<void> {
     memoryReflectionRecovery = setInterval(() => { void drainMemoryReflectionQueue(20).catch((error) => logger.warn({ errorType: error instanceof Error ? error.name : "MemoryReflectionError" }, "Memory reflection sweep failed")); }, 60_000);
     if (typeof memoryReflectionRecovery === "object" && "unref" in memoryReflectionRecovery) memoryReflectionRecovery.unref();
   }
+  daytonaRetentionSweep = setInterval(() => {
+    void listSessionOwnerIds(500).then((owners) => Promise.allSettled(owners.map((userId) => daytonaEngine.retentionSweep(userId)))).catch((error) => logger.warn({ errorType: error instanceof Error ? error.name : "DaytonaRetentionError" }, "Daytona retention sweep failed"));
+  }, 15 * 60_000);
+  if (typeof daytonaRetentionSweep === "object" && "unref" in daytonaRetentionSweep) daytonaRetentionSweep.unref();
   // Webhook updates are dispatched in the background, so initialize grammY
   // before the HTTP server can accept one. Without this, handleUpdate throws
   // because bot.me has not been loaded yet.
@@ -385,6 +390,7 @@ async function main(): Promise<void> {
     if (missionRecovery) clearInterval(missionRecovery);
     if (memoryProjectionRecovery) clearInterval(memoryProjectionRecovery);
     if (telegramWebhookRecovery) clearInterval(telegramWebhookRecovery);
+    if (daytonaRetentionSweep) clearInterval(daytonaRetentionSweep);
     // Stop accepting HTTP work first. During a PM2 cluster reload, the ready
     // replacement worker is already serving this port before this worker gets
     // SIGINT. Give an update already accepted by this worker a bounded chance
