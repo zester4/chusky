@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { Pool } from "pg";
 import { betterAuth } from "better-auth";
 import { organization } from "better-auth/plugins";
+import { twoFactor } from "better-auth/plugins/two-factor";
 import { createAccessControl } from "better-auth/plugins/access";
 import { getMigrations } from "better-auth/db/migration";
 import { redisStorage } from "@better-auth/redis-storage";
@@ -108,6 +109,7 @@ function authConfig(database: AuthDatabase) {
       },
     },
     plugins: [
+      twoFactor({ issuer: "Chusky", backupCodeOptions: { storeBackupCodes: "encrypted" } }),
       organization({
         ac: organizationAc,
         roles: { owner: organizationOwner, admin: organizationAdmin, member: organizationMember },
