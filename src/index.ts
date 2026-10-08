@@ -2308,7 +2308,7 @@ async function main(): Promise<void> {
             linkedChannels,
             preferenceRecords as DeliveryPreferenceRecord[],
             telegramTarget,
-            config.sendblueEnabled,
+            { slack: config.slackEnabled, sendblue: config.sendblueEnabled },
           ) ?? null;
         },
         getJobOccurrence, createJobOccurrence, updateJobOccurrence,

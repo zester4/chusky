@@ -1,5 +1,5 @@
 import { configureAttentionPulse, type NativeToolRuntime } from "../nativeTools.js";
-import { createAttentionRecord, listAttentionRecords, updateAttentionRecord, type AutonomyProfileRecord, type DeliveryPreferenceRecord } from "../store.js";
+import { createAttentionRecord, listAttentionRecords, listChannelIdentities, updateAttentionRecord, type AutonomyProfileRecord, type DeliveryPreferenceRecord } from "../store.js";
 import type { ChannelProvider } from "../channels/contracts.js";
 
 export type PulseCadence = "every_30_minutes" | "hourly" | "daily";
@@ -101,6 +101,13 @@ async function upsertProfile(userId: number, values: { enabled: boolean; authori
 }
 
 async function upsertDeliveryPreferences(userId: number, preferences: ReturnType<typeof normalizePulsePreferences>): Promise<DeliveryPreferenceRecord[]> {
+  const linkedChannels = await listChannelIdentities(userId);
+  for (const target of preferences.deliveryTargets) {
+    if (target.provider === "telegram") continue;
+    if (!target.conversationId || !linkedChannels.some((identity) => identity.userId === userId && identity.provider === target.provider && identity.externalUserId === target.conversationId && !identity.disabledAt && identity.proactiveOptIn !== false)) {
+      throw new Error(`The selected ${target.provider === "sendblue" ? "iMessage" : target.provider} channel is not linked and opted in for this account.`);
+    }
+  }
   const existing = await listAttentionRecords(userId, "delivery_preference", { limit: 100 }) as DeliveryPreferenceRecord[];
   const selected = new Set(preferences.deliveryTargets.map((target) => `${target.provider}:${target.conversationId ?? ""}`));
   for (const preference of existing) {

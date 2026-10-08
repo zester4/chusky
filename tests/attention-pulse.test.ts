@@ -25,15 +25,21 @@ test("attention pulse defaults to Telegram delivery and honors explicit controls
   assert.equal(attentionPulseDeliveryDecision([preference({ maxPerDay: 2 })], Date.UTC(2026, 0, 1, 12, 0), 2).reason, "daily_limit");
 });
 
-test("attention pulse prefers only an active, opted-in private iMessage link and respects its preference", () => {
+test("attention pulse prefers only an active, opted-in private iMessage link when no channel was selected", () => {
   const linked = { accountId: "account_1", userId: 1, provider: "sendblue" as const, externalUserId: "+15550001", verifiedAt: 1, createdAt: 1, updatedAt: 1 };
   const telegram = { provider: "telegram" as const, conversationId: "99" };
-  const preferences = [preference({ mode: "silent" })];
-  assert.deepEqual(selectAttentionPulseDeliveryTarget([linked], preferences, telegram, true), { provider: "sendblue", conversationId: "+15550001" });
-  assert.deepEqual(selectAttentionPulseDeliveryTarget([{ ...linked, proactiveOptIn: false }], preferences, telegram, true), telegram);
-  assert.deepEqual(selectAttentionPulseDeliveryTarget([{ ...linked, disabledAt: 2 }], preferences, telegram, true), telegram);
+  assert.deepEqual(selectAttentionPulseDeliveryTarget([linked], [], telegram, true), { provider: "sendblue", conversationId: "+15550001" });
+  assert.deepEqual(selectAttentionPulseDeliveryTarget([{ ...linked, proactiveOptIn: false }], [], telegram, true), telegram);
+  assert.deepEqual(selectAttentionPulseDeliveryTarget([{ ...linked, disabledAt: 2 }], [], telegram, true), telegram);
   assert.deepEqual(selectAttentionPulseDeliveryTarget([linked], [preference({ provider: "sendblue", conversationId: linked.externalUserId, enabled: false })], telegram, true), telegram);
-  assert.deepEqual(selectAttentionPulseDeliveryTarget([linked], preferences, telegram, false), telegram);
+  assert.deepEqual(selectAttentionPulseDeliveryTarget([linked], [], telegram, false), telegram);
+});
+
+test("attention pulse routes an explicitly selected Slack identity and does not silently override Telegram", () => {
+  const slack = { accountId: "account_1", userId: 1, provider: "slack" as const, externalUserId: "U123", workspaceId: "T123", verifiedAt: 1, createdAt: 1, updatedAt: 1 };
+  const telegram = { provider: "telegram" as const, conversationId: "99" };
+  assert.deepEqual(selectAttentionPulseDeliveryTarget([slack], [preference({ provider: "slack", conversationId: "U123" })], telegram, { slack: true, sendblue: false }), { provider: "slack", conversationId: "U123" });
+  assert.deepEqual(selectAttentionPulseDeliveryTarget([slack], [preference({ provider: "telegram" })], telegram, { slack: true, sendblue: false }), telegram);
 });
 
 test("attention pulse delivery controls are scoped to the selected channel", () => {

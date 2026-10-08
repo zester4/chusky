@@ -176,21 +176,45 @@ export function isWithinQuietHours(minuteUtc: number, quietHours: DeliveryPrefer
   return start < end ? minute >= start && minute < end : minute >= start || minute < end;
 }
 
-/** Prefer a currently linked, opted-in private iMessage identity for Pulse.
- * Group authorizations are stored separately and are never considered here. */
+/** Resolve the owner's selected private delivery channel for Pulse.
+ * Group authorizations are stored separately and are never considered here.
+ * A linked channel is only eligible when the owner explicitly selected it (or
+ * when no explicit delivery preference exists for backwards compatibility).
+ */
 export function selectAttentionPulseDeliveryTarget(
   linkedChannels: readonly ChannelIdentityRecord[],
   preferences: readonly DeliveryPreferenceRecord[],
   telegramTarget: ReminderDeliveryTarget | undefined,
-  sendblueAvailable: boolean,
+  availableProviders: boolean | Partial<Record<"slack" | "sendblue", boolean>>,
 ): ReminderDeliveryTarget | undefined {
-  if (sendblueAvailable) {
-    for (const identity of linkedChannels) {
-      if (identity.provider !== "sendblue" || identity.disabledAt || identity.proactiveOptIn === false) continue;
-      const preference = preferences.find((item) => item.provider === "sendblue" && item.conversationId === identity.externalUserId)
-        ?? preferences.find((item) => item.provider === "sendblue" && !item.conversationId);
-      if (preference && (!preference.enabled || preference.mode === "silent")) continue;
-      return { provider: "sendblue", conversationId: identity.externalUserId };
+  const availability = typeof availableProviders === "boolean"
+    ? { slack: false, sendblue: availableProviders }
+    : availableProviders;
+  const eligible = (provider: "slack" | "sendblue", conversationId?: string): ReminderDeliveryTarget | undefined => {
+    if (!availability[provider]) return undefined;
+    const identity = linkedChannels.find((item) => item.provider === provider && !item.disabledAt && item.proactiveOptIn !== false && (!conversationId || item.externalUserId === conversationId));
+    return identity ? { provider, conversationId: identity.externalUserId } : undefined;
+  };
+
+  // Preferences are ordered by the dashboard selection order. Honor the first
+  // selected connected channel, and never silently switch away from an
+  // explicitly selected Telegram target.
+  const explicitTelegram = preferences.find((item) => item.provider === "telegram");
+  if (explicitTelegram) return telegramTarget;
+  for (const preference of preferences) {
+    if (!preference.enabled || preference.mode === "silent" || (preference.provider !== "slack" && preference.provider !== "sendblue")) continue;
+    const target = eligible(preference.provider, preference.conversationId);
+    if (target) return target;
+  }
+
+  // Older records may have no delivery preference at all. Preserve their
+  // existing iMessage fallback, then try Slack before Telegram. Once an
+  // external provider has an explicit preference, a disabled/silent record is
+  // intentional and must not be overridden by the legacy fallback.
+  if (!preferences.some((item) => item.provider === "slack" || item.provider === "sendblue")) {
+    for (const provider of ["sendblue", "slack"] as const) {
+      const target = eligible(provider);
+      if (target) return target;
     }
   }
   return telegramTarget;
