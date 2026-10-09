@@ -33,10 +33,14 @@ export interface ConnectedWatchSpec extends DefaultWatchSpec {
   accountAlias?: string;
 }
 
+/** Marker used only for starter watches waiting on their matching account. */
+export const DEFAULT_WATCH_CONNECTION_WAIT_ERROR = "Waiting for the matching connected app before monitoring can begin.";
+
 /**
  * These are intentionally read-only starter watches. They are created only
- * after the owner explicitly enables Attention Pulse and remain ordinary
- * owner-configured watches thereafter.
+ * after the owner explicitly enables Attention Pulse and the matching account
+ * is connected. A missing account becomes a capability candidate instead of
+ * an active watch that can age into a misleading stale state.
  */
 export const DEFAULT_PROACTIVE_WATCHES: readonly DefaultWatchSpec[] = [
   { key: "gmail-recent", name: "Recent inbox", domain: "gmail", toolkit: "gmail", objective: "Check the newest owner inbox messages and identify meaningful changes, urgent requests, commitments, invoices, and messages needing a reply.", query: "Gmail newest five inbox messages read only", maxItems: 5, cadenceSeconds: 3600, capabilityIds: ["inbox_priority_scan", "unanswered_message", "important_person_monitor", "email_commitment", "attachment_triage", "invoice_detection"] },
@@ -69,6 +73,31 @@ const TOOLKIT_BY_DOMAIN: Record<string, string> = {
   drive: "googledrive", notion: "notion", github: "github", linear: "linear", jira: "jira", tasks: "linear", projects: "linear",
   sheets: "googlesheets", attention: "chusky", all: "chusky",
 };
+
+const DEFAULT_WATCH_TOOLKIT_ALIASES: Record<string, readonly string[]> = {
+  gmail: ["gmail", "googlemail", "outlook", "microsoftoutlook", "email"],
+  calendar: ["googlecalendar", "calendar", "outlookcalendar", "microsoftoutlookcalendar"],
+};
+
+function normalizeToolkit(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function accountIsActive(account: ConnectedWatchAccount): boolean {
+  return !account.status || ["ACTIVE", "CONNECTED", "ENABLED"].includes(account.status.toUpperCase());
+}
+
+/** Return only universal starter watches whose provider account is available. */
+export function defaultWatchSpecsForConnectedAccounts(accounts: readonly ConnectedWatchAccount[]): DefaultWatchSpec[] {
+  const connectedToolkits = new Set(accounts
+    .filter(accountIsActive)
+    .map((account) => normalizeToolkit(account.toolkit))
+    .filter(Boolean));
+  return DEFAULT_PROACTIVE_WATCHES.filter((spec) =>
+    (DEFAULT_WATCH_TOOLKIT_ALIASES[spec.domain] ?? [spec.toolkit])
+      .some((toolkit) => connectedToolkits.has(normalizeToolkit(toolkit))),
+  );
+}
 
 /** Every catalogue behavior has a typed, read-only watch contract. */
 export const PROACTIVE_WATCH_DEFINITIONS: readonly ProactiveWatchDefinition[] = PROACTIVE_CAPABILITIES.map((capability) => {
@@ -116,10 +145,10 @@ export function defaultWatchInput(spec: DefaultWatchSpec, now = Date.now()): Rec
 export function connectedWatchSpecs(accounts: readonly ConnectedWatchAccount[]): ConnectedWatchSpec[] {
   const specs: ConnectedWatchSpec[] = [];
   for (const account of accounts) {
-    if (!account.id || !account.toolkit || (account.status && !["ACTIVE", "CONNECTED", "ENABLED"].includes(account.status.toUpperCase()))) continue;
-    const toolkit = account.toolkit.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!account.id || !account.toolkit || !accountIsActive(account)) continue;
+    const toolkit = normalizeToolkit(account.toolkit);
     for (const template of CONNECTED_APP_WATCHES) {
-      if (!template.toolkits.some((candidate) => candidate.toLowerCase().replace(/[^a-z0-9]/g, "") === toolkit)) continue;
+      if (!template.toolkits.some((candidate) => normalizeToolkit(candidate) === toolkit)) continue;
       const { toolkits: _toolkits, ...spec } = template;
       specs.push({ ...spec, connectedAccountId: account.id, ...(account.alias ? { accountAlias: account.alias } : {}) });
     }
@@ -135,7 +164,7 @@ export function watchCapabilityIds(watch: Pick<AutonomyWatchRecord, "capabilityI
   return watch.capabilityIds?.length ? [...new Set(watch.capabilityIds)] : [];
 }
 
-export function missingDefaultWatchKeys(existing: readonly AutonomyWatchRecord[]): DefaultWatchSpec[] {
+export function missingDefaultWatchKeys(existing: readonly AutonomyWatchRecord[], availableSpecs: readonly DefaultWatchSpec[] = DEFAULT_PROACTIVE_WATCHES): DefaultWatchSpec[] {
   const names = new Set(existing.filter((watch) => watch.status !== "revoked").map((watch) => `${watch.domain}:${watch.name}`.toLowerCase()));
-  return DEFAULT_PROACTIVE_WATCHES.filter((spec) => !names.has(`${spec.domain}:${spec.name}`.toLowerCase()));
+  return availableSpecs.filter((spec) => !names.has(`${spec.domain}:${spec.name}`.toLowerCase()));
 }

@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { PROACTIVE_CAPABILITIES, proactiveCataloguePrompt } from "../src/proactive/catalog.js";
-import { DEFAULT_PROACTIVE_WATCHES, PROACTIVE_WATCH_DEFINITIONS, connectedWatchInput, connectedWatchSpecs, defaultWatchInput, missingDefaultWatchKeys, normalizeProactiveCapabilityIds, proactiveWatchDefinition, watchCapabilityIds } from "../src/proactive/watches.js";
+import { DEFAULT_PROACTIVE_WATCHES, PROACTIVE_WATCH_DEFINITIONS, connectedWatchInput, connectedWatchSpecs, defaultWatchInput, defaultWatchSpecsForConnectedAccounts, missingDefaultWatchKeys, normalizeProactiveCapabilityIds, proactiveWatchDefinition, watchCapabilityIds } from "../src/proactive/watches.js";
 import { proactiveHeartbeatText } from "../src/proactive/heartbeat.js";
 import { buildDailyOperatingBriefing, detectProactiveFindings, PROACTIVE_RUN_LEVEL_CAPABILITY_IDS, PROACTIVE_SIGNAL_CAPABILITY_IDS } from "../src/proactive/detectors.js";
 import { attentionPulseDeliveryDecision } from "../src/attentionPulse.js";
-import { configureAttentionPulse } from "../src/nativeTools.js";
+import { configureAttentionPulse, syncDefaultProactiveWatchesForConnectedAccounts } from "../src/nativeTools.js";
 import { addJob, createAttentionRecord, initStore, listAttentionRecords } from "../src/store.js";
 import { runDueAutonomyWatches } from "../src/autonomy/reconciliation.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -33,6 +33,15 @@ test("default watches are read-only and idempotently discoverable", () => {
   assert.deepEqual(watchCapabilityIds({ capabilityIds: ["invoice_detection", "invoice_detection"], domain: "gmail" }), ["invoice_detection"]);
   assert.deepEqual(missingDefaultWatchKeys([]).map((item) => item.key), ["gmail-recent", "calendar-upcoming"]);
   assert.deepEqual(missingDefaultWatchKeys([{ id: "w1", userId: 1, name: "Recent inbox", domain: "gmail", objective: "x", mode: "personal", cadenceSeconds: 3600, authority: "observe", status: "active", maxItems: 5, createdAt: 1, updatedAt: 1 }]).map((item) => item.key), [DEFAULT_PROACTIVE_WATCHES[1]!.key]);
+});
+
+test("unconnected starter providers do not become active watches", () => {
+  assert.deepEqual(defaultWatchSpecsForConnectedAccounts([]), []);
+  assert.deepEqual(defaultWatchSpecsForConnectedAccounts([
+    { id: "gmail-1", toolkit: "GMAIL", status: "ACTIVE" },
+    { id: "calendar-1", toolkit: "GOOGLE_CALENDAR", status: "CONNECTED" },
+    { id: "disabled-calendar", toolkit: "GOOGLECALENDAR", status: "DISABLED" },
+  ]).map((spec) => spec.key), ["gmail-recent", "calendar-upcoming"]);
 });
 
 test("connected app starter watches are bounded, account-scoped, and read-only", () => {
@@ -81,15 +90,31 @@ test("pulse heartbeat is bounded by the existing delivery cap", () => {
   assert.equal(attentionPulseDeliveryDecision([{ id: "p", userId: 1, provider: "telegram", enabled: true, mode: "immediate", maxPerDay: 4, createdAt: 1, updatedAt: 1 }], Date.UTC(2026, 0, 1, 12), 4).reason, "daily_limit");
 });
 
-test("re-enabling an existing pulse repairs both starter watches and heartbeat mode", async () => {
+test("re-enabling an existing pulse repairs heartbeat without seeding disconnected watches", async () => {
   await initStore({ memoryOnly: true });
   const userId = 920001;
   await addJob(userId, { id: `pulse_${userId}`, userId, text: "Run pulse", cron: "0 * * * *", scheduleId: `schedule_${userId}`, status: "active", kind: "attention_pulse", createdAt: Date.now() });
   const result = await configureAttentionPulse(userId, { action: "enable" }) as { heartbeat?: boolean };
   const watches = await listAttentionRecords(userId, "autonomy_watch");
   assert.equal(result.heartbeat, true);
-  assert.deepEqual(watches.map((watch) => watch.name).sort(), ["Recent inbox", "Upcoming calendar"]);
-  assert.equal((watches.find((watch) => watch.name === "Recent inbox") as { capabilityIds?: string[] }).capabilityIds?.length, 6);
+  assert.deepEqual(watches, []);
+});
+
+test("starter watches pause while disconnected and resume after the account returns", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 920004;
+  const now = Date.UTC(2026, 9, 8, 12);
+  await syncDefaultProactiveWatchesForConnectedAccounts(userId, [{ id: "gmail-1", toolkit: "gmail", status: "ACTIVE" }], now);
+  let watches = await listAttentionRecords(userId, "autonomy_watch");
+  assert.equal(watches[0]?.status, "active");
+  await syncDefaultProactiveWatchesForConnectedAccounts(userId, [], now + 1);
+  watches = await listAttentionRecords(userId, "autonomy_watch");
+  assert.equal(watches[0]?.status, "paused");
+  assert.match(watches[0]?.lastError ?? "", /matching connected app/);
+  await syncDefaultProactiveWatchesForConnectedAccounts(userId, [{ id: "gmail-1", toolkit: "gmail", status: "ACTIVE" }], now + 2);
+  watches = await listAttentionRecords(userId, "autonomy_watch");
+  assert.equal(watches[0]?.status, "active");
+  assert.equal(watches[0]?.nextCheckAt, now + 2);
 });
 
 test("daily operating briefing is bounded and reports verified run state", () => {

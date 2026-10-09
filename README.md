@@ -733,10 +733,12 @@ email commitments, attachments, tomorrow briefings, meeting preparation, calenda
 post-meeting follow-through, deadlines, invoices, subscription renewals, expenses, cash flow,
 stalled tasks, inactive projects, CRM follow-up, team summaries, document changes, and a daily
 operating briefing. Each capability produces bounded normalized findings and owner-scoped
-candidates; it does not grant provider access. Explicit Pulse opt-in creates only the safe Gmail
-and Calendar starter watches, while other providers require an owner-configured watch and an
-owned connected account. Approval-required pulse work is reported to the owner and persisted as
-waiting until the approval or verified continuation is resolved.
+candidates; it does not grant provider access. Explicit Pulse opt-in creates the safe Gmail and
+Calendar starter watches only when those accounts are active; otherwise Elena creates a bounded
+connection candidate with an action button and explains what the connection unlocks. Other
+providers receive the same treatment before their account is connected, and connected accounts
+may receive a bounded read-only starter watch. Approval-required pulse work is reported to the
+owner and persisted as waiting until the approval or verified continuation is resolved.
 
 ### Event-driven Composio triggers
 

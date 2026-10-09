@@ -62,7 +62,7 @@ import { processBlandConsult, processBlandWebhook } from "./calls/blandWebhooks.
 import { isBlandVoiceConfigured } from "./calls/bland.js";
 import { listBlandCuratedVoices } from "./calls/blandVoices.js";
 import { FLUX_TTS_VOICES } from "./voiceSettings.js";
-import { nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow } from "./nativeTools.js";
+import { nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow, syncDefaultProactiveWatchesForConnectedAccounts } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { executeClaimedDelegation, executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
 import { ATTENTION_PULSE_TOOLS, delegationStageObjective, WORKER_CAPABILITIES } from "./subagents/capabilities.js";
@@ -2376,6 +2376,7 @@ async function main(): Promise<void> {
             try {
               connectedAccounts = await listConnectedAccounts(payload.userId);
               connectedAccountsVerified = true;
+              await syncDefaultProactiveWatchesForConnectedAccounts(payload.userId, connectedAccounts, now);
               await ensureConnectedProactiveWatches(payload.userId, connectedAccounts, now);
               const activeToolkits = [...new Set(connectedAccounts.filter((account) => account.status.toUpperCase() === "ACTIVE").map((account) => account.toolkit))].slice(0, 8);
               const actionResults = await Promise.all(activeToolkits.map(async (toolkit) => ({ toolkit, actions: await listComposioToolkitActions(toolkit) })));

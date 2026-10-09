@@ -143,6 +143,20 @@ async function ensureCapabilityGapCandidates(
   return all;
 }
 
+/**
+ * Reconcile capability suggestions without running a provider watch. This is
+ * used when Pulse is enabled or inspected so an owner can receive useful,
+ * actionable connection suggestions before the first hourly worker run.
+ */
+export async function ensureAttentionPulseCapabilityCandidates(
+  userId: number,
+  discovery: AttentionPulseDiscoveryContext,
+  now = Date.now(),
+): Promise<AttentionCandidateRecord[]> {
+  const existing = await listAttentionRecords(userId, "attention_candidate", { limit: 100 }) as AttentionCandidateRecord[];
+  return ensureCapabilityGapCandidates(userId, existing, discovery, now);
+}
+
 export function attentionPulseDeliveryConfirmation(
   plan: Pick<AttentionPulsePlan, "candidateIds" | "dedupeKey"> & Partial<Pick<AttentionPulsePlan, "observationIds">>,
   output: string,

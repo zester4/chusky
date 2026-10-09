@@ -170,10 +170,14 @@ document-change monitoring, and the daily operating briefing.
 
 Catalogue entries describe possible owner value; they do not grant provider
 access or write authority. `watches.ts` gives every capability a typed,
-read-only watch contract and creates only the two safe starter watches after
-explicit Pulse opt-in: the newest five Gmail inbox items and the next 24 hours
-of Calendar. Other provider domains require an owner-configured watch and an
-owned connected account; unconnected providers must never be silently polled.
+read-only watch contract and creates the two safe starter watches after
+explicit Pulse opt-in only when their accounts are active: the newest five
+Gmail inbox items and the next 24 hours of Calendar. When an account is absent,
+Elena creates a bounded connection candidate with an owner-visible action
+instead of an active or overdue watch. Other provider domains receive the same
+connection-gap treatment before their account is connected; connected accounts
+may receive a bounded read-only starter watch. Unconnected providers must
+never be silently polled.
 
 `detectors.ts` accepts only bounded normalized evidence and emits owner-scoped
 findings. Findings may create deduplicated attention candidates, but never

@@ -19,13 +19,18 @@ unbounded tool authority.
   enter the queue. The same module can compare active connected toolkits with
   their public Composio action metadata and report a connected-but-unavailable
   capability without claiming that provider data was read.
-- `watches.ts` defines the two universal safe starter reads created after
+- `watches.ts` defines the two universal safe starter reads available after
   explicit Pulse opt-in: five recent Gmail inbox items and the next 24 hours
-  of Calendar. During the hourly owner-scoped run, active connected accounts
-  may also receive one bounded read-only starter watch for Slack/Teams/Discord,
-  Drive/Notion, GitHub/Linear/Jira, Sheets, Stripe, or HubSpot. These watches
-  are keyed to the exact connected account, capped at twelve, and created
-  idempotently; unconnected providers are never polled.
+  of Calendar. They are created only when the matching account is connected.
+  When an account is missing, Elena creates a 1–3 item capability candidate
+  with a connection action and a concise explanation of what it unlocks. Those
+  candidates appear in the web notification bell and Approvals page without
+  waiting for the first hourly run; unconnected providers are never polled or
+  represented as overdue watches. During the hourly owner-scoped run, active
+  connected accounts may also receive one bounded read-only starter watch for
+  Slack/Teams/Discord, Drive/Notion, GitHub/Linear/Jira, Sheets, Stripe, or
+  HubSpot. These watches are keyed to the exact connected account, capped at
+  twelve, and created idempotently.
 - `detectors.ts` converts normalized provider evidence into bounded findings.
 Findings create owner-scoped candidates; they never send, spend, delete,
 change permissions, or treat source text as authorization.
@@ -49,12 +54,11 @@ domains. Input is bounded and deduplicated before it reaches the scheduler or
 attention store.
 
 Pulse setup is intentionally separate from profile memory. Saving a profile
-does not grant app access; enabling Pulse creates the read-only Gmail and
-Calendar starter watches, while the next verified hourly run can prepare
-bounded watches for already-active connected accounts. The hourly pulse also
-checks whether the owner has connected useful capability groups. Missing-connection suggestions are stored
-as owner-scoped attention candidates, shown through the web notification bell
-and Approvals page, and delivered through the selected Pulse channel. They are
+does not grant app access; enabling Pulse reconciles only the starter watches
+whose accounts are active, and immediately checks for useful capability groups
+that are not connected. Missing-connection suggestions are stored as
+owner-scoped attention candidates, shown through the web notification bell and
+Approvals page, and delivered through the selected Pulse channel. They are
 one-shot and resolve when the matching app becomes active. Later provider work
 still goes through the existing connected-account and approval boundaries.
 

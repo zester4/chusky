@@ -128,6 +128,7 @@ test("attention pulse creates an owner-visible capability suggestion when no app
   assert.match(plan.fallbackDigest ?? "", /inbox reviews/);
   const candidates = await listAttentionRecords(userId, "attention_candidate") as any[];
   assert.equal(candidates.filter((candidate) => candidate.reason.startsWith("[connection-gap:")).length, 3);
+  assert.equal(candidates.every((candidate) => candidate.suggestedActions?.some((action: { label: string }) => action.label === "Connect app")), true);
 
   const second = await buildAttentionPulsePlan(userId, now, {
     connectedAccounts: [],

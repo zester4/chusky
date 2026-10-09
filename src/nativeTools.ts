@@ -9,8 +9,9 @@ import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { createHash, randomUUID } from "node:crypto";
 import { classifyMemory } from "./memory/classifier.js";
 import { config } from "./config.js";
-import { getAttentionPulseWatchCoverage } from "./attentionPulse.js";
-import { defaultWatchInput, missingDefaultWatchKeys, normalizeProactiveCapabilityIds } from "./proactive/watches.js";
+import { ensureAttentionPulseCapabilityCandidates, getAttentionPulseWatchCoverage } from "./attentionPulse.js";
+import { DEFAULT_PROACTIVE_WATCHES, DEFAULT_WATCH_CONNECTION_WAIT_ERROR, defaultWatchInput, defaultWatchSpecsForConnectedAccounts, missingDefaultWatchKeys, normalizeProactiveCapabilityIds } from "./proactive/watches.js";
+import { logger } from "./logger.js";
 import { assertPublicHttpUrl, createTinyFishClient } from "./tinyfish.js";
 import { receiveTinyFishMonitorWebhook, tinyFishMonitorSignature, tinyFishMonitorSnapshotHash, validateTinyFishMonitorSchedule } from "./tinyfishMonitors.js";
 import { reconcileTinyFishResearchRun } from "./tinyfishResearch.js";
@@ -756,13 +757,71 @@ async function ensureAttentionPulseDeliveryPreference(userId: number, runtime: N
   });
 }
 
-/** Seed only the two safe starter reads after explicit Pulse opt-in. Existing
- * owner watches are preserved, and repeated enable calls are idempotent. */
-async function ensureDefaultProactiveWatches(userId: number): Promise<void> {
-  const existing = await listAttentionRecords(userId, "autonomy_watch", { limit: 200 });
-  for (const spec of missingDefaultWatchKeys(existing as AutonomyWatchRecord[])) {
-    await createAttentionRecord(userId, "autonomy_watch", defaultWatchInput(spec));
+type PulseConnectedAccount = { id: string; toolkit: string; alias?: string; status?: string };
+
+async function loadPulseConnectedAccounts(userId: number): Promise<{ verified: boolean; accounts: PulseConnectedAccount[] }> {
+  try {
+    // Keep this boundary lazy: agent.ts and nativeTools.ts participate in the
+    // runtime tool graph, while status/enable can still be used in isolation.
+    const { listConnectedAccounts } = await import("./agent.js");
+    return { verified: true, accounts: await listConnectedAccounts(userId) };
+  } catch (error) {
+    logger.warn({ err: error, userId }, "Could not verify connected accounts while reconciling Attention Pulse state");
+    return { verified: false, accounts: [] };
   }
+}
+
+/**
+ * Keep universal starter watches aligned with verified connected accounts.
+ * Missing providers are represented by capability candidates, never by active
+ * watches that can later be reported as overdue.
+ */
+export async function syncDefaultProactiveWatchesForConnectedAccounts(
+  userId: number,
+  accounts: readonly PulseConnectedAccount[],
+  now = Date.now(),
+): Promise<AutonomyWatchRecord[]> {
+  const existing = await listAttentionRecords(userId, "autonomy_watch", { limit: 200 }) as AutonomyWatchRecord[];
+  const availableSpecs = defaultWatchSpecsForConnectedAccounts(accounts);
+  const availableKeys = new Set(availableSpecs.map((spec) => `${spec.domain}:${spec.name}`.toLowerCase()));
+  const defaultKeys = new Set(DEFAULT_PROACTIVE_WATCHES.map((spec) => `${spec.domain}:${spec.name}`.toLowerCase()));
+
+  for (const watch of existing) {
+    const key = `${watch.domain}:${watch.name}`.toLowerCase();
+    if (!defaultKeys.has(key) || watch.connectedAccountId) continue;
+    if (!availableKeys.has(key) && watch.status === "active") {
+      await updateAttentionRecord(userId, "autonomy_watch", watch.id, {
+        status: "paused",
+        lastError: DEFAULT_WATCH_CONNECTION_WAIT_ERROR,
+      });
+    } else if (availableKeys.has(key) && watch.status === "paused" && watch.lastError === DEFAULT_WATCH_CONNECTION_WAIT_ERROR) {
+      await updateAttentionRecord(userId, "autonomy_watch", watch.id, {
+        status: "active",
+        nextCheckAt: now,
+        lastError: "",
+      });
+    }
+  }
+
+  for (const spec of missingDefaultWatchKeys(existing, availableSpecs)) {
+    await createAttentionRecord(userId, "autonomy_watch", defaultWatchInput(spec, now));
+  }
+  return await listAttentionRecords(userId, "autonomy_watch", { limit: 200 }) as AutonomyWatchRecord[];
+}
+
+async function syncAttentionPulseProactiveState(userId: number, now = Date.now()): Promise<{
+  verified: boolean;
+  accounts: PulseConnectedAccount[];
+  candidates: Awaited<ReturnType<typeof ensureAttentionPulseCapabilityCandidates>>;
+}> {
+  const connectionState = await loadPulseConnectedAccounts(userId);
+  if (!connectionState.verified) return { ...connectionState, candidates: [] };
+  await syncDefaultProactiveWatchesForConnectedAccounts(userId, connectionState.accounts, now);
+  const candidates = await ensureAttentionPulseCapabilityCandidates(userId, {
+    connectedAccounts: connectionState.accounts,
+    connectedAccountsVerified: true,
+  }, now);
+  return { ...connectionState, candidates };
 }
 
 export async function configureAttentionPulse(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<unknown> {
@@ -771,6 +830,13 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
   if (runtime.sharedConversation && action === "enable") throw new Error("Attention pulse must be enabled from your private Chusky chat");
   const active = (await listJobs(userId)).filter((job) => job.kind === "attention_pulse");
   if (action === "status") {
+    // Status may be inspected while Pulse is disabled. Do not create
+    // notification candidates until the owner has opted into the loop.
+    const proactiveState = active.length ? await syncAttentionPulseProactiveState(userId) : {
+      verified: false,
+      accounts: [] as PulseConnectedAccount[],
+      candidates: [] as Awaited<ReturnType<typeof ensureAttentionPulseCapabilityCandidates>>,
+    };
     const watchCoverage = await getAttentionPulseWatchCoverage(userId);
     const pulseJobs = active.filter((job) => job.id === ATTENTION_PULSE_JOB_ID(userId));
     const occurrences = (await listJobOccurrences(userId, ATTENTION_PULSE_JOB_ID(userId), 12)).map((occurrence) => ({
@@ -784,6 +850,8 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
       jobs: pulseJobs,
       health: { lastOccurrence: latestOccurrence, recentFailures: occurrences.filter((item) => item.status === "failed" || item.status === "blocked").length, neverRun: Boolean(pulseJobs[0] && !latestActivityAt), stale: Boolean(pulseJobs[0] && (!latestActivityAt || Date.now() - latestActivityAt > 2 * 60 * 60_000)) },
       occurrences,
+      connectedAccountsVerified: proactiveState.verified,
+      capabilitySuggestions: proactiveState.candidates.filter((candidate) => candidate.status === "pending").slice(0, 3),
       watchCoverage: {
         scope: "owner-configured watches plus bounded read-only starter watches for active connected apps; not an unrestricted provider sweep",
         active: watchCoverage.length,
@@ -805,7 +873,7 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
   if (existing) {
     if (existing.cron === cron) {
       await ensureAttentionPulseDeliveryPreference(userId, runtime);
-      await ensureDefaultProactiveWatches(userId);
+      await syncAttentionPulseProactiveState(userId);
       if (!existing.heartbeat) await updateJob(userId, existing.id, { heartbeat: true });
       return existing;
     }
@@ -832,12 +900,12 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
       throw error;
     }
     await ensureAttentionPulseDeliveryPreference(userId, runtime);
-    await ensureDefaultProactiveWatches(userId);
+    await syncAttentionPulseProactiveState(userId);
     return { ...existing, cron };
   }
   const qstashToken = requireQStash();
   await ensureAttentionPulseDeliveryPreference(userId, runtime);
-  await ensureDefaultProactiveWatches(userId);
+  await syncAttentionPulseProactiveState(userId);
   const deliveryTarget = durableReminderTarget(runtime.deliveryTarget);
   const job: JobRecord = {
     id: ATTENTION_PULSE_JOB_ID(userId), userId,
