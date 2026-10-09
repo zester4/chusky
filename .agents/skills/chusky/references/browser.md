@@ -130,7 +130,8 @@ fallback, tabs, frames, handoffs, checkpoints, and redesign recovery; live E2B
 coverage remains a separate release gate.
 
 The same retained headed Chromium display can also be viewed through the
-owner-only E2B noVNC stream. `CHUCK_BROWSER` actions `stream_start`,
+owner-only E2B noVNC stream. The returned URL opens a Chusky-branded responsive
+viewer around the packaged noVNC page. `CHUCK_BROWSER` actions `stream_start`,
 `stream_status`, and `stream_stop` start, inspect, and stop a short-lived viewer
 for the existing Playwright browser; they do not create a second browser
 backend. The password-bearing viewer URL is returned only by `stream_start`,

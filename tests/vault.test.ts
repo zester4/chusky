@@ -61,10 +61,11 @@ test("vault identity selectors stay origin-aware", () => {
 test("vault setup form uses the polished light theme and protected password visibility control", () => {
   const worker = readFileSync(join(process.cwd(), "cloudflare", "vault-worker", "src", "index.ts"), "utf8");
   const config = readFileSync(join(process.cwd(), "cloudflare", "vault-worker", "wrangler.jsonc"), "utf8");
-  assert.match(worker, /--amber:#f6a400/);
-  assert.match(worker, /--background:oklch\(0\.985 0\.002 90\)/);
-  assert.match(worker, /--foreground:oklch\(0\.12 0\.01 60\)/);
+  assert.match(worker, /--primary:#e05d38/);
+  assert.match(worker, /--background:oklch\(0\.9383 0\.0042 236\.4993\)/);
+  assert.match(worker, /--foreground:oklch\(0\.3211 0 0\)/);
   assert.match(worker, /--card:#fff/);
+  assert.match(worker, /prefers-color-scheme:dark/);
   assert.match(worker, /--font-display:"Instrument Serif",Georgia/);
   assert.match(worker, /font-src 'self'/);
   assert.match(worker, /instrument-sans-400\.woff2/);

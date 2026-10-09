@@ -849,7 +849,7 @@ export class E2BBrowserEngine {
     const base = /^https?:\/\//i.test(host) ? host : `https://${host}`;
     // noVNC explicitly supports config in the URL fragment. Keep the VNC
     // password out of HTTP requests, reverse-proxy access logs, and referrers.
-    const url = `${base.replace(/\/$/, "")}/vnc.html#autoconnect=1&resize=scale&password=${encodeURIComponent(token)}`;
+    const url = `${base.replace(/\/$/, "")}/chusky-vnc.html#autoconnect=1&resize=scale&password=${encodeURIComponent(token)}`;
     return { url, startedAt, expiresAt: startedAt + ttlSeconds * 1000, port: BROWSER_STREAM_PORT };
   }
 

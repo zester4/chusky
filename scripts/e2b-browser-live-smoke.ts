@@ -211,6 +211,9 @@ async function main() {
     const handoffUrl = /^https?:\/\//i.test(handoffHost) ? handoffHost : `https://${handoffHost}`;
     const handoffPage = await fetch(`${handoffUrl}/vnc.html`, { signal: AbortSignal.timeout(15_000) });
     assertCheck("E2B preview link reaches the live noVNC handoff page", handoffPage.ok, `HTTP ${handoffPage.status}`);
+    const brandedHandoffPage = await fetch(`${handoffUrl}/chusky-vnc.html`, { signal: AbortSignal.timeout(15_000) });
+    const brandedHandoffBody = await brandedHandoffPage.text();
+    assertCheck("E2B preview exposes the branded Chusky handoff page", brandedHandoffPage.ok && brandedHandoffBody.includes("Chusky") && brandedHandoffBody.includes("/vnc.html"), `HTTP ${brandedHandoffPage.status}`);
     const handoffProbe = `import { chromium } from "playwright";
 let browser;
 try {
@@ -231,15 +234,16 @@ try {
   page.on("request", (request) => { try { const url = new URL(request.url()); requestedUrls.push(url.origin + url.pathname); } catch {} });
   page.on("response", (response) => { try { const url = new URL(response.url()); const item = { status: response.status(), url: url.origin + url.pathname }; if (response.status() >= 400) badResponses.push(item); else if (url.pathname.endsWith(".js") || url.pathname.endsWith(".json")) successfulAssets.push(item); } catch {} });
   page.on("requestfailed", (request) => { try { const url = new URL(request.url()); failedRequests.push(url.origin + url.pathname); } catch {} });
-  const response = await page.goto(${JSON.stringify(handoffUrl + "/vnc.html#autoconnect=1&resize=scale&password=" + vncPassword)}, { waitUntil: "domcontentloaded", timeout: 20_000 });
-  await page.waitForFunction(() => document.documentElement.classList.contains("noVNC_connected"), { timeout: 12_000 }).catch(() => {});
+  const response = await page.goto(${JSON.stringify(handoffUrl + "/chusky-vnc.html#autoconnect=1&resize=scale&password=" + vncPassword)}, { waitUntil: "domcontentloaded", timeout: 20_000 });
+  await page.waitForFunction(() => document.querySelector("iframe#viewer")?.contentDocument?.documentElement.classList.contains("noVNC_connected") === true, { timeout: 12_000 }).catch(() => {});
   await page.waitForTimeout(1_000);
-  const status = await page.locator("#noVNC_status").innerText().catch(() => "");
-  const canvas = await page.locator("#noVNC_canvas").count().catch(() => 0);
-  const canvasAny = await page.locator("canvas").count().catch(() => 0);
-  const body = await page.locator("body").innerText().catch(() => "");
-  const uiState = await page.evaluate(() => ({ rootClass: document.documentElement.className, connectDialogClass: document.getElementById("noVNC_connect_dlg")?.className ?? null, statusClass: document.getElementById("noVNC_status")?.className ?? null, canvases: Array.from(document.querySelectorAll("canvas")).map((item) => ({ width: item.width, height: item.height, visible: item.getBoundingClientRect().width > 0 && item.getBoundingClientRect().height > 0 })), scripts: Array.from(document.scripts).map((script) => script.src).filter(Boolean) })).catch(() => null);
-  const packageManifestValid = await page.evaluate(async () => { try { const response = await fetch("./package.json"); if (!response.ok) return false; const manifest = await response.json(); return typeof manifest?.version === "string" && manifest.version.length > 0; } catch { return false; } }).catch(() => false);
+  const viewerFrame = page.frames().find((frame) => { try { return new URL(frame.url()).pathname.endsWith("/vnc.html"); } catch { return false; } });
+  const status = await viewerFrame?.locator("#noVNC_status").innerText().catch(() => "") ?? "";
+  const canvas = await viewerFrame?.locator("#noVNC_canvas").count().catch(() => 0) ?? 0;
+  const canvasAny = await viewerFrame?.locator("canvas").count().catch(() => 0) ?? 0;
+  const body = await viewerFrame?.locator("body").innerText().catch(() => "") ?? "";
+  const uiState = await viewerFrame?.evaluate(() => ({ rootClass: document.documentElement.className, connectDialogClass: document.getElementById("noVNC_connect_dlg")?.className ?? null, statusClass: document.getElementById("noVNC_status")?.className ?? null, canvases: Array.from(document.querySelectorAll("canvas")).map((item) => ({ width: item.width, height: item.height, visible: item.getBoundingClientRect().width > 0 && item.getBoundingClientRect().height > 0 })), scripts: Array.from(document.scripts).map((script) => script.src).filter(Boolean) })).catch(() => null);
+  const packageManifestValid = await viewerFrame?.evaluate(async () => { try { const response = await fetch("./package.json"); if (!response.ok) return false; const manifest = await response.json(); return typeof manifest?.version === "string" && manifest.version.length > 0; } catch { return false; } }).catch(() => false) ?? false;
   const connected = Boolean(uiState?.rootClass?.split(/\\s+/).includes("noVNC_connected")) && framesReceived > 0 && canvasAny > 0 && Boolean(uiState?.canvases?.some((item) => item.width > 0 && item.height > 0));
   console.log(JSON.stringify({ httpStatus: response?.status(), title: await page.title().catch(() => ""), framesReceived, framesSent, websocketEvents, connected, packageManifestValid, canvasPresent: canvas > 0, canvasCount: canvasAny, status: String(status).slice(0, 100), body: String(body).slice(0, 250), uiState, failedRequests: failedRequests.slice(0, 10), badResponses: badResponses.slice(0, 10), successfulAssets: successfulAssets.slice(0, 16), requestedUrls: requestedUrls.slice(0, 20), consoleMessages: consoleMessages.slice(0, 12), pageErrors: pageErrors.slice(0, 5) }));
 } catch (error) {

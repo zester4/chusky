@@ -10,6 +10,7 @@ const root = process.cwd();
 const templateDockerfile = readFileSync(resolve(root, "e2b", "browser-template", "Dockerfile"), "utf8");
 const browserAgent = readFileSync(resolve(root, "e2b", "browser-template", "browser-agent.mjs"), "utf8");
 const browserClient = readFileSync(resolve(root, "e2b", "browser-template", "browser-client.mjs"), "utf8");
+const browserViewer = readFileSync(resolve(root, "e2b", "browser-template", "chusky-vnc.html"), "utf8");
 const browserEngine = readFileSync(resolve(root, "src", "lib", "e2b", "browser.ts"), "utf8");
 const browserNetworkPolicy = readFileSync(resolve(root, "src", "lib", "e2b", "networkPolicy.ts"), "utf8");
 const liveSmoke = readFileSync(resolve(root, "scripts", "e2b-browser-live-smoke.ts"), "utf8");
@@ -72,7 +73,7 @@ test("E2B runtime starts display and browser services through separate idempoten
   assert.match(browserEngine, /websockify --web=\/usr\/share\/novnc \$\{BROWSER_STREAM_PORT\} localhost:5900/);
   assert.match(liveSmoke, /-passwdfile \$\{vncPasswordFile\}/);
   assert.doesNotMatch(liveSmoke, /-passwd \$\{vncPassword\}/);
-  assert.match(browserEngine, /vnc\.html#autoconnect=1&resize=scale&password=/);
+  assert.match(browserEngine, /chusky-vnc\.html#autoconnect=1&resize=scale&password=/);
   assert.doesNotMatch(browserEngine, /vnc\.html\?autoconnect=1&resize=scale&password=/);
   assert.match(browserEngine, /BROWSER_STREAM_PORT.*vnc\.html/);
   assert.doesNotMatch(browserEngine, /pkill -f \\"x11vnc\.\*-rfbport 5900/);
@@ -82,8 +83,17 @@ test("E2B template includes the desktop handoff dependencies", () => {
   assert.match(templateDockerfile, /xvfb fluxbox x11vnc novnc/);
   assert.match(templateDockerfile, /dpkg-query -W novnc \| cut -f2/);
   assert.match(templateDockerfile, /\/usr\/share\/novnc\/package\.json/);
-  assert.match(templateDockerfile, /COPY browser-agent\.mjs browser-client\.mjs web-bot-auth\.mjs/);
+  assert.match(templateDockerfile, /COPY browser-agent\.mjs browser-client\.mjs web-bot-auth\.mjs \.\//);
+  assert.match(templateDockerfile, /COPY chusky-vnc\.html \/usr\/share\/novnc\/chusky-vnc\.html/);
   assert.match(templateDockerfile, /npm ci --omit=dev/);
+});
+
+test("E2B handoff viewer uses the Chusky theme while embedding noVNC", () => {
+  assert.match(browserViewer, /Chusky/);
+  assert.match(browserViewer, /--primary:\s*#e05d38/);
+  assert.match(browserViewer, /iframe/);
+  assert.match(browserViewer, /\/vnc\.html/);
+  assert.match(browserViewer, /Private browser session/);
 });
 
 test("E2B browser exposes an owner-only live stream for the retained Chromium display", () => {

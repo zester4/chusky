@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; child-src 'self'; frame-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; object-src 'none';">
+  <title>Chusky · Private browser</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --background: #eef0f5;
+      --foreground: #343434;
+      --muted: #727986;
+      --card: #ffffff;
+      --border: #dfe3eb;
+      --primary: #e05d38;
+      --primary-soft: #fff0eb;
+      --primary-dark: #a43f26;
+      --shadow: 35 48 70;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --background: #303849;
+        --foreground: #edf0f5;
+        --muted: #aeb5c2;
+        --card: #3b4357;
+        --border: #515b70;
+        --primary-soft: #4a3440;
+        --primary-dark: #ffb09a;
+        --shadow: 0 0 0;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      background: var(--background);
+      color: var(--foreground);
+      font-family: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-synthesis: none;
+    }
+    body::before { display: block; height: 5px; background: var(--primary); content: ""; }
+    .shell { display: flex; min-height: calc(100vh - 5px); flex-direction: column; }
+    .topbar {
+      display: flex;
+      min-height: 58px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 0 22px;
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--card) 92%, transparent);
+    }
+    .brand { display: inline-flex; align-items: center; gap: 9px; font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
+    .mark { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 8px; background: var(--foreground); color: var(--card); font-family: Georgia, serif; font-size: 14px; }
+    .badge { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; font-weight: 600; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 16%, transparent); }
+    main { display: flex; width: min(100%, 1380px); flex: 1; margin: 0 auto; flex-direction: column; gap: 18px; padding: 22px; }
+    .intro { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+    .eyebrow { margin: 0 0 6px; color: var(--primary-dark); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
+    h1 { margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: clamp(25px, 4vw, 38px); font-weight: 400; letter-spacing: -.04em; line-height: 1.05; }
+    .lede { max-width: 700px; margin: 8px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .secure { flex: 0 0 auto; padding: 7px 10px; border: 1px solid color-mix(in srgb, var(--primary) 34%, var(--border)); border-radius: 999px; background: var(--primary-soft); color: var(--primary-dark); font-size: 10px; font-weight: 700; white-space: nowrap; }
+    .viewer { min-height: 0; flex: 1; overflow: hidden; border: 1px solid var(--border); border-radius: 14px; background: #171a21; box-shadow: 0 14px 38px rgb(var(--shadow) / .13); }
+    iframe { display: block; width: 100%; height: 100%; min-height: min(68vh, 760px); border: 0; background: #171a21; }
+    .hint { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+    @media (max-width: 640px) {
+      .topbar { min-height: 52px; padding: 0 14px; }
+      main { gap: 12px; padding: 14px; }
+      .intro { flex-direction: column; gap: 9px; }
+      .viewer { border-radius: 10px; }
+      iframe { min-height: calc(100vh - 190px); }
+      .lede { font-size: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="mark" aria-hidden="true">C</span><span>Chusky</span></div>
+      <div class="badge"><span class="dot" aria-hidden="true"></span>Private browser session</div>
+    </header>
+    <main>
+      <div class="intro">
+        <div>
+          <p class="eyebrow">Live website handoff</p>
+          <h1>Your private browser</h1>
+          <p class="lede">Complete the requested website step below. Chusky will keep the same browser session and continue after you return to the chat.</p>
+        </div>
+        <span class="secure">Owner-only · expires soon</span>
+      </div>
+      <section class="viewer" aria-label="Private browser viewer">
+        <iframe id="viewer" title="Chusky private browser session" referrerpolicy="no-referrer"></iframe>
+      </section>
+      <p class="hint">Only complete the website challenge or login step requested by Chusky. Do not share this temporary link.</p>
+    </main>
+  </div>
+  <script>
+    document.getElementById("viewer").src = "/vnc.html" + window.location.hash;
+  </script>
+</body>
+</html>
