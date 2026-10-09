@@ -1220,6 +1220,7 @@ test("SDK conversation lifecycle is owned, archive-aware, and protects active ru
 });
 
 test("SDK run feedback is durable, owner-scoped, and removable", async () => {
+  setSdkTaskWorkflowEnqueuerForTests(async () => "workflow-feedback-test");
   const api = app();
   const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "feedback-owner", "Content-Type": "application/json" };
   const created = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers, body: "{}" }));
