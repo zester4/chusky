@@ -2579,11 +2579,15 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
     // continuation: it waits for Chusky's verified, role-scoped decision, then
     // resumes the original task and handoff record rather than starting over.
     app.post("/workflows/subagent", serveWorkflow(async (workflow) => {
-      const payload = workflow.requestPayload as { userId?: unknown; handoffId?: unknown; mode?: unknown };
+      const payload = workflow.requestPayload as { userId?: unknown; handoffId?: unknown; mode?: unknown; approvalId?: unknown };
       const userId = Number(payload.userId);
       const handoffId = typeof payload.handoffId === "string" ? payload.handoffId.trim() : "";
+      const approvalId = typeof payload.approvalId === "string" ? payload.approvalId.trim() : undefined;
       if (!Number.isSafeInteger(userId) || userId <= 0 || !handoffId) {
         throw new WorkflowNonRetryableError("Invalid subagent workflow payload");
+      }
+      if (payload.approvalId !== undefined && !approvalId) {
+        throw new WorkflowNonRetryableError("Invalid subagent approval identity");
       }
 
       if (payload.mode === "continue") {
@@ -2592,10 +2596,18 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           if (!record || record.status !== "queued" || !record.taskId || !record.delegation) {
             throw new WorkflowNonRetryableError("Queued worker continuation is missing or no longer eligible");
           }
+          const approval = approvalId ? await getApproval(userId, approvalId) : undefined;
+          if (approvalId && (!approval || approval.status !== "approved" || approval.expiresAt <= Date.now() || approval.handoffId !== handoffId || (record.approvalId && record.approvalId !== approvalId))) {
+            throw new WorkflowNonRetryableError("Approved worker continuation is missing, expired, or no longer matches its handoff");
+          }
           return executeClaimedDelegation(userId, {
             worker: record.to as CapabilityWorkerName,
             objective: record.objective,
-            context: { ...record.context, continuation: true },
+            context: {
+              ...record.context,
+              continuation: true,
+              ...(approval ? { toolCall: { name: approval.toolSlug, args: approval.args } } : {}),
+            },
             expectedOutput: record.expectedOutput,
             model: record.delegation!.model,
             allowedTools: record.delegation!.allowedTools,
@@ -2606,6 +2618,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             duration: record.delegation!.duration,
             budgetSeconds: record.delegation!.budgetSeconds,
           }, {
+            ...(approvalId ? { approvedApprovalId: approvalId } : {}),
             resume: { handoffId: record.id, taskId: record.taskId, workflowRunId: workflow.workflowRunId, resumeCount: (record.delegation!.continuationCount ?? 0) },
             deliveryTarget: (record.context?.deliveryTarget as ReminderDeliveryTarget | undefined),
           }, record.taskId);

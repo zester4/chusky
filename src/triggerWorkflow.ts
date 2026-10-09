@@ -82,9 +82,13 @@ export async function enqueueAutonomyApprovalResume(input: { userId: number; kin
 
 export async function notifyTriggerApproval(approvalId: string, approved: boolean, triggerEventId?: string): Promise<void> {
   const event = triggerEventId ? await getTriggerEvent(triggerEventId) : undefined;
+  // Trigger publications use this deterministic workflowRunId. Keeping the
+  // fallback here closes the small race where the approval callback reads the
+  // event before the workflow's first checkpoint has persisted its ID.
+  const workflowRunId = event?.workflowRunId ?? (triggerEventId ? `trigger-${triggerEventId}` : undefined);
   await workflowClient().notify({
     eventId: workflowEventId("trigger-approval", approvalId),
     eventData: { approved },
-    ...(event?.workflowRunId ? { workflowRunId: event.workflowRunId } : {}),
+    ...(workflowRunId ? { workflowRunId } : {}),
   });
 }

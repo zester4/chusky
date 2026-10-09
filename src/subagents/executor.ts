@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, normalizeDelegationToolScopes, validateDelegationTarget } from "./capabilities.js";
-import { cancelSubagentWorkflow, enqueueSubagentContinuation } from "./workflow.js";
+import { cancelSubagentWorkflow, enqueueSubagentApprovalContinuation, enqueueSubagentContinuation } from "./workflow.js";
 import { memoryRouter } from "../memory/router.js";
 import { nativeTool } from "../nativeTools.js";
 import { canonicalNativeToolSlug, modelFacingChuckTools, validateNativeToolArguments } from "../agentTools.js";
 import { requiresToolApproval, isRiskyToolSlug, isReadOnlyToolSlug, humanToolStatus } from "../policy.js";
-import { createApproval, getSession, getTask, getHandoffRecord, saveHandoffRecord, claimHandoffBudget, createTask, checkpointTask, completeTask, blockTask, updateTask, setApprovalStatus, getAgentRun, saveAgentRun, requestTaskCancellation, finalizeTaskCancellation, claimTask, retryTask, renewTaskLease, releaseTaskLease, type AgentRunRecord } from "../store.js";
+import { createApproval, getApproval, getSession, getTask, getHandoffRecord, saveHandoffRecord, claimHandoffBudget, createTask, checkpointTask, completeTask, blockTask, updateTask, setApprovalStatus, getAgentRun, saveAgentRun, requestTaskCancellation, finalizeTaskCancellation, claimTask, retryTask, renewTaskLease, releaseTaskLease, type AgentRunRecord } from "../store.js";
 import { config } from "../config.js";
 import { getScopedComposioTools, orChat, parseToolArguments, cleanModelText, UnavailableComposioToolsError } from "../agent.js";
 import type { ApiMessage } from "../types.js";
@@ -351,11 +351,7 @@ export async function executeDelegation(
           outputSummary = `The shared delegation tree exceeded its total tool-call limit (${handoffRecord.delegation.maxTotalToolCalls}).`;
         } else {
           const approved = options?.approvedApprovalId
-            ? await getSession(userId).then((s) =>
-                s.approvals.find(
-                  (a) => a.id === options.approvedApprovalId && a.status === "approved" && a.expiresAt > Date.now()
-                )
-              )
+            ? await getApproval(userId, options.approvedApprovalId).then((a) => a?.status === "approved" && a.expiresAt > Date.now() ? a : undefined)
             : undefined;
 
           const approvedForTool = approved?.toolSlug === actionPayload.name;
@@ -378,6 +374,7 @@ export async function executeDelegation(
               model,
               handoffId: handoffRecord.id,
             });
+            handoffRecord.approvalId = approvalRecord.id;
 
             approvalId = approvalRecord.id;
             proposal = {
@@ -653,11 +650,7 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
 
           // 2. Pre-Execution Approval Gate Check
           const approved = options?.approvedApprovalId
-            ? await getSession(userId).then((s) =>
-                s.approvals.find(
-                  (a) => a.id === options.approvedApprovalId && a.status === "approved" && a.expiresAt > Date.now()
-                )
-              )
+            ? await getApproval(userId, options.approvedApprovalId).then((a) => a?.status === "approved" && a.expiresAt > Date.now() ? a : undefined)
             : undefined;
 
           const approvedForTool = approved?.toolSlug === slug;
@@ -680,6 +673,7 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
               model,
               handoffId: handoffRecord.id,
             });
+            handoffRecord.approvalId = approvalRecord.id;
 
             approvalId = approvalRecord.id;
             proposal = {
@@ -764,6 +758,9 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
               content: `Tool Execution Error: ${errMsg}. Please reflect on checklist: ${manifest.reflectionChecklist.join("; ")} and attempt a fix or clean summary.`,
             });
           }
+          // Approval is a one-time authorization. A provider failure must not
+          // leave the exact action authorized for an accidental replay.
+          if (approvedForTool && options?.approvedApprovalId) await setApprovalStatus(userId, options.approvedApprovalId, "consumed");
         }
 
         if (approvalNeeded || status !== "success") {
@@ -918,14 +915,34 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
 
 /** Resume a worker only from the exact owner-approved action stored in its approval record. */
 export async function resumeApprovedDelegation(userId: number, approvalId: string): Promise<DelegationResult> {
-  const approval = (await getSession(userId)).approvals.find((item) => item.id === approvalId);
+  const approval = await getApproval(userId, approvalId);
   if (!approval || approval.status !== "approved" || approval.expiresAt <= Date.now() || !approval.handoffId) {
     throw new Error("The owner-approved worker action is missing, expired, or no longer available.");
   }
   const handoff = await getHandoffRecord(userId, approval.handoffId);
-  if (!handoff?.taskId || !handoff.delegation || handoff.status !== "requires_approval") {
+  if (!handoff?.taskId || !handoff.delegation || !["requires_approval", "queued"].includes(handoff.status)) {
     throw new Error("The approved worker action is no longer attached to a resumable handoff.");
   }
+
+  // Production approval callbacks only enqueue a stable durable workflow. The
+  // in-process fallback is retained for local unit tests where QStash is not
+  // configured; it is never selected by a deployed runtime.
+  if (config.qstashToken && config.webhookUrl) {
+    const queued = await enqueueSubagentApprovalContinuation(userId, approval.handoffId, approvalId);
+    const queuedHandoff = await getHandoffRecord(userId, approval.handoffId);
+    return {
+      contractId: `approval-${approvalId}`,
+      worker: handoff.to as CapabilityWorkerName,
+      status: "queued",
+      output: `The approved worker action was queued for durable execution (${queued.workflowRunId}).`,
+      toolCallsCount: 0,
+      toolCallsLog: [],
+      taskId: handoff.taskId,
+      handoffRecord: queuedHandoff ?? { ...handoff, status: "queued", workflowRunId: queued.workflowRunId },
+      durationMs: 0,
+    };
+  }
+
   const resumed = await executeClaimedDelegation(userId, {
     worker: handoff.to as CapabilityWorkerName,
     objective: handoff.objective,

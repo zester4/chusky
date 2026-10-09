@@ -191,6 +191,8 @@ async function handleApproval(message: InboundMessage, conversation: ChuskyConve
       const resumed = await resumeApprovedDelegation(conversation.userId, approval.id);
       const outcome = resumed.status === "success"
         ? `✅ Approved worker action completed.\n\n${resumed.output}`
+        : resumed.status === "queued"
+          ? `✅ Approval accepted. The worker action is queued for durable execution.\n\n${resumed.output}`
         : `⚠️ The approved worker action did not complete (${resumed.status}).\n\n${resumed.output}`;
       return reply(conversation, outcome.slice(0, 4000), message.providerEventId, { kind: "approval", correlationId: approvalId });
     } catch {

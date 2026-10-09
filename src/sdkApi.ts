@@ -41,7 +41,7 @@ import { validateNativeToolArguments } from "./agentTools.js";
 import { chuckTools } from "./agentTools.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 import { daytonaEngine } from "./lib/daytona/engine.js";
-import { requestDelegationCancellation } from "./subagents/executor.js";
+import { requestDelegationCancellation, resumeApprovedDelegation } from "./subagents/executor.js";
 import { SELF_SERVICE_PROJECT_SCOPES } from "./developerProjects.js";
 import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinPreparedCalendarMeeting, joinRecallMeeting, leaveRecallMeeting, lookupRecallMeetingContext, prepareRecallMeetingMission } from "./meetings/service.js";
 import { MEETING_REPRESENTATIVE_NATIVE_TOOLS } from "./meetings/representative.js";
@@ -3589,7 +3589,41 @@ export function registerSdkApi(app: Hono): void {
         const workflowId = typeof approval.args.workflowId === "string" ? approval.args.workflowId : "";
         const workflow = workflowId ? await reconcileComposerWorkflow(owner.userId, workflowId, sdkTaskWorkflowEnqueuer) : undefined;
         if (!workflow) { await setApprovalStatus(owner.userId, approval.id, "denied"); return apiError(c, 404, "workflow_not_found", "The workflow stage no longer exists."); }
+        if (!(await setApprovalStatus(owner.userId, approval.id, "consumed"))) return apiError(c, 409, "approval_state_changed", "The workflow stage approval could not be finalized safely.");
         return c.json({ id: approval.id, status: "consumed", workflow });
+      }
+      if (approval.handoffId) {
+        try {
+          const resumed = await resumeApprovedDelegation(owner.userId, approval.id);
+          const handoffSession = await getSessionWithSdkRuns(owner.userId);
+          const handoffThread = handoffSession.sdkThreads?.find((item) => item.runs.some((run) => run.approvalId === approval.id));
+          const handoffRun = handoffThread?.runs.find((item) => item.approvalId === approval.id);
+          let handoffView: ReturnType<typeof runView> | undefined;
+          if (handoffThread && handoffRun) {
+            const approvedActivity = [...handoffRun.events].reverse().find((item) => item.type === "run.tool_activity" && item.toolSlug === approval.toolSlug && item.status === "approval_required");
+            if (approvedActivity) {
+              approvedActivity.status = "completed";
+              approvedActivity.message = resumed.status === "queued" ? "Approval accepted; the durable worker continuation is queued." : "Approval accepted; executing the approved worker action.";
+            }
+            handoffRun.status = resumed.status === "queued" ? "queued" : resumed.status === "success" ? "completed" : "failed";
+            handoffRun.approvalId = undefined;
+            handoffRun.output = resumed.output;
+            handoffRun.error = resumed.status === "success" || resumed.status === "queued" ? undefined : { code: "approved_worker_action_failed", message: resumed.output.slice(0, 1000) };
+            handoffRun.updatedAt = Date.now();
+            handoffRun.events.push(event(resumed.status === "queued" ? "run.queued" : handoffRun.status === "completed" ? "run.completed" : "run.failed", resumed.output.slice(0, 1000)));
+            handoffThread.updatedAt = handoffRun.updatedAt;
+            await persistSdkRunSnapshot(owner.userId, handoffThread.id, handoffRun);
+            const latestHandoffSession = await getSessionWithSdkRuns(owner.userId, handoffThread.id);
+            const latestHandoffThread = latestHandoffSession.sdkThreads?.find((item) => item.id === handoffThread.id);
+            const latestHandoffRun = latestHandoffThread?.runs.find((item) => item.id === handoffRun.id);
+            if (latestHandoffThread && latestHandoffRun) handoffView = runView(latestHandoffThread.id, latestHandoffRun);
+            await notifyWebhooks(owner.userId, latestHandoffSession.sdkWebhooks!, `run.${handoffRun.status}`, { threadId: handoffThread.id, runId: handoffRun.id, status: handoffRun.status, handoff: true });
+          }
+          return c.json({ id: approval.id, status: resumed.status === "queued" ? "approved" : resumed.status, handoff: resumed.handoffRecord, ...(handoffView ? { run: handoffView } : {}) }, resumed.status === "queued" ? 202 : 200);
+        } catch (error) {
+          if (config.qstashToken && config.webhookUrl) await setApprovalStatus(owner.userId, approval.id, "pending");
+          return apiError(c, 503, "worker_approval_resume_failed", error instanceof Error ? error.message : "The approved worker action could not be resumed safely.");
+        }
       }
       if (approval.toolSlug === "CHUCK_START_PHONE_CALL") {
         try {

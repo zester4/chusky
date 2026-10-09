@@ -2379,7 +2379,7 @@ export async function runAgent(
     ? { summaries: [], imageAssets: [], history: [] as Message[], approvals: [] as Awaited<ReturnType<typeof getSession>>["approvals"] }
     : await getSession(userId);
   const forcedApproval = options?.forceApprovedAction && approvedApprovalId
-    ? durable.approvals.find((approval) => approval.id === approvedApprovalId && approval.status === "approved" && approval.expiresAt > Date.now())
+    ? await getApproval(userId, approvedApprovalId).then((approval) => approval?.status === "approved" && approval.expiresAt > Date.now() ? approval : undefined)
     : undefined;
   const ownerMeetingHistory = ownerPrivateRun && options?.meetingId
     ? durable.history.slice(-8).map((message) => {
@@ -3165,7 +3165,7 @@ export async function runAgent(
           : args;
         if (options?.composioAccount && !slug.startsWith("CHUCK_")) executionArgs = { ...executionArgs, account: options.composioAccount };
         const groupArtifactTool = channelContext?.scope === "shared" && GROUP_ARTIFACT_TOOLS.has(slug);
-        const approved = approvedApprovalId ? await getSession(userId).then((s) => s.approvals.find((a) => a.id === approvedApprovalId && a.status === "approved" && a.expiresAt > Date.now())) : undefined;
+        const approved = approvedApprovalId ? await getApproval(userId, approvedApprovalId).then((a) => a?.status === "approved" && a.expiresAt > Date.now() ? a : undefined) : undefined;
         const approvedForTool = approved?.toolSlug === slug;
         if (approvedForTool) {
           // The model may regenerate semantically equivalent JSON with a

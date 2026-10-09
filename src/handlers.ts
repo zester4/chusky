@@ -30,6 +30,7 @@ import { notifyTriggerApproval, enqueueAutonomyApprovalResume } from "./triggerW
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
 import { findMissionApprovalTarget, resumeMissionTaskAfterApproval } from "./missionApproval.js";
 import { resumeApprovedDelegation } from "./subagents/executor.js";
+import { SubagentApprovalEnqueueError } from "./subagents/workflow.js";
 import { nativeTool } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { posthog } from "./posthog.js";
@@ -2710,10 +2711,20 @@ export function registerHandlers(bot: Bot): void {
         const resumed = await resumeApprovedDelegation(ctx.from.id, approval.id);
         const outcome = resumed.status === "success"
           ? `✅ Approved worker action completed.\n\n${resumed.output}`
+          : resumed.status === "queued"
+            ? `✅ Approval accepted. The worker action is queued for durable execution.\n\n${resumed.output}`
           : `⚠️ The approved worker action did not complete (${resumed.status}).\n\n${resumed.output}`;
         await editApprovalOutcome(ctx, outcome.slice(0, 3900));
       } catch (error) {
         logger.warn({ err: error, userId: ctx.from.id, approvalId: approval.id, handoffId: approval.handoffId }, "Approved worker action resume failed");
+        if (error instanceof SubagentApprovalEnqueueError) {
+          await setApprovalStatus(ctx.from.id, approval.id, "pending");
+          const retryable = await getApproval(ctx.from.id, approval.id);
+          if (retryable?.status === "pending") {
+            await editCard(ctx, ctx.callbackQuery.message!.message_id, approvalCard(retryable.toolSlug, retryable.id, retryable.args));
+            return;
+          }
+        }
         await editApprovalOutcome(ctx, "⚠️ Approval was recorded, but the worker action could not resume. Inspect the task status before trying again.");
       }
       return;

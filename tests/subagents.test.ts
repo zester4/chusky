@@ -1,6 +1,7 @@
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { delegationStartedStatus, executeDelegation, resumeApprovedDelegation, setSubagentExecutorDependenciesForTests } from "../src/subagents/executor.js";
+import { setSubagentWorkflowTriggerForTests } from "../src/subagents/workflow.js";
 import { nativeTool, setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { ATTENTION_PULSE_TOOLS, WORKER_CAPABILITIES, classifyDelegationObjective, isComposioToolAllowedForWorker, normalizeDelegationToolScopes, planDelegationObjective, validateDelegationTarget } from "../src/subagents/capabilities.js";
 import { chuckTools } from "../src/agentTools.js";
@@ -13,7 +14,10 @@ beforeEach(async () => {
   setPhoneCallLauncherForTests(async (userId, input) => ({ id: `twc_test_${userId}`, userId, provider: "twilio", direction: "outbound", callProfile: input.callProfile, phoneNumber: input.phoneNumber, purpose: input.purpose, status: "bridging", createdAt: Date.now(), updatedAt: Date.now() }));
 });
 
-afterEach(() => setPhoneCallLauncherForTests());
+afterEach(() => {
+  setPhoneCallLauncherForTests();
+  setSubagentWorkflowTriggerForTests();
+});
 
 test("validates capability registry manifests for all worker capabilities", () => {
   const workers = ["lucas", "maya", "leo", "sofia", "dexter", "elena", "nora", "ivy", "quinn", "aria", "kai"] as const;
@@ -358,8 +362,12 @@ test("an unavailable explicitly granted Composio action pauses for supervisor re
 test("owner approval resumes the exact stored worker action once", async () => {
   const userId = 991014;
   const previousApiKey = config.openRouterApiKey;
+  const previousQstashToken = config.qstashToken;
+  const previousWebhookUrl = config.webhookUrl;
   const executions: Array<Record<string, unknown>> = [];
   config.openRouterApiKey = "test-openrouter-key";
+  config.qstashToken = "";
+  config.webhookUrl = "";
   setSubagentExecutorDependenciesForTests({
     getScopedComposioTools: async () => ({
       tools: [{ type: "function", function: { name: "GITHUB_DELETE_REPOSITORY", parameters: { type: "object", properties: {} } } }],
@@ -388,6 +396,53 @@ test("owner approval resumes the exact stored worker action once", async () => {
     assert.equal(resumedTask?.lease, undefined, "approval continuation must release its durable lease after settlement");
   } finally {
     config.openRouterApiKey = previousApiKey;
+    config.qstashToken = previousQstashToken;
+    config.webhookUrl = previousWebhookUrl;
+    setSubagentExecutorDependenciesForTests();
+  }
+});
+
+test("owner approval queues the exact worker action through the durable workflow", async () => {
+  const userId = 991016;
+  const previousQstashToken = config.qstashToken;
+  const previousWebhookUrl = config.webhookUrl;
+  const triggers: Array<Record<string, unknown>> = [];
+  config.qstashToken = "test-qstash-token";
+  config.webhookUrl = "https://example.test";
+  setSubagentExecutorDependenciesForTests({
+    getScopedComposioTools: async () => ({
+      tools: [{ type: "function", function: { name: "GITHUB_DELETE_REPOSITORY", parameters: { type: "object", properties: {} } } }],
+      missing: [],
+      execute: async () => ({ deleted: true }),
+    }),
+  });
+  setSubagentWorkflowTriggerForTests(async (params) => {
+    triggers.push(params as unknown as Record<string, unknown>);
+    return { workflowRunId: params.workflowRunId ?? "missing-workflow-id" };
+  });
+  try {
+    const proposal = await executeDelegation(userId, {
+      worker: "lucas",
+      objective: "Remove the GitHub repository for the approved cleanup action",
+      allowedComposioTools: ["GITHUB_DELETE_REPOSITORY"],
+      context: { toolCall: { name: "GITHUB_DELETE_REPOSITORY", args: { owner: "sample", repo: "test-repo" } } },
+    });
+    assert.equal(proposal.status, "requires_approval");
+    assert.ok(proposal.approvalId);
+    assert.ok(await claimApproval(userId, proposal.approvalId!));
+
+    const resumed = await resumeApprovedDelegation(userId, proposal.approvalId!);
+    assert.equal(resumed.status, "queued");
+    assert.equal(triggers.length, 1);
+    assert.equal(triggers[0].workflowRunId, `subagent-approval-${proposal.approvalId}`);
+    assert.deepEqual(triggers[0].body, { userId, handoffId: proposal.handoffRecord?.id, mode: "continue", approvalId: proposal.approvalId });
+    const handoff = (await listHandoffRecords(userId)).find((item) => item.id === proposal.handoffRecord?.id);
+    assert.equal(handoff?.status, "queued");
+    assert.equal(handoff?.approvalId, proposal.approvalId);
+    assert.equal((await getSession(userId)).approvals.find((approval) => approval.id === proposal.approvalId)?.status, "approved");
+  } finally {
+    config.qstashToken = previousQstashToken;
+    config.webhookUrl = previousWebhookUrl;
     setSubagentExecutorDependenciesForTests();
   }
 });

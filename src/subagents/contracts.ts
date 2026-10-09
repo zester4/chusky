@@ -82,6 +82,8 @@ export interface HandoffRecord {
   rootHandoffId?: string;
   delegationDepth?: number;
   taskId?: string;
+  /** Exact owner approval currently attached to this handoff, when paused. */
+  approvalId?: string;
   toolRequest?: { intent: string; reason: string; preferredToolkit?: string };
   workflowRunId?: string;
   toolRequestEventId?: string;
