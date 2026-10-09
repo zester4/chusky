@@ -13,7 +13,7 @@ import { registerHandlers } from "./handlers.js";
 import { listAttentionRecords } from "./store.js";
 import type { AttentionCandidateRecord, DeliveryPreferenceRecord, ObservationRecord } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
-import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
+import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -99,6 +99,7 @@ import { captureMissionSliceState, missionHasTimerWakeContinuation, missionPostW
 import { settleMissionSlice } from "./missionSlice.js";
 import { diagnoseMission } from "./reliability/missionDoctor.js";
 import { classifyTriggerWebhookSessionFailure } from "./triggerWebhookErrors.js";
+import { reconcileAllUserSchedules } from "./scheduler.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -272,6 +273,7 @@ async function main(): Promise<void> {
   if (config.betterAuthEnabled) await initAuth();
   let sdkWebhookRecovery: ReturnType<typeof setInterval> | undefined;
   let missionRecovery: ReturnType<typeof setInterval> | undefined;
+  let scheduleRecovery: ReturnType<typeof setInterval> | undefined;
   let memoryProjectionRecovery: ReturnType<typeof setInterval> | undefined;
   let memoryReflectionRecovery: ReturnType<typeof setInterval> | undefined;
   let telegramWebhookRecovery: ReturnType<typeof setInterval> | undefined;
@@ -286,6 +288,27 @@ async function main(): Promise<void> {
     void recoverAllMissions(enqueueTaskWorkflow).catch((error) => logger.warn({ error }, "Mission recovery sweep failed"));
   }, 120_000);
   if (typeof missionRecovery === "object" && "unref" in missionRecovery) missionRecovery.unref();
+  let scheduleRecoveryInFlight = false;
+  const reconcileSchedules = async () => {
+    if (scheduleRecoveryInFlight || !config.qstashToken || (!config.jobWorkflowUrl && !config.webhookUrl)) return;
+    scheduleRecoveryInFlight = true;
+    try {
+      const owners = await listJobOwnerIds(1_000);
+      if (!owners.length) return;
+      const result = await reconcileAllUserSchedules(owners);
+      if (result.failures.length || result.recreated.length || result.deleted.length || result.paused.length || result.resumed.length) {
+        logger.info({ owners: result.owners, checked: result.checked, recreated: result.recreated.length, deleted: result.deleted.length, paused: result.paused.length, resumed: result.resumed.length, failures: result.failures.length }, "Recurring schedules reconciled");
+      }
+      for (const failure of result.failures) logger.warn({ userId: failure.userId, error: failure.error }, "Recurring schedule reconciliation failed for owner");
+    } catch (error) {
+      logger.warn({ errorType: error instanceof Error ? error.name : "ScheduleRecoveryError" }, "Recurring schedule recovery sweep failed");
+    } finally {
+      scheduleRecoveryInFlight = false;
+    }
+  };
+  void reconcileSchedules();
+  scheduleRecovery = setInterval(() => { void reconcileSchedules(); }, 5 * 60_000);
+  if (typeof scheduleRecovery === "object" && "unref" in scheduleRecovery) scheduleRecovery.unref();
   if (config.durableMemoryEnabled) {
     memoryProjectionRecovery = setInterval(() => { void drainMemoryVectorOutbox(50).catch((error) => logger.warn({ errorType: error instanceof Error ? error.name : "MemoryProjectionError" }, "Memory Vector projection sweep failed")); }, 60_000);
     if (typeof memoryProjectionRecovery === "object" && "unref" in memoryProjectionRecovery) memoryProjectionRecovery.unref();
@@ -411,6 +434,7 @@ async function main(): Promise<void> {
     channelGateway?.stopRecovery();
     if (sdkWebhookRecovery) clearInterval(sdkWebhookRecovery);
     if (missionRecovery) clearInterval(missionRecovery);
+    if (scheduleRecovery) clearInterval(scheduleRecovery);
     if (memoryProjectionRecovery) clearInterval(memoryProjectionRecovery);
     if (telegramWebhookRecovery) clearInterval(telegramWebhookRecovery);
     if (daytonaRetentionSweep) clearInterval(daytonaRetentionSweep);

@@ -3074,7 +3074,7 @@ class RedisBackend implements Backend {
     return [...owners].sort((a, b) => a - b).slice(0, limit);
   }
   async listJobOwnerIds(limit = 1000): Promise<number[]> {
-    const owners = new Set<number>();
+    const owners = new Set<number>(await this.listSessionOwnerIds(limit));
     let cursor = "0";
     do {
       const [next, keys] = await this.r.scan(cursor, "MATCH", "chuck:jobs:*", "COUNT", Math.min(200, Math.max(1, limit)));
@@ -4396,7 +4396,7 @@ class MemoryBackend implements Backend {
   async saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord) { this.daytona.set(userId, workspace); }
   async clearDaytonaWorkspace(userId: number) { this.daytona.delete(userId); }
   async listSessionOwnerIds(limit = 1000) { return [...new Set([...this.sessions.keys(), ...this.daytona.keys()])].filter((id) => id >= 0).sort((a, b) => a - b).slice(0, limit); }
-  async listJobOwnerIds(limit = 1000) { return [...this.jobs.keys()].filter((id) => id >= 0).sort((a, b) => a - b).slice(0, limit); }
+  async listJobOwnerIds(limit = 1000) { return [...new Set([...await this.listSessionOwnerIds(limit), ...this.jobs.keys()])].filter((id) => id >= 0).sort((a, b) => a - b).slice(0, limit); }
   async getTasks(userId: number) { return this.tasks.get(userId) ?? []; }
   async getTask(userId: number, id: string) { return (this.tasks.get(userId) ?? []).find((task) => task.id === id); }
   async isTaskCancellationRequested(userId: number, id: string) { return this.taskCancellationRequests.has(`${userId}:${id}`); }
