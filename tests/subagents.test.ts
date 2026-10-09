@@ -645,6 +645,38 @@ test("allows safe read-only tools to execute automatically even under strict app
   assert.equal(result.toolCallsCount, 1);
 });
 
+test("allows Elena to persist internal continuity under strict worker approval policy", async () => {
+  const userId = 991018;
+  const task = await nativeTool(userId, "CHUCK_TASK_CREATE", {
+    title: "Internal continuity regression",
+    objective: "Ensure Elena can save progress without an approval prompt",
+  }) as { id: string };
+  const cases = [
+    {
+      name: "CHUCK_TASK_CHECKPOINT",
+      args: { id: task.id, checkpoint: "Pulse state reconciled", nextAction: "Review the next due item" },
+    },
+    {
+      name: "CHUCK_SCRATCHPAD_WRITE",
+      args: { key: "attention-pulse/checklist", content: "Checked continuity policy; next: review the next due item." },
+    },
+  ] as const;
+
+  for (const scenario of cases) {
+    const result = await executeDelegation(userId, {
+      worker: "elena",
+      objective: `Persist ${scenario.name} internal continuity state`,
+      allowedTools: [scenario.name],
+      approvalPolicy: "require_chusky_approval",
+      context: { toolCall: { name: scenario.name, args: scenario.args } },
+    });
+
+    assert.equal(result.status, "success", scenario.name);
+    assert.equal(result.approvalId, undefined, scenario.name);
+    assert.equal((await getSession(userId)).approvals.some((approval) => approval.toolSlug === scenario.name), false, scenario.name);
+  }
+});
+
 test("lets Elena use mission proof, evidence, and repair controls under strict worker approval policy", async () => {
   const userId = 991017;
   const cases = [

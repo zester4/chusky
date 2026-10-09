@@ -146,6 +146,11 @@ const TREG_AUTONOMOUS_TOOLS = new Set([
 const AUTONOMOUS_CONTROL_TOOLS = new Set([
   // User-authorized image publishing is intentionally not an approval loop.
   "CHUCK_MEDIA_BRIDGE",
+  // Worker continuity is private Chusky state. These writes must remain
+  // available inside strict worker contracts; approvals belong at the
+  // external/high-impact action boundary, not around the worker's own
+  // checkpoint or evolving checklist.
+  "CHUCK_TASK_CHECKPOINT", "CHUCK_SCRATCHPAD_WRITE",
   "CHUCK_AUTONOMY_STATUS", "CHUCK_AUTONOMY_RECONCILE", "CHUCK_AUTONOMY_PLAYBOOK",
   "CHUCK_MISSION_START", "CHUCK_MISSION_LIST", "CHUCK_MISSION_GET", "CHUCK_MISSION_PROOF", "CHUCK_MISSION_CONTROL",
   "CHUCK_MISSION_CHECKPOINT", "CHUCK_MISSION_WAIT_EVENT", "CHUCK_MISSION_STEP_COMPLETE",
