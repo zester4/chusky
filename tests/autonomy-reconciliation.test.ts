@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { initStore, createAttentionRecord, listAttentionRecords } from "../src/store.js";
 import { detectBusinessGaps } from "../src/autonomy/gapDetectors.js";
 import { runDueAutonomyWatches } from "../src/autonomy/reconciliation.js";
+import { setAgentDependenciesForTests } from "../src/agent.js";
 
 test("business gap detectors identify overdue invoices, unreplied messages, and coverage deficits", () => {
   const now = Date.parse("2026-01-31T00:00:00Z");
@@ -31,6 +32,31 @@ test("reconciliation executes only exact read-only scopes, checkpoints, and dedu
   assert.equal(second.length, 0);
   assert.equal((await listAttentionRecords(userId, "attention_candidate") as any[]).length, 1);
   assert.equal(watch.userId, userId);
+});
+
+test("starter Gmail watches resolve Composio toolSchemas when no toolSlugs were persisted", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 990012;
+  const session = {
+    sessionId: "watch-search-schema-session",
+    search: async () => ({ toolSchemas: {
+      GMAIL_FETCH_EMAILS: { tool_slug: "GMAIL_FETCH_EMAILS", description: "Read inbox messages" },
+    } }),
+  };
+  setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } } });
+  await createAttentionRecord(userId, "autonomy_watch", {
+    name: "Recent inbox", domain: "gmail", toolkit: "gmail", query: "Gmail newest five inbox messages read only",
+    objective: "Check the newest owner inbox messages", cadenceSeconds: 3600, authority: "observe", status: "active", maxItems: 5, nextCheckAt: 1,
+  });
+  let resolved: string[] = [];
+  const result = await runDueAutonomyWatches(userId, {
+    mode: "personal", now: Date.now(), execute: async ({ toolSlugs }) => {
+      resolved = toolSlugs;
+      return { text: 'AUTONOMY_RESULT: {"changed":false,"summary":"No new inbox changes"}', toolsSucceeded: toolSlugs };
+    },
+  });
+  assert.equal(result[0]?.status, "completed");
+  assert.deepEqual(resolved, ["GMAIL_FETCH_EMAILS"]);
 });
 
 test("reconciliation writes deduplicated owner observations for changes, failures, and recovery", async () => {

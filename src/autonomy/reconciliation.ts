@@ -147,7 +147,7 @@ async function resolveToolSlugs(userId: number, watch: AutonomyWatchRecord): Pro
   if (!watch.query && !watch.toolkit) return [];
   const { searchTools } = await import("../agent.js");
   const results = await searchTools(userId, `${watch.toolkit ?? ""} ${watch.query ?? watch.objective}`.trim());
-  return [...new Set(results.map((item: any) => String(item?.function?.name ?? item?.name ?? item?.slug ?? "").trim()).filter((slug) => /^[A-Z][A-Z0-9]{1,31}_[A-Z0-9_]+$/.test(slug) && isReadOnlyToolSlug(slug) && (!watch.toolkit || slug.toLowerCase().startsWith(`${watch.toolkit.toLowerCase().replace(/[^a-z0-9]/g, "")}_`))))].slice(0, 8);
+  return [...new Set(results.map((item: any) => String(item?.function?.name ?? item?.toolSlug ?? item?.tool_slug ?? item?.name ?? item?.slug ?? "").trim()).filter((slug) => /^[A-Z][A-Z0-9]{1,31}_[A-Z0-9_]+$/.test(slug) && isReadOnlyToolSlug(slug) && (!watch.toolkit || slug.toLowerCase().startsWith(`${watch.toolkit.toLowerCase().replace(/[^a-z0-9]/g, "")}_`))))].slice(0, 8);
 }
 
 function signalIdentity(watch: AutonomyWatchRecord, signal: NormalizedBusinessSignal): string {
