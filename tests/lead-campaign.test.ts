@@ -6,7 +6,13 @@ import { finalizeLeadCampaign, getMission, initStore, listLeadCampaignCandidates
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
 
-const tool = (args: Record<string, unknown>) => nativeTool(981001, "CHUCK_LEAD_CAMPAIGN", args, { ownerPrivateRun: true });
+const enqueueMissionTask = async (_owner: number, missionId: string) => `wf_${missionId}`;
+const campaignRuntime = (patch: Record<string, unknown> = {}) => ({
+  ownerPrivateRun: true,
+  enqueueMissionTask,
+  ...patch,
+});
+const tool = (args: Record<string, unknown>, runtime: Record<string, unknown> = {}) => nativeTool(981001, "CHUCK_LEAD_CAMPAIGN", args, campaignRuntime(runtime));
 
 test("lead campaign tool validates bounded campaign requests and is in the native catalogue", () => {
   assert.ok(chuckTools.some((entry) => entry.function.name === "CHUCK_LEAD_CAMPAIGN"));
@@ -49,15 +55,15 @@ test("mission worker can persist source-backed leads, dedupe them, and keep them
     evidenceSummary: "Company operates commercial HVAC services in Texas; source describes its service area.",
     qualificationStatus: "qualified", qualificationReason: "Matches industry and service geography; company size not yet verified.",
   };
-  const runtime = { missionId: campaign.missionId };
+  const runtime = campaignRuntime({ missionId: campaign.missionId });
   const first = await nativeTool(981001, "CHUCK_LEAD_CAMPAIGN", { action: "record_candidates", id: campaign.id, candidates: [candidate] }, runtime) as { inserted: number; duplicates: number; candidates: Array<{ id: string }> };
   const replay = await nativeTool(981001, "CHUCK_LEAD_CAMPAIGN", { action: "record_candidates", id: campaign.id, candidates: [candidate] }, runtime) as { inserted: number; duplicates: number; candidates: Array<{ id: string }> };
   assert.deepEqual([first.inserted, first.duplicates], [1, 0]);
   assert.deepEqual([replay.inserted, replay.duplicates], [0, 1]);
   assert.equal(first.candidates[0].id, replay.candidates[0].id);
-  const list = await nativeTool(981001, "CHUCK_LEAD_CAMPAIGN", { action: "get", id: campaign.id }, { ownerPrivateRun: true }) as { candidates: unknown[] };
+  const list = await nativeTool(981001, "CHUCK_LEAD_CAMPAIGN", { action: "get", id: campaign.id }, campaignRuntime()) as { candidates: unknown[] };
   assert.equal(list.candidates.length, 1);
-  await assert.rejects(nativeTool(981002, "CHUCK_LEAD_CAMPAIGN", { action: "get", id: campaign.id }, { ownerPrivateRun: true }), /not found|not owned/i);
+  await assert.rejects(nativeTool(981002, "CHUCK_LEAD_CAMPAIGN", { action: "get", id: campaign.id }, campaignRuntime()), /not found|not owned/i);
   await assert.rejects(nativeTool(981001, "CHUCK_LEAD_CAMPAIGN", {
     action: "record_candidates", id: campaign.id,
     candidates: [{ ...candidate, companyName: "Unsourced Company", domain: "unsourced.example", sourceUrls: [] }],
@@ -87,7 +93,7 @@ test("finalization records a server-derived snapshot and freezes the candidate s
     idealCustomerProfile: "B2B services", geography: "US", targetCount: 1,
     maxTregSpendUsd: 0, idempotencyKey: "campaign-finalize-test",
   }) as { id: string; missionId: string };
-  const runtime = { missionId: campaign.missionId };
+  const runtime = campaignRuntime({ missionId: campaign.missionId });
   await nativeTool(981001, "CHUCK_LEAD_CAMPAIGN", { action: "record_candidates", id: campaign.id, candidates: [{
     companyName: "Northstar Mechanical", domain: "northstar.example", sourceUrls: ["https://northstar.example/about"],
     evidenceSummary: "Source describes commercial HVAC services in Texas.", qualificationStatus: "qualified", qualificationReason: "Matches stated segment and geography.",
