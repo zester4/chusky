@@ -55,3 +55,14 @@ test("Pulse health exposes in-flight and failed runs without hiding watch gaps",
   const watchGap = classifyPulseHealth({ ...base, latestOccurrence: { status: "completed", completedAt: base.now - 1_000, updatedAt: base.now - 1_000 }, staleWatches: 1, currentWatches: 0 });
   assert.equal(watchGap.status, "watch_attention");
 });
+
+test("schedule recovery errors are reported as a failed Pulse", () => {
+  const health = classifyPulseHealth({
+    ...base,
+    scheduleError: "QStash schedule recovery failed: provider unavailable",
+  });
+  assert.equal(health.status, "failed");
+  assert.equal(health.recoveryAction, "inspect");
+  assert.match(health.summary, /provider unavailable/);
+  assert.match(health.lastError ?? "", /QStash schedule recovery failed/);
+});

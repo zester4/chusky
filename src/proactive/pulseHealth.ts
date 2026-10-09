@@ -34,6 +34,7 @@ export interface PulseHealthInput {
   cadence: PulseCadence;
   now?: number;
   jobStatus?: "active" | "paused" | "cancelled";
+  scheduleError?: string;
   latestOccurrence?: PulseHealthOccurrence;
   activeWatches: number;
   currentWatches: number;
@@ -98,7 +99,7 @@ export function classifyPulseHealth(input: PulseHealthInput): PulseHealth {
   const pendingSuggestions = boundedCount(input.pendingSuggestions);
   const lastRunAt = latestActivityAt(input.latestOccurrence);
   const lastRunStatus = input.latestOccurrence?.status;
-  const lastError = input.latestOccurrence?.error?.slice(0, 500);
+  const lastError = (input.scheduleError ?? input.latestOccurrence?.error)?.slice(0, 500);
   const base = {
     expectedIntervalMs,
     activeWatches,
@@ -116,6 +117,10 @@ export function classifyPulseHealth(input: PulseHealthInput): PulseHealth {
 
   if (!input.enabled || input.jobStatus === "paused" || input.jobStatus === "cancelled") {
     return { ...base, status: "off", title: "Pulse is paused", summary: "Elena is not scheduled to review your attention state.", recoveryAction: "none" };
+  }
+
+  if (input.scheduleError) {
+    return { ...base, status: "failed", title: "Pulse schedule needs recovery", summary: `The durable Pulse schedule could not be reconciled: ${input.scheduleError.slice(0, 300)}`, recoveryAction: "inspect" };
   }
 
   if (input.latestOccurrence && ["queued", "running", "waiting"].includes(input.latestOccurrence.status)) {

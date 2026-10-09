@@ -2,6 +2,13 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.13.0 - 2026-10-09
+
+- Bind connected-app trigger actions opened from the dashboard to a validated,
+  owner-scoped trigger event and stored action ID.
+- Reject missing, foreign, or invalid trigger-action context before Chat starts
+  a run; normal approval and provider verification boundaries remain unchanged.
+
 ## 1.12.0 - 2026-10-09
 
 - Expose a bounded `pulseEvidence` receipt on recurring-job occurrences so SDK
@@ -10,6 +17,8 @@ Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 - Keep the receipt provider-neutral: it contains counts and lifecycle state,
   never provider payloads, credentials, or a claim that an external write was
   successful.
+- Expose an owner-scoped `scheduleError` on recurring jobs when bounded QStash
+  recovery cannot reconcile a durable schedule; it clears after repair.
 
 ## 1.11.0 - 2026-10-09
 

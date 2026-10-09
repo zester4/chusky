@@ -57,7 +57,9 @@ export function parseReminderWorkflowPayload(value: unknown): ReminderWorkflowPa
 export function parseJobWorkflowPayload(value: unknown): JobWorkflowPayload {
   if (!value || typeof value !== "object") throw new Error("Workflow payload must be an object");
   const payload = value as Record<string, unknown>;
-  if (typeof payload.jobId !== "string" || !/^job_[\w-]+$/.test(payload.jobId)) throw new Error("Invalid jobId");
+  // Pulse records intentionally use pulse_<ownerId>; user-created recurring
+  // jobs use job_<id>. Both are owner-scoped JobRecord identities.
+  if (typeof payload.jobId !== "string" || !/^(?:job|pulse)_[\w-]+$/.test(payload.jobId)) throw new Error("Invalid jobId");
   if (!Number.isSafeInteger(payload.userId) || Number(payload.userId) < 1) throw new Error("Invalid userId");
   if (payload.approvalId !== undefined && (typeof payload.approvalId !== "string" || !/^appr_[A-Za-z0-9_-]{1,160}$/.test(payload.approvalId))) throw new Error("Invalid approvalId");
   return { jobId: payload.jobId, userId: Number(payload.userId), ...(typeof payload.occurrenceId === "string" ? { occurrenceId: payload.occurrenceId } : {}), ...(payload.approvalId ? { approvalId: payload.approvalId } : {}) };
@@ -207,6 +209,11 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
     // persistence. Those operations are retried independently and must not
     // cause a second external delivery.
     if (deps.completeDelivery) await deps.completeDelivery(deliveryKey, 7 * 24 * 60 * 60);
+    // A later successful delivery must clear an older provider failure. Keep
+    // this after the send and delivery dedupe marker so a failed attempt
+    // remains visible and a bookkeeping hiccup cannot cause a duplicate
+    // provider message on retry.
+    if (!dashboardOnly) await deps.updateJob(payload.userId, payload.jobId, { deliveryError: undefined });
     // Dashboard delivery intentionally does not call confirmDelivery: the
     // pending candidate is the notification and must remain actionable until
     // the owner opens it and selects an action in Chat/Approvals.

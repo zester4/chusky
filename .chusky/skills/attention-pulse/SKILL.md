@@ -69,6 +69,15 @@ for approval, and delivered to the dashboard or an opted-in channel. The
 receipt is control-plane evidence only; it never contains provider payloads
 and never proves an external write without the provider outcome boundary.
 
+The production worker periodically reconciles durable recurring-job records
+against one QStash schedule snapshot. Missing or changed active schedules are
+recreated, provider-paused active schedules are resumed, cancelled schedules
+are removed, and locally paused jobs remain paused. Treat a per-owner repair
+failure or shared provider-snapshot failure as a visible scheduler failure.
+The worker persists a bounded `scheduleError` on each affected owner’s
+recurring jobs and clears it after a later verified repair; never replay the
+agent occurrence or an external provider action as a recovery shortcut.
+
 Connection-gap candidates are owner-visible work, not permission. They may be
 shown through the web bell, Approvals, or an opted-in channel even when no
 external delivery channel is linked; the dashboard remains the fallback.

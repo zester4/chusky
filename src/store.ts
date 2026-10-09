@@ -19,7 +19,7 @@ import { recordFailure, recordVectorFailure } from "./monitoring.js";
 import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channels/contracts.js";
 import type { ApprovalPolicy, HandoffRecord, WorkerDuration } from "./subagents/contracts.js";
 import type { CapabilityWorkerName } from "./memory/types.js";
-import { durableMemoryConfigured, forgetAllPersonalDurableMemories, forgetDurableMemory, getDurableMemoryByKey, mergeDurablePersonalMemories, saveDurableMemory, saveMemoryEntity, searchDurableMemory } from "./memory/durable.js";
+import { durableMemoryConfigured, forgetAllPersonalDurableMemories, forgetDurableMemory, getDurableMemoryByKey, mergeDurablePersonalMemories, saveDurableMemory, saveMemoryEntity, searchDurableMemory, setDurableMemoryRuntimeMode } from "./memory/durable.js";
 import { queueConversationReflection } from "./memory/reflection.js";
 import { classifyMemory } from "./memory/classifier.js";
 import { deriveMissionToolHints } from "./missionWorker.js";
@@ -1307,6 +1307,8 @@ export interface JobRecord {
   /** Durable provider-neutral destination captured when the job is created. */
   deliveryTarget?: ReminderDeliveryTarget;
   deliveryError?: string;
+  /** Last bounded QStash schedule-recovery error; cleared after a verified repair. */
+  scheduleError?: string;
   createdAt: number;
 }
 
@@ -4743,6 +4745,7 @@ function deferMemoryVectorBackfill(uid: number): void {
 }
 
 export async function initStore(options: { memoryOnly?: boolean; suppressStorageMetrics?: boolean } = {}): Promise<void> {
+  setDurableMemoryRuntimeMode(options.memoryOnly === true);
   if (redisMetricsFlushTimer) clearInterval(redisMetricsFlushTimer);
   redisMetricsFlushTimer = undefined;
   if (!options.suppressStorageMetrics) await backend?.flushStorageMetrics?.();
@@ -6774,9 +6777,10 @@ export async function setLiveVoicePreference(
 }
 
 export async function setComposioSessionId(uid: number, id: string): Promise<void> {
-  const s = await getSession(uid);
-  s.composioSessionId = id;
-  await saveSession(uid, s);
+  // Composio session initialization can happen while an SDK/web run is being
+  // settled. Mutate only this field under the owner lease so a stale read
+  // cannot overwrite the run status, history, approvals, or Pulse state.
+  await mutateSession(uid, (session) => { session.composioSessionId = id; });
 }
 
 export async function setDaytonaWorkspaceId(uid: number, id: string): Promise<void> {

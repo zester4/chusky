@@ -76,6 +76,15 @@ completed run is `never_run` and an old run is `stale`. This prevents the
 dashboard, SDK, and Elena from reporting an overdue provider watch that was
 never authorized.
 
+The worker also runs a bounded QStash schedule-recovery sweep. It discovers
+owners from durable job state, takes one provider schedule snapshot, removes
+orphaned cancelled schedules, recreates missing or changed active schedules,
+and preserves locally paused jobs as paused. A repair failure—including a
+shared provider-snapshot failure—is recorded for each affected owner as a
+bounded `scheduleError` on its recurring jobs and projected into Pulse health
+and the dashboard. The error clears after a later verified repair; the sweep
+never retries an agent occurrence or replays a provider action.
+
 Each durable Pulse occurrence also carries a bounded `pulseEvidence` receipt.
 It records whether the run completed, waited, or was suppressed; how many due
 watches were reconciled; how many observations and candidates remained; whether
@@ -96,6 +105,13 @@ connection, stale candidate, quota rejection, or interrupted request leaves
 the suggestion recoverable instead of silently removing it. Elena then handles
 the request through the normal connected-account, tool, and approval
 boundaries.
+
+Enabling a new Pulse also admits one bounded first run immediately; the hourly
+schedule is still the governor for later runs. Manual runs persist a queued
+occurrence before publishing the workflow, so the dashboard can show queued,
+running, failed, or completed state even when the worker or provider is delayed.
+Pulse workflow payload validation accepts both owner-scoped `pulse_<id>` records
+and ordinary `job_<id>` recurring jobs.
 
 Provider calls remain in `src/autonomy/reconciliation.ts`, where exact
 read-only tool slugs, account ownership, profiles, leases, checkpoints,

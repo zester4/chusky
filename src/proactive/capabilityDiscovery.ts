@@ -50,7 +50,7 @@ const GAP_DEFINITIONS: readonly CapabilityGapDefinition[] = [
     capabilityIds: ["inbox_priority_scan", "unanswered_message", "email_commitment", "invoice_detection"],
     score: 0.95,
     unlocks: "bounded inbox reviews, urgent-message detection, unanswered-reply detection, commitment tracking, and review-ready drafts",
-    action: "Connect Gmail from Connected Apps, then choose which read-only inbox watch Elena should enable.",
+    action: "Connect Gmail from Connected Apps. Once it is active, Elena will start the smallest read-only Recent inbox watch automatically; you can refine its focus after the first check.",
   },
   {
     key: "calendar",
@@ -59,7 +59,7 @@ const GAP_DEFINITIONS: readonly CapabilityGapDefinition[] = [
     capabilityIds: ["tomorrow_briefing", "meeting_preparation", "calendar_conflict", "deadline_watch"],
     score: 0.94,
     unlocks: "tomorrow briefings, meeting preparation, conflict detection, and early deadline reminders",
-    action: "Connect a calendar from Connected Apps, then choose the meetings and schedule signals Elena should monitor.",
+    action: "Connect a calendar from Connected Apps. Once it is active, Elena will start the smallest read-only Upcoming calendar watch automatically; you can refine its focus after the first check.",
   },
   {
     key: "documents",

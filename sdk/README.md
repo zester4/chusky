@@ -63,6 +63,16 @@ For run-level observability, `client.jobs.occurrences(id)` returns a bounded
 checks, remaining observations/candidates, handling or delegation, approval
 waits, and dashboard/external delivery without exposing provider payloads or
 claiming that an external write succeeded.
+
+Recurring jobs expose an owner-scoped `scheduleError` when the worker cannot
+reconcile their durable QStash schedule. It is bounded, clears after a later
+successful repair, and does not imply that a provider action was attempted.
+
+Connected-app action cards opened from the dashboard can carry
+`metadata.triggerEventId` and `metadata.triggerActionId` into a Chat run. The
+API validates both against the authenticated owner's saved trigger event before
+admitting the run; event text never grants permission and consequential actions
+still require the normal approval boundary.
 Pass `baseUrl` only when targeting a staging or self-hosted API. Never expose
 `CHUSKY_API_KEY` in browser code, mobile apps, public repositories, or prompts.
 

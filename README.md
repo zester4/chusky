@@ -739,6 +739,9 @@ Pulse sends a deterministic owner digest instead. Handling is counted only after
 completion, not when it merely starts or is inspected. Pulse runs use a narrower task, reminder,
 mission-inspection, and attention-state tool surface than ordinary Elena work; connected-app
 actions require an explicit capability expansion. Redis and QStash are required in production.
+The worker also reconciles durable recurring-job records against QStash on a bounded recovery
+sweep: active schedules are repaired, cancelled schedules are removed, and locally paused jobs
+remain paused without replaying agent or provider actions.
 
 The proactive operating layer in [`src/proactive/`](src/proactive/README.md) defines twenty
 typed, read-only behaviors for Elena: inbox priority, unanswered messages, important contacts,
@@ -792,6 +795,15 @@ public-site navigation, tabs, accessible controls, forms, typing, keyboard
 presses, scrolling, screenshots, and verification. It does not apply a
 site-domain allowlist, but blocks private/local network targets and metadata
 services; individual sites can still require authentication or a human check.
+In owner-private model tool calls, each supported observe/action call is paired
+with a viewport screenshot for the next model decision, while the structured
+accessibility, form, and action-verification result is preserved. A bounded
+multi-action run returns its final screenshot after the sequence.
+Only the newest automatic screenshot remains in the active model context; these
+images are not saved as assets or attached to the user's response. Common
+password, one-time-code, and payment-entry fields are visually masked, but this
+is not general page-wide personal-data redaction. Shared conversations receive
+no automatic screenshot.
 Owner-private uploads, downloads, and screen recordings use bounded file sizes
 and an owner-scoped 30-day file library; uploads require approval. CAPTCHA/2FA,
 SSO, and passkey challenges can expose that same browser through a short-lived
