@@ -538,6 +538,8 @@ test("scheduling records survive ordinary session writes", async () => {
 test("approvals require exact ownership, expiry, and one-time state transitions", async () => {
   const userId = 810008;
   const approval = await createApproval({ userId, toolSlug: "CHUCK_DAYTONA_EXECUTE", args: { command: "pwd", purpose: "inspect" }, request: "inspect", history: [], model: "test/model" });
+  assert.ok(approval.expiresAt - approval.createdAt >= 59 * 60 * 1000);
+  assert.ok(approval.expiresAt - approval.createdAt <= 61 * 60 * 1000);
   assert.equal((await getApproval(810009, approval.id)), undefined);
   assert.equal(await setApprovalStatus(userId, approval.id, "approved"), true);
   assert.equal(await setApprovalStatus(userId, approval.id, "approved"), false);

@@ -9398,7 +9398,7 @@ export async function addHistorySummary(uid: number, summary: string): Promise<v
   await saveSession(uid, s);
 }
 
-export async function createApproval(record: Omit<ApprovalRecord, "id" | "status" | "createdAt" | "expiresAt">, ttlMs = 15 * 60 * 1000): Promise<ApprovalRecord> {
+export async function createApproval(record: Omit<ApprovalRecord, "id" | "status" | "createdAt" | "expiresAt">, ttlMs = 60 * 60 * 1000): Promise<ApprovalRecord> {
   const approval: ApprovalRecord = { ...record, id: `appr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, status: "pending", createdAt: Date.now(), expiresAt: Date.now() + ttlMs };
   await backend.saveApproval(approval);
   return approval;
