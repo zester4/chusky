@@ -268,6 +268,8 @@ export async function executeDelegation(
   let approvalId: string | undefined;
   let toolRequest: DelegationResult["toolRequest"] | undefined;
   let sharedBudgetExhausted = false;
+  let pulseCapabilityNudgeCount = 0;
+  let stopAfterToolCalls = false;
 
   // The shared status callback is used by every channel. Make the selected
   // specialist and a bounded preview visible before any worker work begins.
@@ -291,6 +293,20 @@ export async function executeDelegation(
   const nativeWorkerTools = modelFacingChuckTools.filter((t) => contract.allowedTools.includes(canonicalNativeToolSlug(t.function.name))
     && (!canonicalNativeToolSlug(t.function.name).startsWith("CHUCK_TINYFISH_") || Boolean(config.tinyFishApiKey)));
   const allowedToolNames = new Set([...contract.allowedTools, ...contract.allowedComposioTools]);
+
+  // A Pulse already has a verified, owner-visible capability-gap plan before
+  // Elena is invoked. If there is no direct provider action and no due watch
+  // to reconcile, asking for another provider tool would turn a useful
+  // connection suggestion into a blocked internal task. Keep the generic
+  // worker request boundary for every other worker and Pulse state; this is
+  // only a bounded continuation hint for Elena.
+  const pulseGuard = contract.context?.pulseGuard;
+  const pulseCapabilityGapFallback = workerName === "elena"
+    && contract.context?.attentionPulse === true
+    && pulseGuard && typeof pulseGuard === "object" && !Array.isArray(pulseGuard)
+    && (pulseGuard as Record<string, unknown>).verifiedDirectAction === false
+    && Number((pulseGuard as Record<string, unknown>).pendingCapabilityCandidates ?? 0) > 0
+    && Number((pulseGuard as Record<string, unknown>).dueAutonomyWatches ?? 0) === 0;
 
   // Determine if context contains an explicit tool call payload
   const actionPayload = contract.context?.toolCall as { name: string; args: Record<string, unknown> } | undefined;
@@ -627,6 +643,19 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
           // A worker can ask its supervisor for a missing capability, but it
           // cannot discover, self-authorize, or self-grant a provider tool.
           if (slug === "CHUCK_REQUEST_ADDITIONAL_TOOLS") {
+            if (pulseCapabilityGapFallback) {
+              pulseCapabilityNudgeCount += 1;
+              const pulseMessage = pulseCapabilityNudgeCount === 1
+                ? "This Attention Pulse already has a verified owner-visible capability or connection-gap suggestion, and no direct provider action was granted for this run. Do not request another provider tool. Continue with the native pulse state, then explain the suggestion and its next owner action."
+                : "Stop requesting provider tools for this Pulse. Return the concise owner-visible capability-gap summary now; no provider action was executed.";
+              logs.push(safeToolAudit({ tool: slug, args: rawArgs, userId, runId: handoffRecord.delegation.runId, status: "completed", requested: true }));
+              messages.push({ role: "tool", tool_call_id: call.id, content: pulseMessage });
+              if (pulseCapabilityNudgeCount >= 2) {
+                outputSummary = "Attention Pulse found a capability gap and kept it as an owner-visible suggestion; no connected-app action was executed.";
+                stopAfterToolCalls = true;
+              }
+              continue;
+            }
             toolRequest = {
               intent: String(rawArgs.intent ?? "").trim(),
               reason: String(rawArgs.reason ?? "").trim(),
@@ -763,7 +792,7 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
           if (approvedForTool && options?.approvedApprovalId) await setApprovalStatus(userId, options.approvedApprovalId, "consumed");
         }
 
-        if (approvalNeeded || status !== "success") {
+        if (approvalNeeded || status !== "success" || stopAfterToolCalls) {
           break;
         }
       }

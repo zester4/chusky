@@ -282,6 +282,39 @@ test("lets a worker request, but never self-grant, a missing capability", async 
   assert.equal(result.toolCallsLog[0]?.result && (result.toolCallsLog[0].result as { requested?: boolean }).requested, true);
 });
 
+test("keeps a capability-gap Attention Pulse owner-visible instead of blocking its worker task", async () => {
+  const userId = 991018;
+  const previousApiKey = config.openRouterApiKey;
+  let round = 0;
+  config.openRouterApiKey = "test-openrouter-key";
+  setSubagentExecutorDependenciesForTests({
+    chat: async () => {
+      round += 1;
+      if (round === 1) return { choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "status-1", type: "function", function: { name: "CHUCK_AUTONOMY_STATUS", arguments: "{}" } }] }, finish_reason: "tool_calls" }] } as any;
+      if (round === 2) return { choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "request-1", type: "function", function: { name: "CHUCK_REQUEST_ADDITIONAL_TOOLS", arguments: JSON.stringify({ intent: "Inspect Gmail", reason: "The pulse has no direct provider action" }) } }] }, finish_reason: "tool_calls" }] } as any;
+      return { choices: [{ message: { role: "assistant", content: "I found a capability gap and kept it ready for your review." }, finish_reason: "stop" }] } as any;
+    },
+  });
+  try {
+    const result = await executeDelegation(userId, {
+      worker: "elena",
+      objective: "Run one owner-configured Chusky attention pulse now.",
+      context: {
+        attentionPulse: true,
+        pulseGuard: { verifiedDirectAction: false, pendingCapabilityCandidates: 1, dueAutonomyWatches: 0 },
+      },
+    });
+    assert.equal(result.status, "success");
+    assert.equal(result.toolRequest, undefined);
+    assert.ok(result.toolCallsLog.some((entry) => entry.tool === "CHUCK_AUTONOMY_STATUS" && entry.status === "completed"));
+    assert.ok(result.toolCallsLog.some((entry) => entry.tool === "CHUCK_REQUEST_ADDITIONAL_TOOLS" && entry.status === "completed"));
+    assert.equal((await listTasks(userId)).find((task) => task.id === result.taskId)?.status, "completed");
+  } finally {
+    config.openRouterApiKey = previousApiKey;
+    setSubagentExecutorDependenciesForTests();
+  }
+});
+
 test("resumes the same durable worker task and runs the model with the newly scoped action", async () => {
   const userId = 991011;
   const previousApiKey = config.openRouterApiKey;

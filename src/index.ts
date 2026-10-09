@@ -2469,6 +2469,11 @@ async function main(): Promise<void> {
                 composio: proactiveRoute?.composioContext ?? "",
               },
               decisionContext: plan.decisionContext,
+              pulseGuard: {
+                verifiedDirectAction: selectedComposioTools.length > 0,
+                pendingCapabilityCandidates: plan.decisionContext.items.filter((item) => item.kind === "attention_candidate" && /^\[(connection-gap|action-gap):/.test(item.title)).length,
+                dueAutonomyWatches: plan.dueWatchIds.length,
+              },
               ...(job.deliveryTarget ? { deliveryTarget: job.deliveryTarget } : {}),
             };
             const result = await executeDelegation(payload.userId, {
