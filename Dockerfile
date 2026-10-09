@@ -1,5 +1,5 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────────
-FROM node:22-alpine AS builder
+FROM public.ecr.aws/docker/library/node:22-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --legacy-peer-deps
@@ -9,7 +9,7 @@ COPY agent-upgrade.json ./agent-upgrade.json
 RUN NODE_OPTIONS=--max-old-space-size=8192 npm run build
 
 # ── Stage 2: production ───────────────────────────────────────────────────────
-FROM node:22-alpine AS production
+FROM public.ecr.aws/docker/library/node:22-alpine AS production
 WORKDIR /app
 ENV NODE_ENV=production
 # Required to transcode Sendblue's Apple Opus-in-CAF voice notes into the
