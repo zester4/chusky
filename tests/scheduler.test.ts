@@ -19,6 +19,7 @@ test("schedule reconciliation recreates drift and removes cancelled schedules", 
     ],
     create: async (item) => { recreated.push(item.scheduleId); },
     pause: async () => undefined,
+    resume: async () => undefined,
     remove: async (id) => { removed.push(id); },
   });
   assert.deepEqual(result.recreated.sort(), [active.scheduleId, changed.scheduleId].sort());
@@ -27,6 +28,7 @@ test("schedule reconciliation recreates drift and removes cancelled schedules", 
   assert.deepEqual(recreated.sort(), result.recreated.sort());
   assert.deepEqual(removed, [cancelled.scheduleId]);
   assert.deepEqual(result.paused, []);
+  assert.deepEqual(result.resumed, []);
 });
 
 test("schedule reconciliation leaves matching active schedules alone", async () => {
@@ -36,9 +38,10 @@ test("schedule reconciliation leaves matching active schedules alone", async () 
     schedules: async () => [{ scheduleId: active.scheduleId, cron: active.cron, destination: "https://example.test/workflows/job" }],
     create: async () => { throw new Error("must not recreate"); },
     pause: async () => { throw new Error("must not pause"); },
+    resume: async () => { throw new Error("must not resume"); },
     remove: async () => { throw new Error("must not remove"); },
   });
-  assert.deepEqual(result, { checked: 1, recreated: [], deleted: [], paused: [], unchanged: [active.scheduleId] });
+  assert.deepEqual(result, { checked: 1, recreated: [], deleted: [], paused: [], resumed: [], unchanged: [active.scheduleId] });
 });
 
 test("schedule reconciliation preserves paused job state and repairs provider drift", async () => {
@@ -51,9 +54,25 @@ test("schedule reconciliation preserves paused job state and repairs provider dr
     schedules: async () => [{ scheduleId: paused.scheduleId, cron: paused.cron, destination: "https://example.test/workflows/job", isPaused: false }],
     create: async (item) => { created.push(item.scheduleId); },
     pause: async (scheduleId) => { pausedProvider.push(scheduleId); },
+    resume: async () => { throw new Error("must not resume a locally paused job"); },
     remove: async () => undefined,
   });
   assert.deepEqual(created, [missing.scheduleId]);
   assert.deepEqual(pausedProvider, [paused.scheduleId, missing.scheduleId]);
-  assert.deepEqual(result, { checked: 2, recreated: [missing.scheduleId], deleted: [], paused: [paused.scheduleId, missing.scheduleId], unchanged: [] });
+  assert.deepEqual(result, { checked: 2, recreated: [missing.scheduleId], deleted: [], paused: [paused.scheduleId, missing.scheduleId], resumed: [], unchanged: [] });
+});
+
+test("active schedule reconciliation resumes a provider-paused schedule", async () => {
+  const active = job("active", "schedule-provider-paused");
+  const resumed: string[] = [];
+  const result = await reconcileUserSchedules(1, {
+    jobs: async () => [active],
+    schedules: async () => [{ scheduleId: active.scheduleId, cron: active.cron, destination: "https://example.test/workflows/job", isPaused: true }],
+    create: async () => undefined,
+    pause: async () => { throw new Error("must not pause an active job"); },
+    resume: async (scheduleId) => { resumed.push(scheduleId); },
+    remove: async () => undefined,
+  });
+  assert.deepEqual(resumed, [active.scheduleId]);
+  assert.deepEqual(result, { checked: 1, recreated: [active.scheduleId], deleted: [], paused: [], resumed: [active.scheduleId], unchanged: [] });
 });
