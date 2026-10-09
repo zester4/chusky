@@ -23,6 +23,53 @@ const MAX_BROWSER_RECORDING_BYTES = 100 * 1024 * 1024;
 const BROWSER_FILE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const BROWSER_STREAM_PORT = 6080;
 const locks = new Map<number, Promise<void>>();
+
+type BrowserStepRecord = Record<string, unknown>;
+
+function browserStepRecord(value: unknown): BrowserStepRecord | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as BrowserStepRecord : undefined;
+}
+
+/**
+ * High-level adaptive actions carry their real browser action one level down.
+ * Run the vault policy against that real action as well; otherwise `act` or
+ * `agent` could accidentally become an unguarded path around the authenticated
+ * browser controls.
+ */
+async function guardNestedVaultBrowserActions(
+  userId: number,
+  workspaceId: string,
+  action: string,
+  args: Record<string, unknown>,
+  currentUrl: string | undefined,
+  ownerPrivateRun: boolean,
+  ownerApprovedAction: boolean,
+): Promise<void> {
+  const steps: unknown[] = action === "act"
+    ? [args.step]
+    : action === "agent"
+      ? Array.isArray(args.steps) ? args.steps : []
+      : [];
+  if (!steps.length) throw new E2BBrowserError(`${action} requires at least one bounded browser step`);
+  for (const rawStep of steps) {
+    const step = browserStepRecord(rawStep);
+    const nestedAction = typeof step?.action === "string" ? step.action : "";
+    if (!step || !nestedAction || ["act", "agent", "observe"].includes(nestedAction)) {
+      throw new E2BBrowserError(`${action} contains an invalid or recursive browser step`);
+    }
+    const selector = browserStepRecord(step.selector);
+    const nestedArgs: Record<string, unknown> = {
+      ...args,
+      ...step,
+      action: nestedAction,
+      ...(typeof args.nodeId === "string"
+        ? { nodeId: args.nodeId }
+        : typeof selector?.nodeId === "string" ? { nodeId: selector.nodeId } : {}),
+      currentUrl,
+    };
+    await guardVaultBrowserAction(userId, workspaceId, nestedArgs, ownerPrivateRun, ownerApprovedAction);
+  }
+}
 const NO_PROGRESS_GUARDED_ACTIONS = new Set(["click", "invoke", "fill", "select_option", "check", "uncheck", "focus", "hover", "press", "type", "scroll", "drag"]);
 
 function boundedText(value: unknown, field: string, max: number): string {
@@ -723,7 +770,13 @@ export class E2BBrowserEngine {
       }
       if (record.sessionId && !["state", "snapshot", "find", "form_inspect", "form_plan"].includes(action) && args.sessionId !== record.sessionId) throw new E2BBrowserError("Acquire the active E2B browser session lease before steering this browser");
       if (!internal.vaultLoginFlow) assertE2BBrowserHandoffAllowsAction(action, (await getSession(userId)).browserHandoffs ?? [], record.lastUrl, record.sandboxId);
-      if (!internal.vaultLoginFlow) await guardVaultBrowserAction(userId, record.sandboxId, { ...args, currentUrl: record.lastUrl }, internal.ownerPrivateRun, internal.ownerApprovedAction);
+      if (!internal.vaultLoginFlow) {
+        if (action === "act" || action === "agent") {
+          await guardNestedVaultBrowserActions(userId, record.sandboxId, action, args, record.lastUrl, internal.ownerPrivateRun === true, internal.ownerApprovedAction === true);
+        } else {
+          await guardVaultBrowserAction(userId, record.sandboxId, { ...args, currentUrl: record.lastUrl }, internal.ownerPrivateRun, internal.ownerApprovedAction);
+        }
+      }
       const request: Record<string, unknown> = compositeRequest ?? auxiliaryBrowserRequest(action, args);
       if (action === "agent") {
         const limits = normalizeBrowserAgentRunLimits({

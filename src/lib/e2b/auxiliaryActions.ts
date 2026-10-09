@@ -1,6 +1,27 @@
 import { E2BBrowserError } from "./errors.js";
 
 export function auxiliaryBrowserRequest(action: string, args: Record<string, unknown>): Record<string, unknown> {
+  if (action === "observe") {
+    return {
+      action,
+      includeScreenshot: args.includeScreenshot === true,
+      includeForms: args.includeForms !== false,
+      includePageContent: args.includePageContent === true,
+      includeLinks: args.includeLinks === true,
+    };
+  }
+  if (action === "act") {
+    if (!args.step || typeof args.step !== "object" || Array.isArray(args.step)) {
+      throw new E2BBrowserError("act requires one bounded browser step");
+    }
+    return { action, step: args.step };
+  }
+  if (action === "extract") {
+    if (!args.schema || typeof args.schema !== "object" || Array.isArray(args.schema)) {
+      throw new E2BBrowserError("extract requires a bounded object schema");
+    }
+    return { action, schema: args.schema };
+  }
   if (action === "desktop_click") {
     const x = Number(args.x);
     const y = Number(args.y);

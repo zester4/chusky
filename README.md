@@ -1405,6 +1405,7 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `E2B_ALLOW_INTERNET` | automated browser | `true` | Allow public web access; the browser still blocks local, metadata, private, and reserved network targets |
 | `E2B_TIMEOUT_MS` | automated browser | `900000` | Owner sandbox lifetime, bounded to 60 seconds–24 hours |
 | `E2B_REQUEST_TIMEOUT_MS` | automated browser | `120000` | E2B command/request timeout |
+| `MAX_BROWSER_NO_PROGRESS_CALLS` | automated browser | `8` | Consecutive browser calls with no observed page-state progress before the run stops |
 | `WEB_BOT_AUTH_ENABLED` | browser identity | `false` | Publish the signed Web Bot Auth directory; does not enable request signing |
 | `WEB_BOT_AUTH_SIGN_REQUESTS` | browser identity | `false` | Sign browser requests only after Cloudflare approves the identity |
 | `WEB_BOT_AUTH_DIRECTORY_URL` | browser identity | — | Exact public HTTPS URL ending in `/.well-known/http-message-signatures-directory` |
