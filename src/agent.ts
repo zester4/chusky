@@ -4229,10 +4229,30 @@ export async function getToolkitStates(userId: number): Promise<ToolkitState[]> 
   return (await getToolkitStatesPage(userId, { limit: 50, enrich: false })).items;
 }
 
+function normalizeComposioSearchResults(result: unknown): unknown[] {
+  if (Array.isArray(result)) return result;
+  if (!result || typeof result !== "object" || Array.isArray(result)) return [];
+  const root = result as Record<string, unknown>;
+  const containers = [root, root.data && typeof root.data === "object" && !Array.isArray(root.data) ? root.data as Record<string, unknown> : undefined].filter((item): item is Record<string, unknown> => Boolean(item));
+  for (const container of containers) {
+    for (const key of ["items", "tools", "results"]) {
+      if (Array.isArray(container[key])) return container[key] as unknown[];
+    }
+    const schemas = container.toolSchemas ?? container.tool_schemas;
+    if (Array.isArray(schemas)) return schemas;
+    if (schemas && typeof schemas === "object" && !Array.isArray(schemas)) {
+      return Object.entries(schemas as Record<string, unknown>).map(([toolSlug, definition]) => definition && typeof definition === "object" && !Array.isArray(definition)
+        ? { toolSlug, ...(definition as Record<string, unknown>) }
+        : { toolSlug });
+    }
+  }
+  return [];
+}
+
 export async function searchTools(userId: number, query: string): Promise<unknown[]> {
   const { sessionObj } = await getOrCreateComposioSession(userId);
   const result = await sessionObj.search({ query });
-  return Array.isArray(result) ? result : (result.items ?? []);
+  return normalizeComposioSearchResults(result);
 }
 
 export type MeetingComposioCapability = {

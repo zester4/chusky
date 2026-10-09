@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { addRecallMeeting, claimAgentUpgrade, completeMissionStep, createMission, finalizeMissionIfReady, getApproval, getMission, getSession, initStore, listAgentRuns, listMissions, listTasks, saveSession, setApprovalStatus, startMission, updateMeetingRepresentativeProfile } from "../src/store.js";
-import { appendPreviewLinks, cleanModelText, getReconnectUrl, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
+import { appendPreviewLinks, cleanModelText, getReconnectUrl, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, searchTools, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { formatAgentUpgradeNotice, loadAgentUpgrade } from "../src/upgradeNotice.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -1558,6 +1558,21 @@ test("owner-private deletion pauses before provider execution and stores an exac
     assert.deepEqual(approval?.args, { owner: "owner", repo: "archive" });
     assert.equal((await getApproval(userId, approval!.id))?.userId, userId);
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test("normalizes Composio toolSchemas search results for exact action routing", async () => {
+  await initStore({ memoryOnly: true });
+  const session = {
+    sessionId: "search-schema-session",
+    search: async () => ({ toolSchemas: {
+      GMAIL_FETCH_EMAILS: { tool_slug: "GMAIL_FETCH_EMAILS", description: "Read inbox messages" },
+      GMAIL_SEND_EMAIL: { tool_slug: "GMAIL_SEND_EMAIL", description: "Send an email" },
+    } }),
+  };
+  setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } } });
+
+  const results = await searchTools(831201, "gmail recent inbox");
+  assert.deepEqual(results.map((item: any) => item.toolSlug), ["GMAIL_FETCH_EMAILS", "GMAIL_SEND_EMAIL"]);
 });
 
 test("approval resume executes the stored action before model regeneration", async () => {
