@@ -683,7 +683,7 @@ async function challengeFor(page) {
   const detected = await detectChallenge(page);
   if (!kernelController || !detected.detected || detected.type !== "captcha") return detected;
   const outcome = await kernelController.wait(() => detectChallenge(page));
-  return { ...outcome.challenge, automaticAttempted: true, pageVerified: outcome.verified, solver: kernelController.tracker.snapshot() };
+  return { ...outcome.challenge, automaticAttempted: true, pageVerified: outcome.verified, ...(outcome.terminalStatus ? { terminalStatus: outcome.terminalStatus } : {}), solver: kernelController.tracker.snapshot() };
 }
 
 async function tabsFor(context, active) {

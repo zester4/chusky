@@ -14,11 +14,31 @@ test("unordered CAPTCHA telemetry never constitutes page success", () => {
   const tracker = new CaptchaTracker(() => now, 1000);
   tracker.accept({ type: "captcha_solve_result", data: { task_id: "one", status: "success" } });
   tracker.accept({ type: "captcha_solve_started", data: { task_id: "one" } });
-  assert.deepEqual(tracker.snapshot(), { pending: false, results: ["success"], pageVerificationRequired: true });
+  assert.deepEqual(tracker.snapshot(), { pending: false, results: ["success"], challengeResults: [], pageVerificationRequired: true });
   tracker.accept({ type: "captcha_solve_started", data: { task_id: "two" } });
   assert.equal(tracker.snapshot().pending, true);
   now = 1001;
   assert.equal(tracker.snapshot().pending, false);
+});
+
+test("current challenge telemetry keeps press-and-hold terminal outcomes without a task id", () => {
+  const tracker = new CaptchaTracker();
+  tracker.accept({ type: "captcha_challenge_result", data: { challenge_id: "challenge-one", captcha_provider: "human", task_kind: "press_and_hold", status: "failure" } });
+  assert.deepEqual(tracker.snapshot(), { pending: false, results: [], challengeResults: ["failure"], pageVerificationRequired: true });
+  assert.equal(tracker.terminalSince(0)?.status, "failure");
+});
+
+test("challenge wait returns promptly on a terminal solver failure", async () => {
+  let now = 0;
+  const tracker = new CaptchaTracker(() => now, 1000);
+  const options = { timeoutMs: 1000, now: () => now, tracker, afterSequence: tracker.cursor(), sleep: async () => {
+    tracker.accept({ type: "captcha_solve_result", data: { captcha_provider: "human", task_kind: "press_and_hold", status: "failure" } });
+    now += 100;
+  } };
+  const outcome = await waitForChallengeClear(async () => ({ detected: true, type: "captcha" }), options);
+  assert.equal(outcome.verified, false);
+  assert.equal(outcome.timedOut, false);
+  assert.equal(outcome.terminalStatus, "failure");
 });
 
 test("challenge wait verifies clearance and stops at its deadline", async () => {
