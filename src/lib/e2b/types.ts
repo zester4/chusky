@@ -11,6 +11,7 @@ export const E2B_BROWSER_ACTIONS = [
   "desktop_click", "desktop_type", "desktop_press", "clipboard_read", "clipboard_write",
   "dialog_list", "dialog_dismiss", "diagnostics", "events", "pdf", "pause", "resume", "fork",
   "stream_start", "stream_status", "stream_stop",
+  "auth_start", "auth_status", "auth_resume",
 ] as const;
 
 export type E2BBrowserAction = typeof E2B_BROWSER_ACTIONS[number];
@@ -36,6 +37,8 @@ export type E2BBrowserNode = {
 
 export type E2BBrowserRecord = {
   sandboxId: string;
+  /** Safe resource references only. CDP and live-view bearer URLs are never persisted. */
+  kernel?: { sessionId: string; profileId: string };
   /** RFC 7638 thumbprint of the Web Bot Auth key loaded at sandbox creation. */
   webBotAuthKeyId?: string;
   sessionId?: string;

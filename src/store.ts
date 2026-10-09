@@ -215,6 +215,9 @@ export interface UserSession {
   daytonaWorkspaceId?: string;
   /** Owner-scoped automated E2B browser sandbox. Daytona remains the desktop backend. */
   e2bBrowser?: E2BBrowserRecord;
+  kernelBrowserProfileId?: string;
+  kernelBrowserPending?: { sessionId: string; profileId: string; createdAt: number };
+  kernelAuthConnections?: Array<{ id: string; domain: string; profileId: string; profileName: string; accountAlias: string }>;
   /** Private browser downloads and recordings; file bytes live in R2. */
   browserFiles?: E2BBrowserFileRecord[];
   telegramChatId?: number;
@@ -5257,6 +5260,25 @@ export async function getSession(uid: number): Promise<UserSession> {
     ? { ...s.e2bBrowser, sandboxId: s.e2bBrowser.sandboxId.slice(0, 200), webBotAuthKeyId: typeof s.e2bBrowser.webBotAuthKeyId === "string" && /^[A-Za-z0-9_-]{20,80}$/.test(s.e2bBrowser.webBotAuthKeyId) ? s.e2bBrowser.webBotAuthKeyId : undefined, paused: s.e2bBrowser.paused === true, nodes: Array.isArray(s.e2bBrowser.nodes) ? s.e2bBrowser.nodes.filter((node) => node && typeof node.nodeId === "string" && typeof node.role === "string" && typeof node.name === "string" && Number.isSafeInteger(node.index) && Number.isFinite(node.capturedAt)).slice(-60) : [], evidence: Array.isArray(s.e2bBrowser.evidence) ? s.e2bBrowser.evidence.slice(-50).map((item) => ({ action: String(item.action).slice(0, 80), at: Number(item.at), ...(typeof item.url === "string" ? { url: item.url.slice(0, 2_000) } : {}), ...(typeof item.title === "string" ? { title: item.title.slice(0, 160) } : {}), ...(typeof item.observationId === "string" ? { observationId: item.observationId.slice(0, 100) } : {}), ...(typeof item.screenshotHash === "string" ? { screenshotHash: item.screenshotHash.slice(0, 100) } : {}), ...(typeof item.verified === "boolean" ? { verified: item.verified } : {}) })) : [] } satisfies E2BBrowserRecord
     : undefined;
   if (e2bBrowser) s.e2bBrowser = e2bBrowser;
+  const kernelReference = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(value);
+  if (s.kernelBrowserProfileId !== undefined && !kernelReference(s.kernelBrowserProfileId)) throw new Error("Invalid retained Kernel profile reference");
+  if (s.kernelBrowserPending) {
+    if (!kernelReference(s.kernelBrowserPending.sessionId) || !kernelReference(s.kernelBrowserPending.profileId) || !Number.isFinite(s.kernelBrowserPending.createdAt)) throw new Error("Invalid pending Kernel browser references");
+    s.kernelBrowserPending = { sessionId: s.kernelBrowserPending.sessionId, profileId: s.kernelBrowserPending.profileId, createdAt: s.kernelBrowserPending.createdAt };
+  }
+  if (e2bBrowser?.kernel) {
+    if (!kernelReference(e2bBrowser.kernel.sessionId) || !kernelReference(e2bBrowser.kernel.profileId)) throw new Error("Invalid retained Kernel browser references");
+    e2bBrowser.kernel = { sessionId: e2bBrowser.kernel.sessionId, profileId: e2bBrowser.kernel.profileId };
+  }
+  if (s.kernelAuthConnections !== undefined) {
+    if (!Array.isArray(s.kernelAuthConnections) || s.kernelAuthConnections.length > 50) throw new Error("Invalid Kernel auth connection catalogue");
+    s.kernelAuthConnections = s.kernelAuthConnections.map(item => {
+      if (!item || !kernelReference(item.id) || !kernelReference(item.profileId) || !kernelReference(item.profileName)
+        || typeof item.domain !== "string" || !/^[a-z0-9.-]{1,253}$/.test(item.domain)
+        || typeof item.accountAlias !== "string" || !item.accountAlias || item.accountAlias.length > 80) throw new Error("Invalid Kernel auth connection reference");
+      return { id: item.id, domain: item.domain, profileId: item.profileId, profileName: item.profileName, accountAlias: item.accountAlias };
+    });
+  }
   s.tregOAuthStates = Array.isArray(s.tregOAuthStates) ? s.tregOAuthStates.filter((item): item is TregOAuthStateRecord => Boolean(item) && typeof item === "object" && typeof item.stateHash === "string" && /^[a-f0-9]{64}$/.test(item.stateHash) && typeof item.provider === "string" && item.provider.length <= 120 && (item.organizationId === undefined || typeof item.organizationId === "string" && /^org_[A-Za-z0-9_-]{1,120}$/.test(item.organizationId)) && Number.isFinite(item.createdAt) && Number.isFinite(item.expiresAt) && item.expiresAt > now).slice(-20) : [];
   s.linkOAuthStates = Array.isArray(s.linkOAuthStates) ? s.linkOAuthStates.filter((item): item is LinkOAuthStateRecord => Boolean(item) && typeof item === "object" && typeof item.state === "string" && /^[A-Za-z0-9_-]{40,4096}$/.test(item.state) && typeof item.redirectUri === "string" && /^https:\/\//i.test(item.redirectUri) && item.encryptedSecret && typeof item.encryptedSecret === "object" && Number.isFinite(item.createdAt) && Number.isFinite(item.expiresAt) && item.expiresAt > now).slice(-10) : [];
   const linkWallet = s.linkWallet && typeof s.linkWallet === "object" && s.linkWallet.userId === uid && ["connected", "reauth_required", "disconnected"].includes(String(s.linkWallet.status)) && s.linkWallet.encryptedTokens && typeof s.linkWallet.encryptedTokens === "object" && Number.isFinite(s.linkWallet.expiresAt) && Number.isFinite(s.linkWallet.createdAt) && Number.isFinite(s.linkWallet.updatedAt)
@@ -9435,6 +9457,22 @@ function attentionRecord(collection: AttentionCollection, raw: Record<string, un
       } as LeadCampaignCandidateRecord;
     }
   }
+}
+
+/** Coordinate remote browser creation/actions without locking unrelated chat work. */
+export function withKernelBrowserLease<T>(uid: number, work: () => Promise<T>): Promise<T> {
+  if (!Number.isSafeInteger(uid) || uid <= 0) throw new Error("Invalid browser owner");
+  const key = `kernel-browser:${uid}`;
+  const token = randomUUID();
+  return withDistributedLease({
+    acquire: async () => backend.acquireKeyLock(key, token, 60),
+    renew: async () => backend.renewKeyLock(key, token, 60),
+    release: async () => backend.releaseKeyLock(key, token),
+  }, work, {
+    acquisitionAttempts: 20, retryDelayMs: 50, renewalIntervalMs: 15_000,
+    busyMessage: "This owner's Kernel browser is busy; inspect status before retrying.",
+    lostMessage: "Kernel browser coordination was lost; reconcile the live page before retrying any action.",
+  });
 }
 
 function safeAttentionRecord(collection: AttentionCollection, raw: unknown): AttentionRecord | undefined {

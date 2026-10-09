@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { createKernelController } from "./kernel-controller.mjs";
 
 process.env.PLAYWRIGHT_BROWSERS_PATH ||= "/opt/ms-playwright";
 const { chromium } = await import("playwright");
@@ -32,6 +33,7 @@ function recordEvent(type, data = {}) {
   eventLog.push({ type, at: Date.now(), ...data });
   if (eventLog.length > 200) eventLog.shift();
 }
+let kernelController;
 function boundedRecords(items, limit = 50) { return items.slice(-limit).map((item) => ({ ...item })); }
 let webBotAuthActive = Boolean(signatureDirectory && signingKeyB64);
 let webBotAuthSigner;
@@ -645,15 +647,26 @@ async function inspectForms(page) {
   return forms;
 }
 
-async function challengeFor(page) {
+async function detectChallenge(page) {
   let mainOrigin = "";
   try { mainOrigin = new URL(page.url()).origin; } catch {}
-  for (const frame of page.frames()) {
+  const inspectBy = Date.now() + 5_000;
+  const frames = page.frames();
+  for (const frame of frames.slice(0, 64)) {
+    if (Date.now() >= inspectBy) return { detected: true, type: "site_challenge", inspectionIncomplete: true };
     try {
       const url = frame.url().toLowerCase();
       const title = clean(await frame.title().catch(() => ""), 200).toLowerCase();
-      const text = clean(await frame.locator("body").innerText().catch(() => ""), 4_000).toLowerCase();
+      const text = clean(await frame.locator("body").innerText({ timeout: 500 }).catch(() => ""), 4_000).toLowerCase();
       const source = `${url} ${title} ${text}`;
+      // Embedded widgets persist after a solve and invisible CAPTCHA integrations
+      // are not an interactive challenge. Inspect the actual visible control.
+      if (frame !== page.mainFrame() && /recaptcha|hcaptcha|challenges\.cloudflare\.com/.test(url)) {
+        const element = await frame.frameElement();
+        if (!await element.isVisible()) continue;
+        const checkbox = frame.getByRole("checkbox").first();
+        if (await checkbox.count() && await checkbox.getAttribute("aria-checked") === "true") continue;
+      }
       const captcha = /(captcha|recaptcha|hcaptcha|cloudflare.*verify|verify you are human|checking your browser|robot or human|are you a robot|automated traffic|access denied|human verification|human challenge|press & hold)/.test(source);
       let sameOrigin = false;
       try { sameOrigin = frame === page.mainFrame() || new URL(url).origin === mainOrigin; } catch {}
@@ -663,7 +676,14 @@ async function challengeFor(page) {
       recordEvent("challenge_frame_inspection_error", { message: clean(error?.message || error, 300) });
     }
   }
-  return { detected: false };
+  return frames.length > 64 ? { detected: true, type: "site_challenge", inspectionIncomplete: true } : { detected: false };
+}
+
+async function challengeFor(page) {
+  const detected = await detectChallenge(page);
+  if (!kernelController || !detected.detected || detected.type !== "captcha") return detected;
+  const outcome = await kernelController.wait(() => detectChallenge(page));
+  return { ...outcome.challenge, automaticAttempted: true, pageVerified: outcome.verified, solver: kernelController.tracker.snapshot() };
 }
 
 async function tabsFor(context, active) {
@@ -675,7 +695,7 @@ async function healthSnapshot(context) {
   const crashed = pages.some((page) => ensurePageTracking(page).crashed);
   return {
     ok: !crashed && pages.some((page) => !page.isClosed()),
-    provider: "e2b",
+    provider: kernelController ? "kernel" : "e2b",
     browser: crashed ? "unhealthy" : "ready",
     daemon: "ready",
     chromium: crashed ? "crashed" : (pages.length ? "ready" : "starting"),
@@ -708,15 +728,15 @@ async function result(page, context, extra = {}, includePageContent = false) {
   // observation. This remains bounded and avoids treating the same render
   // transaction as a stale page between snapshot and the next action.
   await page.waitForTimeout(50).catch(() => {});
+  const challenge = await challengeFor(page);
   const tracking = ensurePageTracking(page);
   const generation = await pageGeneration(page);
   const observationId = randomUUID();
   tracking.observationId = observationId;
-  const suppliedMatches = Array.isArray(extra.matches) ? extra.matches : undefined;
+  const suppliedMatches = !challenge.automaticAttempted && Array.isArray(extra.matches) ? extra.matches : undefined;
   const matches = suppliedMatches?.map((item) => ({ ...item, observationId, pageGeneration: generation }))
     ?? await roleMatches(page);
   const accessibilityHash = createHash("sha256").update(JSON.stringify(matches.map(({ role, name, index, frameIndex, frameUrl }) => ({ role, name, index, frameIndex, frameUrl })))).digest("hex").slice(0, 24);
-  const challenge = await challengeFor(page);
   return { ok: true, url: page.url(), title: clean(await page.title().catch(() => ""), 160), loadState: "settled", observationId, pageGeneration: generation, accessibilityHash, ...(challenge.detected ? { needsUserInteraction: true, challenge } : { challenge }), ...(includePageContent ? await pageText(page) : {}), ...extra, ...(matches ? { matches } : {}), tabs: await tabsFor(context, page), activeIndex: context.pages().indexOf(page) };
 }
 
@@ -836,6 +856,12 @@ async function startRecording(durationSeconds = 900) {
   if (active >= 2) throw new Error("At most two browser recordings can run at once");
   const id = "rec_" + randomUUID();
   const filePath = path.join(RECORDING_ROOT, id + ".mp4");
+  if (kernelController) {
+    const replay = await kernelController.client.browsers.replays.start(kernelController.id, { max_duration_in_seconds: Math.max(10, Math.min(900, Number(durationSeconds) || 900)), framerate: 8, record_audio: false });
+    const item = { id, name: id + ".mp4", filePath, state: "recording", createdAt: Date.now(), size: 0, replayId: replay.replay_id };
+    recordings.set(id, item);
+    return item;
+  }
   const boundedDuration = Math.max(10, Math.min(900, Number(durationSeconds) || 900));
   const process = spawn("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-nostdin", "-f", "x11grab", "-video_size", "1440x900", "-framerate", "8", "-i", DISPLAY, "-t", String(boundedDuration), "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "32", "-movflags", "+faststart", filePath], { stdio: ["ignore", "ignore", "pipe"] });
   const item = { id, name: id + ".mp4", filePath, state: "recording", createdAt: Date.now(), size: 0, process, exitCode: null, exitSignal: null, stderr: "" };
@@ -871,6 +897,35 @@ async function startRecording(durationSeconds = 900) {
 async function stopRecording(id) {
   const item = recordings.get(String(id));
   if (!item) throw new Error("Recording not found");
+  if (kernelController && item.replayId) {
+    if (item.state === "recording") {
+      // Set before dispatch: an uncertain write must not be replayed.
+      item.state = "stopping";
+      await kernelController.client.browsers.replays.stop(item.replayId, { id_or_name: kernelController.id });
+    }
+    if (item.state !== "ready") {
+      const response = await kernelController.client.browsers.replays.download(item.replayId, { id_or_name: kernelController.id });
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("Kernel replay has no downloadable video yet");
+      const chunks = [];
+      let size = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > 100 * 1024 * 1024) throw new Error("Kernel replay exceeds 100 MB");
+          chunks.push(Buffer.from(value));
+        }
+      } finally { await reader.cancel(); reader.releaseLock(); }
+      const bytes = Buffer.concat(chunks);
+      if (bytes.length < 12 || bytes.toString("ascii", 4, 8) !== "ftyp") throw new Error("Kernel replay is not a supported MP4");
+      await fs.writeFile(item.filePath, bytes, { mode: 0o600 });
+      item.size = size;
+      item.state = "ready";
+    }
+    return item;
+  }
   if (item.state === "recording") {
     item.state = "stopping";
     item.process.kill("SIGINT");
@@ -1128,6 +1183,10 @@ async function execute(context, pageState, request) {
   if (request.action === "tab_close") { if (context.pages().length > 1) await page.close(); page = context.pages()[0] || await context.newPage(); }
   if (request.currentUrl && (() => { try { return /^https?:$/.test(new URL(String(request.currentUrl)).protocol); } catch { return false; } })() && (!page.url() || page.url() === "about:blank")) await page.goto((await safeHttpUrl(request.currentUrl)).toString(), { waitUntil: "domcontentloaded", timeout: 45_000 });
   const action = request.action;
+  if (kernelController && ["click", "invoke", "fill", "select_option", "check", "uncheck", "type", "press", "desktop_click", "desktop_type", "desktop_press", "act", "agent", "form_fill"].includes(action)) {
+    const challenge = await detectChallenge(page);
+    if (challenge.detected) return result(page, context, { actionSkipped: true, nextAction: "Observe the resolved page and choose a fresh target before acting" });
+  }
   let actionFormState;
   if (action === "diagnostics") { const pages = await Promise.all(context.pages().map(async (item, index) => ({ index, url: clean(item.url(), 1_000), title: clean(item.url() ? await item.title().catch(() => "") : "", 160), closed: item.isClosed() }))); return result(page, context, { diagnostics: { console: boundedRecords(diagnostics.console), errors: boundedRecords(diagnostics.errors), dialogs: boundedRecords(diagnostics.dialogs), pages }, events: boundedRecords(eventLog) }); }
   if (action === "events") return result(page, context, { events: boundedRecords(eventLog, 100) });
@@ -1138,11 +1197,14 @@ async function execute(context, pageState, request) {
     const currentShot = await captureBrowserScreenshot(page);
     const currentHash = createHash("sha256").update(currentShot).digest("hex").slice(0, 32);
     if (currentHash !== request.screenshotHash) throw new Error("Visual target is stale; capture a fresh screenshot before retrying the desktop click");
-    await page.mouse.click(Number(request.x), Number(request.y), { button: request.button === "right" ? "right" : request.button === "middle" ? "middle" : "left", clickCount: request.double === true ? 2 : 1 });
+    if (kernelController) {
+      await page.bringToFront();
+      await kernelController.client.browsers.computer.clickMouse(kernelController.id, { x: Number(request.x), y: Number(request.y), button: request.button === "right" ? "right" : request.button === "middle" ? "middle" : "left", num_clicks: request.double === true ? 2 : 1 });
+    } else await page.mouse.click(Number(request.x), Number(request.y), { button: request.button === "right" ? "right" : request.button === "middle" ? "middle" : "left", clickCount: request.double === true ? 2 : 1 });
     return result(page, context, { desktopAction: "click" });
   }
-  if (action === "desktop_type") { await page.keyboard.type(String(request.text || ""), { delay: Math.max(0, Math.min(250, Number(request.delayMs || 0))) }); return result(page, context, { desktopAction: "type" }); }
-  if (action === "desktop_press") { await page.keyboard.press(String(request.key || request.keys || "Enter")); return result(page, context, { desktopAction: "press" }); }
+  if (action === "desktop_type") { await page.bringToFront(); if (kernelController) await kernelController.client.browsers.computer.typeText(kernelController.id, { text: String(request.text || "") }); else await page.keyboard.type(String(request.text || ""), { delay: Math.max(0, Math.min(250, Number(request.delayMs || 0))) }); return result(page, context, { desktopAction: "type" }); }
+  if (action === "desktop_press") { await page.bringToFront(); if (kernelController) await kernelController.client.browsers.computer.pressKey(kernelController.id, { keys: String(request.key || request.keys || "Return").split("+") }); else await page.keyboard.press(String(request.key || request.keys || "Enter")); return result(page, context, { desktopAction: "press" }); }
   if (action === "clipboard_write") { const text = String(request.text || ""); if (text.length > 8_000) throw new Error("Clipboard text exceeds the 8 KB limit"); await page.evaluate(async (value) => { await navigator.clipboard.writeText(value); }, text); return result(page, context, { clipboard: "written", length: text.length }); }
   if (action === "clipboard_read") { const text = await page.evaluate(async () => navigator.clipboard.readText()); return result(page, context, { clipboard: "read", text: clean(text, 8_000) }); }
   if (action === "pdf") {
@@ -1444,6 +1506,8 @@ async function vaultLogin(context, request) {
 async function start() {
   const browserEnv = { ...process.env, DISPLAY };
   delete browserEnv.CHUSKY_WEB_BOT_AUTH_PRIVATE_KEY_B64;
+  delete browserEnv.KERNEL_API_KEY;
+  delete browserEnv.CHUSKY_KERNEL_CDP_URL;
   let geolocation;
   try { const parsed = JSON.parse(process.env.CHUSKY_BROWSER_GEOLOCATION || ""); if (Number.isFinite(parsed?.latitude) && Number.isFinite(parsed?.longitude)) geolocation = { latitude: Number(parsed.latitude), longitude: Number(parsed.longitude), ...(Number.isFinite(parsed.accuracy) ? { accuracy: Number(parsed.accuracy) } : {}) }; } catch {}
   const browserArgs = ["--no-sandbox", "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check"];
@@ -1452,7 +1516,14 @@ async function start() {
   // for constrained hosts, but it must be explicit rather than silently making
   // every browser session look unusual to sites that depend on WebGL/canvas.
   if (process.env.CHUSKY_BROWSER_DISABLE_GPU === "true") browserArgs.push("--disable-gpu");
-  const context = await chromium.launchPersistentContext(PROFILE, { headless: false, acceptDownloads: true, permissions: ["clipboard-read", "clipboard-write"], locale: process.env.CHUSKY_BROWSER_LOCALE || "en-US", timezoneId: process.env.CHUSKY_BROWSER_TIMEZONE || "America/New_York", ...(geolocation ? { geolocation } : {}), args: browserArgs, viewport: { width: 1440, height: 900 }, env: browserEnv });
+  let context;
+  if (process.env.CHUSKY_KERNEL_CDP_URL) {
+    const remote = await chromium.connectOverCDP(process.env.CHUSKY_KERNEL_CDP_URL, { timeout: 30_000 });
+    context = remote.contexts()[0];
+    if (!context) throw new Error("Kernel browser has no default context");
+    kernelController = createKernelController(process.env, recordEvent);
+    for (const event of ["SIGTERM", "SIGINT"]) process.once(event, () => { kernelController?.close(); process.exit(0); });
+  } else context = await chromium.launchPersistentContext(PROFILE, { headless: false, acceptDownloads: true, permissions: ["clipboard-read", "clipboard-write"], locale: process.env.CHUSKY_BROWSER_LOCALE || "en-US", timezoneId: process.env.CHUSKY_BROWSER_TIMEZONE || "America/New_York", ...(geolocation ? { geolocation } : {}), args: browserArgs, viewport: { width: 1440, height: 900 }, env: browserEnv });
   await fs.mkdir(DOWNLOAD_ROOT, { recursive: true, mode: 0o700 });
   await fs.mkdir(RECORDING_ROOT, { recursive: true, mode: 0o700 });
   context.on("page", (page) => {
@@ -1468,12 +1539,21 @@ async function start() {
   }
   if (!context.pages().length) await context.newPage();
   const pageState = { activeIndex: 0 };
+  let commandTail = Promise.resolve();
   const server = http.createServer(async (incoming, response) => {
     if (incoming.method === "GET" && incoming.url === "/health") { const health = await healthSnapshot(context); response.writeHead(health.ok ? 200 : 503, { "content-type": "application/json" }); response.end(JSON.stringify(health)); return; }
     if (incoming.method !== "POST" || incoming.url !== "/command") { response.writeHead(404); response.end(); return; }
     let body = ""; incoming.on("data", (chunk) => { body += chunk; if (body.length > 256_000) incoming.destroy(); });
     incoming.on("end", async () => {
+      const cancellation = new AbortController();
+      response.once("close", () => { if (!response.writableEnded) cancellation.abort(); });
+      const previous = commandTail;
+      let release;
+      commandTail = new Promise(resolve => { release = resolve; });
+      await previous;
       try {
+        if (cancellation.signal.aborted) throw new Error("Browser operation cancelled");
+        kernelController?.setSignal(cancellation.signal);
         const request = JSON.parse(body);
         if (typeof request.webBotAuthEnabled === "boolean") webBotAuthActive = request.webBotAuthEnabled && Boolean(signatureDirectory && signingKeyB64);
         let output;
@@ -1520,11 +1600,14 @@ async function start() {
         response.end(JSON.stringify(output));
       } catch (error) {
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ ok: false, error: clean(error?.message || error, 800) }));
+        response.end(JSON.stringify({ ok: false, error: kernelController ? "Remote browser action failed; inspect the live page before retrying" : clean(error?.message || error, 800) }));
+      } finally {
+        kernelController?.setSignal(undefined);
+        release();
       }
     });
   });
   server.listen(8765, "127.0.0.1");
 }
 
-if (process.argv.includes("--server")) await start();
+if (process.argv.includes("--server")) await start().catch(error => { console.error(process.env.CHUSKY_KERNEL_CDP_URL ? "Kernel controller startup failed" : clean(error?.message || error, 800)); process.exitCode = 1; });

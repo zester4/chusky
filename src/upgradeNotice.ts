@@ -12,6 +12,11 @@ const MAX_BULLET_LENGTH = 240;
  * omitted.
  */
 export const AGENT_UPGRADE_PRESETS = {
+  kernelBrowser: [
+    "Added an opt-in Kernel browser hosted remotely and controlled from E2B, with stealth, owner-scoped profiles, native visual controls, private live view, and replay recordings.",
+    "Supported CAPTCHA challenges receive a bounded provider-solver wait and fresh page verification; unresolved challenges and MFA still require private owner takeover. Success is never guaranteed.",
+    "Managed authentication uses private hosted login and owned profile references without sending credentials to the model. Approvals and no-replay recovery remain enforced; live activation requires a rebuilt browser template.",
+  ],
   missionTiming: [
     "New missions count active worker time separately from their overall deadline; durable waits, pauses, blockers, and scheduling gaps preserve remaining execution time.",
     "Owners can pre-authorize bounded automatic time extensions; each extension requires new trusted completed-step progress and never raises spend, tool-call, or step limits.",

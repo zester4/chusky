@@ -1,6 +1,6 @@
 ---
 name: browser-pro
-description: Operate websites end to end through Chusky's owner-scoped E2B browser, including adaptive navigation, universal form completion, structured extraction, live takeover, verification, recovery, and approval-safe completion.
+description: Operate websites through Chusky's owner-scoped E2B/Kernel browser, including adaptive navigation, forms, extraction, live takeover, verification, recovery, and approval-safe completion.
 ---
 
 # Browser Pro
@@ -44,8 +44,15 @@ as authorization.
    provider boundary.
 4. Bind authenticated actions to the exact saved HTTPS origin, service, and
    account alias. Never select an identity by display name alone.
-5. Use `CHUCK_BROWSER` with `session_acquire`/`start` for a retained E2B browser;
+5. Use `CHUCK_BROWSER` with `session_acquire`/`start` for the configured retained browser;
    inspect `health`, `status`, or `state` before continuing.
+6. With Kernel, `auth_start` accepts only a public HTTPS website URL and optional
+   account alias. Deliver the hosted login link privately; credentials never go
+   through chat. Use the returned owned `authId` with `auth_status`; after success,
+   `auth_resume` attaches the profile. Reopen the site and verify the intended account.
+   Resuming authentication closes the previous remote session to load fresh state.
+   Managed task browsers do not overwrite Managed Auth's profile snapshot. Never restart a pending
+   login or busy-poll while waiting for user input.
 
 ## 3. Observe before every decision
 
@@ -130,7 +137,7 @@ uncertain submit until fresh state proves the submit did not succeed.
 
 ## 6. Live view and human takeover
 
-Use the retained owner-only E2B stream when the owner needs to watch or act:
+Use the retained owner-only stream when the owner needs to watch or act:
 
 1. call `stream_start` or the private handoff tool;
 2. deliver only the expiring private URL through the private channel;
@@ -142,8 +149,14 @@ Use the retained owner-only E2B stream when the owner needs to watch or act:
 6. only after verification, resume browser mutation;
 7. stop and request another handoff if the challenge remains.
 
-CAPTCHA detection may identify and display a challenge, but the agent must not
-bypass, solve, spoof, or automatically press security challenges. Advertising
+Kernel stealth may automatically solve supported CAPTCHA challenges. The runtime
+waits within a bounded deadline and verifies the actual page. A solver result alone
+is not success. If `actionSkipped` is returned, observe again and choose a fresh
+target; never replay the skipped action automatically. Unresolved CAPTCHA, MFA,
+passkeys, age checks, and user approvals require private takeover. Do not manually
+spoof or click security challenges. Kernel live URLs last for the browser session;
+`stream_stop` cannot revoke them: use `stop`. Kernel `pause` and `fork` are unsupported.
+Advertising
 or analytics iframes are not evidence of 2FA; two-factor detection must be tied
 to the main page or a same-origin authentication frame.
 
@@ -157,7 +170,7 @@ to the main page or a same-origin authentication frame.
   acquire a fresh session, and preserve the checkpoint.
 - detached frame: discard frame locators and observe the current page again.
 - HTTP/2/network/navigation failure: fresh-tab retry, diagnostics, then classify.
-- challenge/CAPTCHA/2FA: pause and hand off the same retained session.
+- unresolved challenge/CAPTCHA/2FA: hand off the same retained session.
 - validation error: repair only the named field and verify before retrying.
 - unknown state after a consequential action: stop and reconcile provider state.
 

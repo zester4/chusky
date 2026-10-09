@@ -84,7 +84,7 @@ test("E2B template includes the desktop handoff dependencies", () => {
   assert.match(templateDockerfile, /xvfb fluxbox x11vnc novnc/);
   assert.match(templateDockerfile, /dpkg-query -W novnc \| cut -f2/);
   assert.match(templateDockerfile, /\/usr\/share\/novnc\/package\.json/);
-  assert.match(templateDockerfile, /COPY browser-agent\.mjs browser-client\.mjs web-bot-auth\.mjs \.\//);
+  assert.match(templateDockerfile, /COPY browser-agent\.mjs browser-client\.mjs web-bot-auth\.mjs kernel-controller\.mjs \.\//);
   assert.match(templateDockerfile, /COPY chusky-vnc\.html \/usr\/share\/novnc\/chusky-vnc\.html/);
   assert.match(templateDockerfile, /npm ci --omit=dev/);
 });

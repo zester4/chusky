@@ -2,7 +2,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "playwright": "1.63.0",
-    "http-message-sig": "0.3.0"
+    "@onkernel/sdk": "0.122.0",
+    "http-message-sig": "0.3.0",
+    "playwright": "1.63.0"
   }
 }

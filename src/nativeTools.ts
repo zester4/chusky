@@ -637,7 +637,7 @@ async function createBrowserHandoffRecord(userId: number, input: { reason?: unkn
     ...(origin ? { origin } : {}),
     ...(credentialId ? { credentialId } : {}),
     reason,
-    provider: "e2b",
+    provider: config.browserProvider === "kernel" ? "kernel" : "e2b",
     challengeType: normalizeChallengeType(reason),
     resolutionState: "handoff_required",
     status: "waiting",

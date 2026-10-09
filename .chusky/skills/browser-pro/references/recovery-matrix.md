@@ -11,7 +11,7 @@
 | detached iframe | discard locator; observe again | current frame/control returned |
 | navigation timeout | idempotent fresh-tab retry | usable URL/title, not chrome-error |
 | HTTP/2/network failure | bounded retry, diagnostics, classify | fresh page or external failure |
-| CAPTCHA/human challenge | private handoff; do not bypass | owner completed; verify passes |
+| CAPTCHA/human challenge | Kernel may wait for its provider solver; otherwise private handoff | fresh page is clear, not merely solver success |
 | 2FA/passkey/OTP | private handoff; never request secret | same-origin detector passes |
 | popup/native dialog | inspect tabs/dialogs before acting | intended page/control is fresh |
 | unknown mutation result | stop and reconcile before retry | prior effect proven absent/present |

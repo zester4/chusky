@@ -10,7 +10,8 @@ Chusky has two separate execution paths:
 
 ```text
 CHUCK_BROWSER
-  └─ E2B Playwright/Chromium for retained automated browser sessions
+  └─ E2B trusted Playwright controller
+       └─ local Chromium, or opt-in Kernel remote Chromium
 
 CHUCK_DAYTONA_COMPUTER
   └─ Daytona desktop Computer Use for desktop, file, artifact, and app work
@@ -25,6 +26,17 @@ Use Composio for OAuth-connected app integrations. Use the vault for ordinary
 websites that must be operated through a browser and are not represented by a
 supported Composio connection. Do not search the Composio catalogue merely
 because a user asks to connect a website account.
+
+Kernel mode (`BROWSER_PROVIDER=kernel`) additionally requires `KERNEL_API_KEY`
+and a rebuilt E2B template. Profiles, managed-auth connections and live sessions
+are owner-private. `auth_start/status/resume` use hosted credential collection;
+the existing Cloudflare vault path remains supported. Supported CAPTCHA solving
+is provider-managed and bounded; page clearance is authoritative, telemetry is
+best effort. Remote browser actions are never replayed on uncertain failures.
+Kernel live view lasts until session shutdown; `stop` closes both resources.
+Pause/fork/stream_stop are explicitly unsupported for Kernel. Recordings use
+Kernel replays imported into the existing private file library. No live success
+or deployment is implied by local tests.
 
 ## Intent routing
 

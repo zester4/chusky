@@ -785,6 +785,41 @@ status, branches, checkout, pull, add, commit, and push. Local operations stay p
 approval-gated. Pull requests, CI checks, reviews, and deployments use verified GitHub/Composio
 tools after local checks pass. Changing `DAYTONA_SNAPSHOT` does not change an existing workspace.
 
+### Kernel-hosted browser (opt-in)
+
+Set `BROWSER_PROVIDER=kernel`, `KERNEL_API_KEY`, and `KERNEL_STEALTH=true` alongside
+the existing E2B configuration. Rebuild the E2B browser template with
+`npm run e2b:template:build` before activating it. E2B runs the trusted controller;
+Kernel hosts Chromium, so existing browser tools, vault guards, fresh observation
+checks, approvals, and owner-scoped files remain in use. The installed Kernel SDK
+is pinned to `0.122.0` in both packages.
+
+Kernel adds supported automatic CAPTCHA solving with bounded page-clearance
+verification, native visual mouse/keyboard controls, owner-specific persistent
+profiles, private live view, and MP4 replay recordings. Solver success is not proof
+the page cleared; unresolved CAPTCHA and MFA return to private owner takeover.
+hCaptcha availability depends on provider access. No site-wide success rate is promised.
+
+`CHUCK_BROWSER` actions `auth_start`, `auth_status`, and `auth_resume` provide
+hosted Managed Auth. Supply only website metadata; enter secrets on the private
+hosted form. Connections are looked up from the requesting owner's saved IDs,
+never from arbitrary provider IDs. Profile changes close the previous browser.
+SSO flows requiring additional domains may need operator configuration.
+
+Live-view URLs are sensitive and last for the session, not an independently
+revocable short link. `stop` closes both remote browser and controller; Kernel
+`stream_stop`, `pause`, and `fork` fail explicitly rather than misrepresenting
+revocation or identity isolation. Remote failures preserve state and do not
+automatically replay browser mutations. Local tests do not establish live
+provider readiness; build the template and run a public-page smoke test before
+production activation. Existing Daytona computer-use remains separate.
+
+`npm run kernel:browser:check` reports configuration presence without opening a
+browser or printing credentials. After rebuilding and setting the Kernel key,
+`npm run kernel:browser:check -- --live` opens a disposable public example page,
+verifies the remote observation/live-view path, and closes its browser, controller
+and test profile. It does not test CAPTCHA success or a real user's login.
+
 ### E2B automated browser
 
 When `E2B_ENABLED=true`, `CHUCK_BROWSER` routes normal browser actions through the

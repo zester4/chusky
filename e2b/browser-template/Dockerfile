@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npx playwright install --with-deps chromium
 
-COPY browser-agent.mjs browser-client.mjs web-bot-auth.mjs ./
+COPY browser-agent.mjs browser-client.mjs web-bot-auth.mjs kernel-controller.mjs ./
 COPY chusky-vnc.html /usr/share/novnc/chusky-vnc.html
 RUN chmod -R a+rX /opt/ms-playwright /app \
     && useradd --create-home --shell /bin/bash chusky \

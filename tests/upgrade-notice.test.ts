@@ -5,6 +5,13 @@ import os from "node:os";
 import path from "node:path";
 import { AGENT_UPGRADE_PRESETS, formatAgentUpgradeNotice, getAgentUpgradePreset, loadAgentUpgrade, validateAgentUpgrade, writeAgentUpgrade } from "../src/upgradeNotice.js";
 
+test("Kernel upgrade describes provider limits and activation honestly", () => {
+  const bullets = getAgentUpgradePreset("kernelBrowser");
+  assert.equal(bullets.length, 3);
+  assert.match(bullets[1], /Success is never guaranteed/);
+  assert.match(bullets[2], /rebuilt browser template/);
+});
+
 test("mission timing release distinguishes active time, deadline, and bounded owner authority", () => {
   const bullets = getAgentUpgradePreset("missionTiming");
   assert.equal(bullets.length, 3);
@@ -215,13 +222,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces browser reliability and durable lead campaigns", async () => {
+test("current upgrade manifest announces Kernel browser capabilities with activation limits", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.49.0");
-  assert.equal(notice?.version, "4.49.0");
-  assert.match(notice?.bullets.join(" ") ?? "", /E2B runs.*no-progress blocking/i);
-  assert.match(notice?.bullets.join(" ") ?? "", /idempotent multi-day lead campaigns/);
-  assert.match(notice?.bullets.join(" ") ?? "", /atomic campaign spend allowance/);
+  assert.equal(notice?.id, "release-4.50.0");
+  assert.equal(notice?.version, "4.50.0");
+  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("kernelBrowser"));
 });
 
 test("lead campaign preset describes durable, discovery-first work and bounded enrichment", () => {

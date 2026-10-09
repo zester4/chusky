@@ -342,7 +342,13 @@ export const config = {
   // Computer Use starts noVNC in the retained desktop. A human handoff uses a
   // short-lived signed preview only for this local service, never a public VM.
   daytonaVncPort: optional("DAYTONA_VNC_PORT", "6080"),
-  /** E2B is the only automated web-browser provider. */
+  /** E2B runs the trusted controller; Kernel can host its Chromium remotely. */
+  browserProvider: optional("BROWSER_PROVIDER", "e2b"),
+  kernelApiKey: optional("KERNEL_API_KEY", ""),
+  kernelStealth: optional("KERNEL_STEALTH", "true") === "true",
+  kernelProxyId: optional("KERNEL_PROXY_ID", ""),
+  kernelBrowserTimeoutSeconds: Number(optional("KERNEL_BROWSER_TIMEOUT_SECONDS", "900")),
+  kernelCaptchaWaitMs: Number(optional("KERNEL_CAPTCHA_WAIT_MS", "20000")),
   e2bBrowserHandoffTtlSeconds: optional("E2B_BROWSER_HANDOFF_TTL_SECONDS", "300"),
   e2bApiKey: optional("E2B_API_KEY", ""),
   e2bEnabled: optional("E2B_ENABLED", "false") === "true",

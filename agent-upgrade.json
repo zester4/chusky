@@ -1,11 +1,11 @@
 {
-  "id": "release-4.49.0",
-  "version": "4.49.0",
+  "id": "release-4.50.0",
+  "version": "4.50.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Expanded bounded E2B runs with independent limits, declared postconditions, verified completion checks, safe challenge handoff, fresh-observation recovery, and no-progress blocking.",
-    "Owners can start idempotent multi-day lead campaigns that research, deduplicate, qualify, and track source-linked candidates in private durable state, with honest shortfall reporting and verifiable closeout.",
-    "Discovery uses supplied seeds and read-only sources; Treg enrichment uses an atomic campaign spend allowance. Campaigns never contact prospects or write CRM. Pulse records checks, candidates, approvals, delivery, no provider payloads."
+    "Added an opt-in Kernel browser hosted remotely and controlled from E2B, with stealth, owner-scoped profiles, native visual controls, private live view, and replay recordings.",
+    "Supported CAPTCHA challenges receive a bounded provider-solver wait and fresh page verification; unresolved challenges and MFA still require private owner takeover. Success is never guaranteed.",
+    "Managed authentication uses private hosted login and owned profile references without sending credentials to the model. Approvals and no-replay recovery remain enforced; live activation requires a rebuilt browser template."
   ],
-  "createdAt": "2026-10-09T08:26:38.000Z"
+  "createdAt": "2026-10-09T17:50:07.390Z"
 }
