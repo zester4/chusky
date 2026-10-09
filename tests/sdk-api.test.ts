@@ -419,6 +419,38 @@ test("Attention candidate run context is validated before Chat execution", async
   assert.equal((await missing.json() as { error?: { code?: string } }).error?.code, "attention_candidate_not_found");
 });
 
+test("connected-app trigger action context is owner-scoped and action-validated", async () => {
+  const api = app();
+  const ownerId = Number.parseInt(createHash("sha256").update("sdk:root:tenant-user").digest("hex").slice(0, 12), 16);
+  await createTriggerEvent({
+    eventId: "trigger-context-event",
+    userId: ownerId,
+    triggerSlug: "GMAIL_NEW_GMAIL_MESSAGE",
+    summary: "A customer message needs review.",
+    result: "The saved trigger result is ready for owner review.",
+    status: "completed",
+    notificationStatus: "unavailable",
+    suggestedActions: [{ id: "review", label: "Review", prompt: "Review the saved result." }],
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+  const created = await api.fetch(request({}, "trigger-context-thread"));
+  assert.equal(created.status, 201);
+  const thread = await created.json() as { id: string };
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json" };
+  const malformed = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/stream`, { method: "POST", headers, body: JSON.stringify({ input: "Review it.", metadata: { triggerActionId: "review" } }) }));
+  assert.equal(malformed.status, 400);
+  assert.equal((await malformed.json() as { error?: { code?: string } }).error?.code, "invalid_run_policy");
+
+  const missing = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/stream`, { method: "POST", headers, body: JSON.stringify({ input: "Review it.", metadata: { triggerEventId: "trigger-other-owner", triggerActionId: "review" } }) }));
+  assert.equal(missing.status, 409);
+  assert.equal((await missing.json() as { error?: { code?: string } }).error?.code, "trigger_event_not_found");
+
+  const invalidAction = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/stream`, { method: "POST", headers, body: JSON.stringify({ input: "Archive it.", metadata: { triggerEventId: "trigger-context-event", triggerActionId: "archive" } }) }));
+  assert.equal(invalidAction.status, 409);
+  assert.equal((await invalidAction.json() as { error?: { code?: string } }).error?.code, "invalid_trigger_action");
+});
+
 test("SDK run streams the same human-readable tool progress used by Telegram", async () => {
   const originalFetch = globalThis.fetch;
   let chatCalls = 0;

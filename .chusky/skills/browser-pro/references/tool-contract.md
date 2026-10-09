@@ -18,8 +18,8 @@ names are stable `CHUCK_*` slugs; do not substitute provider or invented names.
 | Tool | Use | Never use it for |
 | --- | --- | --- |
 | `CHUCK_BROWSER_PLAN` | classify goal, boundary, evidence, recovery | opening or mutating a site |
-| `CHUCK_BROWSER_OBSERVE` | fresh controls, forms, metadata, screenshot | claiming success |
-| `CHUCK_BROWSER_ACT` | one fresh bounded action | replaying stale selectors |
+| `CHUCK_BROWSER_OBSERVE` | fresh controls, forms, metadata, plus an automatic owner-private viewport image | claiming success |
+| `CHUCK_BROWSER_ACT` | one fresh bounded action, followed by structured state and an owner-private viewport image | replaying stale selectors |
 | `CHUCK_BROWSER_AGENT` | short grounded sequence with fresh post-action state, bounded deadline, optional assertions, and no-progress stopping | bypassing approval/challenges or submitting irreversible actions |
 | `CHUCK_BROWSER_EXTRACT` | explicit schema fields | arbitrary private dumps |
 | `CHUCK_BROWSER_NEXT` | propose next action | executing or approving |
@@ -27,6 +27,15 @@ names are stable `CHUCK_*` slugs; do not substitute provider or invented names.
 | `CHUCK_BROWSER_HANDOFF` | owner-only CAPTCHA/2FA takeover | asking for secrets in chat |
 | `CHUCK_BROWSER_HANDOFF_COMPLETE` | acknowledge owner return | authorizing action |
 | `CHUCK_BROWSER_HANDOFF_RESUME` | inspect and safely resume same origin | bypassing a live challenge |
+
+For owner-private calls, the runtime pairs each supported top-level
+observation/action call with a fresh screenshot in the next model turn. Use the image and the structured
+result together; the screenshot is not saved as an asset or included in the
+user-facing reply. Only the latest automatic screenshot is retained in active
+model context. Common password, one-time-code, and payment-entry fields are
+visually masked, but unrelated page content is not guaranteed to be redacted.
+Shared conversations receive no automatic screenshots. Coordinate fallback
+must use the matching hash from the latest viewport image.
 
 ## Fresh selector shape
 
@@ -51,6 +60,12 @@ short enough to understand and recover: `maxSteps` is capped at 50,
 state does not change. Add `expected` assertions to mutation steps when the
 next state is knowable. Supported assertions are `url`, `title`, `text`,
 `field`, `checked`, `selected`, and `visible`; required assertions fail closed.
+
+This sequence runs its predeclared steps without returning control to the model
+between actions; it yields a fresh final screenshot, not a vision-based decision
+after every internal step. For an unfamiliar or dynamic page, prefer one
+`CHUCK_BROWSER_ACT` per model decision so it can inspect each paired screenshot
+and structured result before acting again.
 
 For the requested business result, also provide `completionAssertions` on the
 agent call. These are evaluated against the final fresh page state after the

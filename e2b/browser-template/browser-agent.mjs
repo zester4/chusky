@@ -61,6 +61,53 @@ async function pageGeneration(page) {
   return tracking.generation + domGeneration;
 }
 
+const SCREENSHOT_REDACTION_STYLE = `
+  input[type="password"],
+  input[autocomplete*="password" i],
+  input[autocomplete*="one-time-code" i],
+  input[autocomplete*="cc-number" i],
+  input[autocomplete*="cc-exp" i],
+  input[autocomplete*="cc-csc" i],
+  input[autocomplete*="cc-name" i],
+  input[aria-label*="password" i], input[placeholder*="password" i],
+  input[aria-label*="one-time code" i], input[placeholder*="one-time code" i],
+  input[aria-label*="verification code" i], input[placeholder*="verification code" i],
+  input[name*="password" i], input[id*="password" i],
+  input[name*="secret" i], input[id*="secret" i],
+  input[name*="token" i], input[id*="token" i],
+  input[name*="otp" i], input[id*="otp" i],
+  input[name*="one-time" i], input[id*="one-time" i],
+  input[name*="card" i], input[id*="card" i],
+  input[aria-label*="card number" i], input[placeholder*="card number" i],
+  input[aria-label*="security code" i], input[placeholder*="security code" i],
+  input[name*="account-number" i], input[id*="account-number" i],
+  input[name*="routing-number" i], input[id*="routing-number" i],
+  input[name*="iban" i], input[id*="iban" i],
+  input[name*="cvv" i], input[id*="cvv" i],
+  input[name*="cvc" i], input[id*="cvc" i],
+  input[name*="security-code" i], input[id*="security-code" i],
+  textarea[name*="password" i], textarea[id*="password" i],
+  textarea[name*="secret" i], textarea[id*="secret" i],
+  textarea[name*="token" i], textarea[id*="token" i],
+  [data-private="true"], [data-sensitive="true"], [data-secret="true"] {
+    color: transparent !important;
+    -webkit-text-security: disc !important;
+    text-shadow: none !important;
+    caret-color: transparent !important;
+  }
+`;
+
+async function captureBrowserScreenshot(page, options = {}) {
+  return page.screenshot({
+    type: "jpeg",
+    quality: 65,
+    scale: "css",
+    caret: "hide",
+    style: SCREENSHOT_REDACTION_STYLE,
+    ...options,
+  });
+}
+
 function frameFor(page, value = {}) {
   const frames = page.frames();
   const requestedIndex = Number(value.frameIndex);
@@ -1088,7 +1135,7 @@ async function execute(context, pageState, request) {
   if (action === "dialog_dismiss") return result(page, context, { dismissed: true, dialogs: boundedRecords(diagnostics.dialogs) });
   if (action === "desktop_click") {
     if (typeof request.screenshotHash !== "string" || request.visualFallback !== true) throw new Error("Desktop coordinate clicks require a fresh screenshotHash and visualFallback=true");
-    const currentShot = await page.screenshot({ type: "jpeg", quality: 75 });
+    const currentShot = await captureBrowserScreenshot(page);
     const currentHash = createHash("sha256").update(currentShot).digest("hex").slice(0, 32);
     if (currentHash !== request.screenshotHash) throw new Error("Visual target is stale; capture a fresh screenshot before retrying the desktop click");
     await page.mouse.click(Number(request.x), Number(request.y), { button: request.button === "right" ? "right" : request.button === "middle" ? "middle" : "left", clickCount: request.double === true ? 2 : 1 });
@@ -1129,7 +1176,7 @@ async function execute(context, pageState, request) {
     const observed = { matches: await roleMatches(page, request), forms: request.includeForms === false ? undefined : await inspectForms(page) };
     if (request.includeLinks === true) observed.links = await linkMatches(page);
     if (request.includeScreenshot === true) {
-      const image = await page.screenshot({ type: "jpeg", quality: 75 });
+      const image = await captureBrowserScreenshot(page);
       observed.screenshot = image.toString("base64");
       observed.screenshotHash = createHash("sha256").update(image).digest("hex").slice(0, 32);
     }
@@ -1170,7 +1217,7 @@ async function execute(context, pageState, request) {
   else if ((action === "click" || action === "move") && Number.isFinite(Number(request.x)) && Number.isFinite(Number(request.y))) {
     if (action === "click" && request.visualFallback === true) {
       if (typeof request.screenshotHash !== "string" || !request.screenshotHash) throw new Error("Visual coordinate clicks require a screenshotHash from a fresh screenshot");
-      const currentShot = await page.screenshot({ type: "jpeg", quality: 75 });
+      const currentShot = await captureBrowserScreenshot(page);
       const currentHash = createHash("sha256").update(currentShot).digest("hex").slice(0, 32);
       if (currentHash !== request.screenshotHash) throw new Error("Visual target is stale; capture a fresh screenshot before retrying the coordinate click");
     }
@@ -1221,7 +1268,7 @@ async function execute(context, pageState, request) {
   else if (["screenshot", "screenshot_full", "screenshot_region", "screenshot_region_full"].includes(action)) {
     const clipped = ["screenshot_region", "screenshot_region_full"].includes(action);
     const clip = clipped && [request.x, request.y, request.width, request.height].every((value) => Number.isFinite(Number(value))) ? { x: Number(request.x), y: Number(request.y), width: Number(request.width), height: Number(request.height) } : undefined;
-    const image = await page.screenshot({ type: "jpeg", quality: 75, fullPage: action === "screenshot_full", ...(clip ? { clip } : {}) });
+    const image = await captureBrowserScreenshot(page, { fullPage: action === "screenshot_full", ...(clip ? { clip } : {}) });
     const encoded = image.toString("base64");
     return result(page, context, { screenshot: encoded, screenshotId: randomUUID(), screenshotHash: createHash("sha256").update(image).digest("hex").slice(0, 32), screenshotCapturedAt: Date.now() });
   } else if (action === "downloads" || action === "download_register") {
@@ -1445,6 +1492,29 @@ async function start() {
           if (item) { await fs.rm(item.filePath, { force: true }); collection.delete(String(request.id)); }
           output = { ok: true, removed: Boolean(item) };
         } else output = await execute(context, pageState, request);
+        if (request.includeScreenshotAfterAction === true && output && typeof output === "object" && output.ok === true) {
+          try {
+            const pages = context.pages();
+            const requestedIndex = Number(output.activeIndex ?? pageState.activeIndex ?? 0);
+            const page = pages[Math.max(0, Math.min(pages.length - 1, requestedIndex))] || pages[0];
+            if (!page || page.isClosed()) throw new Error("The active browser page closed before visual feedback could be captured");
+            const image = await captureBrowserScreenshot(page);
+            output = {
+              ...output,
+              screenshot: image.toString("base64"),
+              screenshotId: randomUUID(),
+              screenshotHash: createHash("sha256").update(image).digest("hex").slice(0, 32),
+              screenshotCapturedAt: Date.now(),
+              __browserVisualFeedback: true,
+            };
+          } catch (error) {
+            output = {
+              ...output,
+              __browserVisualFeedback: true,
+              visualFeedbackUnavailable: clean(error?.message || error, 240),
+            };
+          }
+        }
         pageState.activeIndex = Number(output.activeIndex ?? pageState.activeIndex);
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify(output));

@@ -228,7 +228,6 @@ const HANDLING_PULSE_TOOLS = new Set([
   "CHUCK_START_PHONE_CALL",
   "CHUCK_BROWSER_HANDOFF",
   "CHUCK_BROWSER_HANDOFF_COMPLETE",
-  "CHUCK_AUTONOMY_RECONCILE",
 ]);
 
 /**
@@ -507,9 +506,9 @@ function meetingSignals(meetings: RecallMeetingRecord[], preparations: Awaited<R
 
 function automationSignals(jobs: Awaited<ReturnType<typeof listJobs>>, occurrences: Awaited<ReturnType<typeof listJobOccurrences>>, now: number): OperationalSignal[] {
   const activeJobs = new Map(jobs.filter((job) => job.status === "active").map((job) => [job.id, job]));
-  const signals: OperationalSignal[] = jobs.filter((job) => Boolean(job.deliveryError)).map((job) => ({
-    id: `job:${job.id}`, kind: "automation", title: compact(job.text, 120), status: `${job.status}; delivery error`,
-    detail: compact(job.deliveryError, 180), nextAction: "Inspect the scheduler/delivery failure and report or repair configuration; do not replay a prior external action.", priority: 0.9, updatedAt: job.createdAt,
+  const signals: OperationalSignal[] = jobs.filter((job) => Boolean(job.deliveryError || job.scheduleError)).map((job) => ({
+    id: `job:${job.id}`, kind: "automation", title: compact(job.text, 120), status: `${job.status}; ${job.scheduleError ? "schedule recovery error" : "delivery error"}`,
+    detail: compact(job.scheduleError ?? job.deliveryError, 180), nextAction: "Inspect the scheduler/delivery failure and report or repair configuration; do not replay a prior external action.", priority: 0.9, updatedAt: job.createdAt,
   }));
   const latestOccurrenceByJob = new Map<string, (typeof occurrences)[number]>();
   for (const occurrence of occurrences) {

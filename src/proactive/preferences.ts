@@ -196,7 +196,7 @@ export async function readPulsePreferences(userId: number): Promise<PulsePrefere
   const deliveryTargets = await listAttentionRecords(userId, "delivery_preference", { limit: 100 }) as DeliveryPreferenceRecord[];
   const status = await configureAttentionPulse(userId, { action: "status" }) as {
     enabled?: boolean;
-    jobs?: Array<{ cron?: string; status?: "active" | "paused" | "cancelled" }>;
+    jobs?: Array<{ cron?: string; status?: "active" | "paused" | "cancelled"; scheduleError?: string }>;
     connectedAccountsVerified?: boolean;
     capabilitySuggestions?: Array<{ status?: string }>;
     health?: { lastOccurrence?: PulseHealthOccurrence };
@@ -210,6 +210,7 @@ export async function readPulsePreferences(userId: number): Promise<PulsePrefere
     enabled: Boolean(job.enabled),
     cadence,
     jobStatus: job.jobs?.[0]?.status,
+    scheduleError: job.jobs?.[0]?.scheduleError,
     latestOccurrence: status.health?.lastOccurrence,
     activeWatches: coverage.active ?? 0,
     currentWatches: coverage.current ?? 0,

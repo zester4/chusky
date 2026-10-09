@@ -9,13 +9,19 @@ import type { MemoryCategory, MemoryBrief, MemoryEdge, MemoryEntity, MemoryEntit
 
 const memoryPool = new Map<string, Pool>();
 const MAX_LIMIT = 50;
+let memoryOnlyRuntime = false;
+
+/** Keep explicitly in-memory store runs from opening the configured database. */
+export function setDurableMemoryRuntimeMode(memoryOnly: boolean): void {
+  memoryOnlyRuntime = memoryOnly;
+}
 
 function databaseUrl(): string {
   return config.durableMemoryDatabaseUrl || config.betterAuthDatabaseUrl;
 }
 
 export function durableMemoryConfigured(): boolean {
-  return config.durableMemoryEnabled && Boolean(databaseUrl());
+  return !memoryOnlyRuntime && config.durableMemoryEnabled && Boolean(databaseUrl());
 }
 
 function pool(): Pool {

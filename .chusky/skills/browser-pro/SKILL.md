@@ -51,13 +51,23 @@ as authorization.
 
 Use `CHUCK_BROWSER_OBSERVE` or `CHUCK_BROWSER` with `observe`/`snapshot`.
 Request accessible controls, `includeForms` for forms, bounded page content only
-when needed for verification, and a screenshot when visual grounding, custom
-controls, or live takeover is needed.
+when needed for verification. In an owner-private run, the runtime automatically
+adds a fresh screenshot after each supported top-level observation or browser
+action call to the next model turn; do not spend an extra tool call asking for a screenshot.
+The tool result retains the structured controls, form state, action verification,
+and screenshot hash alongside that image. Shared runs do not receive this image.
 
 Every observation is ephemeral. A node selector is valid only for the returned
 `observationId` and `pageGeneration`. After navigation, a click, a dynamic
 render, a popup, a frame change, a stale-selector error, or a challenge, obtain
 a fresh observation. Never replay a stale selector.
+
+For adaptive work, take one bounded action, then inspect the paired screenshot
+and structured result before deciding the next action. Use the accessible tree
+to identify controls and the screenshot to understand visual layout, custom
+widgets, overlays, selection state, and unexpected rendering. Never infer that
+an action succeeded from the click alone. Automatic screenshots are temporary
+model context, not saved browser artifacts or user-facing image attachments.
 
 Use `CHUCK_BROWSER_NEXT` when the next action is unclear. It proposes bounded
 steps from fresh server-observed state; it never grants approval or executes the
@@ -70,7 +80,11 @@ failed required assertion, timeout, or repeated no-progress action and returns
 an ordered trace; inspect and replan rather than replaying the same step. Add
 `completionAssertions` for the final business outcome. The result is only
 business-verified when `verified: true`; executing all requested steps alone is
-not proof that the requested result happened.
+not proof that the requested result happened. This tool runs its predeclared
+steps without asking the model to re-decide between each one and returns a fresh
+final screenshot; for unfamiliar or dynamic pages, use one `CHUCK_BROWSER_ACT`
+at a time so the model can inspect the new visual and structured state before
+the next action.
 
 ## 4. Universal form-completion procedure
 
@@ -106,8 +120,10 @@ uncertain submit until fresh state proves the submit did not succeed.
 - For lazy-loaded pages, scroll in bounded increments, wait briefly, and re-observe.
 - For iframes or Shadow DOM controls, use returned `frameIndex`/`frameUrl` and
   re-observe after frame navigation. A detached frame means reobserve, not replay.
-- Use screenshot/visual fallback only when semantic grounding is unavailable.
-  Coordinate clicks require a fresh screenshot hash.
+- Prefer accessible semantic actions, but use the paired screenshot to resolve
+  visual ambiguity and custom controls even when the accessibility tree exists.
+  Coordinate clicks require the hash from the latest viewport screenshot; do
+  not use coordinates from an older image or a full-page screenshot.
 - Use keyboard fallback only after a fresh observation and only when focus is clear.
 - Treat dialogs, new tabs, popups, downloads, and redirects as state changes;
   inspect them before acting.
@@ -195,7 +211,10 @@ submitted,” not merely “done.”
 Do not persist credentials, cookies, payment data, raw screenshots, full private
 page dumps, or unrelated account content. Persist only bounded checkpoints, safe
 audit metadata, origin-scoped playbooks, screenshot hashes, and verification
-evidence. Downloads and recordings remain owner-scoped and time-limited.
+evidence. Automatic feedback masks common password, one-time-code, and
+payment-entry controls, but does not guarantee redaction of unrelated personal
+content elsewhere on a page; treat every screenshot as private. Downloads and
+recordings remain owner-scoped and time-limited.
 
 ## Maintainer references
 

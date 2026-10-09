@@ -6,7 +6,7 @@ Use `CHUCK_ATTENTION_PULSE` with `action`:
 
 | Action | Effect |
 |--------|--------|
-| `enable` | Create durable hourly job `pulse_{userId}` if missing |
+| `enable` | Create durable hourly job `pulse_{userId}` if missing and admit one bounded first run |
 | `disable` | Cancel all `kind: attention_pulse` jobs for the owner |
 | `status` | Report whether pulse jobs are active |
 
@@ -17,7 +17,11 @@ Default schedule: hourly (`0 * * * *`) unless the owner specifies a valid cron.
 1. Confirm owner intent (chat or `/home` control).
 2. Call enable.
 3. Prefer ensuring a Telegram `delivery_preference` exists (enabled, reasonable maxPerDay).
-4. Confirm in plain language: pulse is on, cadence, that silence means nothing pending.
+4. Confirm in plain language: pulse is on, cadence, first run queued, and that silence means nothing pending.
+
+If the owner uses `run now`, persist the occurrence as `queued` before publishing
+the workflow. The workflow may advance it to `running`, `waiting`, `failed`, or
+`completed`; never report `Never run` while a queued occurrence exists.
 
 ## Disable checklist
 

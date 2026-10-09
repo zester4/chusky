@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { reconcileUserSchedules } from "../src/scheduler.js";
+import { reconcileAllUserSchedules, reconcileUserSchedules } from "../src/scheduler.js";
+import { addJob, initStore, listAllJobs } from "../src/store.js";
 import type { JobRecord } from "../src/store.js";
 
 const job = (status: JobRecord["status"], scheduleId: string): JobRecord => ({ id: `job_${scheduleId}`, userId: 1, text: "check", cron: "0 9 * * 1", scheduleId, status, createdAt: Date.now() });
@@ -65,14 +66,33 @@ test("schedule reconciliation preserves paused job state and repairs provider dr
 test("active schedule reconciliation resumes a provider-paused schedule", async () => {
   const active = job("active", "schedule-provider-paused");
   const resumed: string[] = [];
+  const recreated: string[] = [];
   const result = await reconcileUserSchedules(1, {
     jobs: async () => [active],
     schedules: async () => [{ scheduleId: active.scheduleId, cron: active.cron, destination: "https://example.test/workflows/job", isPaused: true }],
-    create: async () => undefined,
+    create: async (item) => { recreated.push(item.scheduleId); },
     pause: async () => { throw new Error("must not pause an active job"); },
     resume: async (scheduleId) => { resumed.push(scheduleId); },
     remove: async () => undefined,
   });
   assert.deepEqual(resumed, [active.scheduleId]);
-  assert.deepEqual(result, { checked: 1, recreated: [active.scheduleId], deleted: [], paused: [], resumed: [active.scheduleId], unchanged: [] });
+  assert.deepEqual(recreated, []);
+  assert.deepEqual(result, { checked: 1, recreated: [], deleted: [], paused: [], resumed: [active.scheduleId], unchanged: [] });
+});
+
+test("shared provider snapshot failures are persisted for every owner and clear after recovery", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 930001;
+  const ownerJob = { ...job("active", "schedule-shared-failure"), userId };
+  await addJob(userId, ownerJob);
+
+  const failed = await reconcileAllUserSchedules([userId], undefined, {
+    loadSchedules: async () => { throw new Error("provider list unavailable"); },
+  });
+  assert.deepEqual(failed.failures, [{ userId, error: "QStash schedule recovery failed: provider list unavailable" }]);
+  assert.match((await listAllJobs(userId))[0]?.scheduleError ?? "", /provider list unavailable/);
+
+  const recovered = await reconcileAllUserSchedules([userId], [{ scheduleId: ownerJob.scheduleId, cron: ownerJob.cron, destination: "https://example.test/workflows/job" }]);
+  assert.deepEqual(recovered.failures, []);
+  assert.equal((await listAllJobs(userId))[0]?.scheduleError, undefined);
 });

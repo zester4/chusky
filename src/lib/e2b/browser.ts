@@ -22,6 +22,13 @@ const MAX_BROWSER_DOWNLOAD_BYTES = 25 * 1024 * 1024;
 const MAX_BROWSER_RECORDING_BYTES = 100 * 1024 * 1024;
 const BROWSER_FILE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const BROWSER_STREAM_PORT = 6080;
+const OWNER_PRIVATE_VISUAL_ACTIONS = new Set([
+  "state", "snapshot", "find", "observe", "extract", "form_inspect", "form_fill",
+  "open", "back", "forward", "refresh", "wait", "tab_open", "tab_focus", "tab_close",
+  "click", "invoke", "fill", "select_option", "check", "uncheck", "focus", "hover",
+  "press", "type", "scroll", "drag", "desktop_click", "desktop_type", "desktop_press",
+  "dialog_dismiss", "act", "agent",
+]);
 const locks = new Map<number, Promise<void>>();
 
 type BrowserStepRecord = Record<string, unknown>;
@@ -611,7 +618,7 @@ export class E2BBrowserEngine {
     return `e2b-pending-${userId}`;
   }
 
-  async browser(userId: number, args: Record<string, unknown>, internal: { vaultLoginFlow?: boolean; ownerPrivateRun?: boolean; ownerApprovedAction?: boolean; signal?: AbortSignal } = {}): Promise<unknown> {
+  async browser(userId: number, args: Record<string, unknown>, internal: { vaultLoginFlow?: boolean; ownerPrivateRun?: boolean; ownerApprovedAction?: boolean; visualFeedback?: boolean; signal?: AbortSignal } = {}): Promise<unknown> {
     return withUserLock(userId, async () => {
       await this.purgeExpiredBrowserFiles(userId);
       const action = safeAction(args.action);
@@ -795,6 +802,13 @@ export class E2BBrowserEngine {
       if (action === "open") request.url = (await assertSafeBrowserUrl(args.url)).toString();
       if (action === "find") Object.assign(request, { role: args.role, name: args.name, nameMatch: args.nameMatch, limit: args.limit });
       if (action !== "open" && record.lastUrl) request.currentUrl = record.lastUrl;
+      // Visual state is private model context, not a shared-session attachment.
+      // The template captures it after the action so the screenshot and the
+      // returned structured state describe the same page generation.
+      if (action === "observe") request.includeScreenshot = false;
+      if (internal.ownerPrivateRun === true && internal.visualFeedback === true && OWNER_PRIVATE_VISUAL_ACTIONS.has(action)) {
+        request.includeScreenshotAfterAction = true;
+      }
       if (["state", "snapshot", "find", "form_inspect", "open", "wait", "back", "forward", "refresh"].includes(action)) request.includePageContent = internal.ownerPrivateRun === true;
       if ((INTERACTIVE_ACTIONS as readonly string[]).includes(action) && args.nodeId) {
         const saved = record.nodes?.find((item) => item.nodeId === args.nodeId);
@@ -903,7 +917,69 @@ export class E2BBrowserEngine {
       }
       if (nodes.length) await rememberVaultBrowserNodes(userId, next.sandboxId, nodes, next.lastUrl);
       const agent = normalizeAgentSummary(result.agent);
-      const safe = { provider: "e2b", sandboxId: next.sandboxId, action, ...(agent ? { agent } : {}), ...(result.observationId ? { observationId: result.observationId } : {}), ...(typeof result.pageGeneration === "number" ? { pageGeneration: result.pageGeneration } : {}), ...(result.accessibilityHash ? { accessibilityHash: result.accessibilityHash } : {}), ...(result.health ? { health: result.health } : {}), ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}), ...(result.events ? { events: result.events } : {}), ...(result.url ? { observedUrl: result.url, observationMethod: "playwright_page_url" } : {}), ...(result.title ? { title: redactBrowserText(result.title, 160) } : {}), ...(result.loadState ? { loadState: result.loadState } : {}), ...(nodes.length ? { matches: nodes } : {}), ...(result.formState ? { formState: result.formState } : {}), ...(result.actionVerification ? { actionVerification: result.actionVerification } : {}), ...(result.validationErrors ? { validationErrors: result.validationErrors } : {}), ...(typeof result.submitted === "boolean" ? { submitted: result.submitted } : {}), ...(result.workflowCheckpoint ? { workflowCheckpoint: result.workflowCheckpoint } : {}), ...(internal.ownerPrivateRun === true && typeof result.pageContent === "string" ? { pageContent: normalizeE2BPageContent(result.pageContent).text, pageContentTruncated: result.pageContentTruncated === true } : {}), ...(result.download ? { download: result.download } : {}), ...(result.pdf ? { pdf: { name: result.pdf.name, size: result.pdf.size, ...(importedFiles[0] ? { fileId: importedFiles[0].id } : {}) } } : {}), ...(importedFiles.length ? { files: importedFiles.map((file) => ({ fileId: file.id, name: file.name, kind: file.kind, size: file.size, contentType: file.contentType, expiresAt: file.expiresAt })) } : {}), ...(result.recording ? { recording: { id: result.recording.id, name: result.recording.name, state: result.recording.state, size: result.recording.size, createdAt: result.recording.createdAt, ...(importedFiles[0] ? { fileId: importedFiles[0].id } : {}) } } : {}), ...(result.screenshot ? { __browserScreenshot: true, base64: result.screenshot, mediaType: "image/jpeg", sizeBytes: Math.floor(result.screenshot.length * 0.75), ...(typeof result.screenshotId === "string" ? { screenshotId: result.screenshotId } : {}), ...(typeof result.screenshotHash === "string" ? { screenshotHash: result.screenshotHash } : {}) } : {}) };
+      const safe = {
+        provider: "e2b",
+        sandboxId: next.sandboxId,
+        action,
+        ...(agent ? { agent } : {}),
+        ...(result.observationId ? { observationId: result.observationId } : {}),
+        ...(typeof result.pageGeneration === "number" ? { pageGeneration: result.pageGeneration } : {}),
+        ...(result.accessibilityHash ? { accessibilityHash: result.accessibilityHash } : {}),
+        ...(result.health ? { health: result.health } : {}),
+        ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}),
+        ...(result.events ? { events: result.events } : {}),
+        ...(result.url ? { observedUrl: result.url, observationMethod: "playwright_page_url" } : {}),
+        ...(result.title ? { title: redactBrowserText(result.title, 160) } : {}),
+        ...(result.loadState ? { loadState: result.loadState } : {}),
+        ...(nodes.length ? { matches: nodes } : {}),
+        ...(result.formState ? { formState: result.formState } : {}),
+        ...(result.actionVerification ? { actionVerification: result.actionVerification } : {}),
+        ...(result.validationErrors ? { validationErrors: result.validationErrors } : {}),
+        ...(typeof result.submitted === "boolean" ? { submitted: result.submitted } : {}),
+        ...(result.workflowCheckpoint ? { workflowCheckpoint: result.workflowCheckpoint } : {}),
+        ...(internal.ownerPrivateRun === true && typeof result.pageContent === "string"
+          ? { pageContent: normalizeE2BPageContent(result.pageContent).text, pageContentTruncated: result.pageContentTruncated === true }
+          : {}),
+        ...(result.download ? { download: result.download } : {}),
+        ...(result.pdf
+          ? {
+              pdf: {
+                name: result.pdf.name,
+                size: result.pdf.size,
+                ...(importedFiles[0] ? { fileId: importedFiles[0].id } : {}),
+              },
+            }
+          : {}),
+        ...(importedFiles.length
+          ? { files: importedFiles.map((file) => ({ fileId: file.id, name: file.name, kind: file.kind, size: file.size, contentType: file.contentType, expiresAt: file.expiresAt })) }
+          : {}),
+        ...(result.recording
+          ? {
+              recording: {
+                id: result.recording.id,
+                name: result.recording.name,
+                state: result.recording.state,
+                size: result.recording.size,
+                createdAt: result.recording.createdAt,
+                ...(importedFiles[0] ? { fileId: importedFiles[0].id } : {}),
+              },
+            }
+          : {}),
+        ...(result.__browserVisualFeedback === true ? { __browserVisualFeedback: true } : {}),
+        ...(typeof result.visualFeedbackUnavailable === "string"
+          ? { visualFeedbackUnavailable: redactBrowserText(result.visualFeedbackUnavailable, 240) }
+          : {}),
+        ...(result.screenshot
+          ? {
+              __browserScreenshot: true,
+              base64: result.screenshot,
+              mediaType: "image/jpeg",
+              sizeBytes: Math.floor(result.screenshot.length * 0.75),
+              ...(typeof result.screenshotId === "string" ? { screenshotId: result.screenshotId } : {}),
+              ...(typeof result.screenshotHash === "string" ? { screenshotHash: result.screenshotHash } : {}),
+            }
+          : {}),
+      };
       Object.assign(safe, result.forms ? { forms: result.forms } : {}, result.desktopAction ? { desktopAction: result.desktopAction } : {}, result.clipboard ? { clipboard: result.clipboard, ...(typeof result.text === "string" ? { text: result.text } : {}) } : {}, next.checkpoint ? { checkpoint: next.checkpoint } : {});
       const challenge = result.challenge && typeof result.challenge === "object" ? result.challenge : undefined;
       const safeWithChallenge = { ...safe, ...(result.needsUserInteraction ? { needsUserInteraction: true } : {}), ...(challenge ? { challenge } : {}), ...(Array.isArray(result.tabs) ? { tabs: result.tabs } : {}) };

@@ -318,7 +318,9 @@ Operating Rules:
 3. Track open loops and standing orders to keep Chusky operating proactively.
 4. At the beginning of every Attention Pulse, read the private scratchpad entry attention-pulse/checklist before choosing work. It is an evolving working plan and continuity record, not an exhaustive task list, permission grant, or final decision-maker.
 5. Reconcile the checklist with current evidence. You may investigate, prioritize, or suggest useful work outside it when the current state warrants it; do not stay idle merely because the checklist did not predict the issue.
-6. After meaningful discoveries, completed work, blocked work, or a new user-relevant idea, update attention-pulse/checklist with concise status, what changed, the next useful checks, and any owner decision needed. Keep it short enough to remain useful and never put secrets or raw provider payloads in it.`,
+6. After meaningful discoveries, completed work, blocked work, or a new user-relevant idea, update attention-pulse/checklist with concise status, what changed, the next useful checks, and any owner decision needed. Keep it short enough to remain useful and never put secrets or raw provider payloads in it.
+7. When Attention Pulse is enabled and a verified connected account matches a bounded starter watch, begin with that safe read-only watch instead of stopping to ask the owner to choose a category. Start with the smallest useful coverage, report what was checked, and offer refinement after the first result.
+8. Connected-app access is granted per run through exact verified actions or the watch reconciler. Do not treat a missing preferred action as proof that the account is disconnected; ask Chusky to discover a safe exact capability when needed, and preserve normal approval boundaries for writes.`,
     reflectionChecklist: [
       "Is the task checkpoint concise and actionable?",
       "Are task lifecycle statuses valid (queued -> running -> completed)?",

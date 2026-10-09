@@ -14,7 +14,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type TriggerEventRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
@@ -960,6 +960,7 @@ function workerView(record: Awaited<ReturnType<typeof getHandoffRecord>>) { retu
 type RunBody = { input?: string; attachments?: string[]; model?: string; agentId?: string; metadata?: Record<string, unknown>; budget?: { duration?: string; maxToolCalls?: number; maxCost?: number }; tools?: CompanyToolPolicy; skills?: string[]; wait?: boolean; organizationId?: string };
 
 type AttentionCandidateRunContext = { candidateId: string; actionId?: string };
+type TriggerEventRunContext = { eventId: string; actionId?: string };
 
 function attentionCandidateRunContext(body: RunBody): AttentionCandidateRunContext | undefined {
   const metadata = body.metadata;
@@ -972,6 +973,17 @@ function attentionCandidateRunContext(body: RunBody): AttentionCandidateRunConte
   return { candidateId: rawCandidateId, ...(typeof rawActionId === "string" ? { actionId: rawActionId } : {}) };
 }
 
+function triggerEventRunContext(body: RunBody): TriggerEventRunContext | undefined {
+  const metadata = body.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return undefined;
+  const rawEventId = metadata.triggerEventId;
+  const rawActionId = metadata.triggerActionId;
+  if (rawEventId === undefined && rawActionId === undefined) return undefined;
+  if (typeof rawEventId !== "string" || !/^[A-Za-z0-9][-A-Za-z0-9._:]{0,199}$/.test(rawEventId)) throw new Error("triggerEventId must be a valid owner-scoped trigger event ID");
+  if (rawActionId !== undefined && (typeof rawActionId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(rawActionId))) throw new Error("triggerActionId must be a valid trigger action ID");
+  return { eventId: rawEventId, ...(typeof rawActionId === "string" ? { actionId: rawActionId } : {}) };
+}
+
 async function validateAttentionCandidateForRun(userId: number, context: AttentionCandidateRunContext | undefined): Promise<AttentionCandidateRecord | undefined> {
   if (!context) return undefined;
   const candidate = await getAttentionRecord(userId, "attention_candidate", context.candidateId) as AttentionCandidateRecord | undefined;
@@ -980,6 +992,14 @@ async function validateAttentionCandidateForRun(userId: number, context: Attenti
   const availableActions = candidate.suggestedActions?.length ? candidate.suggestedActions : [{ id: "review" }];
   if (context.actionId && !availableActions.some((action) => action.id === context.actionId)) throw new Error("invalid_attention_action");
   return candidate;
+}
+
+async function validateTriggerEventForRun(userId: number, context: TriggerEventRunContext | undefined): Promise<TriggerEventRecord | undefined> {
+  if (!context) return undefined;
+  const event = await getTriggerEvent(context.eventId);
+  if (!event || event.userId !== userId) throw new Error("trigger_event_not_found");
+  if (context.actionId && event.suggestedActions?.length && !event.suggestedActions.some((action) => action.id === context.actionId)) throw new Error("invalid_trigger_action");
+  return event;
 }
 
 async function acceptAttentionCandidateForRun(userId: number, context: AttentionCandidateRunContext | undefined): Promise<void> {
@@ -997,6 +1017,17 @@ function attentionCandidateRunError(error: unknown): { code: string; message: st
   if (value === "attention_candidate_unavailable") return { code: "attention_candidate_unavailable", message: "This Elena suggestion is no longer actionable." };
   if (value === "invalid_attention_action") return { code: "invalid_attention_action", message: "That suggestion action is not valid for this candidate." };
   return undefined;
+}
+
+function triggerEventRunError(error: unknown): { code: string; message: string } | undefined {
+  const value = error instanceof Error ? error.message : "";
+  if (value === "trigger_event_not_found") return { code: "trigger_event_not_found", message: "This connected-app event is no longer available for this account." };
+  if (value === "invalid_trigger_action") return { code: "invalid_trigger_action", message: "That trigger action is no longer valid for this event." };
+  return undefined;
+}
+
+function runContextError(error: unknown): { code: string; message: string } | undefined {
+  return attentionCandidateRunError(error) ?? triggerEventRunError(error);
 }
 
 function principalFromContext(c: any): SdkPrincipal {
@@ -1074,7 +1105,7 @@ function validateRunPolicy(body: RunBody): string | undefined {
     if (list !== undefined && (!Array.isArray(list) || list.length > 100 || !list.every((item) => typeof item === "string" && toolSlug.test(item)))) return `tools.${field} must contain at most 100 valid tool slugs`;
   }
   if (body.agentId !== undefined && (typeof body.agentId !== "string" || !/^(?:agt_[A-Za-z0-9_-]{1,100}|[a-z][a-z0-9-]{1,80})$/.test(body.agentId))) return "agentId must be a valid profile ID or template slug";
-  try { attentionCandidateRunContext(body); } catch (error) { return error instanceof Error ? error.message : "attention candidate context is invalid"; }
+  try { attentionCandidateRunContext(body); triggerEventRunContext(body); } catch (error) { return error instanceof Error ? error.message : "run context is invalid"; }
   return undefined;
 }
 
@@ -1587,16 +1618,22 @@ export function registerSdkApi(app: Hono): void {
     const owner = sdkUser(c)!;
     const webAuthUserId = (c as any).get("webAuthUserId") as string | undefined;
     const session = await getSession(owner.userId);
-    const [channels, devices, reminders, jobs, workspace, deliveries, memory, triggerEvents, approvals, attentionCandidates] = await Promise.all([
+    const memoryProjection = searchMemories(owner.userId, undefined, { limit: 20 }).then((memory) => ({ memory, status: "available" as const })).catch((error) => {
+      // Memory is a dashboard projection, not the source of truth for
+      // approvals, candidates, jobs, or delivery state. Keep those actionable
+      // surfaces available during a transient durable-memory outage while
+      // exposing the degraded projection to the client.
+      logger.warn({ errorType: error instanceof Error ? error.name : "UnknownError", userId: owner.userId }, "Account overview memory projection unavailable");
+      return { memory: [], status: "degraded" as const };
+    });
+    const [channels, devices, reminders, jobs, workspace, deliveries, memoryProjectionResult, triggerEvents, approvals, attentionCandidates] = await Promise.all([
       listChannelIdentities(owner.userId),
       listCliDevices(owner.userId),
       listReminders(owner.userId),
       listJobs(owner.userId),
       getDaytonaWorkspace(owner.userId),
       listOutbox(undefined, 500, owner.userId),
-      // Keep the overview's memory projection identical to /v1/memory:
-      // expired facts must not reappear in another dashboard surface.
-      searchMemories(owner.userId, undefined, { limit: 20 }),
+      memoryProjection,
       listTriggerEvents(owner.userId, 50),
       listApprovals(owner.userId, 100),
       listAttentionRecords(owner.userId, "attention_candidate", { limit: 50 }),
@@ -1610,7 +1647,8 @@ export function registerSdkApi(app: Hono): void {
       channels: channels.filter((item) => !item.disabledAt).map((item) => ({ id: identityFingerprint(item), provider: item.provider, externalUserId: item.externalUserId, workspaceId: item.workspaceId, displayName: item.displayName, verifiedAt: new Date(item.verifiedAt).toISOString(), proactiveOptIn: item.proactiveOptIn !== false })),
       reminders: reminders.map((item) => ({ ...item, runAt: new Date(item.runAt).toISOString(), createdAt: new Date(item.createdAt).toISOString() })),
       jobs: jobs.map((item) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
-      memory: memory.map(memoryView),
+      memory: memoryProjectionResult.memory.map(memoryView),
+      memoryStatus: memoryProjectionResult.status,
       scratchpad: Object.entries(session.scratchpad).map(([key, item]) => ({ key, content: item.content, updatedAt: new Date(item.updatedAt).toISOString() })),
       triggers: session.triggerIds,
       triggerEvents: triggerEvents.map((event) => ({
@@ -2722,7 +2760,7 @@ export function registerSdkApi(app: Hono): void {
     if (!quota.allowed) return apiError(c, 429, "execution_quota_exceeded", quota.reason ?? "Execution quota exceeded.");
     if (!(await checkRateLimit(owner.userId))) { c.header("Retry-After", "60"); return apiError(c, 429, "rate_limited", "Rate limit exceeded."); }
     if (!(await canSpend(owner.userId))) return apiError(c, 402, "spend_limit", "Usage cap reached.");
-    const session = await getSession(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
+    const session = await getSession(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); let thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
     let resolved: Awaited<ReturnType<typeof resolveRunInput>>; try { resolved = await resolveRunInput(session, body); } catch (error) { return apiError(c, 400, error instanceof Error && error.message === "invalid_attachment" ? "invalid_attachment" : "invalid_input", error instanceof Error && error.message === "invalid_attachment" ? "Each attachment must be a verified upload owned by this account." : "Provide 1–30000 characters or up to five verified attachments."); }
     if (dashboardRequest(c)) {
       const sharedHistory = dashboardAgentHistory(c, session, thread.history);
@@ -2732,9 +2770,10 @@ export function registerSdkApi(app: Hono): void {
     const lockToken = randomUUID();
     if (!(await acquireUserLock(owner.userId, lockToken))) return apiError(c, 409, "run_in_progress", "Another Chusky request is already running for this user.");
     const attentionContext = attentionCandidateRunContext(body);
+    const triggerContext = triggerEventRunContext(body);
     try {
-    try { await validateAttentionCandidateForRun(owner.userId, attentionContext); } catch (error) { const detail = attentionCandidateRunError(error); if (detail) return apiError(c, 409, detail.code, detail.message); throw error; }
-    const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: body.wait === false ? "queued" : "running", ...(owner.organizationId ? { companyProjectId: owner.projectId } : {}), ...(body.organizationId ? { organizationId: body.organizationId } : {}), ...(dashboardRequest(c) ? { ownerPrivateRun: true } : {}), input: resolved.input, model: body.model ?? session.model, agentId: companyPolicy.agent?.id, agentName: companyPolicy.agent?.name, agentInstructions: companyPolicy.agent?.instructions, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event(body.wait === false ? "run.queued" : "run.started")], createdAt: now, updatedAt: now };
+    try { await validateAttentionCandidateForRun(owner.userId, attentionContext); await validateTriggerEventForRun(owner.userId, triggerContext); } catch (error) { const detail = runContextError(error); if (detail) return apiError(c, 409, detail.code, detail.message); throw error; }
+    const now = Date.now(); let run: SdkRunRecord = { id: `run_${randomUUID()}`, status: body.wait === false ? "queued" : "running", ...(owner.organizationId ? { companyProjectId: owner.projectId } : {}), ...(body.organizationId ? { organizationId: body.organizationId } : {}), ...(dashboardRequest(c) ? { ownerPrivateRun: true } : {}), input: resolved.input, model: body.model ?? session.model, agentId: companyPolicy.agent?.id, agentName: companyPolicy.agent?.name, agentInstructions: companyPolicy.agent?.instructions, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event(body.wait === false ? "run.queued" : "run.started")], createdAt: now, updatedAt: now };
     let quotaReservationId: string | undefined;
     if (body.wait === false) {
       try {
@@ -2761,23 +2800,31 @@ export function registerSdkApi(app: Hono): void {
         thread.runs = thread.runs.filter((item) => item.id !== run.id);
         await saveSession(owner.userId, session);
         await deleteSdkRun(owner.userId, thread.id, run.id);
-        const detail = attentionCandidateRunError(error);
+        const detail = runContextError(error);
         if (detail) return apiError(c, 409, detail.code, detail.message);
         return apiError(c, 503, "run_enqueue_failed", error instanceof Error ? error.message : "The durable run could not be queued.");
       }
     }
     try {
       await saveSession(owner.userId, session);
+      // saveSession compacts SDK threads into bounded clones. Rebind the
+      // local references before the synchronous run so settled history is
+      // applied to the same run record that will be persisted.
+      const persistedThread = session.sdkThreads?.find((item) => item.id === c.req.param("threadId"));
+      const persistedRun = persistedThread?.runs.find((item) => item.id === run.id);
+      if (!persistedThread || !persistedRun) throw new Error("The SDK run disappeared while it was being admitted.");
+      thread = persistedThread;
+      run = persistedRun;
       await acceptAttentionCandidateForRun(owner.userId, attentionContext);
     } catch (error) {
       thread.runs = thread.runs.filter((item) => item.id !== run.id);
       await saveSession(owner.userId, session).catch((cleanupError) => logger.error({ err: cleanupError, runId: run.id }, "Could not roll back an unaccepted attention candidate run"));
-      const detail = attentionCandidateRunError(error);
+      const detail = runContextError(error);
       if (detail) return apiError(c, 409, detail.code, detail.message);
       throw error;
     }
     let privateLinks: PrivateRunLink[] | undefined;
-    try { const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions, dashboardRequest(c))); privateLinks = result.privateLinks; run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); appendSdkRunHistoryToSession(session, thread.id, run.id, [
+    try { const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions, dashboardRequest(c))); privateLinks = result.privateLinks; run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; run.events.push(event("run.completed")); appendSdkRunHistoryToSession(session, thread.id, run.id, [
       { role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}`, createdAt: run.createdAt },
       { role: "assistant", content: result.text, createdAt: Date.now() },
     ]); }
@@ -2805,7 +2852,8 @@ export function registerSdkApi(app: Hono): void {
     const lockToken = randomUUID();
     if (!(await acquireUserLock(owner.userId, lockToken))) return apiError(c, 409, "run_in_progress", "Another Chusky request is already running for this user.");
     const attentionContext = attentionCandidateRunContext(body);
-    try { await validateAttentionCandidateForRun(owner.userId, attentionContext); } catch (error) { const detail = attentionCandidateRunError(error); if (detail) { await releaseUserLock(owner.userId, lockToken); return apiError(c, 409, detail.code, detail.message); } await releaseUserLock(owner.userId, lockToken); throw error; }
+    const triggerContext = triggerEventRunContext(body);
+    try { await validateAttentionCandidateForRun(owner.userId, attentionContext); await validateTriggerEventForRun(owner.userId, triggerContext); } catch (error) { const detail = runContextError(error); if (detail) { await releaseUserLock(owner.userId, lockToken); return apiError(c, 409, detail.code, detail.message); } await releaseUserLock(owner.userId, lockToken); throw error; }
     const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", ...(owner.organizationId ? { companyProjectId: owner.projectId } : {}), ...(body.organizationId ? { organizationId: body.organizationId } : {}), ...(dashboardRequest(c) ? { ownerPrivateRun: true } : {}), input: resolved.input, model: body.model ?? session.model, agentId: companyPolicy.agent?.id, agentName: companyPolicy.agent?.name, agentInstructions: companyPolicy.agent?.instructions, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event("run.started")], createdAt: now, updatedAt: now }; thread.runs.push(run); await persistSdkCompanyRun(run);
     await saveSession(owner.userId, session);
     try {
@@ -2813,7 +2861,7 @@ export function registerSdkApi(app: Hono): void {
     } catch (error) {
       thread.runs = thread.runs.filter((item) => item.id !== run.id);
       await saveSession(owner.userId, session).catch((cleanupError) => logger.error({ err: cleanupError, runId: run.id }, "Could not roll back an unaccepted streamed attention candidate run"));
-      const detail = attentionCandidateRunError(error);
+      const detail = runContextError(error);
       await releaseUserLock(owner.userId, lockToken);
       if (detail) return apiError(c, 409, detail.code, detail.message);
       throw error;

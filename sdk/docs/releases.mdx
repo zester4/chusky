@@ -5,6 +5,19 @@ description: Validate, version, publish, and track Chusky SDK releases.
 
 The canonical SDK source is the separate [`zester4/chusky-sdk`](https://github.com/zester4/chusky-sdk) repository. Its **Release Chusky SDK** workflow automatically validates and publishes when `package.json` or `package-lock.json` changes on `main`. It also supports a manually dispatched exact version and `sdk-vX.Y.Z` tags for recovery. The agent monorepo's release workflow is a guarded fallback; never start two releases for the same version concurrently.
 
+## 1.13.0 — Verified trigger action context
+
+Dashboard actions for connected-app trigger events can now continue in Chat with
+the saved event and selected action attached to the run request.
+
+- The API verifies the trigger event belongs to the authenticated owner before
+  admitting the run.
+- When the event has persisted suggested actions, the selected action must be
+  one of those actions; missing, foreign, or unknown actions are rejected.
+- Event summaries and provider-derived results remain context, not
+  authorization. Consequential work still uses the normal approval and
+  provider-safety boundaries.
+
 ## 1.10.0 — Attention Pulse
 
 The TypeScript SDK now exposes `chusky.attentionPulse.get()` and

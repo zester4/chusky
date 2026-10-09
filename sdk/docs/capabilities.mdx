@@ -95,6 +95,16 @@ approval boundary was reached, and whether the result was surfaced in the
 dashboard or an external channel. It is an execution receipt, not provider
 payload or proof that an external write succeeded.
 
+Recurring jobs also expose an owner-scoped `scheduleError` when the worker
+cannot reconcile their durable QStash schedule. It clears after a successful
+repair and does not imply that a provider action was attempted.
+
+Connected-app attention cards can carry their verified event context into Chat.
+The dashboard sends `metadata.triggerEventId` and `metadata.triggerActionId`;
+the API checks the owner and the stored action before admitting the run. Event
+text is context, not authorization, and consequential provider operations still
+use the normal approval and outcome-verification boundary.
+
 ## Voice and meetings
 
 Voice calls and Recall meetings are first-class API resources rather than

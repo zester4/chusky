@@ -34,7 +34,7 @@ export const AGENT_UPGRADE_PRESETS = {
   ],
   attention: [
     "Attention Pulse records owner-private change, failure, and recovery observations plus verified missing-capability suggestions, deduplicates replays, and surfaces them as durable events.",
-    "Pulse status reports current, scheduled, stale, failed, and never-checked coverage for explicitly configured watches; it does not claim to monitor every connected app.",
+    "Pulse status reports current, scheduled, stale, failed, and never-checked coverage for explicitly configured watches; the worker repairs QStash drift while preserving paused jobs and never claims to monitor every connected app.",
     "New observations stay pending until confirmed delivery, and each durable Pulse occurrence records a bounded execution receipt so the dashboard and SDK can show checks, candidates, handling, delegation, approval waits, and delivery without exposing provider payloads.",
   ],
   missions: [
@@ -146,6 +146,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Added E2B browser primitives for fresh observation, bounded semantic action, schema-bounded extraction, ordered model-driven execution with a per-step trace, desktop fallback, clipboard, dialogs, diagnostics, and PDF export.",
     "E2B now combines accessibility and form controls with bounded screenshot evidence, deterministic visual-target ranking, stale-observation recovery guidance, durable pause/resume, sandbox forks, and owner-scoped browser-session concurrency limits.",
     "The internal E2B runtime contract records structured browser evidence and event traces for dynamic pages, popups, console errors, failed requests, and verified outcomes; business completion still requires explicit verification or a trusted site receipt.",
+  ],
+  browserVisualLoop: [
+    "Owner-private E2B observations and browser actions now send the latest viewport screenshot beside fresh accessible, form, and action state for the next model decision; shared conversations receive no automatic screenshot.",
+    "Visual feedback stays in the current model turn, is not saved as an image asset or attached to the user reply, and replaces older automatic screenshots so long tasks do not accumulate stale images.",
+    "Common password, one-time-code, and payment-entry controls are masked in screenshots; coordinate fallback still requires a matching fresh screenshot hash, and challenge and payment approval boundaries are unchanged.",
   ],
   browserAgentReliability: [
     "Bounded E2B agent runs now enforce independent step, action, wall-clock, and no-progress limits so repeated browser calls stop instead of running away.",

@@ -16,7 +16,7 @@ import { assertPublicHttpUrl, createTinyFishClient } from "./tinyfish.js";
 import { receiveTinyFishMonitorWebhook, tinyFishMonitorSignature, tinyFishMonitorSnapshotHash, validateTinyFishMonitorSchedule } from "./tinyfishMonitors.js";
 import { reconcileTinyFishResearchRun } from "./tinyfishResearch.js";
 import {
-  addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, listJobs, listJobOccurrences, listReminders, claimHandoffBudget, searchConversationMessages, getConversationMessage,
+  addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, listJobs, listJobOccurrences, createJobOccurrence, updateJobOccurrence, listReminders, claimHandoffBudget, searchConversationMessages, getConversationMessage,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
   upsertMeetingContact, listMeetingContacts, deleteMeetingContact, getMeetingContact, updateMeetingContact,
   readScratchpad, updateJob, updateReminder, transitionReminderStatus, writeScratchpad,
@@ -1151,6 +1151,15 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
     await updateJob(userId, job.id, { status: "cancelled", deliveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
     throw error;
   }
+  // A new Pulse must produce observable work immediately. The recurring
+  // schedule remains hourly; this one-shot admission gives the owner a first
+  // bounded check without waiting for the next cron tick.
+  try {
+    await runJobNow(userId, job.id);
+  } catch (error) {
+    await updateJob(userId, job.id, { deliveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
+    throw new Error("Attention Pulse was scheduled, but its first run could not be queued. Inspect Pulse status before retrying.", { cause: error });
+  }
   return job;
 }
 
@@ -1390,6 +1399,20 @@ export async function runJobNow(userId: number, id: string): Promise<{ jobId: st
   if (!job) throw new Error("Job not found or not owned by you");
   if (job.status !== "active") throw new Error("Resume the job before running it");
   const occurrenceId = `manual-${randomUUID()}`;
+  const now = Date.now();
+  const occurrence = await createJobOccurrence({
+    id: `occ_${job.id}_${occurrenceId}`.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 240),
+    userId,
+    jobId: job.id,
+    occurrenceId,
+    status: "queued",
+    mode: job.mode ?? (job.workerBinding ? "act" : "notify"),
+    idempotencyKey: `job:${job.id}:${occurrenceId}`,
+    ...(job.contextSnapshot ? { context: job.contextSnapshot } : {}),
+    createdAt: now,
+    updatedAt: now,
+    version: 0,
+  });
   const workflow = await new WorkflowClient({ token: requireQStash(), baseUrl: config.qstashUrl || undefined }).trigger({
     url: workflowUrl(config.jobWorkflowUrl, "JOB_WORKFLOW_URL", "/workflows/job"),
     body: { jobId: job.id, userId, occurrenceId },
@@ -1399,6 +1422,13 @@ export async function runJobNow(userId: number, id: string): Promise<{ jobId: st
     retryDelay: "1000 * (1 + retried)",
     ...(workflowFailureUrl() ? { failureUrl: workflowFailureUrl() } : {}),
     flowControl: { key: `chusky-job-user-${userId}`, parallelism: 1, rate: 1, period: "1s" },
+  }).catch(async (error) => {
+    await updateJobOccurrence(userId, occurrence.id, {
+      status: "failed",
+      error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+      completedAt: Date.now(),
+    }, occurrence.version);
+    throw error;
   });
   return { jobId: job.id, occurrenceId, workflowRunId: workflow.workflowRunId };
 }
@@ -2738,16 +2768,16 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         includeScreenshot: args.includeScreenshot === true,
         includeForms: args.includeForms !== false,
         includePageContent: args.includePageContent === true,
-      }, { ownerPrivateRun: runtime.ownerPrivateRun, signal: runtime.signal }));
+      }, { ownerPrivateRun: runtime.ownerPrivateRun, visualFeedback: true, signal: runtime.signal }));
     }
     case "CHUCK_BROWSER_ACT": {
       const browser = automatedBrowserEngine("act");
       const step = { ...args, action: args.action };
-      return abortableToolCall(runtime, () => browser.browser(userId, { action: "act", step }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId), signal: runtime.signal }));
+      return abortableToolCall(runtime, () => browser.browser(userId, { action: "act", step }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId), visualFeedback: true, signal: runtime.signal }));
     }
     case "CHUCK_BROWSER_EXTRACT": {
       const browser = automatedBrowserEngine("extract");
-      return abortableToolCall(runtime, () => browser.browser(userId, { action: "extract", schema: args.schema }, { ownerPrivateRun: runtime.ownerPrivateRun, signal: runtime.signal }));
+      return abortableToolCall(runtime, () => browser.browser(userId, { action: "extract", schema: args.schema }, { ownerPrivateRun: runtime.ownerPrivateRun, visualFeedback: true, signal: runtime.signal }));
     }
     case "CHUCK_BROWSER_AGENT": {
       const browser = automatedBrowserEngine("agent");
@@ -2760,14 +2790,14 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         noProgressLimit: args.noProgressLimit,
         completionAssertions: args.completionAssertions,
         sessionId: args.sessionId,
-      }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId), signal: runtime.signal }));
+      }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId), visualFeedback: true, signal: runtime.signal }));
     }
     case "CHUCK_BROWSER": {
       const action = classifyBrowserIntent({ label: typeof args.label === "string" ? args.label : String(args.action ?? "browse"), url: typeof args.url === "string" ? args.url : undefined });
       const origin = typeof args.url === "string" ? (() => { try { return new URL(args.url).origin; } catch { return undefined; } })() : undefined;
       try {
         const browser = automatedBrowserEngine(args.action);
-        const result = await abortableToolCall(runtime, () => browser.browser(userId, args, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId), signal: runtime.signal }));
+        const result = await abortableToolCall(runtime, () => browser.browser(userId, args, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId), visualFeedback: true, signal: runtime.signal }));
         if (runtime.registerCancellationCleanup && args.action === "session_acquire" && result && typeof result === "object" && typeof (result as { sessionId?: unknown }).sessionId === "string") {
           const sessionId = (result as { sessionId: string }).sessionId;
           runtime.registerCancellationCleanup(async () => { await browser.browser(userId, { action: "session_release", sessionId }); });

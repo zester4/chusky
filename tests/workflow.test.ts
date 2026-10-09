@@ -101,6 +101,15 @@ test("recurring job delivery escapes content and sends only to the mapped owner"
   assert.match(state.sent[0].text, /Run &lt;task&gt;/);
 });
 
+test("successful recurring delivery clears a previous delivery error", async () => {
+  const state = deps({
+    getJob: async () => ({ ...deps().job, deliveryError: "previous provider failure" }),
+  });
+  const result = await deliverJob({ jobId: "job-1", userId: 1 }, state);
+  assert.deepEqual(result, { delivered: true });
+  assert.deepEqual(state.jobUpdates, [{ deliveryError: undefined }]);
+});
+
 test("recurring job delivery runs the agent before sending its response", async () => {
   const state = deps({ runAgent: async (job) => ({ text: `**Agent result for ${job.id}**` }) });
   const result = await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "occ-agent" }, state);
@@ -270,6 +279,7 @@ test("delivery claims suppress duplicate reminder and job executions", async () 
 test("workflow payload validation rejects malformed and cross-tenant payloads", () => {
   assert.deepEqual(parseReminderWorkflowPayload({ reminderId: "rem_abc", userId: 7 }), { reminderId: "rem_abc", userId: 7 });
   assert.deepEqual(parseJobWorkflowPayload({ jobId: "job_abc", userId: 7, occurrenceId: "run-1" }), { jobId: "job_abc", userId: 7, occurrenceId: "run-1" });
+  assert.deepEqual(parseJobWorkflowPayload({ jobId: "pulse_abc", userId: 7 }), { jobId: "pulse_abc", userId: 7 });
   assert.throws(() => parseReminderWorkflowPayload({ reminderId: "rem_abc", userId: 0 }));
   assert.throws(() => parseJobWorkflowPayload({ jobId: "other", userId: 7 }));
 });
