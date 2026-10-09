@@ -1366,7 +1366,9 @@ export type AttentionEntityKind =
   | "relationship"
   | "project_state"
   | "tinyfish_research_run"
-  | "tinyfish_monitor";
+  | "tinyfish_monitor"
+  | "lead_campaign"
+  | "lead_candidate";
 export type AttentionCollection =
   | "observations"
   | "open-loops"
@@ -1378,7 +1380,9 @@ export type AttentionCollection =
   | "relationships"
   | "project-states"
   | "tinyfish-research-runs"
-  | "tinyfish-monitors";
+  | "tinyfish-monitors"
+  | "lead-campaigns"
+  | "lead-candidates";
 export type AttentionMetadata = Record<string, string | number | boolean | null>;
 
 export interface ObservationRecord {
@@ -1467,7 +1471,22 @@ export interface TinyFishMonitorRecord {
   status: "active" | "paused" | "failed" | "deleted"; lastRunId?: string; lastRunAt?: number; lastSummary?: string; lastError?: string;
   snapshotHash?: string; runHistory: TinyFishMonitorRunRecord[]; createdAt: number; updatedAt: number;
 }
-export type AttentionRecord = ObservationRecord | OpenLoopRecord | AttentionCandidateRecord | StandingOrderRecord | AutonomyWatchRecord | AutonomyProfileRecord | DeliveryPreferenceRecord | RelationshipRecord | ProjectStateRecord | TinyFishResearchRunRecord | TinyFishMonitorRecord;
+export interface LeadCampaignRecord {
+  id: string; userId: number; idempotencyKey: string; title: string; objective: string;
+  idealCustomerProfile: string; geography: string; targetCount: number; maxTregSpendUsd: number;
+  missionId?: string; seedQueries: string[]; tregSpentUsd: number; tregReservedUsd: number;
+  finalizedAt?: number; createdAt: number; updatedAt: number;
+}
+export interface LeadCampaignCandidateRecord {
+  id: string; userId: number; campaignId: string; dedupeKey: string; companyName: string;
+  domain?: string; website?: string; personName?: string; jobTitle?: string; workEmail?: string; linkedinUrl?: string;
+  sourceUrls: string[]; evidenceSummary: string;
+  qualificationStatus: "review" | "qualified" | "rejected";
+  qualificationReason?: string; enrichmentStatus: "not_started" | "enriched" | "no_match" | "skipped";
+  enrichmentSource?: string; enrichmentFields: string[]; nextAction?: string; followUpAt?: number;
+  updatedAt: number; createdAt: number;
+}
+export type AttentionRecord = ObservationRecord | OpenLoopRecord | AttentionCandidateRecord | StandingOrderRecord | AutonomyWatchRecord | AutonomyProfileRecord | DeliveryPreferenceRecord | RelationshipRecord | ProjectStateRecord | TinyFishResearchRunRecord | TinyFishMonitorRecord | LeadCampaignRecord | LeadCampaignCandidateRecord;
 export interface AttentionListOptions { query?: string; status?: string; limit?: number; }
 
 export interface ApprovalRecord {
@@ -1782,6 +1801,7 @@ interface Backend {
   saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord): Promise<void>;
   clearDaytonaWorkspace(userId: number): Promise<void>;
   listSessionOwnerIds(limit?: number): Promise<number[]>;
+  listJobOwnerIds(limit?: number): Promise<number[]>;
   getTasks(userId: number): Promise<TaskRecord[]>;
   getTask(userId: number, id: string): Promise<TaskRecord | undefined>;
   /** Small, per-task cancellation signal for active workers. */
@@ -3047,6 +3067,20 @@ class RedisBackend implements Backend {
       cursor = String(next);
       for (const key of keys) {
         const match = String(key).match(/^chuck:session:(\d+)$/);
+        if (match) owners.add(Number(match[1]));
+        if (owners.size >= limit) break;
+      }
+    } while (cursor !== "0" && owners.size < limit);
+    return [...owners].sort((a, b) => a - b).slice(0, limit);
+  }
+  async listJobOwnerIds(limit = 1000): Promise<number[]> {
+    const owners = new Set<number>();
+    let cursor = "0";
+    do {
+      const [next, keys] = await this.r.scan(cursor, "MATCH", "chuck:jobs:*", "COUNT", Math.min(200, Math.max(1, limit)));
+      cursor = String(next);
+      for (const key of keys) {
+        const match = String(key).match(/^chuck:jobs:(\d+)$/);
         if (match) owners.add(Number(match[1]));
         if (owners.size >= limit) break;
       }
@@ -4362,6 +4396,7 @@ class MemoryBackend implements Backend {
   async saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord) { this.daytona.set(userId, workspace); }
   async clearDaytonaWorkspace(userId: number) { this.daytona.delete(userId); }
   async listSessionOwnerIds(limit = 1000) { return [...new Set([...this.sessions.keys(), ...this.daytona.keys()])].filter((id) => id >= 0).sort((a, b) => a - b).slice(0, limit); }
+  async listJobOwnerIds(limit = 1000) { return [...this.jobs.keys()].filter((id) => id >= 0).sort((a, b) => a - b).slice(0, limit); }
   async getTasks(userId: number) { return this.tasks.get(userId) ?? []; }
   async getTask(userId: number, id: string) { return (this.tasks.get(userId) ?? []).find((task) => task.id === id); }
   async isTaskCancellationRequested(userId: number, id: string) { return this.taskCancellationRequests.has(`${userId}:${id}`); }
@@ -5052,17 +5087,42 @@ function normalizeAutonomyRun(value: unknown, uid: number): AutonomousRunRecord 
   };
 }
 
+function normalizePulseEvidence(value: unknown): JobOccurrenceRecord["pulseEvidence"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const states = new Set(["completed", "waiting", "blocked", "failed", "skipped"]);
+  const deliveries = new Set(["dashboard", "external", "suppressed", "none"]);
+  if (!states.has(String(input.state)) || !deliveries.has(String(input.delivery)) || typeof input.handled !== "boolean" || typeof input.approvalRequired !== "boolean") return undefined;
+  const count = (key: string): number => {
+    const value = input[key];
+    return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(100, Math.floor(value))) : 0;
+  };
+  return {
+    state: input.state as NonNullable<JobOccurrenceRecord["pulseEvidence"]>["state"],
+    dueWatches: count("dueWatches"),
+    watchesReconciled: count("watchesReconciled"),
+    pendingObservations: count("pendingObservations"),
+    pendingCandidates: count("pendingCandidates"),
+    handled: input.handled,
+    delegated: count("delegated"),
+    approvalRequired: input.approvalRequired,
+    delivery: input.delivery as NonNullable<JobOccurrenceRecord["pulseEvidence"]>["delivery"],
+  };
+}
+
 function normalizeJobOccurrence(value: unknown, uid: number): JobOccurrenceRecord | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const input = value as Record<string, unknown>;
   if (input.userId !== uid || typeof input.id !== "string" || typeof input.jobId !== "string" || typeof input.occurrenceId !== "string") return undefined;
   if (!AUTONOMY_MODES.includes(input.mode as AutonomyMode) || !AUTONOMY_STATUSES.includes(input.status as typeof AUTONOMY_STATUSES[number])) return undefined;
+  const pulseEvidence = normalizePulseEvidence(input.pulseEvidence);
   return {
     id: input.id.slice(0, 160), userId: uid, jobId: input.jobId.slice(0, 160), occurrenceId: input.occurrenceId.slice(0, 240),
     status: input.status as JobOccurrenceRecord["status"], mode: input.mode as AutonomyMode,
     idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey.slice(0, 240) : `${input.jobId}:${input.occurrenceId}`,
     ...(normalizeContextSnapshot(input.context) ? { context: normalizeContextSnapshot(input.context) } : {}),
     ...(typeof input.result === "string" ? { result: input.result.slice(0, 8_000) } : {}),
+    ...(pulseEvidence ? { pulseEvidence } : {}),
     ...(typeof input.nextAction === "string" ? { nextAction: input.nextAction.slice(0, 1_000) } : {}),
     ...(typeof input.waitReason === "string" ? { waitReason: input.waitReason.slice(0, 1_000) } : {}),
     ...(typeof input.error === "string" ? { error: input.error.slice(0, 1_000) } : {}),
@@ -6752,6 +6812,10 @@ export async function clearDaytonaWorkspace(uid: number): Promise<void> {
 
 export async function listSessionOwnerIds(limit = 1000): Promise<number[]> {
   return backend.listSessionOwnerIds(Math.max(1, Math.min(10_000, Math.floor(limit))));
+}
+
+export async function listJobOwnerIds(limit = 1000): Promise<number[]> {
+  return backend.listJobOwnerIds(Math.max(1, Math.min(10_000, Math.floor(limit))));
 }
 
 function normalizeTask(task: TaskRecord): TaskRecord {
@@ -9175,10 +9239,12 @@ const attentionCollections: Record<AttentionEntityKind, AttentionCollection> = {
   observation: "observations", open_loop: "open-loops", attention_candidate: "attention-candidates",
   standing_order: "standing-orders", autonomy_watch: "autonomy-watches", autonomy_profile: "autonomy-profiles", delivery_preference: "delivery-preferences",
   relationship: "relationships", project_state: "project-states", tinyfish_research_run: "tinyfish-research-runs", tinyfish_monitor: "tinyfish-monitors",
+  lead_campaign: "lead-campaigns", lead_candidate: "lead-candidates",
 };
 const attentionPrefixes: Record<AttentionEntityKind, string> = {
   observation: "obs", open_loop: "loop", attention_candidate: "cand", standing_order: "order",
   autonomy_watch: "watch", autonomy_profile: "profile", delivery_preference: "pref", relationship: "rel", project_state: "proj", tinyfish_research_run: "tf_run", tinyfish_monitor: "tf_monitor",
+  lead_campaign: "lc", lead_candidate: "lcand",
 };
 const channelProviders: ChannelProvider[] = ["telegram", "slack", "whatsapp", "sendblue", "sms", "x", "xchat", "voice", "cli", "webhook"];
 
@@ -9326,6 +9392,44 @@ function attentionRecord(collection: AttentionCollection, raw: Record<string, un
         return [{ id, occurredAt: attentionTimestamp(run.occurredAt, "run.occurredAt", base.createdAt)!, status: attentionStatus(run.status, ["changed", "unchanged", "failed"], "unchanged") as TinyFishMonitorRunRecord["status"], summary: attentionText(run.summary, "run.summary", 500, true)! }];
       }) : [],
     };
+    case "lead-campaigns": return {
+      ...base,
+      idempotencyKey: attentionText(raw.idempotencyKey, "idempotencyKey", 240, true)!,
+      title: attentionText(raw.title, "title", 200, true)!,
+      objective: attentionText(raw.objective, "objective", 3000, true)!,
+      idealCustomerProfile: attentionText(raw.idealCustomerProfile, "idealCustomerProfile", 2000, true)!,
+      geography: attentionText(raw.geography, "geography", 300, true)!,
+      targetCount: Math.round(attentionNumber(raw.targetCount, "targetCount", 1, 1, 500)),
+      maxTregSpendUsd: attentionNumber(raw.maxTregSpendUsd, "maxTregSpendUsd", 0, 0, 1000),
+      missionId: attentionText(raw.missionId, "missionId", 160),
+      seedQueries: attentionArray(raw.seedQueries, "seedQueries", 100) ?? [],
+      tregSpentUsd: attentionNumber(raw.tregSpentUsd, "tregSpentUsd", 0, 0, 1_000_000),
+      tregReservedUsd: attentionNumber(raw.tregReservedUsd, "tregReservedUsd", 0, 0, 1_000_000),
+      finalizedAt: attentionTimestamp(raw.finalizedAt, "finalizedAt"),
+    } as LeadCampaignRecord;
+    case "lead-candidates": {
+      const sourceUrls = Array.isArray(raw.sourceUrls) ? raw.sourceUrls.slice(0, 10).flatMap((item) => {
+        if (typeof item !== "string" || item.length > 2000) return [];
+        try { const url = new URL(item); return url.protocol === "https:" ? [url.toString()] : []; } catch { return []; }
+      }) : [];
+      if (sourceUrls.length === 0) throw new Error("At least one HTTPS source URL is required");
+      return {
+        ...base,
+        campaignId: attentionText(raw.campaignId, "campaignId", 160, true)!,
+        dedupeKey: attentionText(raw.dedupeKey, "dedupeKey", 500, true)!,
+        companyName: attentionText(raw.companyName, "companyName", 240, true)!,
+        domain: attentionText(raw.domain, "domain", 253), website: attentionText(raw.website, "website", 2000),
+        personName: attentionText(raw.personName, "personName", 240), jobTitle: attentionText(raw.jobTitle, "jobTitle", 240),
+        workEmail: attentionText(raw.workEmail, "workEmail", 320), linkedinUrl: attentionText(raw.linkedinUrl, "linkedinUrl", 2000),
+        sourceUrls, evidenceSummary: attentionText(raw.evidenceSummary, "evidenceSummary", 2000, true)!,
+        qualificationStatus: attentionStatus(raw.qualificationStatus, ["review", "qualified", "rejected"], "review") as LeadCampaignCandidateRecord["qualificationStatus"],
+        qualificationReason: attentionText(raw.qualificationReason, "qualificationReason", 1000),
+        enrichmentStatus: attentionStatus(raw.enrichmentStatus, ["not_started", "enriched", "no_match", "skipped"], "not_started") as LeadCampaignCandidateRecord["enrichmentStatus"],
+        enrichmentSource: attentionText(raw.enrichmentSource, "enrichmentSource", 300),
+        enrichmentFields: attentionArray(raw.enrichmentFields, "enrichmentFields", 30) ?? [],
+        nextAction: attentionText(raw.nextAction, "nextAction", 1000), followUpAt: attentionTimestamp(raw.followUpAt, "followUpAt"),
+      } as LeadCampaignCandidateRecord;
+    }
   }
 }
 
@@ -9390,6 +9494,226 @@ export async function updateAttentionRecord(userId: number, kind: AttentionEntit
     return normalized;
   });
   return result;
+}
+
+export async function listLeadCampaigns(userId: number): Promise<LeadCampaignRecord[]> {
+  const collection = collectionFor("lead_campaign");
+  return (await backend.getAttentionRecords(userId, collection))
+    .map((item) => safeAttentionRecord(collection, item))
+    .filter((item): item is LeadCampaignRecord => Boolean(item && "idempotencyKey" in item && item.userId === userId))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export async function getLeadCampaign(userId: number, id: string): Promise<LeadCampaignRecord | undefined> {
+  return (await listLeadCampaigns(userId)).find((item) => item.id === id);
+}
+
+function withLeadCampaignMutation<T>(userId: number, campaignId: string, work: () => Promise<T>): Promise<T> {
+  const key = `lead-campaign:${userId}:${campaignId}`;
+  const token = randomUUID();
+  return withDistributedLease({
+    acquire: async () => backend.acquireKeyLock(key, token, 60),
+    renew: async () => backend.renewKeyLock(key, token, 60),
+    release: async () => backend.releaseKeyLock(key, token),
+  }, work, {
+    acquisitionAttempts: 40,
+    retryDelayMs: 25,
+    renewalIntervalMs: 15_000,
+    busyMessage: "Lead campaign is being updated concurrently; retry shortly.",
+    lostMessage: "Lead campaign update lost its coordination lease; inspect the saved campaign before retrying.",
+  });
+}
+
+export async function createLeadCampaign(userId: number, input: Omit<LeadCampaignRecord, "id" | "userId" | "createdAt" | "updatedAt">): Promise<LeadCampaignRecord> {
+  const collection = collectionFor("lead_campaign");
+  const now = Date.now();
+  const raw = { ...input, id: `${attentionPrefixes.lead_campaign}_${randomUUID()}`, userId, createdAt: now, updatedAt: now };
+  const created = attentionRecord(collection, raw) as LeadCampaignRecord;
+  let result = created;
+  await backend.mutateAttentionRecords(userId, collection, (records) => {
+    const normalized = records.map((item) => safeAttentionRecord(collection, item)).filter((item): item is LeadCampaignRecord => Boolean(item && "idempotencyKey" in item && item.userId === userId));
+    const existing = normalized.find((item) => item.idempotencyKey === created.idempotencyKey);
+    if (existing) {
+      if (existing.title !== created.title || existing.objective !== created.objective || existing.idealCustomerProfile !== created.idealCustomerProfile || existing.geography !== created.geography || existing.targetCount !== created.targetCount || existing.maxTregSpendUsd !== created.maxTregSpendUsd || JSON.stringify(existing.seedQueries) !== JSON.stringify(created.seedQueries)) {
+        throw new Error("This campaign idempotency key was already used with different inputs.");
+      }
+      result = existing;
+      return normalized;
+    }
+    if (normalized.length >= 200) throw new Error("Campaign history reached its 200-record limit; campaign archival is not currently available.");
+    return [...normalized, created];
+  });
+  return result;
+}
+
+export async function reserveLeadCampaignTregSpend(userId: number, missionId: string, requestedUsd: number): Promise<{ campaignId: string; reservedUsd: number } | undefined> {
+  if (!Number.isFinite(requestedUsd) || requestedUsd <= 0) throw new Error("A positive Treg campaign spend reservation is required.");
+  const collection = collectionFor("lead_campaign");
+  let reservation: { campaignId: string; reservedUsd: number } | undefined;
+  await backend.mutateAttentionRecords(userId, collection, (records) => {
+    const normalized = records.map((item) => safeAttentionRecord(collection, item)).filter((item): item is LeadCampaignRecord => Boolean(item && "idempotencyKey" in item && item.userId === userId));
+    const index = normalized.findIndex((item) => item.missionId === missionId);
+    if (index < 0) return normalized;
+    const campaign = normalized[index];
+    const remaining = Math.max(0, campaign.maxTregSpendUsd - campaign.tregSpentUsd - campaign.tregReservedUsd);
+    const reservedUsd = Number(Math.min(remaining, requestedUsd).toFixed(6));
+    if (reservedUsd <= 0) throw new Error("This lead campaign has exhausted its Treg enrichment budget.");
+    normalized[index] = attentionRecord(collection, { ...campaign, tregReservedUsd: campaign.tregReservedUsd + reservedUsd, updatedAt: Date.now() }) as LeadCampaignRecord;
+    reservation = { campaignId: campaign.id, reservedUsd };
+    return normalized;
+  });
+  return reservation;
+}
+
+export async function settleLeadCampaignTregSpend(userId: number, campaignId: string, reservedUsd: number, actualUsd: number): Promise<LeadCampaignRecord | undefined> {
+  if (!Number.isFinite(reservedUsd) || reservedUsd < 0 || !Number.isFinite(actualUsd) || actualUsd < 0) throw new Error("Invalid Treg campaign settlement.");
+  const collection = collectionFor("lead_campaign");
+  let result: LeadCampaignRecord | undefined;
+  await backend.mutateAttentionRecords(userId, collection, (records) => {
+    const normalized = records.map((item) => safeAttentionRecord(collection, item)).filter((item): item is LeadCampaignRecord => Boolean(item && "idempotencyKey" in item && item.userId === userId));
+    const index = normalized.findIndex((item) => item.id === campaignId);
+    if (index < 0) return normalized;
+    const campaign = normalized[index];
+    result = attentionRecord(collection, { ...campaign, tregReservedUsd: Math.max(0, campaign.tregReservedUsd - reservedUsd), tregSpentUsd: Number((campaign.tregSpentUsd + actualUsd).toFixed(6)), updatedAt: Date.now() }) as LeadCampaignRecord;
+    normalized[index] = result;
+    return normalized;
+  });
+  return result;
+}
+
+export async function finalizeLeadCampaign(userId: number, campaignId: string, missionId: string): Promise<{ campaign: LeadCampaignRecord; candidateCount: number; qualifiedCount: number; reviewCount: number; rejectedCount: number; shortfall: number; evidenceHash: string } | undefined> {
+  return withLeadCampaignMutation(userId, campaignId, async () => {
+    const campaign = await getLeadCampaign(userId, campaignId);
+    if (!campaign || campaign.missionId !== missionId) return undefined;
+    const collection = collectionFor("lead_candidate");
+    const candidates = (await backend.getAttentionRecords(userId, collection))
+      .map((item) => safeAttentionRecord(collection, item))
+      .filter((item): item is LeadCampaignCandidateRecord => Boolean(item && "campaignId" in item && item.userId === userId && item.campaignId === campaignId));
+    const counts = {
+      candidateCount: candidates.length,
+      qualifiedCount: candidates.filter((item) => item.qualificationStatus === "qualified").length,
+      reviewCount: candidates.filter((item) => item.qualificationStatus === "review").length,
+      rejectedCount: candidates.filter((item) => item.qualificationStatus === "rejected").length,
+      shortfall: Math.max(0, campaign.targetCount - candidates.length),
+      evidenceHash: createHash("sha256").update(candidates.map((item) => `${item.id}:${item.dedupeKey}:${item.sourceUrls.join(",")}`).sort().join("\n")).digest("hex"),
+    };
+    const finalized = await updateLeadCampaign(userId, campaignId, { finalizedAt: campaign.finalizedAt ?? Date.now() });
+    if (!finalized) return undefined;
+    return { campaign: finalized, ...counts };
+  });
+}
+
+export async function updateLeadCampaign(userId: number, id: string, patch: Partial<Pick<LeadCampaignRecord, "missionId" | "seedQueries" | "finalizedAt">>): Promise<LeadCampaignRecord | undefined> {
+  const collection = collectionFor("lead_campaign");
+  let result: LeadCampaignRecord | undefined;
+  await backend.mutateAttentionRecords(userId, collection, (records) => {
+    const normalized = records.map((item) => safeAttentionRecord(collection, item)).filter((item): item is LeadCampaignRecord => Boolean(item && "idempotencyKey" in item && item.userId === userId));
+    const index = normalized.findIndex((item) => item.id === id);
+    if (index < 0) return normalized;
+    result = attentionRecord(collection, { ...normalized[index], ...patch, id, userId, createdAt: normalized[index].createdAt, updatedAt: Date.now() }) as LeadCampaignRecord;
+    normalized[index] = result;
+    return normalized;
+  });
+  return result;
+}
+
+export async function listLeadCampaignCandidates(userId: number, campaignId: string, options: { limit?: number; offset?: number; qualificationStatus?: LeadCampaignCandidateRecord["qualificationStatus"] } = {}): Promise<LeadCampaignCandidateRecord[]> {
+  const collection = collectionFor("lead_candidate");
+  const records = (await backend.getAttentionRecords(userId, collection))
+    .map((item) => safeAttentionRecord(collection, item))
+    .filter((item): item is LeadCampaignCandidateRecord => Boolean(item && "campaignId" in item && item.userId === userId && item.campaignId === campaignId))
+    .filter((item) => !options.qualificationStatus || item.qualificationStatus === options.qualificationStatus)
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+  const offset = Math.max(0, Math.floor(options.offset ?? 0));
+  const limit = Math.max(1, Math.min(100, Math.floor(options.limit ?? 50)));
+  return records.slice(offset, offset + limit);
+}
+
+export async function countLeadCampaignCandidates(userId: number, campaignId: string): Promise<{ total: number; qualified: number; review: number; rejected: number }> {
+  const collection = collectionFor("lead_candidate");
+  const records = (await backend.getAttentionRecords(userId, collection))
+    .map((item) => safeAttentionRecord(collection, item))
+    .filter((item): item is LeadCampaignCandidateRecord => Boolean(item && "campaignId" in item && item.userId === userId && item.campaignId === campaignId));
+  return {
+    total: records.length,
+    qualified: records.filter((item) => item.qualificationStatus === "qualified").length,
+    review: records.filter((item) => item.qualificationStatus === "review").length,
+    rejected: records.filter((item) => item.qualificationStatus === "rejected").length,
+  };
+}
+
+export async function upsertLeadCampaignCandidates(userId: number, campaignId: string, inputs: Array<Omit<LeadCampaignCandidateRecord, "id" | "userId" | "campaignId" | "createdAt" | "updatedAt">>): Promise<{ inserted: number; duplicates: number; candidates: LeadCampaignCandidateRecord[] }> {
+  if (!Array.isArray(inputs) || inputs.length < 1 || inputs.length > 50) throw new Error("Candidate batches must contain 1-50 leads.");
+  return withLeadCampaignMutation(userId, campaignId, async () => {
+    const campaign = await getLeadCampaign(userId, campaignId);
+    if (!campaign) throw new Error("Lead campaign not found or not owned by you");
+    if (campaign.finalizedAt) throw new Error("This lead campaign is finalized and its candidate set is read-only.");
+    const collection = collectionFor("lead_candidate");
+    const prepared = inputs.map((input) => attentionRecord(collection, {
+      ...input, id: `${attentionPrefixes.lead_candidate}_${randomUUID()}`, userId, campaignId,
+      createdAt: Date.now(), updatedAt: Date.now(),
+    }) as LeadCampaignCandidateRecord);
+    const byInput: LeadCampaignCandidateRecord[] = [];
+    let inserted = 0;
+    let duplicates = 0;
+    await backend.mutateAttentionRecords(userId, collection, (records) => {
+      const normalized = records.map((item) => safeAttentionRecord(collection, item)).filter((item): item is LeadCampaignCandidateRecord => Boolean(item && "campaignId" in item && item.userId === userId));
+      let campaignCount = normalized.filter((item) => item.campaignId === campaignId).length;
+      const next = [...normalized];
+      for (const candidate of prepared) {
+        const index = next.findIndex((item) => item.campaignId === campaignId && item.dedupeKey === candidate.dedupeKey);
+        if (index >= 0) {
+          const prior = next[index];
+          const mergedSources = [...new Set([...prior.sourceUrls, ...candidate.sourceUrls])].slice(0, 10);
+          const updated = attentionRecord(collection, {
+            ...prior,
+            ...(candidate.domain ? { domain: candidate.domain } : {}),
+            ...(candidate.website ? { website: candidate.website } : {}),
+            ...(candidate.personName ? { personName: candidate.personName } : {}),
+            ...(candidate.jobTitle ? { jobTitle: candidate.jobTitle } : {}),
+            ...(candidate.workEmail ? { workEmail: candidate.workEmail } : {}),
+            ...(candidate.linkedinUrl ? { linkedinUrl: candidate.linkedinUrl } : {}),
+            sourceUrls: mergedSources,
+            evidenceSummary: candidate.evidenceSummary,
+            qualificationStatus: prior.qualificationStatus,
+            ...(prior.qualificationReason ? { qualificationReason: prior.qualificationReason } : candidate.qualificationReason ? { qualificationReason: candidate.qualificationReason } : {}),
+            updatedAt: Date.now(),
+          }) as LeadCampaignCandidateRecord;
+          next[index] = updated;
+          byInput.push(updated);
+          duplicates += 1;
+          continue;
+        }
+        if (campaignCount >= campaign.targetCount) throw new Error(`Campaign already contains its ${campaign.targetCount}-lead target.`);
+        if (next.length >= 2000) throw new Error("Owner lead-candidate storage is full; campaign archival/export controls are not currently available.");
+        next.push(candidate);
+        byInput.push(candidate);
+        campaignCount += 1;
+        inserted += 1;
+      }
+      return next;
+    });
+    return { inserted, duplicates, candidates: byInput };
+  });
+}
+
+export async function updateLeadCampaignCandidate(userId: number, campaignId: string, candidateId: string, patch: Partial<Pick<LeadCampaignCandidateRecord, "qualificationStatus" | "qualificationReason" | "enrichmentStatus" | "enrichmentSource" | "enrichmentFields" | "nextAction" | "followUpAt" | "workEmail" | "personName" | "jobTitle" | "linkedinUrl" | "evidenceSummary" | "sourceUrls">>): Promise<LeadCampaignCandidateRecord | undefined> {
+  return withLeadCampaignMutation(userId, campaignId, async () => {
+    const campaign = await getLeadCampaign(userId, campaignId);
+    if (!campaign) throw new Error("Lead campaign not found or not owned by you.");
+    if (campaign.finalizedAt) throw new Error("This lead campaign is finalized and its candidate set is read-only.");
+    const collection = collectionFor("lead_candidate");
+    let result: LeadCampaignCandidateRecord | undefined;
+    await backend.mutateAttentionRecords(userId, collection, (records) => {
+      const normalized = records.map((item) => safeAttentionRecord(collection, item)).filter((item): item is LeadCampaignCandidateRecord => Boolean(item && "campaignId" in item && item.userId === userId));
+      const index = normalized.findIndex((item) => item.id === candidateId && item.campaignId === campaignId);
+      if (index < 0) return normalized;
+      result = attentionRecord(collection, { ...normalized[index], ...patch, id: candidateId, campaignId, userId, createdAt: normalized[index].createdAt, updatedAt: Date.now() }) as LeadCampaignCandidateRecord;
+      normalized[index] = result;
+      return normalized;
+    });
+    return result;
+  });
 }
 
 export async function addHistorySummary(uid: number, summary: string): Promise<void> {

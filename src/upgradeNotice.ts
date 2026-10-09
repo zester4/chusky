@@ -35,7 +35,7 @@ export const AGENT_UPGRADE_PRESETS = {
   attention: [
     "Attention Pulse records owner-private change, failure, and recovery observations plus verified missing-capability suggestions, deduplicates replays, and surfaces them as durable events.",
     "Pulse status reports current, scheduled, stale, failed, and never-checked coverage for explicitly configured watches; it does not claim to monitor every connected app.",
-    "New observations stay pending until confirmed delivery, and a deterministic digest prevents NO_ACTION from hiding an update while existing approval and personal/business boundaries remain.",
+    "New observations stay pending until confirmed delivery, and each durable Pulse occurrence records a bounded execution receipt so the dashboard and SDK can show checks, candidates, handling, delegation, approval waits, and delivery without exposing provider payloads.",
   ],
   missions: [
     "Added durable autonomous missions for concrete outcomes: dependency-aware steps, bounded budgets, checkpoints, retries, restart-safe execution, server-side closeout, and live provider outcome verification.",
@@ -107,6 +107,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "First-seen signal identities are hashed and persisted per owner/watch, so repeated provider results are suppressed and new signals become private durable observations.",
     "Checks run only when the owner enables the Attention Pulse, require Treg configuration, obey existing spend controls, and never contact leads or write to connected apps.",
   ],
+  leadCampaigns: [
+    "Owners can start an idempotent, multi-day lead campaign that researches, deduplicates, qualifies, and tracks source-linked candidates in private durable state, with an honest shortfall report and verifiable closeout.",
+    "Discovery uses supplied seeds and available read-only research first; optional Treg enrichment is limited to qualified candidates by an atomic campaign spend allowance and records provider receipts.",
+    "A campaign prepares an internal tracker and next actions but does not contact prospects or write to an external CRM; those follow-ups remain a separate explicit action with the existing approval policy.",
+  ],
   linkAgentWallet: [
     "Added an owner-controlled Stripe Link Agent Wallet with PKCE OAuth, encrypted server-side token storage, bounded wallet metadata, Link Pay Token steering, Shared Payment Token MPP, and UCP catalog and checkout support.",
     "Purchase requests carry the exact merchant, amount, currency, checkout binding, and owner-visible context to Link, which owns the approval notification and approval decision before any payment credential is released.",
@@ -141,6 +146,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Added E2B browser primitives for fresh observation, bounded semantic action, schema-bounded extraction, ordered model-driven execution with a per-step trace, desktop fallback, clipboard, dialogs, diagnostics, and PDF export.",
     "E2B now combines accessibility and form controls with bounded screenshot evidence, deterministic visual-target ranking, stale-observation recovery guidance, durable pause/resume, sandbox forks, and owner-scoped browser-session concurrency limits.",
     "The internal E2B runtime contract records structured browser evidence and event traces for dynamic pages, popups, console errors, failed requests, and verified outcomes; business completion still requires explicit verification or a trusted site receipt.",
+  ],
+  browserAgentReliability: [
+    "Bounded E2B agent runs now enforce independent step, action, wall-clock, and no-progress limits so repeated browser calls stop instead of running away.",
+    "Agent steps can declare URL, title, text, field, checked, selected, or visible postconditions, and completionAssertions prove the final business state; required checks fail closed and verified traces retain bounded diagnostic evidence.",
+    "Challenges stop the run for owner handoff, stale or ambiguous failures return a fresh observation for replanning, and generic repeated no-progress actions are blocked without persisting action values.",
   ],
   browserLiveView: [
     "Added owner-only live viewing for the retained E2B headed Chromium browser through a short-lived noVNC stream, without introducing a second browser backend.",

@@ -144,6 +144,16 @@ test("TinyFish web tools expose bounded search and public page fetch schemas", (
   assert.throws(() => validateNativeToolArguments("CHUCK_TINYFISH_FETCH", { urls: ["https://example.com"], format: "text" }), /unsupported value/i);
 });
 
+test("lead campaign exposes bounded durable controls and source-required lead records", () => {
+  const names = new Set(chuckTools.map((tool) => tool.function.name));
+  assert.equal(names.has("CHUCK_LEAD_CAMPAIGN"), true);
+  validateNativeToolArguments("CHUCK_LEAD_CAMPAIGN", { action: "start", title: "Prospects", objective: "Find candidates", idealCustomerProfile: "B2B SaaS", geography: "US", targetCount: 100, maxTregSpendUsd: 5 });
+  validateNativeToolArguments("CHUCK_LEAD_CAMPAIGN", { action: "record_candidates", id: "lc_test", candidates: [{ companyName: "Example Co", sourceUrls: ["https://example.com/about"], evidenceSummary: "Source describes its business." }] });
+  assert.throws(() => validateNativeToolArguments("CHUCK_LEAD_CAMPAIGN", { action: "start", title: "Prospects", objective: "Find candidates", idealCustomerProfile: "B2B SaaS", geography: "US", targetCount: 501 }), /targetCount.*at most 500/i);
+  assert.throws(() => validateNativeToolArguments("CHUCK_LEAD_CAMPAIGN", { action: "record_candidates", id: "lc_test", candidates: [{ companyName: "Example Co", evidenceSummary: "No source." }] }), /requires argument: sourceUrls/i);
+  validateNativeToolArguments("CHUCK_TREG_ENRICH_COMPANY", { domain: "example.com", maxSpendUsd: 0.2 });
+});
+
 test("Daytona image transfer exposes owner-scoped import and export without binary model input", () => {
   const tool = chuckTools.find((entry) => entry.function.name === "CHUCK_DAYTONA_IMAGE")!;
   assert.deepEqual(tool.function.parameters.properties.action.enum, ["import", "export"]);

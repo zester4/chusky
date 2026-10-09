@@ -154,6 +154,19 @@ verification, repair, context, and outcome tools/resources. Production autonomy 
 and QStash for continuation delivery; without them, Chusky must fail clearly
 instead of pretending that background work is durable.
 
+### Durable lead campaigns
+
+In a private owner conversation, ask Chusky to find and qualify a specific
+number of leads for a stated customer profile and geography. `CHUCK_LEAD_CAMPAIGN`
+creates one idempotent, resumable mission and owner-scoped candidate tracker.
+It researches from supplied seeds and available read-only sources first,
+requires HTTPS provenance for each saved candidate, deduplicates candidates,
+and reports verified counts and any target shortfall at closeout. Optional Treg
+enrichment is reserved for qualified candidates and bounded by the campaign's
+explicit spend allowance. It does not send outreach or write to an external CRM;
+those are separate follow-up actions governed by the existing approval policy.
+Production persistence and continuation require Redis and QStash.
+
 ### Context, departments, and business outcomes
 
 Missions use the owner-scoped context graph to select durable facts,

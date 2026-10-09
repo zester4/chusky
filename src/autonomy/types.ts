@@ -38,6 +38,23 @@ export type AutonomyExecutionStatus =
   | "failed"
   | "cancelled";
 
+/**
+ * Bounded, provider-neutral proof that one Attention Pulse occurrence ran.
+ * This is deliberately a receipt of Chusky work, not a copy of provider
+ * payloads or a claim that an external effect succeeded.
+ */
+export interface AttentionPulseRunEvidence {
+  state: "completed" | "waiting" | "blocked" | "failed" | "skipped";
+  dueWatches: number;
+  watchesReconciled: number;
+  pendingObservations: number;
+  pendingCandidates: number;
+  handled: boolean;
+  delegated: number;
+  approvalRequired: boolean;
+  delivery: "dashboard" | "external" | "suppressed" | "none";
+}
+
 export interface AutonomousRunRecord {
   id: string;
   userId: number;
@@ -71,6 +88,7 @@ export interface JobOccurrenceRecord {
   idempotencyKey: string;
   context?: AutonomyContextSnapshot;
   result?: string;
+  pulseEvidence?: AttentionPulseRunEvidence;
   nextAction?: string;
   waitReason?: string;
   error?: string;

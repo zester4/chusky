@@ -47,9 +47,22 @@ const updated = await client.attentionPulse.update({
 }, { idempotencyKey: "pulse-setup-2026-10-07" });
 ```
 
+`attentionPulse.get()` also returns `health`. Use it to render an honest
+control-plane state: `healthy`, `running`, `never_run`, `stale`, `failed`, or
+`waiting_for_connection`. The `recoveryAction` is a bounded UI hint such as
+`run_now`, `inspect`, or `connect_app`; it does not authorize provider access
+or bypass an approval. The dashboard bell and Chat remain a delivery surface
+for actionable Pulse candidates even when no external channel is connected.
+
 The `authority` values are `observe`, `prepare`, and `execute_reversible`.
 Provider actions still pass through the server's connected-account, ownership,
 approval, and verification controls.
+
+For run-level observability, `client.jobs.occurrences(id)` returns a bounded
+`pulseEvidence` receipt on Attention Pulse occurrences. It records due-watch
+checks, remaining observations/candidates, handling or delegation, approval
+waits, and dashboard/external delivery without exposing provider payloads or
+claiming that an external write succeeded.
 Pass `baseUrl` only when targeting a staging or self-hosted API. Never expose
 `CHUSKY_API_KEY` in browser code, mobile apps, public repositories, or prompts.
 

@@ -63,6 +63,15 @@ Use `CHUCK_BROWSER_NEXT` when the next action is unclear. It proposes bounded
 steps from fresh server-observed state; it never grants approval or executes the
 action by itself.
 
+For a short sequence whose controls and expected outcomes are already grounded,
+use `CHUCK_BROWSER_AGENT` with explicit `expected` assertions. Keep its
+`maxActions` and `maxDurationMs` bounded. The runtime stops on a challenge,
+failed required assertion, timeout, or repeated no-progress action and returns
+an ordered trace; inspect and replan rather than replaying the same step. Add
+`completionAssertions` for the final business outcome. The result is only
+business-verified when `verified: true`; executing all requested steps alone is
+not proof that the requested result happened.
+
 ## 4. Universal form-completion procedure
 
 For a form of any length or layout:

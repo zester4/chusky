@@ -24,7 +24,8 @@ import {
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, getApproval, getAgentRun, setApprovalStatus, updateTask, getHandoffRecord,
   blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, createMission, finalizeMissionIfReady, getMission, listMissions, missionProof, pauseMission, startMission, updateMission, updateMissionControl, waitMission, recordTrustedMissionEvidence, verifyMission, repairMission, missionBudgetPreflight, missingMissionEvidenceRequirements, MissionReplanConflictError,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
-  type AttentionEntityKind, type AutonomyWatchRecord, type DeliveryPreferenceRecord, type ImageAsset, type TinyFishMonitorRecord, type TinyFishResearchRunRecord,
+  countLeadCampaignCandidates, createLeadCampaign, finalizeLeadCampaign, getLeadCampaign, listLeadCampaigns, listLeadCampaignCandidates, reserveLeadCampaignTregSpend, settleLeadCampaignTregSpend, updateLeadCampaign, updateLeadCampaignCandidate, upsertLeadCampaignCandidates,
+  type AttentionEntityKind, type AutonomyWatchRecord, type DeliveryPreferenceRecord, type ImageAsset, type TinyFishMonitorRecord, type TinyFishResearchRunRecord, type LeadCampaignCandidateRecord,
   type TaskStatus, type MissionStatus, type MissionBudget, type MissionWorkSchedule,
   type JobRecord, type ReminderRecord, type ScheduledWorkerBinding, type ReminderDeliveryTarget,
   listPhoneCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
@@ -37,6 +38,7 @@ import { e2bBrowserEngine } from "./lib/e2b/index.js";
 import { E2BBrowserHandoffWaitingError } from "./lib/e2b/errors.js";
 import { browserHandoffWaitingResult } from "./lib/e2b/contracts.js";
 import { isTrustedBrowserUrlObservation } from "./lib/e2b/contracts.js";
+import { browserChallengeStillActive } from "./lib/e2b/handoffStatus.js";
 import { E2B_BROWSER_ACTIONS } from "./lib/e2b/types.js";
 import { transferDaytonaImage, type DaytonaImageTransferInput } from "./daytonaImageTransfer.js";
 import { startTwilioCallForUser } from "./calls/twilio.js";
@@ -71,6 +73,7 @@ import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { planBusinessGapPlaybook } from "./autonomy/playbooks.js";
 import type { BusinessGap } from "./autonomy/gapDetectors.js";
 import { canonicalNativeToolSlug, validateNativeToolArguments } from "./agentTools.js";
+import { isReadOnlyToolSlug } from "./policy.js";
 import { searchDiscoveredToolManifest, type NativeToolBundle } from "./decisions/nativeToolRouter.js";
 import { externalArgumentsHash } from "./autonomy/actions.js";
 import { inspectToolRecovery, preflightToolCall, summarizeIntegrationHealth } from "./toolDiagnostics.js";
@@ -151,6 +154,8 @@ export interface NativeToolRuntime {
   taskId?: string;
   /** The autonomous mission currently executing this bounded slice. */
   missionId?: string;
+  /** Exact dependency-aware step currently executing; used only for trusted evidence attribution. */
+  missionStepId?: string;
   /** True when this slice is the first worker turn after a persisted timer wake. */
   missionTimerResumed?: boolean;
   /** Checkpoint/action pair that created the timer wait, used to reject an exact duplicate wait. */
@@ -305,6 +310,224 @@ function missionStartIdempotencyKey(userId: number, args: Record<string, unknown
   const scope = createHash("sha256").update(`${userId}:${runId}`).digest("hex");
   const fingerprint = createHash("sha256").update(stableJson(intent)).digest("hex");
   return `agent-run:${scope}:${fingerprint}`;
+}
+
+function leadDedupeKey(candidate: { companyName: string; domain?: string; website?: string; personName?: string; workEmail?: string; linkedinUrl?: string }): string {
+  const cleanUrl = (value: string) => {
+    try { const url = new URL(value); url.hash = ""; url.search = ""; return url.toString().replace(/\/$/, "").toLowerCase(); } catch { return value.trim().toLowerCase(); }
+  };
+  if (candidate.workEmail) return `email:${candidate.workEmail.trim().toLowerCase()}`;
+  if (candidate.linkedinUrl) return `linkedin:${cleanUrl(candidate.linkedinUrl)}`;
+  const domain = candidate.domain?.trim().toLowerCase().replace(/^www\./, "").replace(/\.$/, "")
+    || (candidate.website ? (() => { try { return new URL(candidate.website).hostname.toLowerCase().replace(/^www\./, ""); } catch { return ""; } })() : "");
+  if (domain && candidate.personName) return `person:${domain}:${candidate.personName.trim().toLowerCase()}`;
+  if (domain) return `company:${domain}`;
+  return `company:${candidate.companyName.trim().toLowerCase()}:${candidate.personName?.trim().toLowerCase() ?? ""}`;
+}
+
+function leadCampaignTools(runtime: NativeToolRuntime): string[] {
+  const connectedReadTools = (runtime.availableToolCatalog ?? runtime.toolCatalog ?? []).flatMap((tool: any) => {
+    const slug = String(tool?.function?.name ?? "").trim().toUpperCase();
+    return slug && !/^(?:CHUCK_|COMPOSIO_|MCP_)/.test(slug) && isReadOnlyToolSlug(slug) ? [slug] : [];
+  }).slice(0, 40);
+  return [...new Set([
+    "CHUCK_LEAD_CAMPAIGN", "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE",
+    "CHUCK_TINYFISH_SEARCH", "CHUCK_TINYFISH_FETCH", "COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT",
+    ...connectedReadTools,
+    "CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE",
+    "CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT",
+  ])];
+}
+
+async function startLeadCampaign(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime): Promise<unknown> {
+  const title = missionText(args.title, "title", 200);
+  const objective = missionText(args.objective, "objective", 3000);
+  const idealCustomerProfile = missionText(args.idealCustomerProfile, "idealCustomerProfile", 2000);
+  const geography = missionText(args.geography, "geography", 300);
+  const targetCount = Number(args.targetCount);
+  if (!Number.isInteger(targetCount) || targetCount < 1 || targetCount > 500) throw new Error("targetCount must be from 1 to 500.");
+  const maxTregSpendUsd = args.maxTregSpendUsd === undefined ? config.tregMissionBudgetUsd : Number(args.maxTregSpendUsd);
+  if (!Number.isFinite(maxTregSpendUsd) || maxTregSpendUsd < 0 || maxTregSpendUsd > 1000) throw new Error("maxTregSpendUsd must be from 0 to 1000.");
+  const seedQueries = Array.isArray(args.seedQueries) ? [...new Set(args.seedQueries.map((item) => missionText(item, "seed query", 240)))].slice(0, 100) : [];
+  const explicitIdempotencyKey = optionalIdentifier(args.idempotencyKey, 180);
+  const runScope = runtime.currentRunId?.trim();
+  const fingerprint = createHash("sha256").update(stableJson({ title, objective, idealCustomerProfile, geography, targetCount, maxTregSpendUsd, seedQueries })).digest("hex").slice(0, 48);
+  const idempotencyKey = explicitIdempotencyKey ?? (runScope ? `lead-run:${createHash("sha256").update(`${userId}:${runScope}`).digest("hex").slice(0, 24)}:${fingerprint}` : `lead:${randomUUID()}`);
+  const campaign = await createLeadCampaign(userId, {
+    idempotencyKey, title, objective, idealCustomerProfile, geography, targetCount, maxTregSpendUsd,
+    seedQueries, tregSpentUsd: 0, tregReservedUsd: 0,
+  });
+  const mission = await createMission(userId, {
+    title: `Lead campaign: ${title}`.slice(0, 240),
+    objective: `Run owner-private lead campaign ${campaign.id}. Objective: ${objective}. ICP: ${idealCustomerProfile}. Geography: ${geography}. Target: ${targetCount}. Treg enrichment budget: $${maxTregSpendUsd.toFixed(2)}. Seed terms: ${seedQueries.join("; ") || "none supplied"}.`,
+    definitionOfDone: `Persist a deduplicated, source-linked campaign tracker for ${targetCount} target leads or honestly report the achievable shortfall; qualify candidates against the stated ICP, enrich only the qualified shortlist within the $${maxTregSpendUsd.toFixed(2)} Treg cap, preserve next actions, and record a server-verified campaign snapshot. No outreach or external CRM write is part of this campaign.`,
+    idempotencyKey: `lead-campaign:${campaign.id}`,
+    requiredEvidence: ["kind:before_after"], verificationMode: "strict",
+    steps: [
+      { id: "campaign-intake", title: "Load lead research playbook and confirm campaign scope", objective: `Read lead-intel-pro skill and references needed for ${campaign.id}. Confirm ICP, geography, target, supplied seeds, and no-contact boundary. Use CHUCK_LEAD_CAMPAIGN get to inspect this campaign.`, allowedTools: ["CHUCK_LEAD_CAMPAIGN", "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE"] },
+      { id: "candidate-discovery", title: "Discover and persist source-linked candidates", objective: `Find candidates for campaign ${campaign.id} using owner-provided seeds, eligible connected-app read sources, and low-cost public research first. Use TinyFish/Composio web search where available and exact read-only connected-app actions already present in this private run. Never use a generic write gateway. Deduplicate and persist batches of at most 50 using CHUCK_LEAD_CAMPAIGN record_candidates. Every candidate must have an HTTPS source URL and a concise observed-fact summary. Aim for ${targetCount}; do not invent contacts or intent.`, dependsOn: ["campaign-intake"], allowedTools: leadCampaignTools(runtime).filter((slug) => !slug.startsWith("CHUCK_TREG_") && !["CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"].includes(slug)) },
+      { id: "candidate-qualification", title: "Qualify and deduplicate candidates", objective: `Review persisted candidates in campaign ${campaign.id} against the explicit ICP/geography. Update qualificationStatus and reason; distinguish observed evidence from inference. Keep uncertain rows in review and reject clear mismatches. Qualification means fit, never purchase intent.`, dependsOn: ["candidate-discovery"], allowedTools: ["CHUCK_LEAD_CAMPAIGN", "CHUCK_TINYFISH_FETCH", "COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT"] },
+      { id: "shortlist-enrichment", title: "Enrich only the qualified shortlist within budget", objective: `For qualified candidates only, use the narrow Treg person/company enrichment tools when Treg is configured and useful. Pass campaign mission ID and a maxSpendUsd no greater than the remaining campaign budget on each call; process one paid call at a time. Record returned fields, provider/source, and no-match state. Never enrich rejected/review rows or exceed the campaign cap. If the cap is zero/exhausted or Treg is unavailable, mark enrichment skipped and continue without asking the owner to reconnect unnecessarily.`, dependsOn: ["candidate-qualification"], allowedTools: ["CHUCK_LEAD_CAMPAIGN", "CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE"] },
+      { id: "campaign-tracker", title: "Prepare the internal campaign tracker", objective: `Read campaign ${campaign.id} candidates in bounded pages and prepare a professional spreadsheet artifact with company, contact, qualification, source URLs, enrichment status, and next action. Keep the persisted campaign records as the source of truth. Do not create or modify an external CRM/Sheet/Notion database or send outreach in this run; offer the user an approval-gated connected-app sync as a next action.`, dependsOn: ["shortlist-enrichment"], allowedTools: ["CHUCK_LEAD_CAMPAIGN", "CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"] },
+      { id: "campaign-finalize", title: "Verify and finalize the campaign snapshot", objective: `Call CHUCK_LEAD_CAMPAIGN finalize for campaign ${campaign.id}. The server computes persisted candidate counts, shortfall, and a hash and records trusted mission evidence. Report actual persisted counts, Treg campaign spend, and unresolved gaps; never claim more leads than the store contains.`, dependsOn: ["campaign-tracker"], allowedTools: ["CHUCK_LEAD_CAMPAIGN"] },
+    ],
+    budget: {
+      maxDurationSeconds: 3 * 24 * 60 * 60,
+      maxLifetimeSeconds: 7 * 24 * 60 * 60,
+      maxSteps: 12,
+      maxSlices: Math.min(500, Math.max(20, 20 + Math.ceil(targetCount / 10))),
+      maxToolCalls: Math.min(3000, 60 + targetCount * 4),
+      maxCost: Math.min(1000, 20 + targetCount * 0.1 + maxTregSpendUsd),
+    },
+  });
+  await updateLeadCampaign(userId, campaign.id, { missionId: mission.id });
+  if (mission.status === "queued") {
+    const started = await startMission(userId, mission.id);
+    if (started) {
+      try {
+        const scheduled = await reconcileMissionExecution(userId, started.id, runtime.enqueueMissionTask ?? enqueueTaskWorkflow);
+        return { ...(await getLeadCampaign(userId, campaign.id)), status: scheduled?.status ?? started.status, missionId: mission.id };
+      } catch (error) {
+        await blockMission(userId, started.id, `Lead campaign could not be scheduled: ${error instanceof Error ? error.message : String(error)}`, "Retry this same campaign after the durable workflow service is available.");
+        throw error;
+      }
+    }
+  }
+  if (mission.status === "running") {
+    const scheduled = await reconcileMissionExecution(userId, mission.id, runtime.enqueueMissionTask ?? enqueueTaskWorkflow);
+    return { ...(await getLeadCampaign(userId, campaign.id)), status: scheduled?.status ?? mission.status, missionId: mission.id };
+  }
+  return { ...(await getLeadCampaign(userId, campaign.id)), status: mission.status, missionId: mission.id };
+}
+
+async function leadCampaignTool(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime): Promise<unknown> {
+  const action = missionText(args.action, "action", 40);
+  if (action === "start") return startLeadCampaign(userId, args, runtime);
+  if (action === "list") {
+    if (runtime.missionId) throw new Error("A campaign mission worker may inspect only its own campaign, not the owner's campaign list.");
+    const campaigns = await listLeadCampaigns(userId);
+    const rows = await Promise.all(campaigns.slice(0, args.limit === undefined ? 20 : Number(args.limit)).map(async (campaign) => {
+      const mission = campaign.missionId ? await getMission(userId, campaign.missionId) : undefined;
+      const counts = await countLeadCampaignCandidates(userId, campaign.id);
+      return { ...campaign, status: mission?.status ?? (campaign.missionId ? "missing_mission" : "pending"), ...counts };
+    }));
+    return { campaigns: rows };
+  }
+  const id = missionText(args.id, "id", 160);
+  const campaign = await getLeadCampaign(userId, id);
+  if (!campaign) throw new Error("Lead campaign not found or not owned by you.");
+  if (runtime.missionId && campaign.missionId !== runtime.missionId) throw new Error("A mission worker may access only its own lead campaign.");
+  if (action === "get") {
+    const mission = campaign.missionId ? await getMission(userId, campaign.missionId) : undefined;
+    const counts = await countLeadCampaignCandidates(userId, campaign.id);
+    const candidates = await listLeadCampaignCandidates(userId, campaign.id, {
+      limit: args.limit === undefined ? 50 : Number(args.limit), offset: args.offset === undefined ? 0 : Number(args.offset),
+      qualificationStatus: args.qualificationFilter as LeadCampaignCandidateRecord["qualificationStatus"] | undefined,
+    });
+    return { campaign: { ...campaign, status: mission?.status ?? (campaign.missionId ? "missing_mission" : "pending"), ...counts }, candidates, nextOffset: Number(args.offset ?? 0) + candidates.length < counts.total ? Number(args.offset ?? 0) + candidates.length : undefined };
+  }
+  if (action === "record_candidates") {
+    if (!runtime.missionId || campaign.missionId !== runtime.missionId) throw new Error("Only this campaign's durable mission worker can record candidate batches.");
+    const candidates = args.candidates as Array<Record<string, unknown>>;
+    const prepared = candidates.map((candidate) => {
+      const companyName = missionText(candidate.companyName, "companyName", 240);
+      const domain = optionalText(candidate.domain, 253, "domain")?.toLowerCase().replace(/^www\./, "").replace(/\.$/, "");
+      const website = optionalText(candidate.website, 2000, "website");
+      const personName = optionalText(candidate.personName, 240, "personName");
+      const jobTitle = optionalText(candidate.jobTitle, 240, "jobTitle");
+      const workEmail = optionalText(candidate.workEmail, 320, "workEmail");
+      const linkedinUrl = optionalText(candidate.linkedinUrl, 2000, "linkedinUrl");
+      const sourceUrls = Array.isArray(candidate.sourceUrls) ? candidate.sourceUrls.map((value) => {
+        const url = new URL(missionText(value, "source URL", 2000));
+        if (url.protocol !== "https:" || url.username || url.password) throw new Error("Lead provenance URLs must be credential-free HTTPS links.");
+        return url.toString();
+      }) : [];
+      return {
+        dedupeKey: leadDedupeKey({ companyName, domain, website, personName, workEmail, linkedinUrl }), companyName, domain, website,
+        personName, jobTitle, workEmail, linkedinUrl, sourceUrls,
+        evidenceSummary: missionText(candidate.evidenceSummary, "evidenceSummary", 2000),
+        qualificationStatus: (candidate.qualificationStatus ?? "review") as LeadCampaignCandidateRecord["qualificationStatus"],
+        qualificationReason: optionalText(candidate.qualificationReason, 1000, "qualificationReason"),
+        enrichmentStatus: (candidate.enrichmentStatus ?? "not_started") as LeadCampaignCandidateRecord["enrichmentStatus"],
+        enrichmentSource: optionalText(candidate.enrichmentSource, 300, "enrichmentSource"),
+        enrichmentFields: Array.isArray(candidate.enrichmentFields) ? candidate.enrichmentFields.map((item) => missionText(item, "enrichment field", 120)).slice(0, 30) : [],
+        nextAction: optionalText(candidate.nextAction, 1000, "nextAction"),
+        followUpAt: candidate.followUpAt === undefined ? undefined : Number(candidate.followUpAt),
+      };
+    });
+    for (const candidate of prepared) {
+      if (candidate.qualificationStatus !== "review" && !candidate.qualificationReason) throw new Error("A qualified or rejected lead must include a qualificationReason.");
+      if (candidate.enrichmentStatus === "enriched" && (!candidate.enrichmentSource || candidate.enrichmentFields.length === 0)) throw new Error("Enriched leads must retain their provider/source and returned field names.");
+    }
+    const result = await upsertLeadCampaignCandidates(userId, campaign.id, prepared);
+    return { ...result, contentIsUntrusted: true, persisted: true };
+  }
+  if (action === "update_candidate") {
+    const candidateId = missionText(args.candidateId, "candidateId", 160);
+    const patch: Record<string, unknown> = {};
+    for (const key of ["qualificationStatus", "qualificationReason", "enrichmentStatus", "enrichmentSource", "enrichmentFields", "nextAction", "followUpAt", "workEmail", "personName", "jobTitle", "linkedinUrl", "evidenceSummary", "sourceUrls"] as const) {
+      if (Object.hasOwn(args, key)) patch[key] = args[key];
+    }
+    if (patch.qualificationStatus !== undefined && patch.qualificationStatus !== "review" && !patch.qualificationReason) throw new Error("A qualified or rejected lead must include a qualificationReason.");
+    if (Array.isArray(patch.sourceUrls)) patch.sourceUrls = patch.sourceUrls.map((value) => {
+      const url = new URL(missionText(value, "source URL", 2000));
+      if (url.protocol !== "https:" || url.username || url.password) throw new Error("Lead provenance URLs must be credential-free HTTPS links.");
+      return url.toString();
+    });
+    const updated = await updateLeadCampaignCandidate(userId, campaign.id, candidateId, patch as any);
+    if (!updated) throw new Error("Lead candidate not found in this campaign.");
+    return { candidate: updated, persisted: true };
+  }
+  if (action === "finalize") {
+    if (!runtime.missionId || campaign.missionId !== runtime.missionId) throw new Error("Only this campaign's durable mission worker can finalize its snapshot.");
+    const result = await finalizeLeadCampaign(userId, campaign.id, runtime.missionId);
+    if (!result) throw new Error("Lead campaign could not be finalized.");
+    const summary = `Server snapshot for ${campaign.id}: ${result.candidateCount}/${campaign.targetCount} candidate rows persisted; ${result.qualifiedCount} qualified, ${result.reviewCount} review, ${result.rejectedCount} rejected, shortfall ${result.shortfall}.`;
+    await recordTrustedMissionEvidence(userId, runtime.missionId, [{
+      id: `lead_campaign_${campaign.id}_snapshot`, kind: "before_after", summary, source: "CHUCK_LEAD_CAMPAIGN",
+      ref: `chusky://lead-campaigns/${campaign.id}`, hash: result.evidenceHash, verified: true, verifiedBy: "system",
+    }], runtime.missionStepId);
+    return { ...result, summary, evidenceRecorded: true };
+  }
+  throw new Error("Unsupported lead campaign action.");
+}
+
+function effectiveTregMissionId(args: Record<string, unknown>, runtime: NativeToolRuntime): string | undefined {
+  if (runtime.missionId) return runtime.missionId;
+  return args.missionId ? text(args.missionId, 160) : undefined;
+}
+
+async function withLeadCampaignTregBudget<T>(userId: number, missionId: string | undefined, requestedUsd: number | undefined, runtime: NativeToolRuntime, execute: (reservedUsd: number | undefined) => Promise<T>): Promise<T> {
+  if (!missionId) return execute(undefined);
+  const campaign = (await listLeadCampaigns(userId)).find((item) => item.missionId === missionId);
+  if (!campaign) return execute(undefined);
+  const remainingUsd = Math.max(0, campaign.maxTregSpendUsd - campaign.tregSpentUsd - campaign.tregReservedUsd);
+  const runLimit = runtime.tregMaxSpendUsd === undefined ? remainingUsd : Math.min(remainingUsd, runtime.tregMaxSpendUsd);
+  const requested = requestedUsd === undefined ? runLimit : Math.min(runLimit, requestedUsd);
+  if (requested <= 0) throw new Error("This lead campaign has no remaining Treg enrichment budget; continue with the source data already collected.");
+  const reservation = await reserveLeadCampaignTregSpend(userId, missionId, requested);
+  if (!reservation) return execute(undefined);
+  const seenCallIds = new Set((await listTregReceipts(userId, 200, runtime.organizationId)).filter((receipt) => receipt.missionId === missionId).map((receipt) => receipt.callId));
+  let result: T | undefined;
+  let succeeded = false;
+  try {
+    result = await execute(reservation.reservedUsd);
+    succeeded = true;
+    return result;
+  } finally {
+    const receipts = await listTregReceipts(userId, 200, runtime.organizationId);
+    const receiptSpend = receipts.filter((receipt) => receipt.missionId === missionId && !seenCallIds.has(receipt.callId)).reduce((sum, receipt) => sum + receipt.costUsd, 0);
+    const resultSpend = result && typeof result === "object" && "totalCostUsd" in result && Number.isFinite(Number((result as Record<string, unknown>).totalCostUsd))
+      ? Number((result as Record<string, unknown>).totalCostUsd)
+      : result && typeof result === "object" && "receipt" in result && (result as any).receipt && Number.isFinite(Number((result as any).receipt.costUsd))
+        ? Number((result as any).receipt.costUsd)
+        : 0;
+    const actualSpend = Math.max(receiptSpend, resultSpend);
+    // The provider may have completed a paid request before its response was
+    // lost. Without a receipt, keep the reservation consumed rather than
+    // blindly retrying into an unknown billable effect.
+    await settleLeadCampaignTregSpend(userId, reservation.campaignId, reservation.reservedUsd, !succeeded && actualSpend === 0 ? reservation.reservedUsd : actualSpend);
+  }
 }
 
 function taskCreateIdempotencyId(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime): string | undefined {
@@ -841,12 +1064,12 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
     const pulseJobs = active.filter((job) => job.id === ATTENTION_PULSE_JOB_ID(userId));
     const occurrences = (await listJobOccurrences(userId, ATTENTION_PULSE_JOB_ID(userId), 12)).map((occurrence) => ({
       occurrenceId: occurrence.occurrenceId, status: occurrence.status, startedAt: occurrence.startedAt, completedAt: occurrence.completedAt,
-      error: occurrence.error, nextAction: occurrence.nextAction, result: occurrence.result?.slice(0, 500),
+      error: occurrence.error, nextAction: occurrence.nextAction, result: occurrence.result?.slice(0, 500), pulseEvidence: occurrence.pulseEvidence,
     }));
     const latestOccurrence = occurrences[0];
     const latestActivityAt = latestOccurrence?.completedAt ?? latestOccurrence?.startedAt;
     return {
-      enabled: active.length > 0,
+      enabled: pulseJobs.some((job) => job.status === "active"),
       jobs: pulseJobs,
       health: { lastOccurrence: latestOccurrence, recentFailures: occurrences.filter((item) => item.status === "failed" || item.status === "blocked").length, neverRun: Boolean(pulseJobs[0] && !latestActivityAt), stale: Boolean(pulseJobs[0] && (!latestActivityAt || Date.now() - latestActivityAt > 2 * 60 * 60_000)) },
       occurrences,
@@ -1216,7 +1439,7 @@ async function resumeBrowserHandoff(userId: number, id: string, ownerPrivateRun:
   try { currentOrigin = new URL(currentUrl).origin; } catch { throw new Error("The retained browser returned an invalid URL; the handoff remains unverified"); }
   if (handoff.origin && currentOrigin !== handoff.origin) throw new Error("The retained browser is outside the website origin bound to this handoff");
   const challenge = observed.challenge && typeof observed.challenge === "object" ? observed.challenge as { detected?: unknown } : undefined;
-  if (observed.needsUserInteraction === true || challenge?.detected === true) {
+  if (browserChallengeStillActive(observed)) {
     if (handoff.resolutionState !== "handoff_required") await updateBrowserHandoffResolution(userId, id, "handoff_required");
     return { id, status: "awaiting_verification", needsUserInteraction: true, ...(typeof observed.title === "string" ? { title: observed.title } : {}), next: "The challenge is still present. Complete it in the retained private browser, then resume again." };
   }
@@ -1478,36 +1701,48 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         idempotencyKey: args.idempotencyKey ? text(args.idempotencyKey, 200) : undefined,
       });
     }
-    case "CHUCK_TREG_ENRICH_PERSON": return tregGateway().enrichPerson({
-      userId,
-      name: args.name ? text(args.name, 240) : undefined,
-      domain: args.domain ? text(args.domain, 240) : undefined,
-      company: args.company ? text(args.company, 240) : undefined,
-      linkedinUrl: args.linkedinUrl ? text(args.linkedinUrl, 1000) : undefined,
-      missionId: args.missionId ? text(args.missionId, 160) : runtime.missionId,
-      maxSpendUsd: args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd),
-      organizationId: runtime.organizationId,
-    });
-    case "CHUCK_TREG_ENRICH_COMPANY": return tregGateway().enrichCompany({
-      userId,
-      domain: args.domain ? text(args.domain, 240) : undefined,
-      name: args.name ? text(args.name, 240) : undefined,
-      missionId: args.missionId ? text(args.missionId, 160) : runtime.missionId,
-      organizationId: runtime.organizationId,
-    });
-    case "CHUCK_TREG_RESOLVE": return tregGateway().resolveDataNeed({
-      userId,
-      need: text(args.need, 1000),
-      requiredFields: Array.isArray(args.requiredFields) ? args.requiredFields.map((field) => text(field, 120)) : undefined,
-      maxCalls: runtime.tregMaxCalls === undefined
-        ? args.maxCalls === undefined ? undefined : Number(args.maxCalls)
-        : Math.max(1, Math.min(runtime.tregMaxCalls, args.maxCalls === undefined ? runtime.tregMaxCalls : Number(args.maxCalls))),
-      maxSpendUsd: runtime.tregMaxSpendUsd === undefined
-        ? args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd)
-        : Math.min(runtime.tregMaxSpendUsd, args.maxSpendUsd === undefined ? runtime.tregMaxSpendUsd : Number(args.maxSpendUsd)),
-      missionId: args.missionId ? text(args.missionId, 160) : runtime.missionId,
-      organizationId: runtime.organizationId,
-    });
+    case "CHUCK_TREG_ENRICH_PERSON": {
+      const missionId = effectiveTregMissionId(args, runtime);
+      const requestedSpend = args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd);
+      return withLeadCampaignTregBudget(userId, missionId, requestedSpend, runtime, (reservedUsd) => tregGateway().enrichPerson({
+        userId,
+        name: args.name ? text(args.name, 240) : undefined,
+        domain: args.domain ? text(args.domain, 240) : undefined,
+        company: args.company ? text(args.company, 240) : undefined,
+        linkedinUrl: args.linkedinUrl ? text(args.linkedinUrl, 1000) : undefined,
+        missionId,
+        maxSpendUsd: reservedUsd ?? (runtime.tregMaxSpendUsd === undefined ? requestedSpend : Math.min(runtime.tregMaxSpendUsd, requestedSpend ?? runtime.tregMaxSpendUsd)),
+        organizationId: runtime.organizationId,
+      }));
+    }
+    case "CHUCK_TREG_ENRICH_COMPANY": {
+      const missionId = effectiveTregMissionId(args, runtime);
+      const requestedSpend = args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd);
+      return withLeadCampaignTregBudget(userId, missionId, requestedSpend, runtime, (reservedUsd) => tregGateway().enrichCompany({
+        userId,
+        domain: args.domain ? text(args.domain, 240) : undefined,
+        name: args.name ? text(args.name, 240) : undefined,
+        missionId,
+        maxSpendUsd: reservedUsd ?? (runtime.tregMaxSpendUsd === undefined ? requestedSpend : Math.min(runtime.tregMaxSpendUsd, requestedSpend ?? runtime.tregMaxSpendUsd)),
+        organizationId: runtime.organizationId,
+      }));
+    }
+    case "CHUCK_TREG_RESOLVE": {
+      const missionId = effectiveTregMissionId(args, runtime);
+      const requestedSpend = args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd);
+      return withLeadCampaignTregBudget(userId, missionId, requestedSpend, runtime, (reservedUsd) => tregGateway().resolveDataNeed({
+        userId,
+        need: text(args.need, 1000),
+        requiredFields: Array.isArray(args.requiredFields) ? args.requiredFields.map((field) => text(field, 120)) : undefined,
+        maxCalls: runtime.tregMaxCalls === undefined
+          ? args.maxCalls === undefined ? undefined : Number(args.maxCalls)
+          : Math.max(1, Math.min(runtime.tregMaxCalls, args.maxCalls === undefined ? runtime.tregMaxCalls : Number(args.maxCalls))),
+        maxSpendUsd: reservedUsd ?? (runtime.tregMaxSpendUsd === undefined
+          ? requestedSpend : Math.min(runtime.tregMaxSpendUsd, requestedSpend ?? runtime.tregMaxSpendUsd)),
+        missionId,
+        organizationId: runtime.organizationId,
+      }));
+    }
     case "CHUCK_TREG_BALANCE": return tregGateway().balance(args.orgId ? text(args.orgId, 160) : undefined, runtime.organizationId);
     case "CHUCK_TREG_USAGE": {
       const dayKey = args.dayKey ? text(args.dayKey, 10) : new Date().toISOString().slice(0, 10);
@@ -2243,6 +2478,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     }
     case "CHUCK_OUTCOME_LIST": return listOutcomePackages();
     case "CHUCK_OUTCOME_PLAN": return planOutcome(text(args.slug), args.input && typeof args.input === "object" ? args.input as Record<string, unknown> : {});
+    case "CHUCK_LEAD_CAMPAIGN": return leadCampaignTool(userId, args, runtime);
     case "CHUCK_MISSION_REPLAN": {
       const missionSteps = stripSupervisorOwnedMissionStepTools(args.steps);
       const invalidSteps = validateMissionStepsPayload(missionSteps, { requireNonEmpty: true });
@@ -2502,16 +2738,16 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         includeScreenshot: args.includeScreenshot === true,
         includeForms: args.includeForms !== false,
         includePageContent: args.includePageContent === true,
-      }, { ownerPrivateRun: runtime.ownerPrivateRun }));
+      }, { ownerPrivateRun: runtime.ownerPrivateRun, signal: runtime.signal }));
     }
     case "CHUCK_BROWSER_ACT": {
       const browser = automatedBrowserEngine("act");
       const step = { ...args, action: args.action };
-      return abortableToolCall(runtime, () => browser.browser(userId, { action: "act", step }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId) }));
+      return abortableToolCall(runtime, () => browser.browser(userId, { action: "act", step }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId), signal: runtime.signal }));
     }
     case "CHUCK_BROWSER_EXTRACT": {
       const browser = automatedBrowserEngine("extract");
-      return abortableToolCall(runtime, () => browser.browser(userId, { action: "extract", schema: args.schema }, { ownerPrivateRun: runtime.ownerPrivateRun }));
+      return abortableToolCall(runtime, () => browser.browser(userId, { action: "extract", schema: args.schema }, { ownerPrivateRun: runtime.ownerPrivateRun, signal: runtime.signal }));
     }
     case "CHUCK_BROWSER_AGENT": {
       const browser = automatedBrowserEngine("agent");
@@ -2519,15 +2755,19 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         action: "agent",
         steps: args.steps,
         maxSteps: args.maxSteps,
+        maxActions: args.maxActions,
+        maxDurationMs: args.maxDurationMs,
+        noProgressLimit: args.noProgressLimit,
+        completionAssertions: args.completionAssertions,
         sessionId: args.sessionId,
-      }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId) }));
+      }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId), signal: runtime.signal }));
     }
     case "CHUCK_BROWSER": {
       const action = classifyBrowserIntent({ label: typeof args.label === "string" ? args.label : String(args.action ?? "browse"), url: typeof args.url === "string" ? args.url : undefined });
       const origin = typeof args.url === "string" ? (() => { try { return new URL(args.url).origin; } catch { return undefined; } })() : undefined;
       try {
         const browser = automatedBrowserEngine(args.action);
-        const result = await abortableToolCall(runtime, () => browser.browser(userId, args, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId) }));
+        const result = await abortableToolCall(runtime, () => browser.browser(userId, args, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId), signal: runtime.signal }));
         if (runtime.registerCancellationCleanup && args.action === "session_acquire" && result && typeof result === "object" && typeof (result as { sessionId?: unknown }).sessionId === "string") {
           const sessionId = (result as { sessionId: string }).sessionId;
           runtime.registerCancellationCleanup(async () => { await browser.browser(userId, { action: "session_release", sessionId }); });

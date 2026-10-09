@@ -89,7 +89,7 @@ const BUNDLE_TERMS: Record<NativeToolBundle, string[]> = {
   meetings: ["meeting", "zoom", "meet", "teams", "webex", "call", "participant", "transcript"],
   artifacts: ["pdf", "document", "docx", "spreadsheet", "excel", "presentation", "slide", "artifact", "image", "video"],
   code: ["code", "file", "folder", "sandbox", "app", "build", "deploy", "terminal", "repository", "git"],
-  autonomy: ["task", "mission", "reminder", "follow-up", "followup", "schedule", "delegate", "attention", "proactive", "loop"],
+  autonomy: ["task", "mission", "reminder", "follow-up", "followup", "schedule", "delegate", "attention", "proactive", "loop", "lead", "leads", "prospect", "prospects", "campaign", "pipeline", "qualification"],
   intelligence: ["treg", "mcp", "research", "enrich", "company", "person", "seo", "search", "provider", "data"],
   shopping: ["shop", "shopping", "order", "purchase", "cart", "merchant", "payment", "stripe", "link wallet"],
   other: [],
@@ -113,6 +113,7 @@ function inferBundle(slug: string, description: string): NativeToolBundle {
   if (/^CHUCK_MEETING_/.test(name) || /^CHUCK_(?:START_PHONE_CALL|LIST_PHONE_CALLS)$/.test(name)) return "meetings";
   if (/^CHUCK_(?:CREATE_(?:PDF|DOCUMENT|SPREADSHEET|PRESENTATION)|GENERATE_(?:IMAGE|VIDEO)|ARTIFACT(?:_|$)|IMAGE_ASSET_|DAYTONA_IMAGE$|EMAIL_ARTIFACT$|FILE_BRIDGE$|VIDEO_(?:STATUS|CANCEL)$)/.test(name)) return "artifacts";
   if (/^CHUCK_(?:MISSION_|TASK_|AUTONOMY_|ATTENTION_|.*SUBAGENT|HANDOFF_SUBAGENT|OUTCOME_)/.test(name) || /^CHUCK_(?:SCHEDULE_JOB|LIST_JOBS|RESUME_JOB|CANCEL_JOB|RUN_JOB_NOW|PAUSE_JOB)$/.test(name)) return "autonomy";
+  if (/^CHUCK_LEAD_CAMPAIGN$/.test(name)) return "autonomy";
   if (/^CHUCK_(?:SHOPPING_|LINK_)/.test(name)) return "shopping";
   if (/^CHUCK_(?:DAYTONA_|COMPUTER(?:_|$))/.test(name)) return "code";
   if (/^CHUCK_TREG_/.test(name)) return "intelligence";
@@ -167,6 +168,8 @@ function relevance(query: string, descriptor: NativeToolDescriptor): number {
   const bundleWords = BUNDLE_TERMS[descriptor.bundle];
   for (const word of requestWords) if (bundleWords.includes(word)) score += 3;
   if (requestWords.has(descriptor.slug.toLowerCase().replace(/^chuck_/, "").replace(/_/g, " "))) score += 8;
+  if (descriptor.slug === "CHUCK_LEAD_CAMPAIGN" && /\b(?:lead|leads|prospect|prospects|prospecting)\b/i.test(query)
+    && /\b(?:find|build|generate|source|qualify|campaign|track|research)\b/i.test(query)) score += 100;
   if (descriptor.slug === "CHUCK_SET_REMINDER" && /\b(?:remind me|set (?:a )?reminder|schedule (?:a )?reminder)\b/i.test(query)) score += 100;
   // Prefer the purpose-built generator when the request names a concrete
   // document format. CHUCK_ARTIFACT owns lifecycle/registration, but should
@@ -186,6 +189,7 @@ function relevance(query: string, descriptor: NativeToolDescriptor): number {
 function inferredFamily(query: string): NativeToolBundle | undefined {
   const normalized = query.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   if (/\btiny\s*fish\b|\btinyfish\b/.test(normalized)) return "tinyfish";
+  if (/\b(?:lead|leads|prospect|prospects|campaign|pipeline|qualification)\b/.test(normalized)) return "autonomy";
   if (/\bmemories\b|\bmemory\b|\bscratchpad\b/.test(normalized)) return "memory";
   if (/\bremind(?:er|ers)?\b|\breminding\b|\bnotification\b|\bnotify\b/.test(normalized)) return "reminders";
   if (/\bbrowser\b|\bwebsite\b|\bwebpage\b|\bweb form\b/.test(normalized)) return "browser";

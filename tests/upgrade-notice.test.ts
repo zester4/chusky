@@ -73,7 +73,7 @@ test("attention upgrade preset describes evidence-based proactive reconciliation
   assert.match(bullets[0], /change, failure, and recovery observations plus verified missing-capability suggestions/);
   assert.match(bullets[1], /current, scheduled, stale, failed, and never-checked coverage/);
   assert.match(bullets[2], /pending until confirmed delivery/);
-  assert.match(bullets[2], /NO_ACTION from hiding an update/);
+  assert.match(bullets[2], /bounded execution receipt/);
 });
 
 test("tool reliability upgrade preset describes bounded diagnostics and approved artifact transfer", () => {
@@ -215,12 +215,22 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the browser domain workflow release", async () => {
+test("current upgrade manifest announces browser reliability and durable lead campaigns", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.47.0");
-  assert.equal(notice?.version, "4.47.0");
-  assert.match(notice?.bullets.join(" ") ?? "", /flights.*stays.*telecom.*streaming/i);
-  assert.match(notice?.bullets.join(" ") ?? "", /approval gates/i);
+  assert.equal(notice?.id, "release-4.49.0");
+  assert.equal(notice?.version, "4.49.0");
+  assert.match(notice?.bullets.join(" ") ?? "", /E2B runs.*no-progress blocking/i);
+  assert.match(notice?.bullets.join(" ") ?? "", /idempotent multi-day lead campaigns/);
+  assert.match(notice?.bullets.join(" ") ?? "", /atomic campaign spend allowance/);
+});
+
+test("lead campaign preset describes durable, discovery-first work and bounded enrichment", () => {
+  const bullets = getAgentUpgradePreset("leadCampaigns");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.leadCampaigns]);
+  assert.match(bullets[0], /multi-day lead campaign/);
+  assert.match(bullets[1], /atomic campaign spend allowance/);
+  assert.match(bullets[2], /does not contact prospects or write to an external CRM/);
 });
 
 test("browser reliability preset covers planning, recovery, checkpoints, and visual freshness", () => {
@@ -237,6 +247,14 @@ test("browser frontier preset describes bounded primitives and verification boun
   assert.match(bullets[0]!, /fresh observation.*schema-bounded extraction.*per-step trace/i);
   assert.match(bullets[1]!, /accessibility.*visual-target ranking.*concurrency limits/i);
   assert.match(bullets[2]!, /internal E2B runtime contract.*explicit verification or a trusted site receipt/i);
+});
+
+test("browser agent reliability preset documents bounded execution and postconditions", () => {
+  const bullets = getAgentUpgradePreset("browserAgentReliability");
+  assert.equal(bullets.length, 3);
+  assert.match(bullets[0]!, /step, action, wall-clock, and no-progress limits/i);
+  assert.match(bullets[1]!, /postconditions.*completionAssertions.*final business state.*required checks fail closed/i);
+  assert.match(bullets[2]!, /Challenges stop.*fresh observation.*generic repeated no-progress/i);
 });
 
 test("browser live view preset describes the retained owner-only stream", () => {

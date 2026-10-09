@@ -70,6 +70,7 @@ import { deliverSubagentResult } from "./subagents/delivery.js";
 import { enqueueSubagentToolContinuation, SUBAGENT_TOOL_WAIT_TIMEOUT, subagentWorkflowUrl, type SubagentToolDecision } from "./subagents/workflow.js";
 import { workflowEventId } from "./workflowIds.js";
 import type { CapabilityWorkerName } from "./memory/types.js";
+import type { AttentionPulseRunEvidence } from "./autonomy/types.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 import { normalizeVoiceDelta, normalizeVoiceText } from "./voiceText.js";
@@ -2361,6 +2362,18 @@ async function main(): Promise<void> {
           }
         }),
         runWorker: async (job) => withCliLock(payload.userId, undefined, async () => {
+          const pulseEvidence = (patch: Partial<AttentionPulseRunEvidence> = {}): AttentionPulseRunEvidence => ({
+            state: "skipped",
+            dueWatches: 0,
+            watchesReconciled: 0,
+            pendingObservations: 0,
+            pendingCandidates: 0,
+            handled: false,
+            delegated: 0,
+            approvalRequired: false,
+            delivery: "none",
+            ...patch,
+          });
           const binding = job.workerBinding;
           if (!binding) return { text: job.text };
           if (job.kind === "attention_pulse") {
@@ -2368,7 +2381,7 @@ async function main(): Promise<void> {
             const now = Date.now();
             const deliveredToday = attentionPulseDeliveredToday(job.attentionPulse, now);
             const delivery = attentionPulseDeliveryDecision(preferences as DeliveryPreferenceRecord[], now, deliveredToday, job.deliveryTarget);
-            if (delivery.suppressed) return { text: "", suppressDelivery: true };
+            if (delivery.suppressed) return { text: "", suppressDelivery: true, pulseEvidence: pulseEvidence({ state: "skipped" }) };
             let connectedAccounts: Awaited<ReturnType<typeof listConnectedAccounts>> = [];
             let connectedAccountsVerified = false;
             let connectedActions: Array<{ toolkit: string; slug: string; name?: string; description?: string }> = [];
@@ -2391,8 +2404,13 @@ async function main(): Promise<void> {
               connectedActions,
               connectedActionsVerified,
             });
-            if (!plan.hasWork) return { text: "", suppressDelivery: true };
-            if (job.attentionPulse?.lastDigestKey === plan.dedupeKey) return { text: "", suppressDelivery: true };
+            if (!plan.hasWork) return { text: "", suppressDelivery: true, pulseEvidence: pulseEvidence({ state: "completed" }) };
+            if (job.attentionPulse?.lastDigestKey === plan.dedupeKey) {
+              return {
+                text: "", suppressDelivery: true,
+                pulseEvidence: pulseEvidence({ state: "skipped", dueWatches: plan.dueWatchIds.length, pendingObservations: plan.observationIds.length, pendingCandidates: plan.candidateIds.length }),
+              };
+            }
             const proactiveRoute = await routeProactiveWork(plan.prompt, plan.decisionContext, {
               accounts: config.jevMode === "off" ? [] : connectedAccounts,
               listActions: listComposioToolkitActions,
@@ -2453,6 +2471,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                 terminalStatus: "waiting",
                 nextAction: "Wait for the verified capability continuation to complete.",
                 waitReason: "A verified capability request is waiting for its durable continuation.",
+                pulseEvidence: pulseEvidence({ state: "waiting", dueWatches: plan.dueWatchIds.length, pendingObservations: plan.observationIds.length, pendingCandidates: plan.candidateIds.length }),
               };
             }
             if (result.status === "requires_approval") {
@@ -2461,6 +2480,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                 terminalStatus: "waiting",
                 nextAction: result.approvalId ? `Approve request ${result.approvalId}.` : "Review the pending approval in Telegram.",
                 waitReason: "The pulse reached an approval boundary and did not perform the external action.",
+                pulseEvidence: pulseEvidence({ state: "waiting", dueWatches: plan.dueWatchIds.length, pendingObservations: plan.observationIds.length, pendingCandidates: plan.candidateIds.length, approvalRequired: true }),
               };
             }
             const reconciliationCompleted = result.toolCallsLog.some((entry) => entry.tool === "CHUCK_AUTONOMY_RECONCILE" && entry.status === "completed");
@@ -2475,6 +2495,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             const output = attentionPulseCloseoutOutput(closeoutPlan, result.output);
             const noAction = isNoActionPulseOutput(output);
             const handled = attentionPulseHasHandlingEvidence(result.toolCallsLog);
+            const delegated = result.toolCallsLog.filter((entry) => ["CHUCK_DELEGATE_SUBAGENT", "CHUCK_HANDOFF_SUBAGENT", "CHUCK_DEPARTMENT_HANDOFF"].includes(entry.tool) && entry.status === "completed").length;
             // A successfully delivered owner digest should suppress an identical
             // hourly repeat even when the signal only needs the owner's decision.
             // Candidate records remain pending unless the worker actually handled
@@ -2486,7 +2507,12 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             const heartbeatText = noAction && job.heartbeat
               ? "Elena pulse checked the configured attention state. No new owner-visible action was found in this run."
               : text;
-            return { text: heartbeatText, suppressDelivery: noAction && !job.heartbeat, ...(deliveryConfirmation ? { deliveryConfirmation } : {}) };
+            return {
+              text: heartbeatText,
+              suppressDelivery: noAction && !job.heartbeat,
+              pulseEvidence: pulseEvidence({ state: "completed", dueWatches: plan.dueWatchIds.length, watchesReconciled: reconciliationCompleted ? plan.dueWatchIds.length : 0, pendingObservations: closeoutPlan.observationIds?.length ?? plan.observationIds.length, pendingCandidates: closeoutPlan.candidateIds.length, handled, delegated }),
+              ...(deliveryConfirmation ? { deliveryConfirmation } : {}),
+            };
           }
           const session = await getSession(payload.userId);
           const context = await buildAutonomyContextBundle(payload.userId, { objective: job.text, links: job.links, snapshot: job.contextSnapshot });

@@ -61,9 +61,8 @@ const updated = await chusky.attentionPulse.update(
     enabled: true,
     cadence: "hourly",
     authority: "prepare",
-    delivery: [
-      { channel: "dashboard", enabled: true },
-      { channel: "telegram", enabled: true },
+    deliveryTargets: [
+      { provider: "telegram" },
     ],
     monitoredDomains: ["communication", "calendar", "work"],
     maxPerDay: 8,
@@ -78,7 +77,23 @@ The available authority levels are `observe`, `prepare`, and
 automatic when the owner allows it. Financial, destructive,
 permission-changing, and other consequential actions still use Chusky's
 approval flow. Delivery is explicitly opted in per channel and remains
-account-scoped.
+account-scoped. The web dashboard remains a first-class fallback: Pulse can
+surface an actionable candidate in the notification bell and Approvals/Chat
+even when no Telegram, Slack, or iMessage route is linked.
+
+The read response includes typed operational health. `waiting_for_connection`
+means Elena can still make capability suggestions but has no connected account
+to watch; `never_run`, `stale`, and `failed` identify scheduler or watch
+recovery states. Use `health.recoveryAction` to choose the next dashboard
+affordance, while keeping provider actions and consequential writes behind the
+normal connected-account and approval boundaries.
+
+Recurring-job history also exposes a bounded `pulseEvidence` receipt for Pulse
+runs. It reports how many due watches were reconciled, how many observations or
+candidates remained, whether Elena handled or delegated a step, whether an
+approval boundary was reached, and whether the result was surfaced in the
+dashboard or an external channel. It is an execution receipt, not provider
+payload or proof that an external write succeeded.
 
 ## Voice and meetings
 

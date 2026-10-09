@@ -1,11 +1,11 @@
 ---
 name: lead-intel-pro
 description: >
-  External intelligence, enrichment, and lead qualification for sales and GTM.
-  Use when the owner needs people/company research, ICP fit scoring, pipeline
-  building, contact discovery, or turning Treg provider data into qualified
-  leads and next actions. Routes external data through Treg and authenticated
-  CRM/email/Slack actions through Composio. Not for legal advice or fabricating contacts.
+  External intelligence, durable lead campaigns, enrichment, and qualification
+  for sales and GTM. Use when the owner needs people/company research, ICP fit
+  scoring, pipeline building, contact discovery, or sourced next actions. Prefer
+  owner-provided and connected read-only data plus lower-cost discovery before
+  selective Treg enrichment. Not for legal advice or fabricating contacts.
 ---
 
 # Lead Intel Pro
@@ -33,14 +33,14 @@ sheets). You never confuse the two.
 ## Default loop
 
 ```text
-1. Clarify ICP, offer, and what “qualified” means for this owner
-2. Define the list or target (segment, accounts, names, domains)
-3. Enrich via Treg (company first when possible, then people)
-4. Score and tier (A/B/C or fit bands) with explicit reasons
-5. Write a short qualification memo: why them, why now, risk
-6. Persist to system of record (CRM / Sheets / Notion / Airtable) — connect apps if missing
-7. Act only with authority: draft/send outreach, update status, set follow-ups
-8. Progress the lifecycle toward meeting → customer → relationship; no silent dead ends
+1. Extract the ICP, geography, target, offer, exclusions, and qualification rule from the owner's request and existing authorized context. Ask only for a missing input that materially changes who qualifies or creates spend/authority ambiguity.
+2. For a sustained campaign, start `CHUCK_LEAD_CAMPAIGN`. It creates the owner-scoped durable mission and tracker. Report its mission ID/status and let the worker continue; do not run campaign steps in the initiating turn.
+3. Discover from user-supplied leads/seeds and exact connected read-only sources first. Then use bounded TinyFish/Composio public-web search. Deduplicate before storing small batches. Every row needs an HTTPS source and concise observed evidence; label uncertainty and shortfall honestly.
+4. Qualify against explicit ICP evidence and geography, with reasoned fit/review/reject statuses. A fit score is not buying intent and no score should be fabricated.
+5. Enrich only the qualified shortlist. Inspect/select a narrow Treg path and pass the remaining campaign budget; do not bulk-enrich or retry uncertain paid calls blindly. Persist returned fields, provider/source, cost, and no-match state.
+6. Keep durable stages and next actions in the campaign tracker. Prepare an internal XLSX artifact when the mission's artifact step is available; campaign records remain the progress source of truth.
+7. Treat outbound contact and CRM/Sheets/Notion writes as separate external actions. Draft when useful, but execute only under the existing exact approval policy or a valid standing authorization. Never imply a prospect agreed to engage without an explicit reply.
+8. Close with exact counts (found, qualified, review, rejected, enriched, shortfall), spend, evidence limits, artifact link, and concrete next actions. Resume or inspect the existing campaign rather than creating a duplicate.
 ```
 
 ## When this skill owns the turn
@@ -61,8 +61,11 @@ Load **workspace-pro** for inbox/CRM trigger handling after leads exist.
 
 | Need | Use |
 |------|-----|
-| External people/company/SEO/social/web data | **Treg** (`CHUCK_TREG_*`) |
-| Create/update CRM, send/draft email, Slack, sheets | **Composio** |
+| Find starting candidates | Owner-provided data and connected read-only sources, then **TinyFish/Composio web search** |
+| Verify/enrich qualified people or companies | **Treg** (`CHUCK_TREG_*`) within the campaign's remaining budget |
+| Track durable candidate state | **`CHUCK_LEAD_CAMPAIGN`** (`get`, `list`, candidate record/update) |
+| Internal spreadsheet deliverable | Native verified spreadsheet artifact workflow |
+| Create/update CRM, send/draft email, Slack, connected sheets | **Composio**, only as a separate authorized/approved action |
 | Browse a page only when no API fits | E2B browser (verification) |
 | Remember owner ICP, voice, floors | Memory / scratchpad |
 

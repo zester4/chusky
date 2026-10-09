@@ -1,6 +1,7 @@
 import { configureAttentionPulse, type NativeToolRuntime } from "../nativeTools.js";
 import { createAttentionRecord, listAttentionRecords, listChannelIdentities, updateAttentionRecord, type AutonomyProfileRecord, type DeliveryPreferenceRecord } from "../store.js";
 import type { ChannelProvider } from "../channels/contracts.js";
+import { classifyPulseHealth, type PulseHealth, type PulseHealthOccurrence } from "./pulseHealth.js";
 
 export type PulseCadence = "every_30_minutes" | "hourly" | "daily";
 export type PulseAuthority = "observe" | "prepare" | "execute_reversible";
@@ -28,6 +29,7 @@ export interface PulsePreferencesView {
   maxPerDay: number;
   quietHoursUtc?: { startMinute: number; endMinute: number };
   monitoredDomains: string[];
+  health: PulseHealth;
 }
 
 const CADENCE_CRON: Record<PulseCadence, string> = {
@@ -173,9 +175,9 @@ export async function applyPulsePreferences(userId: number, input: PulsePreferen
   try {
     if (preferences.enabled) await configureAttentionPulse(userId, { action: "enable", cron: cronForCadence(preferences.cadence) }, runtime);
     else await configureAttentionPulse(userId, { action: "disable" }, runtime);
-    const profile = await upsertProfile(userId, { enabled: preferences.enabled, authority: preferences.authority, quietHoursUtc: preferences.quietHoursUtc, monitoredDomains: preferences.monitoredDomains, maxPerDay: preferences.maxPerDay });
-    const deliveryTargets = await upsertDeliveryPreferences(userId, preferences);
-    return { enabled: preferences.enabled, cadence: preferences.cadence, authority: profile.defaultAuthority, deliveryTargets: deliveryPreferenceView(deliveryTargets), maxPerDay: preferences.maxPerDay, ...(profile.quietHoursUtc ? { quietHoursUtc: profile.quietHoursUtc } : {}), monitoredDomains: profile.allowedDomains };
+    await upsertProfile(userId, { enabled: preferences.enabled, authority: preferences.authority, quietHoursUtc: preferences.quietHoursUtc, monitoredDomains: preferences.monitoredDomains, maxPerDay: preferences.maxPerDay });
+    await upsertDeliveryPreferences(userId, preferences);
+    return await readPulsePreferences(userId);
   } catch (error) {
     try {
       if (beforeStatus.enabled) await configureAttentionPulse(userId, { action: "enable", cron: beforeStatus.jobs?.[0]?.cron ?? cronForCadence("hourly") }, runtime);
@@ -192,8 +194,31 @@ export async function readPulsePreferences(userId: number): Promise<PulsePrefere
   const profiles = await listAttentionRecords(userId, "autonomy_profile", { limit: 20 }) as AutonomyProfileRecord[];
   const profile = profiles.find((item) => item.mode === "personal");
   const deliveryTargets = await listAttentionRecords(userId, "delivery_preference", { limit: 100 }) as DeliveryPreferenceRecord[];
-  const job = await configureAttentionPulse(userId, { action: "status" }) as { enabled?: boolean; jobs?: Array<{ cron?: string }> };
+  const status = await configureAttentionPulse(userId, { action: "status" }) as {
+    enabled?: boolean;
+    jobs?: Array<{ cron?: string; status?: "active" | "paused" | "cancelled" }>;
+    connectedAccountsVerified?: boolean;
+    capabilitySuggestions?: Array<{ status?: string }>;
+    health?: { lastOccurrence?: PulseHealthOccurrence };
+    watchCoverage?: { active?: number; current?: number; scheduled?: number; stale?: number; failed?: number; neverChecked?: number };
+  };
+  const job = status;
   const cron = job.jobs?.[0]?.cron;
   const cadence = cadenceForCron(cron);
-  return { enabled: Boolean(job.enabled), cadence, authority: profile?.defaultAuthority ?? "observe", deliveryTargets: deliveryPreferenceView(deliveryTargets), maxPerDay: deliveryTargets.find((item) => item.enabled)?.maxPerDay ?? profile?.maxAutonomousActionsPerDay ?? 4, ...(profile?.quietHoursUtc ? { quietHoursUtc: profile.quietHoursUtc } : {}), monitoredDomains: profile?.allowedDomains?.length ? profile.allowedDomains : [...DEFAULT_DOMAINS] };
+  const coverage = status.watchCoverage ?? {};
+  const health = classifyPulseHealth({
+    enabled: Boolean(job.enabled),
+    cadence,
+    jobStatus: job.jobs?.[0]?.status,
+    latestOccurrence: status.health?.lastOccurrence,
+    activeWatches: coverage.active ?? 0,
+    currentWatches: coverage.current ?? 0,
+    scheduledWatches: coverage.scheduled ?? 0,
+    staleWatches: coverage.stale ?? 0,
+    failedWatches: coverage.failed ?? 0,
+    neverCheckedWatches: coverage.neverChecked ?? 0,
+    pendingSuggestions: status.capabilitySuggestions?.filter((candidate) => candidate.status === "pending").length ?? 0,
+    connectedAccountsVerified: status.connectedAccountsVerified === true,
+  });
+  return { enabled: Boolean(job.enabled), cadence, authority: profile?.defaultAuthority ?? "observe", deliveryTargets: deliveryPreferenceView(deliveryTargets), maxPerDay: deliveryTargets.find((item) => item.enabled)?.maxPerDay ?? profile?.maxAutonomousActionsPerDay ?? 4, ...(profile?.quietHoursUtc ? { quietHoursUtc: profile.quietHoursUtc } : {}), monitoredDomains: profile?.allowedDomains?.length ? profile.allowedDomains : [...DEFAULT_DOMAINS], health };
 }

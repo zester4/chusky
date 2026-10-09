@@ -509,15 +509,16 @@ export class TregGateway {
     return { query, intent: "enrich_person", items, endpointsUsed: [hit.id], totalCostUsd: response.receipt.costUsd, warnings: items.length ? [] : ["Provider returned no usable fields"], incomplete: items.length < 2, generatedAt: new Date().toISOString() };
   }
 
-  async enrichCompany(options: { userId: number; domain?: string; name?: string; missionId?: string; organizationId?: string }): Promise<TregEvidenceBundle> {
+  async enrichCompany(options: { userId: number; domain?: string; name?: string; missionId?: string; maxSpendUsd?: number; organizationId?: string }): Promise<TregEvidenceBundle> {
     const query = ["company enrichment", options.domain, options.name].filter(Boolean).join(" ");
     const initialHits = await this.search(query, 8, options.organizationId);
     const initialCompanyHits = initialHits.filter((item) => item.category === "enrichment_company" || /company|companies|firmographic|domain/i.test(`${item.id} ${item.title}`));
     const fallbackHits = initialCompanyHits.length > 0 ? [] : await this.search("company enrichment by domain", 10, options.organizationId);
-    const hit = (await this.rank([...initialHits, ...fallbackHits], "enrich_company", query, undefined, ["domain", "company", "name"], ["company_name", "domain", "industry", "employee_count", "description"]))
+    const hit = (await this.rank([...initialHits, ...fallbackHits], "enrich_company", query, options.maxSpendUsd, ["domain", "company", "name"], ["company_name", "domain", "industry", "employee_count", "description"]))
       .find((item) => !item.requiresOwnAccount && !item.requiresByok && (item.category === "enrichment_company" || /company|companies|firmographic|domain/i.test(`${item.id} ${item.title}`)));
     if (!hit) return emptyBundle(query, "enrich_company", ["No catalog endpoint matched"]);
-    const response = await this.call({ userId: options.userId, endpointId: hit.id, body: { domain: options.domain, name: options.name }, missionId: options.missionId, organizationId: options.organizationId, estimateUsd: hit.priceUsd });
+    const estimateUsd = hit.priceUsd === undefined ? options.maxSpendUsd : Math.min(hit.priceUsd, options.maxSpendUsd ?? hit.priceUsd);
+    const response = await this.call({ userId: options.userId, endpointId: hit.id, body: { domain: options.domain, name: options.name }, missionId: options.missionId, organizationId: options.organizationId, estimateUsd });
     return { query, intent: "enrich_company", items: normalizeCompanyPayload(response.result, hit), endpointsUsed: [hit.id], totalCostUsd: response.receipt.costUsd, warnings: [], incomplete: false, generatedAt: new Date().toISOString() };
   }
 

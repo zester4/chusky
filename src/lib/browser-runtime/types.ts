@@ -64,5 +64,5 @@ export interface BrowserRuntime {
   observe(ownerId: number, options?: { screenshot?: boolean; includeForms?: boolean }): Promise<BrowserObservation>;
   act(ownerId: number, step: BrowserActionStep): Promise<Record<string, unknown>>;
   extract(ownerId: number, schema: Record<string, unknown>): Promise<Record<string, unknown>>;
-  run(ownerId: number, steps: BrowserActionStep[], options?: { maxSteps?: number }): Promise<Record<string, unknown>>;
+  run(ownerId: number, steps: BrowserActionStep[], options?: { maxSteps?: number; maxActions?: number; maxDurationMs?: number; noProgressLimit?: number; completionAssertions?: BrowserAssertion[] }): Promise<Record<string, unknown>>;
 }

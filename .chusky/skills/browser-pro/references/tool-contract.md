@@ -20,7 +20,7 @@ names are stable `CHUCK_*` slugs; do not substitute provider or invented names.
 | `CHUCK_BROWSER_PLAN` | classify goal, boundary, evidence, recovery | opening or mutating a site |
 | `CHUCK_BROWSER_OBSERVE` | fresh controls, forms, metadata, screenshot | claiming success |
 | `CHUCK_BROWSER_ACT` | one fresh bounded action | replaying stale selectors |
-| `CHUCK_BROWSER_AGENT` | max-50-step bounded loop | bypassing approval/challenges |
+| `CHUCK_BROWSER_AGENT` | short grounded sequence with fresh post-action state, bounded deadline, optional assertions, and no-progress stopping | bypassing approval/challenges or submitting irreversible actions |
 | `CHUCK_BROWSER_EXTRACT` | explicit schema fields | arbitrary private dumps |
 | `CHUCK_BROWSER_NEXT` | propose next action | executing or approving |
 | `CHUCK_BROWSER_VERIFY` | URL/title/text postconditions | trusting narration |
@@ -41,6 +41,31 @@ planner recognizes labels, roles, autocomplete, checkbox/radio state, native
 select options, disabled state, and validation messages. A form plan is not
 submit authorization. After `form_fill`, inspect `workflowCheckpoint`,
 `validationErrors`, `forms`, and `formState`, then verify the result.
+
+## Bounded agent sequences
+
+Use `CHUCK_BROWSER_AGENT` only after a current observation. Keep sequences
+short enough to understand and recover: `maxSteps` is capped at 50,
+`maxActions` caps executed actions, `maxDurationMs` caps wall-clock time, and
+`noProgressLimit` stops repeated identical actions whose URL/title/accessibility
+state does not change. Add `expected` assertions to mutation steps when the
+next state is knowable. Supported assertions are `url`, `title`, `text`,
+`field`, `checked`, `selected`, and `visible`; required assertions fail closed.
+
+For the requested business result, also provide `completionAssertions` on the
+agent call. These are evaluated against the final fresh page state after the
+last step. A run can execute every step while still failing to prove the
+requested outcome. Treat `verified: true` and passing required completion checks
+as the business result; `completion_assertion_failed` means the sequence ran
+but the promised final state was not proven.
+
+The result includes an ordered, bounded trace and `stoppedReason`, including
+observed URL/title/page-generation/accessibility evidence for each step. Treat
+the verified completion result—not a tool-call success alone—as proof. A
+`challenge` stops the sequence and routes to the retained owner-only handoff.
+A stale, ambiguous, missing, or timed-out step returns a fresh observation for
+replanning. Do not replay the same step after a `no_progress` stop; inspect and
+choose a different action.
 
 ## E2B-only live browser
 

@@ -145,6 +145,11 @@ test("native discovery finds the primary tool across browser, meeting, artifact,
   }
 });
 
+test("native discovery routes durable lead-generation campaigns to their campaign controller", () => {
+  const found = searchNativeToolManifest("Find 100 qualified leads and track the campaign");
+  assert.equal(found[0]?.slug, "CHUCK_LEAD_CAMPAIGN");
+});
+
 test("connected-app discovery is not pushed out by native keyword matches", () => {
   const found = searchDiscoveredToolManifest("search Gmail for an email and send a reply");
   const slugs = found.map((item) => item.slug);

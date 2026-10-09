@@ -58,6 +58,7 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   // reconciliation, or start an internal durable mission. Provider side
   // effects remain governed by the normal tool approval boundary.
   "CHUCK_AUTONOMY_STATUS", "CHUCK_AUTONOMY_RECONCILE", "CHUCK_AUTONOMY_PLAYBOOK",
+  "CHUCK_LEAD_CAMPAIGN",
   "CHUCK_GENERATE_IMAGE", "CHUCK_LIST_IMAGE_MODELS", "CHUCK_GENERATE_VIDEO", "CHUCK_LIST_VIDEO_MODELS", "CHUCK_VIDEO_CANCEL",
   "CHUCK_LIST_JOBS", "CHUCK_LIST_REMINDERS", "CHUCK_SAVE_MEMORY",
   "CHUCK_SCHEDULE_JOB", "CHUCK_PAUSE_JOB", "CHUCK_RESUME_JOB", "CHUCK_RUN_JOB_NOW", "CHUCK_SCRATCHPAD_READ",
@@ -241,6 +242,7 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
 }
 
 const STATUSES: Record<string, string> = {
+  CHUCK_LEAD_CAMPAIGN: "🎯 I’m setting up a durable, source-backed lead campaign…",
   CHUCK_FIND_TOOLS: "🧭 I’m finding the relevant tools…",
   CHUCK_SEARCH_SKILLS: "🧭 I’m bringing in the relevant guidance…",
   CHUCK_TOOL_PREFLIGHT: "🧪 I’m checking the tool and its arguments…",
@@ -428,6 +430,7 @@ export function isDeletionToolCall(slug: string, args: Record<string, unknown> =
 export function requiresToolApproval(slug: string, args: Record<string, unknown> = {}, forceApproval = false, ownerPrivateRun = false): boolean {
   if (BROWSER_HANDOFF_CONTROL_TOOLS.has(canonicalPolicySlug(slug))) return false;
   if (TINYFISH_AUTONOMOUS_TOOLS.has(canonicalPolicySlug(slug))) return false;
+  if (slug === "CHUCK_LEAD_CAMPAIGN") return false;
   if (BROWSER_AUTONOMOUS_TOOLS.has(canonicalPolicySlug(slug))) return false;
   if (slug === "CHUCK_TREG_CALL" && isAutonomousTregCatalogCall(args)) return false;
   if (TREG_AUTONOMOUS_TOOLS.has(slug)) return false;

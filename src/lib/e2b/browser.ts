@@ -9,7 +9,8 @@ import { E2BBrowserError } from "./errors.js";
 import { assertSafeBrowserUrl } from "./urlSafety.js";
 import { E2B_BROWSER_DENY_OUT_CIDRS } from "./networkPolicy.js";
 import { deleteR2Object, putR2Object, r2Configured, readR2Object } from "../../lib/storage/r2.js";
-import { E2B_BROWSER_ACTIONS, type E2BBrowserAction, type E2BBrowserFileRecord, type E2BBrowserNode, type E2BBrowserRecord, type E2BCommandResult } from "./types.js";
+import { E2B_BROWSER_ACTIONS, type E2BBrowserAction, type E2BBrowserAgentSummary, type E2BBrowserFileRecord, type E2BBrowserNode, type E2BBrowserRecord, type E2BCommandResult } from "./types.js";
+import { browserAgentProgressMarker, browserAgentStepKey, normalizeBrowserAgentRunLimits } from "./agentRunPolicy.js";
 import { planFormSubmission, type RequestedFormField } from "./formPlanner.js";
 import { auxiliaryBrowserRequest } from "./auxiliaryActions.js";
 import { webBotAuthConfigurationIssue, webBotAuthConfigurationStatus, webBotAuthKeyId, webBotAuthSandboxEnvironment, webBotAuthSigningEnabled } from "../../webBotAuth.js";
@@ -22,6 +23,7 @@ const MAX_BROWSER_RECORDING_BYTES = 100 * 1024 * 1024;
 const BROWSER_FILE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const BROWSER_STREAM_PORT = 6080;
 const locks = new Map<number, Promise<void>>();
+const NO_PROGRESS_GUARDED_ACTIONS = new Set(["click", "invoke", "fill", "select_option", "check", "uncheck", "focus", "hover", "press", "type", "scroll", "drag"]);
 
 function boundedText(value: unknown, field: string, max: number): string {
   if (typeof value !== "string" || !value.trim() || value.length > max) throw new E2BBrowserError(`${field} must be 1-${max} characters`);
@@ -58,8 +60,8 @@ function parseResult(stdout: string, stderr: string): E2BCommandResult {
 
 function browserFailureCode(message: string): string {
   const value = message.toLowerCase();
-  if (value.includes("observation_stale") || value.includes("fresh accessible node")) return "stale_observation";
-  if (value.includes("ambiguous")) return "control_ambiguous";
+  if (value.includes("observation_stale") || value.includes("stale_observation") || value.includes("fresh accessible node") || value.includes("visual target is stale")) return "stale_observation";
+  if (value.includes("ambiguous") || value.includes("safely remap") || value.includes("unique current")) return "control_ambiguous";
   if (value.includes("not found") || value.includes("was not found")) return "control_missing";
   if (value.includes("frame")) return "frame_missing";
   if (value.includes("challenge") || value.includes("captcha") || value.includes("two_factor")) return "challenge_detected";
@@ -81,6 +83,82 @@ function normalizeMatches(raw: E2BCommandResult, url: string, now: number): E2BB
     const pageGeneration = Number(item?.pageGeneration);
     return [{ nodeId: nodeId(role, name, index, typeof item?.observationId === "string" ? item.observationId : undefined, Number.isSafeInteger(frameIndex) ? frameIndex : undefined), role, name, index, ...optional("id", 160), ...optional("nameAttr", 160), ...optional("placeholder", 200), ...optional("autocomplete", 80), ...optional("inputType", 40), ...optional("tagName", 40), ...(Number.isSafeInteger(frameIndex) && frameIndex >= 0 ? { frameIndex } : {}), ...optional("frameUrl", 1_000), ...optional("observationId", 100), ...(Number.isSafeInteger(pageGeneration) && pageGeneration >= 0 ? { pageGeneration } : {}), url, capturedAt: now }];
   });
+}
+
+function actionGuardFingerprint(action: string, args: Record<string, unknown>): string {
+  return createHash("sha256").update(browserAgentStepKey({ ...args, action })).digest("hex").slice(0, 32);
+}
+
+function actionGuardMarker(record: E2BBrowserRecord): string {
+  return browserAgentProgressMarker({
+    observedUrl: record.lastUrl,
+    title: record.title,
+    pageGeneration: record.pageGeneration,
+    accessibilityHash: record.checkpoint?.accessibilityHash,
+  });
+}
+
+function normalizeAgentSummary(value: unknown): E2BBrowserAgentSummary | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const input = value as Record<string, unknown>;
+  const steps = Array.isArray(input.steps) ? input.steps.slice(0, 50).flatMap((item): E2BBrowserAgentSummary["steps"] => {
+    if (!item || typeof item !== "object") return [];
+    const step = item as Record<string, unknown>;
+    const index = Number(step.index);
+    const action = typeof step.action === "string" ? step.action.slice(0, 40) : "";
+    const status = step.status === "succeeded" || step.status === "failed" || step.status === "stopped" ? step.status : undefined;
+    if (!Number.isSafeInteger(index) || index < 0 || !action || !status) return [];
+    return [{
+      index,
+      action,
+      status,
+      durationMs: Math.max(0, Math.min(120_000, Number(step.durationMs) || 0)),
+      ...(typeof step.observedUrl === "string" ? { observedUrl: redactBrowserText(step.observedUrl, 2_000) } : {}),
+      ...(typeof step.observedTitle === "string" ? { observedTitle: redactBrowserText(step.observedTitle, 160) } : {}),
+      ...(Number.isSafeInteger(Number(step.observedPageGeneration)) ? { observedPageGeneration: Number(step.observedPageGeneration) } : {}),
+      ...(typeof step.observedAccessibilityHash === "string" ? { observedAccessibilityHash: step.observedAccessibilityHash.slice(0, 64) } : {}),
+      ...(typeof step.screenshotHash === "string" ? { screenshotHash: step.screenshotHash.slice(0, 128) } : {}),
+      ...(typeof step.recovery === "string" ? { recovery: redactBrowserText(step.recovery, 80) } : {}),
+      ...(typeof step.progress === "boolean" ? { progress: step.progress } : {}),
+      ...(Array.isArray(step.expectations) ? { expectations: step.expectations.slice(0, 12).flatMap((item) => {
+        if (!item || typeof item !== "object") return [];
+        const expectation = item as Record<string, unknown>;
+        return typeof expectation.kind === "string" && typeof expectation.passed === "boolean"
+          ? [{ kind: expectation.kind.slice(0, 40), passed: expectation.passed, required: expectation.required !== false }]
+          : [];
+      }) } : {}),
+      ...(typeof step.error === "string" ? { error: redactBrowserText(step.error, 300) } : {}),
+    }];
+  }) : [];
+  if (!steps.length && input.completed !== true) return undefined;
+  const maxSteps = Number(input.maxSteps);
+  const maxActions = Number(input.maxActions);
+  const maxDurationMs = Number(input.maxDurationMs);
+  const noProgressLimit = Number(input.noProgressLimit);
+  const actionCount = Number(input.actionCount);
+  const elapsedMs = Number(input.elapsedMs);
+  const stoppedReason = ["timeout", "max_actions", "no_progress", "expectation_failed", "completion_assertion_failed", "step_failed", "challenge", "completed"].includes(String(input.stoppedReason))
+    ? String(input.stoppedReason) as E2BBrowserAgentSummary["stoppedReason"]
+    : undefined;
+  const completionChecks = Array.isArray(input.completionChecks) ? input.completionChecks.slice(0, 12).flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const check = item as Record<string, unknown>;
+    if (typeof check.kind !== "string" || typeof check.value !== "string" || typeof check.passed !== "boolean") return [];
+    return [{ kind: check.kind.slice(0, 40), value: redactBrowserText(check.value, 300), passed: check.passed, required: check.required !== false, ...(typeof check.observed === "boolean" ? { observed: check.observed } : {}) }];
+  }) : [];
+  return {
+    steps,
+    completed: input.completed === true,
+    maxSteps: Number.isSafeInteger(maxSteps) ? maxSteps : steps.length,
+    maxActions: Number.isSafeInteger(maxActions) ? maxActions : steps.length,
+    maxDurationMs: Number.isSafeInteger(maxDurationMs) ? maxDurationMs : 0,
+    noProgressLimit: Number.isSafeInteger(noProgressLimit) ? noProgressLimit : 0,
+    actionCount: Number.isSafeInteger(actionCount) ? actionCount : steps.length,
+    elapsedMs: Number.isSafeInteger(elapsedMs) ? elapsedMs : 0,
+    verified: input.verified === true,
+    ...(completionChecks.length ? { completionChecks } : {}),
+    ...(stoppedReason ? { stoppedReason } : {}),
+  };
 }
 
 const LOCATION_INTENTS = [
@@ -297,7 +375,7 @@ export class E2BBrowserEngine {
     throw new E2BBrowserError(`E2B browser daemon did not become ready: ${lastError}; ${await this.runtimeDiagnostics(sandbox.sandboxId)}`);
   }
 
-  private async run(sandbox: Sandbox, request: Record<string, unknown>, commandTimeoutMs = Math.min(config.e2bRequestTimeoutMs, DEFAULT_E2B_BROWSER_COMMAND_TIMEOUT_MS)): Promise<E2BCommandResult> {
+  private async run(sandbox: Sandbox, request: Record<string, unknown>, commandTimeoutMs = Math.min(config.e2bRequestTimeoutMs, DEFAULT_E2B_BROWSER_COMMAND_TIMEOUT_MS), signal?: AbortSignal): Promise<E2BCommandResult> {
     const browserRequest = { ...request, webBotAuthEnabled: webBotAuthSigningEnabled() };
     const responseFile = `/tmp/chusky-browser-response-${randomUUID()}.json`;
     const result = await sandbox.commands.run("node /app/browser-client.mjs", {
@@ -305,6 +383,7 @@ export class E2BBrowserEngine {
       envs: { CHUSKY_E2B_REQUEST_B64: encodeRequest(browserRequest), CHUSKY_E2B_RESPONSE_FILE: responseFile },
       timeoutMs: commandTimeoutMs,
       requestTimeoutMs: config.e2bRequestTimeoutMs,
+      ...(signal ? { signal } : {}),
     });
     if (result.exitCode !== 0) {
       const message = redactBrowserText(result.stderr || result.stdout, 800);
@@ -429,6 +508,7 @@ export class E2BBrowserEngine {
       },
       evidence: [{ action, at: now, ...(typeof result.url === "string" ? { url: result.url } : {}), ...(typeof result.title === "string" ? { title: redactBrowserText(result.title, 160) } : {}), ...(typeof result.observationId === "string" ? { observationId: result.observationId } : {}), ...(typeof result.screenshotHash === "string" ? { screenshotHash: result.screenshotHash } : {}), verified: action === "snapshot" || action === "state" || action === "find" || action === "form_inspect" || Boolean(result.formState) }, ...(record.evidence ?? [])].slice(-50),
       nodes: nodes.length ? nodes : record.nodes,
+      ...(result.agent ? { lastAgent: normalizeAgentSummary(result.agent) ?? record.lastAgent } : {}),
       updatedAt: now,
       expiresAt: record.sessionId ? record.expiresAt : now + config.e2bTimeoutMs,
       paused: record.paused === true,
@@ -484,7 +564,7 @@ export class E2BBrowserEngine {
     return `e2b-pending-${userId}`;
   }
 
-  async browser(userId: number, args: Record<string, unknown>, internal: { vaultLoginFlow?: boolean; ownerPrivateRun?: boolean; ownerApprovedAction?: boolean } = {}): Promise<unknown> {
+  async browser(userId: number, args: Record<string, unknown>, internal: { vaultLoginFlow?: boolean; ownerPrivateRun?: boolean; ownerApprovedAction?: boolean; signal?: AbortSignal } = {}): Promise<unknown> {
     return withUserLock(userId, async () => {
       await this.purgeExpiredBrowserFiles(userId);
       const action = safeAction(args.action);
@@ -645,6 +725,20 @@ export class E2BBrowserEngine {
       if (!internal.vaultLoginFlow) assertE2BBrowserHandoffAllowsAction(action, (await getSession(userId)).browserHandoffs ?? [], record.lastUrl, record.sandboxId);
       if (!internal.vaultLoginFlow) await guardVaultBrowserAction(userId, record.sandboxId, { ...args, currentUrl: record.lastUrl }, internal.ownerPrivateRun, internal.ownerApprovedAction);
       const request: Record<string, unknown> = compositeRequest ?? auxiliaryBrowserRequest(action, args);
+      if (action === "agent") {
+        const limits = normalizeBrowserAgentRunLimits({
+          maxSteps: args.maxSteps,
+          maxActions: args.maxActions,
+          maxDurationMs: args.maxDurationMs,
+          noProgressLimit: args.noProgressLimit,
+        });
+        if (!Array.isArray(args.steps) || args.steps.length === 0) throw new E2BBrowserError("Browser agent requires at least one bounded step");
+        Object.assign(request, {
+          steps: args.steps.slice(0, limits.maxSteps),
+          ...limits,
+          ...(Array.isArray(args.completionAssertions) ? { completionAssertions: args.completionAssertions.slice(0, 12) } : {}),
+        });
+      }
       if (action === "open") request.url = (await assertSafeBrowserUrl(args.url)).toString();
       if (action === "find") Object.assign(request, { role: args.role, name: args.name, nameMatch: args.nameMatch, limit: args.limit });
       if (action !== "open" && record.lastUrl) request.currentUrl = record.lastUrl;
@@ -699,9 +793,17 @@ export class E2BBrowserEngine {
       if (action === "wait_download") request.timeoutMs = Math.max(100, Math.min(30_000, Number(args.timeoutSeconds ?? args.timeoutMs ?? 10_000) * (args.timeoutSeconds ? 1_000 : 1)));
       if (action === "recording_start") request.durationSeconds = Math.max(10, Math.min(900, Number(args.timeoutSeconds ?? 900)));
       if (action === "recording_stop" || action === "recording_get") request.recordingId = boundedText(args.recordingId ?? args.fileId, "recordingId", 128);
+      if (NO_PROGRESS_GUARDED_ACTIONS.has(action)) {
+        const fingerprint = actionGuardFingerprint(action, args);
+        const marker = actionGuardMarker(record);
+        const guard = record.lastActionGuard;
+        if (guard && guard.fingerprint === fingerprint && guard.marker === marker && guard.count >= 2) {
+          throw new E2BBrowserError("Browser stopped a repeated action because the page made no progress. Re-observe the current page and choose a different next step.");
+        }
+      }
       let result: E2BCommandResult;
       try {
-        result = await this.run(sandbox, request, commandTimeoutMs);
+        result = await this.run(sandbox, request, commandTimeoutMs, internal.signal);
       } catch (error) {
         // Only replay idempotent control operations. A click, keypress, type,
         // submit, or coordinate action may already have caused an external
@@ -731,8 +833,24 @@ export class E2BBrowserEngine {
       const url = typeof result.url === "string" ? result.url : record.lastUrl ?? "";
       const nodes = normalizeMatches(result, url, Date.now());
       const next = await this.persistResult(userId, record, result, nodes, action);
+      if (NO_PROGRESS_GUARDED_ACTIONS.has(action)) {
+        const fingerprint = actionGuardFingerprint(action, args);
+        const marker = browserAgentProgressMarker({
+          observedUrl: result.url,
+          title: result.title,
+          pageGeneration: result.pageGeneration,
+          accessibilityHash: result.accessibilityHash,
+          screenshotHash: result.screenshotHash,
+          submitted: result.submitted,
+        });
+        const previous = record.lastActionGuard;
+        const count = previous && previous.fingerprint === fingerprint && previous.marker === marker ? previous.count + 1 : 0;
+        next.lastActionGuard = { fingerprint, marker, count, action, updatedAt: Date.now() };
+        await this.save(userId, next);
+      }
       if (nodes.length) await rememberVaultBrowserNodes(userId, next.sandboxId, nodes, next.lastUrl);
-      const safe = { provider: "e2b", sandboxId: next.sandboxId, action, ...(result.observationId ? { observationId: result.observationId } : {}), ...(typeof result.pageGeneration === "number" ? { pageGeneration: result.pageGeneration } : {}), ...(result.accessibilityHash ? { accessibilityHash: result.accessibilityHash } : {}), ...(result.health ? { health: result.health } : {}), ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}), ...(result.events ? { events: result.events } : {}), ...(result.url ? { observedUrl: result.url, observationMethod: "playwright_page_url" } : {}), ...(result.title ? { title: redactBrowserText(result.title, 160) } : {}), ...(result.loadState ? { loadState: result.loadState } : {}), ...(nodes.length ? { matches: nodes } : {}), ...(result.formState ? { formState: result.formState } : {}), ...(result.actionVerification ? { actionVerification: result.actionVerification } : {}), ...(result.validationErrors ? { validationErrors: result.validationErrors } : {}), ...(typeof result.submitted === "boolean" ? { submitted: result.submitted } : {}), ...(result.workflowCheckpoint ? { workflowCheckpoint: result.workflowCheckpoint } : {}), ...(internal.ownerPrivateRun === true && typeof result.pageContent === "string" ? { pageContent: normalizeE2BPageContent(result.pageContent).text, pageContentTruncated: result.pageContentTruncated === true } : {}), ...(result.download ? { download: result.download } : {}), ...(result.pdf ? { pdf: { name: result.pdf.name, size: result.pdf.size, ...(importedFiles[0] ? { fileId: importedFiles[0].id } : {}) } } : {}), ...(importedFiles.length ? { files: importedFiles.map((file) => ({ fileId: file.id, name: file.name, kind: file.kind, size: file.size, contentType: file.contentType, expiresAt: file.expiresAt })) } : {}), ...(result.recording ? { recording: { id: result.recording.id, name: result.recording.name, state: result.recording.state, size: result.recording.size, createdAt: result.recording.createdAt, ...(importedFiles[0] ? { fileId: importedFiles[0].id } : {}) } } : {}), ...(result.screenshot ? { __browserScreenshot: true, base64: result.screenshot, mediaType: "image/jpeg", sizeBytes: Math.floor(result.screenshot.length * 0.75), ...(typeof result.screenshotId === "string" ? { screenshotId: result.screenshotId } : {}), ...(typeof result.screenshotHash === "string" ? { screenshotHash: result.screenshotHash } : {}) } : {}) };
+      const agent = normalizeAgentSummary(result.agent);
+      const safe = { provider: "e2b", sandboxId: next.sandboxId, action, ...(agent ? { agent } : {}), ...(result.observationId ? { observationId: result.observationId } : {}), ...(typeof result.pageGeneration === "number" ? { pageGeneration: result.pageGeneration } : {}), ...(result.accessibilityHash ? { accessibilityHash: result.accessibilityHash } : {}), ...(result.health ? { health: result.health } : {}), ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}), ...(result.events ? { events: result.events } : {}), ...(result.url ? { observedUrl: result.url, observationMethod: "playwright_page_url" } : {}), ...(result.title ? { title: redactBrowserText(result.title, 160) } : {}), ...(result.loadState ? { loadState: result.loadState } : {}), ...(nodes.length ? { matches: nodes } : {}), ...(result.formState ? { formState: result.formState } : {}), ...(result.actionVerification ? { actionVerification: result.actionVerification } : {}), ...(result.validationErrors ? { validationErrors: result.validationErrors } : {}), ...(typeof result.submitted === "boolean" ? { submitted: result.submitted } : {}), ...(result.workflowCheckpoint ? { workflowCheckpoint: result.workflowCheckpoint } : {}), ...(internal.ownerPrivateRun === true && typeof result.pageContent === "string" ? { pageContent: normalizeE2BPageContent(result.pageContent).text, pageContentTruncated: result.pageContentTruncated === true } : {}), ...(result.download ? { download: result.download } : {}), ...(result.pdf ? { pdf: { name: result.pdf.name, size: result.pdf.size, ...(importedFiles[0] ? { fileId: importedFiles[0].id } : {}) } } : {}), ...(importedFiles.length ? { files: importedFiles.map((file) => ({ fileId: file.id, name: file.name, kind: file.kind, size: file.size, contentType: file.contentType, expiresAt: file.expiresAt })) } : {}), ...(result.recording ? { recording: { id: result.recording.id, name: result.recording.name, state: result.recording.state, size: result.recording.size, createdAt: result.recording.createdAt, ...(importedFiles[0] ? { fileId: importedFiles[0].id } : {}) } } : {}), ...(result.screenshot ? { __browserScreenshot: true, base64: result.screenshot, mediaType: "image/jpeg", sizeBytes: Math.floor(result.screenshot.length * 0.75), ...(typeof result.screenshotId === "string" ? { screenshotId: result.screenshotId } : {}), ...(typeof result.screenshotHash === "string" ? { screenshotHash: result.screenshotHash } : {}) } : {}) };
       Object.assign(safe, result.forms ? { forms: result.forms } : {}, result.desktopAction ? { desktopAction: result.desktopAction } : {}, result.clipboard ? { clipboard: result.clipboard, ...(typeof result.text === "string" ? { text: result.text } : {}) } : {}, next.checkpoint ? { checkpoint: next.checkpoint } : {});
       const challenge = result.challenge && typeof result.challenge === "object" ? result.challenge : undefined;
       const safeWithChallenge = { ...safe, ...(result.needsUserInteraction ? { needsUserInteraction: true } : {}), ...(challenge ? { challenge } : {}), ...(Array.isArray(result.tabs) ? { tabs: result.tabs } : {}) };

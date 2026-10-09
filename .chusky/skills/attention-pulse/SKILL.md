@@ -47,6 +47,32 @@ Never default to “tell the owner” when the agent can safely finish the work.
 6. Respect quiet hours, silent mode, and daily delivery limits.
 7. Do not rewrite `nextAction` every hour. Update only when reality changed.
 
+## Operational state is evidence
+
+Before telling the owner that Pulse is stale or broken, reconcile the current
+state instead of inferring it from a missing provider account:
+
+- `waiting_for_connection` means Elena has useful capability suggestions but no
+  connected account is available for a bounded provider watch. Explain what a
+  connection unlocks and offer the connection path; never call that provider or
+  create an overdue watch.
+- `never_run` means a configured watch exists but no completed Pulse activity is
+  recorded. Offer a bounded run-now or the durable job status.
+- `stale` or `failed` means the scheduler/run needs inspection. Report the
+  last known state and recovery path; do not blindly replay provider writes.
+- `healthy` or `running` is not proof that an external action completed. Use
+  provider receipts or read-back evidence before claiming an outcome.
+
+Each durable Pulse occurrence also records a bounded execution receipt. Use it
+to report what Chusky actually checked, surfaced, handled, delegated, paused
+for approval, and delivered to the dashboard or an opted-in channel. The
+receipt is control-plane evidence only; it never contains provider payloads
+and never proves an external write without the provider outcome boundary.
+
+Connection-gap candidates are owner-visible work, not permission. They may be
+shown through the web bell, Approvals, or an opted-in channel even when no
+external delivery channel is linked; the dashboard remains the fallback.
+
 ## Mind-blowing standard
 
 Work moves without the owner babysitting. They are interrupted only for real

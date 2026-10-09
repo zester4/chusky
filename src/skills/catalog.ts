@@ -96,7 +96,7 @@ const ROUTED_SKILLS: Array<{ name: string; triggers: string[] }> = [
   { name: "cold-email", triggers: ["cold email", "outbound email sequence"] },
   { name: "seo-audit", triggers: ["seo", "search ranking", "meta tags audit"] },
   { name: "lead-magnets", triggers: ["lead magnet", "lead magnets", "opt-in offer"] },
-  { name: "lead-intel-pro", triggers: ["lead signals", "buyer intent signals", "monitor leads", "signal monitoring", "find prospects", "lead research", "qualify leads"] },
+  { name: "lead-intel-pro", triggers: ["lead signals", "buyer intent signals", "monitor leads", "signal monitoring", "find prospects", "lead research", "qualify leads", "lead campaign", "lead generation", "build a lead list", "prospecting campaign", "100 leads"] },
   { name: "marketing-ideas", triggers: ["marketing ideas", "campaign ideas", "growth ideas"] },
   { name: "marketing-psychology", triggers: ["marketing psychology", "persuasion", "positioning"] },
   { name: "customer-research", triggers: ["customer research", "icp", "user interviews"] },

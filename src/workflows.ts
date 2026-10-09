@@ -1,7 +1,7 @@
 import type { JobRecord, ReminderRecord, ReminderDeliveryTarget } from "./store.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { posthog } from "./posthog.js";
-import type { AutonomyExecutionStatus, AutonomyMode, JobOccurrenceRecord } from "./autonomy/types.js";
+import type { AttentionPulseRunEvidence, AutonomyExecutionStatus, AutonomyMode, JobOccurrenceRecord } from "./autonomy/types.js";
 
 export interface ReminderWorkflowPayload { reminderId: string; userId: number; approvalId?: string; attemptId?: string; }
 export interface JobWorkflowPayload { jobId: string; userId: number; occurrenceId?: string; approvalId?: string; }
@@ -39,6 +39,8 @@ export interface WorkflowExecutionResult {
   nextAction?: string;
   waitReason?: string;
   retryAt?: number;
+  /** Structured evidence for an Attention Pulse occurrence; never provider payloads. */
+  pulseEvidence?: AttentionPulseRunEvidence;
   deliveryConfirmation?: { kind: "attention_pulse"; candidateIds: string[]; observationIds?: string[]; dedupeKey: string };
 }
 
@@ -136,7 +138,14 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
   }
   const target = deliveryJob.deliveryTarget;
   const chatId = target?.provider === "telegram" ? Number(target.conversationId) : (!target ? await deps.getTelegramChatId(payload.userId) : undefined);
-  if ((!target && !chatId) || (target?.provider === "telegram" && !Number.isSafeInteger(chatId)) || (target && target.provider !== "telegram" && !deps.sendChannelMessage)) {
+  const hasTelegramChat = Number.isSafeInteger(chatId) && Number(chatId) > 0;
+  // The dashboard is a first-class delivery surface for Attention Pulse. A
+  // web-only account may have no Telegram mapping and no linked external
+  // channel, but Elena must still be able to run, persist a candidate, and
+  // expose it through the bell/Approvals feed. Other scheduled jobs retain
+  // their existing hard delivery requirement.
+  const dashboardOnly = job.kind === "attention_pulse" && !target && !hasTelegramChat;
+  if ((!target && !hasTelegramChat && !dashboardOnly) || (target?.provider === "telegram" && !hasTelegramChat) || (target && target.provider !== "telegram" && !deps.sendChannelMessage)) {
     if (occurrence && deps.updateJobOccurrence) await deps.updateJobOccurrence(payload.userId, occurrence.id, { status: "failed", error: target ? `No adapter for ${target.provider}` : "No Telegram mapping", completedAt: Date.now() }, occurrence.version);
     await deps.updateJob(payload.userId, payload.jobId, { deliveryError: target ? `No adapter for ${target.provider}` : "No Telegram mapping" });
     return { delivered: false };
@@ -149,10 +158,14 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
         : deps.runAgent
         ? await deps.runAgent(deliveryJob)
         : { text: deliveryJob.text };
+    const pulseEvidence = result.pulseEvidence
+      ? { ...result.pulseEvidence, delivery: result.pulseEvidence.delivery === "none" ? "suppressed" as const : result.pulseEvidence.delivery }
+      : undefined;
     if (occurrence && deps.updateJobOccurrence) {
       occurrence = await deps.updateJobOccurrence(payload.userId, occurrence.id, {
         status: result.status === "waiting" || result.status === "blocked" ? result.status : "running",
         result: result.text, nextAction: result.nextAction, waitReason: result.waitReason, cost: result.cost, toolCalls: result.toolCalls,
+        ...(pulseEvidence ? { pulseEvidence } : {}),
         completedAt: result.status === "waiting" || result.status === "blocked" ? undefined : undefined,
       }, occurrence.version) ?? occurrence;
     }
@@ -166,7 +179,21 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
       return { skipped: true, delivered: false };
     }
     const response = result.text.trim() || "Scheduled job completed.";
-    if (target && target.provider !== "telegram") {
+    if (dashboardOnly) {
+      // Candidate/observation records are the durable web notification. Keep
+      // them actionable for the owner; only advance the job-level digest key
+      // so the same unchanged state does not wake Elena every hour forever.
+      if (job.kind === "attention_pulse" && result.deliveryConfirmation?.kind === "attention_pulse") {
+        await deps.updateJob(payload.userId, payload.jobId, {
+          attentionPulse: {
+            ...(job.attentionPulse ?? {}),
+            lastDigestKey: result.deliveryConfirmation.dedupeKey,
+          },
+          deliveryError: undefined,
+        });
+      }
+      if (pulseEvidence) pulseEvidence.delivery = "dashboard";
+    } else if (target && target.provider !== "telegram") {
       const title = job.kind === "attention_pulse" ? "🧭 Chusky attention pulse" : "🔁 Chusky scheduled job";
       await deps.sendChannelMessage!(target, `${title}\n\n${response}`, `job:${payload.jobId}:${payload.occurrenceId ?? "legacy"}`);
     } else {
@@ -174,15 +201,20 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
       for (const chunk of splitHtml(mdToTelegramHtml(response), 3900)) {
         await deps.sendMessage(chatId!, `${header}${chunk}`, { parse_mode: "HTML" });
       }
+      if (pulseEvidence) pulseEvidence.delivery = "external";
     }
     // Mark the provider send complete before confirmation and occurrence
     // persistence. Those operations are retried independently and must not
     // cause a second external delivery.
     if (deps.completeDelivery) await deps.completeDelivery(deliveryKey, 7 * 24 * 60 * 60);
-    if (result.deliveryConfirmation && deps.confirmDelivery) await deps.confirmDelivery(payload.userId, deliveryJob, result.deliveryConfirmation);
+    // Dashboard delivery intentionally does not call confirmDelivery: the
+    // pending candidate is the notification and must remain actionable until
+    // the owner opens it and selects an action in Chat/Approvals.
+    if (!dashboardOnly && result.deliveryConfirmation && deps.confirmDelivery) await deps.confirmDelivery(payload.userId, deliveryJob, result.deliveryConfirmation);
     if (occurrence && deps.updateJobOccurrence) await deps.updateJobOccurrence(payload.userId, occurrence.id, {
       status: result.terminalStatus ?? "completed",
       ...(result.terminalStatus ? { nextAction: result.nextAction, waitReason: result.waitReason } : { completedAt: Date.now() }),
+      ...(pulseEvidence ? { pulseEvidence } : {}),
     }, occurrence.version);
   } catch (error) {
     if (occurrence && deps.updateJobOccurrence) await deps.updateJobOccurrence(payload.userId, occurrence.id, { status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500), completedAt: Date.now() }, occurrence.version);

@@ -72,7 +72,38 @@ export type AttentionPulseCadence = "every_30_minutes" | "hourly" | "daily";
 export type AttentionPulseAuthority = "observe" | "prepare" | "execute_reversible";
 export type AttentionPulseDeliveryTarget = { provider: string; conversationId?: string };
 export type AttentionPulseDeliveryPreference = { id: string; provider: string; conversationId?: string; enabled: boolean; mode: "immediate" | "digest" | "silent"; maxPerDay?: number; minScore?: number; quietHoursUtc?: { startMinute: number; endMinute: number }; createdAt: number; updatedAt: number };
-export interface AttentionPulsePreferences { enabled: boolean; cadence: AttentionPulseCadence; authority: AttentionPulseAuthority; deliveryTargets: AttentionPulseDeliveryPreference[]; maxPerDay: number; quietHoursUtc?: { startMinute: number; endMinute: number }; monitoredDomains: string[]; }
+export type AttentionPulseHealthStatus = "off" | "waiting_for_connection" | "waiting_for_setup" | "never_run" | "running" | "healthy" | "watch_attention" | "stale" | "failed";
+export type AttentionPulseRecoveryAction = "none" | "connect_app" | "run_now" | "inspect";
+export interface AttentionPulseHealth {
+  status: AttentionPulseHealthStatus;
+  title: string;
+  summary: string;
+  recoveryAction: AttentionPulseRecoveryAction;
+  expectedIntervalMs: number;
+  activeWatches: number;
+  currentWatches: number;
+  scheduledWatches: number;
+  staleWatches: number;
+  failedWatches: number;
+  neverCheckedWatches: number;
+  pendingSuggestions: number;
+  connectedAccountsVerified: boolean;
+  lastRunAt?: number;
+  lastRunStatus?: string;
+  lastError?: string;
+}
+export type AttentionPulseRunEvidence = {
+  state: "completed" | "waiting" | "blocked" | "failed" | "skipped";
+  dueWatches: number;
+  watchesReconciled: number;
+  pendingObservations: number;
+  pendingCandidates: number;
+  handled: boolean;
+  delegated: number;
+  approvalRequired: boolean;
+  delivery: "dashboard" | "external" | "suppressed" | "none";
+};
+export interface AttentionPulsePreferences { enabled: boolean; cadence: AttentionPulseCadence; authority: AttentionPulseAuthority; deliveryTargets: AttentionPulseDeliveryPreference[]; maxPerDay: number; quietHoursUtc?: { startMinute: number; endMinute: number }; monitoredDomains: string[]; health: AttentionPulseHealth; }
 export interface AttentionPulseUpdate { enabled: boolean; cadence?: AttentionPulseCadence; authority?: AttentionPulseAuthority; deliveryTargets?: AttentionPulseDeliveryTarget[]; maxPerDay?: number; quietHoursUtc?: { startMinute: number; endMinute: number } | null; monitoredDomains?: string[]; }
 export type ComposerStageStatus = "pending" | "running" | "completed" | "blocked" | "failed" | "cancelled";
 export interface ComposerStageInput { id: string; title: string; objective: string; dependsOn?: string[]; requiresApproval?: boolean; retryLimit?: number; budgetSeconds?: number; }
@@ -81,7 +112,7 @@ export interface WorkflowComposerRecord { id: string; name: string; description?
 export interface AutonomyContextSnapshot { capturedAt: number; objective: string; summary?: string; nextAction?: string; links?: AutonomyLinks; freshnessMs?: number; source?: "live" | "checkpoint" | "user" | "system"; }
 export interface Reminder { id: string; text: string; runAt: string; status: "scheduled" | "waiting" | "paused" | "sent" | "cancelled" | "failed"; workflowRunId?: string; mode?: AutonomyMode; links?: AutonomyLinks; contextSnapshot?: AutonomyContextSnapshot; preconditions?: string[]; postconditions?: string[]; nextAction?: string; pollEverySeconds?: number; deliveryTarget?: Record<string, unknown>; deliveryError?: string; createdAt: string; }
 export interface RecurringJob { id: string; text: string; cron: string; status?: "active" | "paused" | "cancelled"; workflowRunId?: string; mode?: AutonomyMode; links?: AutonomyLinks; contextSnapshot?: AutonomyContextSnapshot; preconditions?: string[]; postconditions?: string[]; nextAction?: string; deliveryTarget?: Record<string, unknown>; deliveryError?: string; createdAt: string; [key: string]: unknown; }
-export interface JobOccurrence { id: string; userId?: number; jobId: string; occurrenceId: string; status: string; mode: AutonomyMode; idempotencyKey: string; context?: AutonomyContextSnapshot; result?: string; nextAction?: string; waitReason?: string; error?: string; cost?: number; toolCalls?: number; startedAt?: string; completedAt?: string; createdAt: string; updatedAt: string; version: number; }
+export interface JobOccurrence { id: string; userId?: number; jobId: string; occurrenceId: string; status: string; mode: AutonomyMode; idempotencyKey: string; context?: AutonomyContextSnapshot; result?: string; pulseEvidence?: AttentionPulseRunEvidence; nextAction?: string; waitReason?: string; error?: string; cost?: number; toolCalls?: number; startedAt?: string; completedAt?: string; createdAt: string; updatedAt: string; version: number; }
 export interface ScratchpadEntry { key: string; content: string; updatedAt: string; }
 export type MemoryCategory = "profile" | "personal" | "preference" | "business" | "relationship" | "project" | "procedural" | "episodic" | "document" | "negative" | "fact" | "instruction" | "asset";
 export interface MemoryFact { id: string; category: MemoryCategory; key: string; value: string; confidence: number; source: string; sensitivity: "normal" | "sensitive"; status?: string; projectId?: string; personKey?: string; createdAt: string; updatedAt: string; expiresAt?: string; reviewAt?: string; }

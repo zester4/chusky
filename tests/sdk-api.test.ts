@@ -404,6 +404,21 @@ test("SDK thread creation is authenticated, replay-safe, and rejects key/body mi
   assert.equal(forbidden.status, 401);
 });
 
+test("Attention candidate run context is validated before Chat execution", async () => {
+  const api = app();
+  const created = await api.fetch(request({}, "candidate-context-thread"));
+  assert.equal(created.status, 201);
+  const thread = await created.json() as { id: string };
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json" };
+  const malformed = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/stream`, { method: "POST", headers, body: JSON.stringify({ input: "Review the suggestion.", metadata: { attentionActionId: "review" } }) }));
+  assert.equal(malformed.status, 400);
+  assert.equal((await malformed.json() as { error?: { code?: string } }).error?.code, "invalid_run_policy");
+
+  const missing = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/stream`, { method: "POST", headers, body: JSON.stringify({ input: "Review the suggestion.", metadata: { attentionCandidateId: "cand_missing", attentionActionId: "review" } }) }));
+  assert.equal(missing.status, 409);
+  assert.equal((await missing.json() as { error?: { code?: string } }).error?.code, "attention_candidate_not_found");
+});
+
 test("SDK run streams the same human-readable tool progress used by Telegram", async () => {
   const originalFetch = globalThis.fetch;
   let chatCalls = 0;
@@ -1484,6 +1499,8 @@ test("Attention Pulse settings enforce owner auth, validation, and idempotent re
   const first = await updated.json() as { data: { enabled: boolean; authority: string; monitoredDomains: string[] } };
   assert.equal(first.data.enabled, false);
   assert.equal(first.data.authority, "prepare");
+  assert.equal((first.data as { health: { status: string; recoveryAction: string } }).health.status, "off");
+  assert.equal((first.data as { health: { status: string; recoveryAction: string } }).health.recoveryAction, "none");
   assert.deepEqual(first.data.monitoredDomains, ["gmail", "calendar"]);
   assert.equal("userId" in (first.data as Record<string, unknown>), false);
   assert.equal("userId" in (first.data.deliveryTargets[0] as Record<string, unknown>), false);

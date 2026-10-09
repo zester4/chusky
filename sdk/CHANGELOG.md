@@ -2,6 +2,25 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.12.0 - 2026-10-09
+
+- Expose a bounded `pulseEvidence` receipt on recurring-job occurrences so SDK
+  clients can distinguish checks, surfaced observations/candidates, handling,
+  delegation, approval waits, and dashboard or external delivery.
+- Keep the receipt provider-neutral: it contains counts and lifecycle state,
+  never provider payloads, credentials, or a claim that an external write was
+  successful.
+
+## 1.11.0 - 2026-10-09
+
+- Extend `client.attentionPulse.get()` with typed operational health so clients
+  can distinguish a healthy run, a first run, a stale schedule, a failed watch,
+  and a missing connected-app dependency.
+- Expose the recommended recovery action and bounded watch/suggestion counts
+  without exposing provider payloads or changing the existing approval policy.
+- Keep the web notification bell as a delivery surface for Pulse candidates
+  when no external channel is linked; candidates remain actionable in Chat.
+
 ## 1.10.1 - 2026-10-07
 
 - Synchronize meeting projections across the API, dashboard, and SDK with

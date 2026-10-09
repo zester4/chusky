@@ -130,6 +130,49 @@ test("attention pulse delivery is confirmed only after the channel send succeeds
   assert.equal(confirmations, 0);
 });
 
+test("web-only attention pulse runs without an external channel and keeps the candidate actionable", async () => {
+  let confirmations = 0;
+  const state = deps({
+    getTelegramChatId: async () => undefined,
+    getJob: async () => ({ ...deps().job, kind: "attention_pulse", mode: "act", workerBinding: { worker: "elena", objective: "Run Pulse", expectedOutput: "Pulse result", allowedTools: [], approvalPolicy: "require_chusky_approval" as const, timeoutSeconds: 60, maxToolCalls: 4 } }),
+    runWorker: async () => ({ text: "Connect Gmail to unlock inbox monitoring.", deliveryConfirmation: { kind: "attention_pulse" as const, candidateIds: ["cand_web"], dedupeKey: "digest-web" } }),
+    confirmDelivery: async () => { confirmations += 1; },
+  });
+  const result = await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "pulse-web-only" }, state);
+  assert.deepEqual(result, { delivered: true });
+  assert.equal(state.sent.length, 0);
+  assert.equal(state.sentChannels.length, 0);
+  assert.equal(confirmations, 0);
+  assert.deepEqual(state.jobUpdates, [{ attentionPulse: { lastDigestKey: "digest-web" }, deliveryError: undefined }]);
+});
+
+test("web-only attention pulse records a dashboard run receipt", async () => {
+  let occurrence: JobOccurrenceRecord | undefined;
+  const state = deps({
+    getTelegramChatId: async () => undefined,
+    getJob: async () => ({ ...deps().job, kind: "attention_pulse", mode: "act", workerBinding: { worker: "elena", objective: "Run the attention pulse", expectedOutput: "Pulse result", allowedTools: [], approvalPolicy: "require_chusky_approval" as const, timeoutSeconds: 60, maxToolCalls: 4 } }),
+    getJobOccurrence: async () => occurrence,
+    createJobOccurrence: async (record) => { occurrence = record; return record; },
+    updateJobOccurrence: async (_userId, _id, patch, expectedVersion) => {
+      assert.equal(expectedVersion, occurrence?.version);
+      occurrence = { ...occurrence!, ...patch, version: occurrence!.version + 1, updatedAt: Date.now() };
+      return occurrence;
+    },
+    runWorker: async () => ({
+      text: "Connect Gmail to unlock inbox monitoring.",
+      pulseEvidence: { state: "completed" as const, dueWatches: 0, watchesReconciled: 0, pendingObservations: 0, pendingCandidates: 1, handled: false, delegated: 0, approvalRequired: false, delivery: "none" as const },
+      deliveryConfirmation: { kind: "attention_pulse" as const, candidateIds: ["cand_web"], dedupeKey: "digest-web-receipt" },
+    }),
+  });
+  const result = await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "pulse-web-receipt" }, state);
+  assert.deepEqual(result, { delivered: true });
+  assert.equal(occurrence?.status, "completed");
+  assert.equal(occurrence?.pulseEvidence?.delivery, "dashboard");
+  assert.equal(occurrence?.pulseEvidence?.pendingCandidates, 1);
+  assert.equal(state.sent.length, 0);
+  assert.equal(state.sentChannels.length, 0);
+});
+
 test("attention pulse resolves a fresh linked iMessage route for execution and delivery", async () => {
   let runnerTarget: string | undefined;
   const state = deps({
@@ -291,6 +334,7 @@ test("owner-facing pulse approval notices leave the occurrence waiting instead o
       terminalStatus: "waiting" as const,
       nextAction: "Approve request appr_123.",
       waitReason: "The pulse reached an approval boundary and did not perform the external action.",
+      pulseEvidence: { state: "waiting" as const, dueWatches: 1, watchesReconciled: 1, pendingObservations: 0, pendingCandidates: 1, handled: false, delegated: 0, approvalRequired: true, delivery: "none" as const },
     }),
   });
   const result = await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "occ-pulse-approval" }, state);
@@ -300,6 +344,7 @@ test("owner-facing pulse approval notices leave the occurrence waiting instead o
   assert.equal(occurrence?.completedAt, undefined);
   assert.equal(occurrence?.nextAction, "Approve request appr_123.");
   assert.match(occurrence?.waitReason ?? "", /approval boundary/);
+  assert.deepEqual(occurrence?.pulseEvidence, { state: "waiting", dueWatches: 1, watchesReconciled: 1, pendingObservations: 0, pendingCandidates: 1, handled: false, delegated: 0, approvalRequired: true, delivery: "external" });
 });
 
 test("explicit notify jobs do not invoke the agent", async () => {

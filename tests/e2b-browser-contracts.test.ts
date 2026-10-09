@@ -11,6 +11,7 @@ import { chuckTools } from "../src/agentTools.js";
 import { pendingVaultInspectionOrigins } from "../src/vault/browserGuard.js";
 import { auxiliaryBrowserRequest } from "../src/lib/e2b/auxiliaryActions.js";
 import { scoreBrowserControlRemap, selectBrowserControlRemapCandidate } from "../src/lib/e2b/browser.js";
+import { browserChallengeStillActive } from "../src/lib/e2b/handoffStatus.js";
 
 test("the model schema and dispatcher expose exactly the supported E2B browser actions", () => {
   const schema = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER")?.function.parameters as { properties?: { action?: { enum?: string[] } } } | undefined;
@@ -72,6 +73,8 @@ test("form inspection is a structured, safe browser capability", () => {
   assert.match(engine, /stale_observation.*action_timeout.*browser_action_failed/);
   assert.match(engine, /recovery needs the control role and accessible name/);
   assert.match(engine, /retryableCode/);
+  assert.match(engine, /lastActionGuard/);
+  assert.match(engine, /repeated action because the page made no progress/);
   assert.doesNotMatch(engine, /retryable = .*click/);
   assert.doesNotMatch(agent, /forms.*password.*value/);
 });
@@ -187,6 +190,13 @@ test("resuming an incomplete handoff returns a waiting state without touching E2
   assert.equal(result.status, "waiting_for_owner");
   assert.equal(result.needsUserInteraction, true);
   assert.match(String(result.next), /CHUCK_BROWSER_HANDOFF_COMPLETE/);
+});
+
+test("handoff completion requires the fresh observation to clear the challenge", () => {
+  assert.equal(browserChallengeStillActive({ needsUserInteraction: true, challenge: { detected: true } }), true);
+  assert.equal(browserChallengeStillActive({ needsUserInteraction: false, challenge: { detected: true } }), true);
+  assert.equal(browserChallengeStillActive({ needsUserInteraction: false, challenge: { detected: false } }), false);
+  assert.equal(browserChallengeStillActive({}), false);
 });
 
 test("handoff verification trusts direct Playwright URL observations but rejects unproven browser URLs", () => {

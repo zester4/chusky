@@ -53,6 +53,40 @@ export type E2BBrowserRecord = {
   /** The live owner-only noVNC stream state. The password and URL are never persisted. */
   stream?: { startedAt: number; expiresAt: number; port: number };
   evidence?: Array<{ action: string; at: number; url?: string; title?: string; observationId?: string; screenshotHash?: string; verified?: boolean }>;
+  /** The last bounded agent run, retained for resumable diagnostics without page content. */
+  lastAgent?: E2BBrowserAgentSummary;
+  /** Hashed generic-action guard used to stop repeated no-progress tool calls. */
+  lastActionGuard?: { fingerprint: string; marker: string; count: number; action: string; updatedAt: number };
+};
+
+export type E2BBrowserAgentTraceStep = {
+  index: number;
+  action: string;
+  status: "succeeded" | "failed" | "stopped";
+  durationMs: number;
+  observedUrl?: string;
+  observedTitle?: string;
+  observedPageGeneration?: number;
+  observedAccessibilityHash?: string;
+  screenshotHash?: string;
+  recovery?: string;
+  progress?: boolean;
+  expectations?: Array<{ kind: string; passed: boolean; required: boolean }>;
+  error?: string;
+};
+
+export type E2BBrowserAgentSummary = {
+  steps: E2BBrowserAgentTraceStep[];
+  completed: boolean;
+  maxSteps: number;
+  maxActions: number;
+  maxDurationMs: number;
+  noProgressLimit: number;
+  actionCount: number;
+  elapsedMs: number;
+  verified: boolean;
+  completionChecks?: Array<{ kind: string; value: string; passed: boolean; required: boolean; observed?: boolean }>;
+  stoppedReason?: "timeout" | "max_actions" | "no_progress" | "expectation_failed" | "completion_assertion_failed" | "step_failed" | "challenge" | "completed";
 };
 
 export type E2BBrowserFormControl = {
@@ -152,5 +186,6 @@ export type E2BCommandResult = {
   pdf?: { filePath: string; name: string; size: number };
   forks?: Array<{ sandboxId?: string; error?: string }>;
   stream?: { url?: string; startedAt?: number; expiresAt?: number; port?: number; ready?: boolean; active?: boolean };
+  agent?: E2BBrowserAgentSummary;
   [key: string]: unknown;
 };

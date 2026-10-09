@@ -112,7 +112,8 @@ function commitmentTitle(signal: OperatingSignal, order: StandingOrderRecord): s
 
 function existingCommitment(records: AttentionRecord[], eventId: string): OpenLoopRecord | undefined {
   return records.find((record): record is OpenLoopRecord =>
-    "title" in record && record.source === `trigger:${eventId}` && record.status !== "dismissed",
+    "title" in record && "source" in record && "status" in record
+      && record.source === `trigger:${eventId}` && record.status !== "dismissed",
   );
 }
 

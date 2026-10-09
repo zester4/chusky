@@ -959,6 +959,46 @@ function occurrenceView(occurrence: Awaited<ReturnType<typeof listJobOccurrences
 function workerView(record: Awaited<ReturnType<typeof getHandoffRecord>>) { return record ? { id: record.id, worker: record.to, from: record.from, objective: record.objective, expectedOutput: record.expectedOutput, status: record.status, taskId: record.taskId, workflowRunId: record.workflowRunId, context: record.context, delegation: record.delegation, timestamp: new Date(record.timestamp).toISOString() } : undefined; }
 type RunBody = { input?: string; attachments?: string[]; model?: string; agentId?: string; metadata?: Record<string, unknown>; budget?: { duration?: string; maxToolCalls?: number; maxCost?: number }; tools?: CompanyToolPolicy; skills?: string[]; wait?: boolean; organizationId?: string };
 
+type AttentionCandidateRunContext = { candidateId: string; actionId?: string };
+
+function attentionCandidateRunContext(body: RunBody): AttentionCandidateRunContext | undefined {
+  const metadata = body.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return undefined;
+  const rawCandidateId = metadata.attentionCandidateId;
+  const rawActionId = metadata.attentionActionId;
+  if (rawCandidateId === undefined && rawActionId === undefined) return undefined;
+  if (typeof rawCandidateId !== "string" || !/^cand_[A-Za-z0-9_-]{1,156}$/.test(rawCandidateId)) throw new Error("attentionCandidateId must be a valid owner-scoped candidate ID");
+  if (rawActionId !== undefined && (typeof rawActionId !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(rawActionId))) throw new Error("attentionActionId must be a valid candidate action ID");
+  return { candidateId: rawCandidateId, ...(typeof rawActionId === "string" ? { actionId: rawActionId } : {}) };
+}
+
+async function validateAttentionCandidateForRun(userId: number, context: AttentionCandidateRunContext | undefined): Promise<AttentionCandidateRecord | undefined> {
+  if (!context) return undefined;
+  const candidate = await getAttentionRecord(userId, "attention_candidate", context.candidateId) as AttentionCandidateRecord | undefined;
+  if (!candidate) throw new Error("attention_candidate_not_found");
+  if (!["pending", "delivered", "accepted"].includes(candidate.status)) throw new Error("attention_candidate_unavailable");
+  const availableActions = candidate.suggestedActions?.length ? candidate.suggestedActions : [{ id: "review" }];
+  if (context.actionId && !availableActions.some((action) => action.id === context.actionId)) throw new Error("invalid_attention_action");
+  return candidate;
+}
+
+async function acceptAttentionCandidateForRun(userId: number, context: AttentionCandidateRunContext | undefined): Promise<void> {
+  const candidate = await validateAttentionCandidateForRun(userId, context);
+  if (!candidate) return;
+  if (candidate.status !== "accepted") {
+    const updated = await updateAttentionRecord(userId, "attention_candidate", candidate.id, { status: "accepted" });
+    if (!updated) throw new Error("attention_candidate_unavailable");
+  }
+}
+
+function attentionCandidateRunError(error: unknown): { code: string; message: string } | undefined {
+  const value = error instanceof Error ? error.message : "";
+  if (value === "attention_candidate_not_found") return { code: "attention_candidate_not_found", message: "This Elena suggestion is no longer available." };
+  if (value === "attention_candidate_unavailable") return { code: "attention_candidate_unavailable", message: "This Elena suggestion is no longer actionable." };
+  if (value === "invalid_attention_action") return { code: "invalid_attention_action", message: "That suggestion action is not valid for this candidate." };
+  return undefined;
+}
+
 function principalFromContext(c: any): SdkPrincipal {
   return (c.get as (key: string) => unknown)("sdkPrincipal") as SdkPrincipal;
 }
@@ -1034,6 +1074,7 @@ function validateRunPolicy(body: RunBody): string | undefined {
     if (list !== undefined && (!Array.isArray(list) || list.length > 100 || !list.every((item) => typeof item === "string" && toolSlug.test(item)))) return `tools.${field} must contain at most 100 valid tool slugs`;
   }
   if (body.agentId !== undefined && (typeof body.agentId !== "string" || !/^(?:agt_[A-Za-z0-9_-]{1,100}|[a-z][a-z0-9-]{1,80})$/.test(body.agentId))) return "agentId must be a valid profile ID or template slug";
+  try { attentionCandidateRunContext(body); } catch (error) { return error instanceof Error ? error.message : "attention candidate context is invalid"; }
   return undefined;
 }
 
@@ -2690,7 +2731,9 @@ export function registerSdkApi(app: Hono): void {
     }
     const lockToken = randomUUID();
     if (!(await acquireUserLock(owner.userId, lockToken))) return apiError(c, 409, "run_in_progress", "Another Chusky request is already running for this user.");
+    const attentionContext = attentionCandidateRunContext(body);
     try {
+    try { await validateAttentionCandidateForRun(owner.userId, attentionContext); } catch (error) { const detail = attentionCandidateRunError(error); if (detail) return apiError(c, 409, detail.code, detail.message); throw error; }
     const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: body.wait === false ? "queued" : "running", ...(owner.organizationId ? { companyProjectId: owner.projectId } : {}), ...(body.organizationId ? { organizationId: body.organizationId } : {}), ...(dashboardRequest(c) ? { ownerPrivateRun: true } : {}), input: resolved.input, model: body.model ?? session.model, agentId: companyPolicy.agent?.id, agentName: companyPolicy.agent?.name, agentInstructions: companyPolicy.agent?.instructions, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event(body.wait === false ? "run.queued" : "run.started")], createdAt: now, updatedAt: now };
     let quotaReservationId: string | undefined;
     if (body.wait === false) {
@@ -2709,8 +2752,29 @@ export function registerSdkApi(app: Hono): void {
       try {
         task = await createTask(owner.userId, { title: (resolved.input || "SDK agent run").slice(0, 120), objective: resolved.input || "Process the verified attachments.", runAt: Date.now(), maxAttempts: 10, sdkRunId: run.id, sdkThreadId: thread.id, sdkInput: resolved.input, sdkAttachments: resolved.attachments, sdkModel: body.model ?? session.model, sdkTools: body.tools ? { allow: body.tools.allow, deny: body.tools.deny, requireApproval: body.tools.requireApproval } : undefined, sdkBudget: body.budget, sdkStartedAt: Date.now(), sdkSkills: body.skills, sdkInstructions: companyPolicy.agent?.instructions, sdkOrganizationId: body.organizationId, sdkOwnerPrivateRun: run.ownerPrivateRun, quotaReservationId });
         const workflowRunId = await enqueueTaskWithClaim(owner.userId, task.id, task.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer);
-        if (!workflowRunId) throw new Error("A task enqueue is already in progress; retry the request shortly."); run.taskId = task.id; run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, "run.queued", { threadId: thread.id, runId: run.id, taskId: task.id, status: run.status }); return c.json(response, 202);
-      } catch (error) { if (task!) await cancelTask(owner.userId, task.id); if (quotaReservationId) await releaseExecutionQuota(owner.userId, quotaReservationId).catch(() => undefined); thread.runs = thread.runs.filter((item) => item.id !== run.id); await saveSession(owner.userId, session); await deleteSdkRun(owner.userId, thread.id, run.id); return apiError(c, 503, "run_enqueue_failed", error instanceof Error ? error.message : "The durable run could not be queued."); }
+        if (!workflowRunId) throw new Error("A task enqueue is already in progress; retry the request shortly.");
+        await acceptAttentionCandidateForRun(owner.userId, attentionContext);
+        run.taskId = task.id; run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, "run.queued", { threadId: thread.id, runId: run.id, taskId: task.id, status: run.status }); return c.json(response, 202);
+      } catch (error) {
+        if (task!) await cancelTask(owner.userId, task.id);
+        if (quotaReservationId) await releaseExecutionQuota(owner.userId, quotaReservationId).catch(() => undefined);
+        thread.runs = thread.runs.filter((item) => item.id !== run.id);
+        await saveSession(owner.userId, session);
+        await deleteSdkRun(owner.userId, thread.id, run.id);
+        const detail = attentionCandidateRunError(error);
+        if (detail) return apiError(c, 409, detail.code, detail.message);
+        return apiError(c, 503, "run_enqueue_failed", error instanceof Error ? error.message : "The durable run could not be queued.");
+      }
+    }
+    try {
+      await saveSession(owner.userId, session);
+      await acceptAttentionCandidateForRun(owner.userId, attentionContext);
+    } catch (error) {
+      thread.runs = thread.runs.filter((item) => item.id !== run.id);
+      await saveSession(owner.userId, session).catch((cleanupError) => logger.error({ err: cleanupError, runId: run.id }, "Could not roll back an unaccepted attention candidate run"));
+      const detail = attentionCandidateRunError(error);
+      if (detail) return apiError(c, 409, detail.code, detail.message);
+      throw error;
     }
     let privateLinks: PrivateRunLink[] | undefined;
     try { const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions, dashboardRequest(c))); privateLinks = result.privateLinks; run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); appendSdkRunHistoryToSession(session, thread.id, run.id, [
@@ -2740,8 +2804,20 @@ export function registerSdkApi(app: Hono): void {
     }
     const lockToken = randomUUID();
     if (!(await acquireUserLock(owner.userId, lockToken))) return apiError(c, 409, "run_in_progress", "Another Chusky request is already running for this user.");
+    const attentionContext = attentionCandidateRunContext(body);
+    try { await validateAttentionCandidateForRun(owner.userId, attentionContext); } catch (error) { const detail = attentionCandidateRunError(error); if (detail) { await releaseUserLock(owner.userId, lockToken); return apiError(c, 409, detail.code, detail.message); } await releaseUserLock(owner.userId, lockToken); throw error; }
     const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", ...(owner.organizationId ? { companyProjectId: owner.projectId } : {}), ...(body.organizationId ? { organizationId: body.organizationId } : {}), ...(dashboardRequest(c) ? { ownerPrivateRun: true } : {}), input: resolved.input, model: body.model ?? session.model, agentId: companyPolicy.agent?.id, agentName: companyPolicy.agent?.name, agentInstructions: companyPolicy.agent?.instructions, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event("run.started")], createdAt: now, updatedAt: now }; thread.runs.push(run); await persistSdkCompanyRun(run);
     await saveSession(owner.userId, session);
+    try {
+      await acceptAttentionCandidateForRun(owner.userId, attentionContext);
+    } catch (error) {
+      thread.runs = thread.runs.filter((item) => item.id !== run.id);
+      await saveSession(owner.userId, session).catch((cleanupError) => logger.error({ err: cleanupError, runId: run.id }, "Could not roll back an unaccepted streamed attention candidate run"));
+      const detail = attentionCandidateRunError(error);
+      await releaseUserLock(owner.userId, lockToken);
+      if (detail) return apiError(c, 409, detail.code, detail.message);
+      throw error;
+    }
     const abort = new AbortController(); let clientDisconnected = false; const markClientDisconnected = () => { clientDisconnected = true; }; c.req.raw.signal.addEventListener("abort", markClientDisconnected, { once: true }); activeRuns.set(run.id, abort);
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({ start: async (controller) => {

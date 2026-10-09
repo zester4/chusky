@@ -94,6 +94,37 @@ async function main() {
     assertCheck("bounded act executes a fresh semantic step", acted.ok === true);
     const agentProbe = await requestBrowser({ action: "agent", maxSteps: 1, steps: [{ action: "screenshot" }] });
     assertCheck("bounded agent loop returns an ordered action trace", agentProbe.agent?.completed === true && Array.isArray(agentProbe.agent?.steps) && agentProbe.agent.steps[0]?.status === "succeeded");
+    const verifiedAgentProbe = await requestBrowser({
+      action: "agent",
+      maxSteps: 2,
+      maxActions: 2,
+      steps: [
+        { action: "fill", selector: selectorFor(textbox), value: "E2B verified agent" },
+        { action: "click", selector: selectorFor(button) },
+      ],
+      completionAssertions: [{ kind: "text", value: "Submitted: E2B verified agent", required: true }],
+    });
+    assertCheck("bounded agent verifies the requested business outcome", verifiedAgentProbe.agent?.completed === true && verifiedAgentProbe.agent?.verified === true && verifiedAgentProbe.agent?.stoppedReason === "completed" && verifiedAgentProbe.agent?.completionChecks?.every((check: any) => check.passed === true), JSON.stringify(verifiedAgentProbe.agent));
+    const failedCompletionProbe = await requestBrowser({
+      action: "agent",
+      maxSteps: 1,
+      steps: [{ action: "screenshot" }],
+      completionAssertions: [{ kind: "text", value: "This completion marker does not exist", required: true }],
+    });
+    assertCheck("bounded agent refuses false business completion", failedCompletionProbe.agent?.completed === false && failedCompletionProbe.agent?.verified === false && failedCompletionProbe.agent?.stoppedReason === "completion_assertion_failed", JSON.stringify(failedCompletionProbe.agent));
+    const noProgressProbe = await requestBrowser({
+      action: "agent",
+      maxSteps: 5,
+      maxActions: 5,
+      noProgressLimit: 2,
+      steps: [
+        { action: "focus", selector: selectorFor(textbox) },
+        { action: "focus", selector: selectorFor(textbox) },
+        { action: "focus", selector: selectorFor(textbox) },
+        { action: "focus", selector: selectorFor(textbox) },
+      ],
+    });
+    assertCheck("bounded agent loop stops repeated no-progress actions", noProgressProbe.agent?.completed === false && noProgressProbe.agent?.stoppedReason === "no_progress" && noProgressProbe.agent?.steps?.at(-1)?.status === "stopped", JSON.stringify(noProgressProbe.agent));
     await requestBrowser({ action: "fill", selector: selectorFor(textbox), value: "E2B form test" });
     await requestBrowser({ action: "click", selector: selectorFor(button) });
     const submitted = await requestBrowser({ action: "snapshot", includePageContent: true });

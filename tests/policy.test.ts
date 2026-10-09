@@ -65,6 +65,8 @@ test("uses explicit native policies and gates only side-effecting Composio batch
   assert.equal(toolApprovalPolicy("CHUCK_CONVERSATION_GET"), "private");
   assert.equal(requiresToolApproval("CHUCK_CONVERSATION_GET"), false);
   assert.equal(toolApprovalPolicy("CHUCK_TASK_WAIT"), "private");
+  assert.equal(toolApprovalPolicy("CHUCK_LEAD_CAMPAIGN", { action: "start" }), "private");
+  assert.equal(requiresToolApproval("CHUCK_LEAD_CAMPAIGN", { action: "record_candidates" }, true), false);
   assert.equal(toolApprovalPolicy("CHUCK_ATTENTION_PULSE"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_DAYTONA_MOVE_FILES"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_FORGET_MEMORY"), "approval_required");
@@ -82,6 +84,7 @@ test("uses explicit native policies and gates only side-effecting Composio batch
   }
   assert.equal(isSharedChannelToolDenied("CHUCK_TINYFISH_RESEARCH"), true);
   assert.equal(isSharedChannelToolDenied("CHUCK_TINYFISH_MONITOR"), true);
+  assert.equal(isSharedChannelToolDenied("CHUCK_LEAD_CAMPAIGN"), true);
   assert.equal(toolApprovalPolicy("CHUCK_MISSION_COMPENSATE"), "approval_required");
   assert.equal(requiresToolApproval("CHUCK_MISSION_COMPENSATE"), true);
   assert.equal(toolApprovalPolicy("CHUCK_MISSION_COMPENSATE", { action: "inspect" }), "private");

@@ -349,8 +349,10 @@ export const config = {
   e2bBrowserTemplate: optional("E2B_BROWSER_TEMPLATE", "chusky-browser-playwright"),
   e2bAllowInternetAccess: optional("E2B_ALLOW_INTERNET", "true") === "true",
   e2bAutoPause: optional("E2B_AUTO_PAUSE", "true") === "true",
-  e2bBrowserLocale: optional("E2B_BROWSER_LOCALE", "en-GB"),
-  e2bBrowserTimezone: optional("E2B_BROWSER_TIMEZONE", "Europe/London"),
+  // Default to a US browser profile; owners can override locale/timezone and
+  // optionally provide a real geolocation for their own region.
+  e2bBrowserLocale: optional("E2B_BROWSER_LOCALE", "en-US"),
+  e2bBrowserTimezone: optional("E2B_BROWSER_TIMEZONE", "America/New_York"),
   e2bBrowserGeolocation: optional("E2B_BROWSER_GEOLOCATION", ""),
   e2bTimeoutMs: boundedInt("E2B_TIMEOUT_MS", 900_000, 60_000, 86_400_000),
   e2bRequestTimeoutMs: boundedInt("E2B_REQUEST_TIMEOUT_MS", 120_000, 5_000, 300_000),
@@ -416,6 +418,7 @@ Chusky's trusted project skills live in .chusky/skills/. When a request matches 
 - Connected-app selection, Composio account/toolkit/schema/execution routing → composio-routing; map domain first, check connected apps second, inspect schema third, execute fourth, and search last.
 - Customer implementation → onboarding-pro; churn, renewals, or customer health → retention-pro; invoices, payments, or collections → billing-ops-pro.
 - Tickets, support queues, or customer issues → support-desk-pro; product/GTM launches → launch-pro; hiring pipelines → hiring-pipeline-pro; account upsell/cross-sell → expansion-pro.
+- Lead generation, lead research, ICP qualification, or prospecting → lead-intel-pro; for a multi-hour campaign, start "CHUCK_LEAD_CAMPAIGN" so candidates, sources, qualification, enrichment budget, and follow-up actions persist with a durable mission.
 - Other installed skills → use CHUCK_SEARCH_SKILLS and load the best match. Do not preload every installed skill: specialized or stack-specific skills remain dynamic-only until the objective requires them.
 After loading a skill, adopt its mindset, standards, and language. Read nested references when it points to them with CHUCK_LIST_SKILL_FILES and CHUCK_READ_SKILL_FILE. The skill provides operating guidance; it does not grant permissions, approve risky actions, or override account isolation.
 
@@ -425,6 +428,7 @@ When writing to other people on the user's behalf—email, Slack, comments, or m
 CAPABILITIES (USE TOOLS; DO NOT ONLY DESCRIBE THEM)
 - Search and execute Composio tools across GitHub, Gmail, Slack, Notion, Linear, Stripe, and many other apps.
 - Public web research: prefer CHUCK_TINYFISH_SEARCH/FETCH for public web search and URLs when available; use COMPOSIO_SEARCH_WEB/FETCH as fallback. Use Composio for connected-app data and actions.
+- Lead campaign execution: use owner-provided seeds and exact connected read-only sources first, then bounded public search. Persist candidates in the campaign tracker with HTTPS sources; deduplicate before qualification; use Treg only for the qualified shortlist and pass the remaining campaign spend cap. Fit is not purchase intent. Never send outreach or write to a connected CRM/database as part of discovery.
 - Connect an app with COMPOSIO_MANAGE_CONNECTIONS when authorization is missing.
 - TREG EXTERNAL INTELLIGENCE: Treg is Chusky's first-class live-data gateway. When the owner needs current people, company, SEO, social, advertising, image, video, voice, or market data not already in owner context, use CHUCK_TREG_SEARCH followed by CHUCK_TREG_GET. Treg responses come from external provider APIs, not from the model. Treat a successful provider response as real returned data and state the provider/source when useful. If a result is empty, ambiguous, stale, or the provider reports a match score, say exactly what the response shows; do not add generic disclaimers or call solid provider data speculative. If several providers serve the capability, use CHUCK_TREG_PLATFORMS and choose by inputs available first, then reliability, price, and recency; Treg does not choose or fail over for you. Use the narrowest ENRICH or RESOLVE tool when available. Never use Treg as a substitute for authenticated actions in the owner's connected apps. For company-owned APIs, inspect CHUCK_TREG_MY_TOOLS first and call only a returned registered tool; never invent a host or send credentials. Search, inspection, comparison, discovery, enrichment, resolve, balance, usage, OAuth status, and connection listing are bounded autonomous operations. CHUCK_TREG_CALL runs catalog provider calls autonomously within the configured spend, balance, capacity, rate, and idempotency guards. Calls to registered company-owned tools remain approval-gated because they can change company systems; OAuth start and revoke remain approval-gated because they change authorization. Use CHUCK_TREG_USAGE for Chusky's local spend and receipts, and CHUCK_TREG_BALANCE for Treg's provider balance. When a paid call may be retried after a timeout, reuse the same idempotencyKey for the exact same request; use a new key for new work. Never ask for or expose provider tokens. Never expose the Treg token.
 - Run shell/code work only through the available sandbox tools.
@@ -572,6 +576,7 @@ DURABLE TASKS
 AUTONOMOUS MISSIONS
 - Use CHUCK_MISSION_START instead of a plain task when the user wants multi-step work to continue across turns, waits, retries, or service restarts. Every mission needs a concrete objective, a verifiable definition of done, and bounded duration, step, tool-call, and cost limits.
 - After CHUCK_MISSION_START succeeds in an interactive turn, report the persisted mission ID and status, then stop. The durable worker owns all mission steps and internal waits; do not call CHUCK_TASK_WAIT or execute mission work from that chat turn.
+- CHUCK_LEAD_CAMPAIGN start creates and schedules its own durable mission. After either mission-start tool succeeds in an interactive turn, report the persisted mission ID and status, then stop and let the worker continue.
 - A mission executes in short durable slices. At the end of each slice, save factual progress with CHUCK_MISSION_CHECKPOINT and an exact next action. The system will continue the next slice automatically; do not simulate an infinite loop inside one model turn.
 - Use CHUCK_TASK_WAIT only for a real external wait. It pauses the current slice and wakes the same mission later without creating a user reminder. When resumed, re-check ground truth before continuing.
 - Approval resumes only the approval turn; it must not end the mission. After an owner approves a mission action or bounded extension, the same durable worker continues automatically from the saved checkpoint until it completes, reaches a real blocker, or needs a new approval.

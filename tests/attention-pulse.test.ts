@@ -207,6 +207,18 @@ test("attention pulse status shows configured watch coverage honestly", async ()
   assert.equal(status.watchCoverage.watches[0].status, "stale");
 });
 
+test("attention pulse status does not report a paused schedule as enabled", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910026;
+  await addJob(userId, {
+    id: `pulse_${userId}`, userId, text: "Run the owner's proactive attention pulse.", cron: "0 * * * *",
+    scheduleId: `chuck-attention-pulse-${userId}`, status: "paused", kind: "attention_pulse", createdAt: Date.now(),
+  });
+  const status = await configureAttentionPulse(userId, { action: "status" }) as { enabled: boolean; jobs: Array<{ status: string }> };
+  assert.equal(status.enabled, false);
+  assert.equal(status.jobs[0]?.status, "paused");
+});
+
 test("attention pulse executes Elena's real handle-or-delegate boundary", async () => {
   await initStore({ memoryOnly: true });
   const userId = 910008;

@@ -895,27 +895,183 @@ async function extractRequestedSchema(page, schema) {
   return { extracted, forms };
 }
 
+function agentStepKey(step) {
+  const selector = step?.selector && typeof step.selector === "object" ? step.selector : undefined;
+  return JSON.stringify({
+    action: typeof step?.action === "string" ? step.action : "",
+    selector: selector ? {
+      role: selector.role,
+      name: selector.name,
+      id: selector.id,
+      nameAttr: selector.nameAttr,
+      placeholder: selector.placeholder,
+      autocomplete: selector.autocomplete,
+      index: selector.index,
+      frameIndex: selector.frameIndex,
+      frameUrl: selector.frameUrl,
+    } : undefined,
+    value: step?.value,
+    text: step?.text,
+    key: step?.key,
+    x: step?.x,
+    y: step?.y,
+  });
+}
+
+function agentProgressMarker(value) {
+  return JSON.stringify({
+    url: value?.url,
+    title: value?.title,
+    pageGeneration: value?.pageGeneration,
+    accessibilityHash: value?.accessibilityHash,
+    screenshotHash: value?.screenshotHash,
+    submitted: value?.submitted,
+  });
+}
+
+async function assertionLocator(page, assertion) {
+  const value = String(assertion?.value || "").trim().slice(0, 300);
+  if (!value) return undefined;
+  const roles = assertion.kind === "checked"
+    ? ["checkbox", "switch", "radio"]
+    : assertion.kind === "selected"
+      ? ["combobox", "listbox", "option"]
+      : assertion.kind === "field"
+        ? ["textbox", "combobox"]
+        : ["button", "link", "textbox", "combobox", "checkbox", "radio", "switch", "option", "tab"];
+  for (const role of roles) {
+    const locator = page.getByRole(role, { name: value, exact: true });
+    const visible = [];
+    const count = Math.min(await locator.count().catch(() => 0), 8);
+    for (let index = 0; index < count; index += 1) {
+      const candidate = locator.nth(index);
+      if (await candidate.isVisible().catch(() => false)) visible.push(candidate);
+    }
+    if (visible.length === 1) return visible[0];
+  }
+  const labelled = page.getByLabel(value, { exact: false });
+  if (await labelled.count().catch(() => 0) === 1 && await labelled.first().isVisible().catch(() => false)) return labelled.first();
+  return undefined;
+}
+
+async function verifyAgentExpectations(page, expectations) {
+  const checks = [];
+  for (const assertion of Array.isArray(expectations) ? expectations.slice(0, 12) : []) {
+    const kind = String(assertion?.kind || "").slice(0, 40);
+    const value = String(assertion?.value || "").slice(0, 300);
+    const required = assertion?.required !== false;
+    let observed;
+    let passed = false;
+    try {
+      if (kind === "url") observed = page.url();
+      else if (kind === "title") observed = await page.title().catch(() => "");
+      else if (kind === "text") observed = (await pageText(page)).pageContent;
+      else {
+        const locator = await assertionLocator(page, assertion);
+        if (!locator) throw new Error(`Expected ${kind || "control"} "${clean(value, 120)}" was not found`);
+        if (kind === "visible") observed = await locator.isVisible().catch(() => false);
+        else if (kind === "checked") observed = (await controlState(locator)).checked === true;
+        else if (kind === "selected") observed = (await controlState(locator)).selectedText || await locator.innerText().catch(() => "");
+        else if (kind === "field") observed = (await controlState(locator)).value || "";
+        else throw new Error(`Unsupported browser assertion kind "${kind}"`);
+      }
+      if (typeof assertion?.equals === "boolean") passed = observed === assertion.equals;
+      else if (typeof assertion?.equals === "string") passed = String(observed ?? "").toLowerCase() === assertion.equals.toLowerCase();
+      else if (kind === "checked" || kind === "visible") passed = observed === true;
+      else passed = String(observed ?? "").toLowerCase().includes(value.toLowerCase());
+    } catch (error) {
+      observed = clean(error?.message || error, 240);
+      passed = false;
+    }
+    checks.push({ kind, value, required, passed, ...(typeof observed === "boolean" ? { observed } : {}) });
+  }
+  return { passed: checks.every((item) => !item.required || item.passed), checks };
+}
+
 async function boundedAgentRun(context, pageState, request) {
-  const steps = Array.isArray(request.steps) ? request.steps.slice(0, Math.max(1, Math.min(50, Number(request.maxSteps || 20)))) : [];
+  const maxSteps = Math.max(1, Math.min(50, Number(request.maxSteps || 20)));
+  const maxActions = Math.max(1, Math.min(maxSteps, Number(request.maxActions || maxSteps)));
+  const maxDurationMs = Math.max(1_000, Math.min(120_000, Number(request.maxDurationMs || 45_000)));
+  const noProgressLimit = Math.max(1, Math.min(3, Number(request.noProgressLimit || 2)));
+  const steps = Array.isArray(request.steps) ? request.steps.slice(0, maxSteps) : [];
   if (!steps.length) throw new Error("agent requires at least one bounded browser step");
   const trace = [];
   let last;
+  let previousKey;
+  let previousMarker;
+  let noProgressCount = 0;
+  let actionCount = 0;
+  let stoppedReason = "completed";
+  let completionChecks = [];
+  let verified = false;
+  const startedRunAt = Date.now();
+  const guardedActions = new Set(["click", "invoke", "fill", "select_option", "check", "uncheck", "focus", "hover", "press", "scroll", "drag"]);
   for (let index = 0; index < steps.length; index += 1) {
+    if (Date.now() - startedRunAt >= maxDurationMs) {
+      stoppedReason = "timeout";
+      break;
+    }
+    if (actionCount >= maxActions) {
+      stoppedReason = "max_actions";
+      break;
+    }
     const step = steps[index];
     if (!step || typeof step !== "object" || typeof step.action !== "string" || ["agent", "act", "observe"].includes(step.action)) throw new Error(`agent step ${index + 1} is invalid or recursive`);
     const startedAt = Date.now();
+    const key = agentStepKey(step);
     try {
       last = await execute(context, pageState, step);
-      trace.push({ index, action: step.action, status: "succeeded", durationMs: Date.now() - startedAt, screenshotHash: last?.screenshotHash });
+      actionCount += 1;
+      if (last?.needsUserInteraction === true && last?.challenge?.detected === true) {
+        trace.push({ index, action: step.action, status: "stopped", durationMs: Date.now() - startedAt, observedUrl: last?.url, observedTitle: last?.title, observedPageGeneration: last?.pageGeneration, observedAccessibilityHash: last?.accessibilityHash, screenshotHash: last?.screenshotHash, recovery: "handoff" });
+        stoppedReason = "challenge";
+        break;
+      }
+      const marker = agentProgressMarker(last);
+      const progress = marker !== previousMarker;
+      if (key === previousKey && marker === previousMarker && guardedActions.has(step.action)) noProgressCount += 1;
+      else noProgressCount = 0;
+      const expectationResult = await verifyAgentExpectations(context.pages()[Math.max(0, Number(pageState.activeIndex || 0))] || context.pages()[0], step.expected);
+      trace.push({ index, action: step.action, status: expectationResult.passed ? "succeeded" : "failed", durationMs: Date.now() - startedAt, observedUrl: last?.url, observedTitle: last?.title, observedPageGeneration: last?.pageGeneration, observedAccessibilityHash: last?.accessibilityHash, screenshotHash: last?.screenshotHash, progress, expectations: expectationResult.checks });
+      previousKey = key;
+      previousMarker = marker;
+      if (!expectationResult.passed) {
+        stoppedReason = "expectation_failed";
+        break;
+      }
+      if (noProgressCount >= noProgressLimit) {
+        stoppedReason = "no_progress";
+        trace[trace.length - 1].status = "stopped";
+        trace[trace.length - 1].recovery = "stop_and_reobserve";
+        break;
+      }
     } catch (error) {
-      trace.push({ index, action: step.action, status: "failed", durationMs: Date.now() - startedAt, error: clean(error?.message || error, 300), recovery: String(error?.message || error).toLowerCase().includes("stale") ? "reobserve" : "stop" });
+      const message = String(error?.message || error);
+      const recovery = /stale|fresh accessible|ambiguous|not found|timed out|timeout/i.test(message) ? "reobserve" : "stop";
+      trace.push({ index, action: step.action, status: "failed", durationMs: Date.now() - startedAt, observedUrl: last?.url, observedTitle: last?.title, observedPageGeneration: last?.pageGeneration, observedAccessibilityHash: last?.accessibilityHash, screenshotHash: last?.screenshotHash, error: clean(message, 300), recovery });
+      stoppedReason = "step_failed";
+      if (recovery === "reobserve") {
+        last = await execute(context, pageState, { action: "observe", includeForms: true, includeScreenshot: false }).catch(() => last);
+      }
       break;
     }
+  }
+  const sequenceComplete = trace.length === steps.length && stoppedReason === "completed";
+  if (sequenceComplete && Array.isArray(request.completionAssertions) && request.completionAssertions.length) {
+    const completionPage = context.pages()[Math.max(0, Number(pageState.activeIndex || 0))] || context.pages()[0];
+    const completionResult = completionPage
+      ? await verifyAgentExpectations(completionPage, request.completionAssertions)
+      : { passed: false, checks: [{ kind: "visible", value: "active browser page", required: true, passed: false }] };
+    completionChecks = completionResult.checks;
+    verified = completionResult.passed;
+    if (!verified) stoppedReason = "completion_assertion_failed";
   }
   const safeLast = last && typeof last === "object" ? { ...last } : undefined;
   const screenshot = safeLast && typeof safeLast.screenshot === "string" ? { screenshot: safeLast.screenshot, screenshotHash: safeLast.screenshotHash, screenshotId: safeLast.screenshotId } : {};
   if (safeLast) delete safeLast.screenshot;
-  return result(context.pages()[Math.max(0, Number(pageState.activeIndex || 0))] || context.pages()[0], context, { agent: { steps: trace, completed: trace.length === steps.length, maxSteps: steps.length }, ...(safeLast ? { lastResult: safeLast } : {}), ...screenshot }, false);
+  const elapsedMs = Date.now() - startedRunAt;
+  if (trace.length === steps.length && stoppedReason === "completed") stoppedReason = "completed";
+  return result(context.pages()[Math.max(0, Number(pageState.activeIndex || 0))] || context.pages()[0], context, { agent: { steps: trace, completed: trace.length === steps.length && stoppedReason === "completed", verified, ...(completionChecks.length ? { completionChecks } : {}), maxSteps, maxActions, maxDurationMs, noProgressLimit, actionCount, elapsedMs, stoppedReason }, ...(safeLast ? { lastResult: safeLast } : {}), ...screenshot }, false);
 }
 
 async function execute(context, pageState, request) {
@@ -1243,7 +1399,13 @@ async function start() {
   delete browserEnv.CHUSKY_WEB_BOT_AUTH_PRIVATE_KEY_B64;
   let geolocation;
   try { const parsed = JSON.parse(process.env.CHUSKY_BROWSER_GEOLOCATION || ""); if (Number.isFinite(parsed?.latitude) && Number.isFinite(parsed?.longitude)) geolocation = { latitude: Number(parsed.latitude), longitude: Number(parsed.longitude), ...(Number.isFinite(parsed.accuracy) ? { accuracy: Number(parsed.accuracy) } : {}) }; } catch {}
-  const context = await chromium.launchPersistentContext(PROFILE, { headless: false, acceptDownloads: true, permissions: ["clipboard-read", "clipboard-write"], locale: process.env.CHUSKY_BROWSER_LOCALE || "en-GB", timezoneId: process.env.CHUSKY_BROWSER_TIMEZONE || "Europe/London", ...(geolocation ? { geolocation } : {}), args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--no-first-run", "--no-default-browser-check"], viewport: { width: 1440, height: 900 }, env: browserEnv });
+  const browserArgs = ["--no-sandbox", "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check"];
+  // Keep the headed Chromium feature surface intact for normal websites and
+  // human-only challenges. Operators can opt back into software-only rendering
+  // for constrained hosts, but it must be explicit rather than silently making
+  // every browser session look unusual to sites that depend on WebGL/canvas.
+  if (process.env.CHUSKY_BROWSER_DISABLE_GPU === "true") browserArgs.push("--disable-gpu");
+  const context = await chromium.launchPersistentContext(PROFILE, { headless: false, acceptDownloads: true, permissions: ["clipboard-read", "clipboard-write"], locale: process.env.CHUSKY_BROWSER_LOCALE || "en-US", timezoneId: process.env.CHUSKY_BROWSER_TIMEZONE || "America/New_York", ...(geolocation ? { geolocation } : {}), args: browserArgs, viewport: { width: 1440, height: 900 }, env: browserEnv });
   await fs.mkdir(DOWNLOAD_ROOT, { recursive: true, mode: 0o700 });
   await fs.mkdir(RECORDING_ROOT, { recursive: true, mode: 0o700 });
   context.on("page", (page) => {

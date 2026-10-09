@@ -50,17 +50,52 @@ current owner-scoped Pulse projection and `PUT /v1/account/attention-pulse` to
 apply onboarding or later settings changes. The write accepts an explicit
 cadence, authority (`observe`, `prepare`, or `execute_reversible`), opted-in
 delivery targets, daily notification cap, UTC quiet hours, and monitored app
-domains. Input is bounded and deduplicated before it reaches the scheduler or
-attention store.
+domains. The read response also exposes a pure, typed health projection with
+the current run state, bounded watch counts, pending capability suggestions,
+and a non-authorizing recovery hint (`connect_app`, `run_now`, or `inspect`).
+Input is bounded and deduplicated before it reaches the scheduler or attention
+store.
 
 Pulse setup is intentionally separate from profile memory. Saving a profile
 does not grant app access; enabling Pulse reconciles only the starter watches
 whose accounts are active, and immediately checks for useful capability groups
 that are not connected. Missing-connection suggestions are stored as
 owner-scoped attention candidates, shown through the web notification bell and
-Approvals page, and delivered through the selected Pulse channel. They are
-one-shot and resolve when the matching app becomes active. Later provider work
-still goes through the existing connected-account and approval boundaries.
+Approvals page even when no external channel is linked. When an external Pulse
+channel is selected, the same candidate can also be delivered there. The web
+dashboard is not treated as an external provider send: the candidate stays
+actionable until the owner opens Chat/Approvals and selects an action. They are
+one-shot and resolve when the matching app becomes active or the owner handles
+the suggestion. Later provider work still goes through the existing
+connected-account and approval boundaries.
+
+The health projection deliberately distinguishes a missing connection from a
+stalled scheduler: an enabled Pulse with no active watch and pending capability
+suggestions is `waiting_for_connection`, while a configured watch with no
+completed run is `never_run` and an old run is `stale`. This prevents the
+dashboard, SDK, and Elena from reporting an overdue provider watch that was
+never authorized.
+
+Each durable Pulse occurrence also carries a bounded `pulseEvidence` receipt.
+It records whether the run completed, waited, or was suppressed; how many due
+watches were reconciled; how many observations and candidates remained; whether
+Elena handled or delegated a step; whether approval was required; and whether
+the result was surfaced on the dashboard or an external channel. The receipt is
+execution evidence for Chusky's control plane, not provider payload or proof
+that an external write succeeded.
+
+## Candidate-to-Chat lifecycle
+
+The web bell, Autonomy page, and Approvals page route an owner-scoped candidate
+ID into a fresh Chat thread. Chat renders the same candidate card with its
+provider logo, explanation, and suggested actions. Selecting an action sends
+the candidate ID and action ID as run metadata; the API verifies ownership,
+candidate status, and the action list before accepting it. The dashboard never
+marks a candidate handled before a real Chat run is admitted, so a failed
+connection, stale candidate, quota rejection, or interrupted request leaves
+the suggestion recoverable instead of silently removing it. Elena then handles
+the request through the normal connected-account, tool, and approval
+boundaries.
 
 Provider calls remain in `src/autonomy/reconciliation.ts`, where exact
 read-only tool slugs, account ownership, profiles, leases, checkpoints,

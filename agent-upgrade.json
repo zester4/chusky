@@ -1,11 +1,11 @@
 {
-  "id": "release-4.47.0",
-  "version": "4.47.0",
+  "id": "release-4.49.0",
+  "version": "4.49.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added owner-scoped browser planning for flights, stays, telecom services, and streaming accounts with structured route, date, guest, plan, title, and profile constraints.",
-    "Public search, comparison, itinerary or plan review, cart preparation, and watchlist work remain autonomous; bookings, plan changes, cancellations, purchases, payments, and final confirmations retain approval gates.",
-    "Added catalogue routing for major airlines, Airbnb, Booking.com, Verizon, T-Mobile, AT&T, Netflix, and other common providers; catalogue entries provide workflow hints, not a guarantee of live access or successful completion."
+    "Expanded bounded E2B runs with independent limits, declared postconditions, verified completion checks, safe challenge handoff, fresh-observation recovery, and no-progress blocking.",
+    "Owners can start idempotent multi-day lead campaigns that research, deduplicate, qualify, and track source-linked candidates in private durable state, with honest shortfall reporting and verifiable closeout.",
+    "Discovery uses supplied seeds and read-only sources; Treg enrichment uses an atomic campaign spend allowance. Campaigns never contact prospects or write CRM. Pulse records checks, candidates, approvals, delivery, no provider payloads."
   ],
-  "createdAt": "2026-10-09T00:55:04.492Z"
+  "createdAt": "2026-10-09T08:26:38.000Z"
 }
