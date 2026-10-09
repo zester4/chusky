@@ -11,7 +11,7 @@ import { chuckTools } from "../src/agentTools.js";
 import { pendingVaultInspectionOrigins } from "../src/vault/browserGuard.js";
 import { auxiliaryBrowserRequest } from "../src/lib/e2b/auxiliaryActions.js";
 import { browserRunHasProgress, browserRunProgressMarker } from "../src/lib/e2b/runProgress.js";
-import { scoreBrowserControlRemap, selectBrowserControlRemapCandidate } from "../src/lib/e2b/browser.js";
+import { findSavedBrowserControl, scoreBrowserControlRemap, selectBrowserControlRemapCandidate } from "../src/lib/e2b/browser.js";
 import { browserChallengeStillActive } from "../src/lib/e2b/handoffStatus.js";
 
 test("the model schema and dispatcher expose exactly the supported E2B browser actions", () => {
@@ -236,6 +236,16 @@ test("browser recovery chooses the unique semantic location candidate and preser
   const engine = readFileSync("src/lib/e2b/browser.ts", "utf8");
   assert.match(engine, /selectBrowserControlRemapCandidate/);
   assert.match(engine, /scoreBrowserControlRemap/);
+});
+
+test("browser recovery reuses an unambiguous saved control when the model omits nodeId", () => {
+  const saved = [
+    { nodeId: "pickup", role: "textbox", name: "Pickup location", index: 0, url: "https://ride.example", capturedAt: 1 },
+    { nodeId: "dropoff", role: "textbox", name: "Dropoff location", index: 1, url: "https://ride.example", capturedAt: 1 },
+  ];
+  assert.equal(findSavedBrowserControl(saved, { role: "combobox", name: "Pickup location" }, "combobox", "Pickup location")?.nodeId, "pickup");
+  assert.equal(findSavedBrowserControl(saved, { role: "combobox", name: "Unknown location" }, "combobox", "Unknown location"), undefined);
+  assert.match(readFileSync("src/lib/e2b/browser.ts", "utf8"), /findSavedBrowserControl/);
 });
 
 test("resuming an incomplete handoff returns a waiting state without touching E2B", async () => {

@@ -271,6 +271,33 @@ export function selectBrowserControlRemapCandidate(requested: E2BBrowserNode, ca
   return indexed.length === 1 ? indexed[0].item : undefined;
 }
 
+export function findSavedBrowserControl(
+  nodes: E2BBrowserNode[] | undefined,
+  args: Record<string, unknown>,
+  role?: string,
+  name?: string,
+): E2BBrowserNode | undefined {
+  if (!nodes?.length || !role || !name) return undefined;
+  const compatible = nodes.filter((item) => compatibleControlRole(role, item.role));
+  const nodeId = typeof args.nodeId === "string" ? args.nodeId : undefined;
+  if (nodeId) return compatible.find((item) => item.nodeId === nodeId);
+
+  const stableKeys = ["id", "nameAttr", "placeholder", "autocomplete"] as const;
+  const stableMatches = compatible.filter((item) => stableKeys.some((key) => {
+    const requested = args[key];
+    return typeof requested === "string" && requested.length > 0 && item[key] === requested;
+  }));
+  if (stableMatches.length === 1) return stableMatches[0];
+
+  const named = compatible.filter((item) => item.name === name);
+  const requestedIndex = Number.isSafeInteger(args.index) ? Number(args.index) : undefined;
+  if (requestedIndex !== undefined) {
+    const indexed = named.filter((item) => item.index === requestedIndex);
+    if (indexed.length === 1) return indexed[0];
+  }
+  return named.length === 1 ? named[0] : undefined;
+}
+
 function compatibleControlRole(requested: string, candidate: string): boolean {
   if (requested === candidate) return true;
   return [requested, candidate].every((role) => ["textbox", "combobox"].includes(role));
@@ -678,9 +705,11 @@ export class E2BBrowserEngine {
   }
 
   private async replanInteraction(userId: number, sandbox: Sandbox, record: E2BBrowserRecord, args: Record<string, unknown>, action: string, commandTimeoutMs = Math.min(config.e2bRequestTimeoutMs, DEFAULT_E2B_BROWSER_COMMAND_TIMEOUT_MS)): Promise<{ record: E2BBrowserRecord; selector: Record<string, unknown> }> {
-    const saved = typeof args.nodeId === "string" ? record.nodes?.find((item) => item.nodeId === args.nodeId) : undefined;
-    const role = typeof saved?.role === "string" ? saved.role : typeof args.role === "string" ? args.role : undefined;
-    const name = typeof saved?.name === "string" ? saved.name : typeof args.name === "string" ? args.name : undefined;
+    const requestedRole = typeof args.role === "string" ? args.role : undefined;
+    const requestedName = typeof args.name === "string" ? args.name : undefined;
+    const saved = findSavedBrowserControl(record.nodes, args, requestedRole, requestedName);
+    const role = typeof saved?.role === "string" ? saved.role : requestedRole;
+    const name = typeof saved?.name === "string" ? saved.name : requestedName;
     if (!role || !name) throw new E2BBrowserError("Browser recovery needs the control role and accessible name; inspect the current page before retrying");
     const inspected = await this.run(sandbox, { action: "find", currentUrl: record.lastUrl, role, name, nameMatch: args.nameMatch, limit: 12 }, commandTimeoutMs);
     const url = typeof inspected.url === "string" ? inspected.url : record.lastUrl ?? "";
