@@ -121,6 +121,10 @@ test("form inspection is a structured, safe browser capability", () => {
   assert.match(agent, /async function clickControl/);
   assert.match(agent, /force: true/);
   assert.match(agent, /selectUniqueAutocomplete/);
+  assert.match(agent, /async function isDirectAddressControl/);
+  assert.match(agent, /directAddressEntry/);
+  assert.match(agent, /addressCommitAttempted/);
+  assert.match(agent, /locator\.press\("Enter"\)/);
   assert.match(agent, /aria-autocomplete/);
   assert.match(agent, /autocompleteCommittedByPage/);
     assert.match(agent, /setAttribute\(['"]role['"],\s*['"]option['"]\)/);

@@ -485,6 +485,21 @@ async function selectUniqueAutocomplete(page, locator, value, root) {
   return { selected: false, autocompleteDetected: true, candidates: visible.length };
 }
 
+async function isDirectAddressControl(locator) {
+  return locator.evaluate((element) => {
+    const labelText = Array.from(element.labels || []).map((label) => label.innerText || label.textContent || "").join(" ");
+    const descriptor = [
+      element.getAttribute("aria-label"),
+      element.getAttribute("placeholder"),
+      element.getAttribute("name"),
+      element.getAttribute("id"),
+      element.getAttribute("autocomplete"),
+      labelText,
+    ].filter(Boolean).join(" ").toLowerCase();
+    return /\b(?:address|location|pickup|pick up|dropoff|drop off|delivery|destination|origin|postal|postcode|zip)\b/.test(descriptor);
+  }).catch(() => false);
+}
+
 async function fillControl(page, locator, value, root = page.mainFrame()) {
   const beforeUrl = page.url();
   try {
@@ -500,6 +515,16 @@ async function fillControl(page, locator, value, root = page.mainFrame()) {
   // inspecting their popup; this does not bypass the widget's own selection
   // logic and keeps verification anchored to the resulting option.
   await locator.dispatchEvent("input").catch(() => {});
+  // Address/location controls often expose suggestions, but the agent already
+  // has the owner's complete address. Do not wait for or guess a suggestion:
+  // commit the typed value once with Enter, then verify the field immediately.
+  // Other comboboxes retain the inspect/select path below.
+  if (await isDirectAddressControl(locator)) {
+    await locator.press("Enter").catch(() => {});
+    const state = await controlState(locator);
+    if (state.value !== value) throw new Error("Address value did not persist after direct entry");
+    return { ...state, directAddressEntry: true, addressCommitAttempted: true, urlChanged: page.url() !== beforeUrl };
+  }
   const autocomplete = await selectUniqueAutocomplete(page, locator, value, root);
   const navigatedAfterSelection = autocomplete.selected && page.url() !== beforeUrl;
   if (navigatedAfterSelection) return { controlRole: "combobox", value, valueLength: value.length, required: false, disabled: false, checked: false, autocompleteDetected: true, autocompleteSelected: true, autocompleteNavigated: true, autocompleteLabel: autocomplete.label, ...(autocomplete.autocompleteCandidates !== undefined ? { autocompleteCandidates: autocomplete.autocompleteCandidates } : {}) };
