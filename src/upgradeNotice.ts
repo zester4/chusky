@@ -147,6 +147,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "The stream lifecycle is explicit and bounded: start returns a private viewer URL, status reports readiness without returning the password, and stop tears down the viewer services.",
     "Viewer URLs and passwords are never persisted in browser records; private-scope checks remain separate from CAPTCHA, 2FA, payment, and other approval or human-challenge boundaries.",
   ],
+  browserDomainWorkflows: [
+    "Added owner-scoped browser planning for flights, stays, telecom services, and streaming accounts with structured route, date, guest, plan, title, and profile constraints.",
+    "Public search, comparison, itinerary or plan review, cart preparation, and watchlist work remain autonomous; bookings, plan changes, cancellations, purchases, payments, and final confirmations retain approval gates.",
+    "Added catalogue routing for major airlines, Airbnb, Booking.com, Verizon, T-Mobile, AT&T, Netflix, and other common providers; catalogue entries provide workflow hints, not a guarantee of live access or successful completion.",
+  ],
   webBotAuth: [
     "Added an opt-in Cloudflare Web Bot Auth identity with a signed public-key directory and a separate RFC 9421 Ed25519 request-signing switch for Chusky's E2B browser.",
     "Request signing remains off during Cloudflare review; after approval, private signing keys stay in server configuration and the trusted browser process, never in page JavaScript, model context, tool arguments, browser history, or logs.",

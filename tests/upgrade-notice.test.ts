@@ -215,12 +215,12 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the attention capability discovery release", async () => {
+test("current upgrade manifest announces the browser domain workflow release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.46.0");
-  assert.equal(notice?.version, "4.46.0");
-  assert.match(notice?.bullets.join(" ") ?? "", /missing-capability/i);
-  assert.match(notice?.bullets.join(" ") ?? "", /missing-capability suggestions/i);
+  assert.equal(notice?.id, "release-4.47.0");
+  assert.equal(notice?.version, "4.47.0");
+  assert.match(notice?.bullets.join(" ") ?? "", /flights.*stays.*telecom.*streaming/i);
+  assert.match(notice?.bullets.join(" ") ?? "", /approval gates/i);
 });
 
 test("browser reliability preset covers planning, recovery, checkpoints, and visual freshness", () => {
@@ -245,6 +245,14 @@ test("browser live view preset describes the retained owner-only stream", () => 
   assert.match(bullets[0]!, /owner-only live viewing.*retained E2B.*noVNC/i);
   assert.match(bullets[1]!, /start returns a private viewer URL.*status.*stop/i);
   assert.match(bullets[2]!, /never persisted.*CAPTCHA.*2FA/i);
+});
+
+test("browser domain workflow preset describes safe travel, service, and streaming planning", () => {
+  const bullets = getAgentUpgradePreset("browserDomainWorkflows");
+  assert.equal(bullets.length, 3);
+  assert.match(bullets[0]!, /flights.*stays.*telecom.*streaming/i);
+  assert.match(bullets[1]!, /bookings.*plan changes.*cancellations.*approval gates/i);
+  assert.match(bullets[2]!, /Airbnb.*Booking\.com.*Verizon.*Netflix/i);
 });
 
 test("mission continuity preset documents automatic approval handoff and wake recovery", () => {

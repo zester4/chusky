@@ -8,9 +8,10 @@ Amazon-only logic or as a list of hard-coded login instructions.
 - `src/shopping/shopping.ts`: validates requests, creates private durable
   shopping plans, selects retailers, updates constraints, and returns the next
   safe action for the agent.
-- `src/shopping/retailers.ts`: a broad curated retailer starter catalogue for
-  useful suggestions. It is not an allowlist: a user may select any clean HTTPS
-  retailer through `CHUCK_SHOPPING_SELECT_RETAILER` with an explicit origin.
+- `src/shopping/retailers.ts`: a broad curated retailer and service-provider
+  starter catalogue for useful suggestions. It is not an allowlist: a user may
+  select any clean HTTPS site through `CHUCK_SHOPPING_SELECT_RETAILER` with an
+  explicit origin.
   It includes regional options across North America, the UK, Europe, Africa,
   India, and Australia—including Jumia Ghana—but availability is always
   confirmed on the retailer's own site.
@@ -50,6 +51,23 @@ Do not use one generic cart recipe for every shopping category:
   date, and a plan summary. Subscription and final confirmation remain gated.
 - Dining reservations use restaurant, date, time, party size, availability,
   and reservation review. Confirmation remains gated.
+- Flight searches use origin, destination, dates, passenger count, cabin, fares,
+  bags, seats, and a booking review. Booking and payment remain gated.
+- Stay searches use location, dates, guests, rooms, property type, cancellation
+  rules, fees, and a reservation review. Reservation and payment remain gated.
+- Telecom workflows use service type, coverage, lines, data/device needs,
+  recurring price, one-time fees, and account review. Plan changes, upgrades,
+  cancellations, and purchases remain gated.
+- Streaming workflows use title/profile search, watchlists, current plan
+  status, and plan comparison. Upgrades, downgrades, cancellations, and
+  payment actions remain gated.
+
+The starter catalogue includes United Airlines, Delta, American Airlines,
+Southwest, Alaska Airlines, JetBlue, Airbnb, Booking.com, Expedia, Verizon,
+T-Mobile, AT&T, Netflix, Disney+, Hulu, and Max. Catalogue membership provides
+domain routing and workflow hints only; it is not a guarantee that a provider
+will allow automated access or that a live flow has passed. Always inspect the
+current page, detect challenges, and record live verification separately.
 
 Every selected option must be verified from a fresh browser observation. A
 meal plan or reservation is not complete merely because a button was clicked;

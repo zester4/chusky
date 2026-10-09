@@ -3,7 +3,7 @@ import { beforeEach, test } from "node:test";
 import { chuckTools, validateNativeToolArguments } from "../src/agentTools.js";
 import { initStore } from "../src/store.js";
 import { cancelShopping, listSavedShoppingSites, listShopping, pauseShopping, resumeShopping, saveShoppingSitePreference, selectShoppingRetailer, startShopping, updateShopping } from "../src/shopping/shopping.js";
-import { suggestRetailers } from "../src/shopping/retailers.js";
+import { getRetailer, shoppingWorkflowFor, suggestRetailers } from "../src/shopping/retailers.js";
 import { shoppingActionPolicy } from "../src/shopping/policy.js";
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
@@ -17,6 +17,50 @@ test("shopping tools are exposed without accepting credentials or payment data",
   }
   validateNativeToolArguments("CHUCK_SHOPPING_START", { items: ["milk"] });
   assert.throws(() => validateNativeToolArguments("CHUCK_SHOPPING_START", {}), /requires argument/);
+  validateNativeToolArguments("CHUCK_SHOPPING_START", {
+    items: ["round trip flight"],
+    category: "flights",
+    details: { origin: "LAX", destination: "JFK", departureDate: "2027-02-01", passengers: 1, cabin: "economy" },
+  });
+  assert.throws(() => validateNativeToolArguments("CHUCK_SHOPPING_START", { items: ["flight"], details: { password: "secret" } }), /not allowed/i);
+});
+
+test("travel, telecom, and streaming catalogue entries resolve to domain workflows", () => {
+  const expected = [
+    ["United Airlines", "flight_search"],
+    ["Delta", "flight_search"],
+    ["Airbnb", "stay_search"],
+    ["Booking.com", "stay_search"],
+    ["Verizon", "service_plan"],
+    ["T-Mobile", "service_plan"],
+    ["Netflix", "streaming_account"],
+  ] as const;
+  for (const [name, workflow] of expected) assert.equal(getRetailer(name)?.workflow, workflow, name);
+  assert.equal(getRetailer("Expedia", "stays")?.workflow, "stay_search");
+  assert.equal(getRetailer("Expedia", "flights")?.workflow, "flight_search");
+  assert.equal(shoppingWorkflowFor({ categories: ["flights"] }), "flight_search");
+  assert.equal(shoppingWorkflowFor({ categories: ["stays"] }), "stay_search");
+  assert.equal(shoppingWorkflowFor({ categories: ["telecom"] }), "service_plan");
+  assert.equal(shoppingWorkflowFor({ categories: ["streaming"] }), "streaming_account");
+});
+
+test("domain details are retained as safe planning constraints and reject secrets", async () => {
+  const flight = await startShopping(9020, {
+    items: ["round trip"],
+    category: "flights",
+    retailer: "United Airlines",
+    details: { origin: "LAX", destination: "JFK", departureDate: "2027-02-01", returnDate: "2027-02-08", passengers: 1, cabin: "economy", nonstop: true },
+  });
+  assert.equal(flight.retailer?.workflow, "flight_search");
+  assert.deepEqual(flight.details, { origin: "LAX", destination: "JFK", departureDate: "2027-02-01", returnDate: "2027-02-08", passengers: 1, cabin: "economy", nonstop: true });
+  assert.match(flight.nextStep, /flight|fare|approval/i);
+  await assert.rejects(() => startShopping(9021, { items: ["flight"], category: "flights", details: { origin: "LAX", password: "secret" } }), /not supported|not allowed|details/i);
+  await assert.rejects(() => startShopping(9022, { items: ["hotel"], category: "stays", details: { checkIn: "2027-02-08", checkOut: "2027-02-01" } }), /checkOut must be after checkIn/i);
+});
+
+test("domain actions keep final bookings, plan changes, cancellations, and purchases gated", () => {
+  for (const action of ["book", "checkout", "place_order", "purchase", "change_plan", "cancel"] as const) assert.equal(shoppingActionPolicy(action), "approval_required", action);
+  for (const action of ["browse", "search", "review_booking", "review_service", "review_subscription", "add_to_watchlist"] as const) assert.equal(shoppingActionPolicy(action), "auto", action);
 });
 
 test("shopping starts retailer-neutral and suggests local options", async () => {

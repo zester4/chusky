@@ -1,11 +1,11 @@
 {
-  "id": "release-4.46.0",
-  "version": "4.46.0",
+  "id": "release-4.47.0",
+  "version": "4.47.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Attention Pulse records owner-private change, failure, and recovery observations plus verified missing-capability suggestions, deduplicates replays, and surfaces them as durable events.",
-    "Pulse status reports current, scheduled, stale, failed, and never-checked coverage for explicitly configured watches; it does not claim to monitor every connected app.",
-    "New observations stay pending until confirmed delivery, and a deterministic digest prevents NO_ACTION from hiding an update while existing approval and personal/business boundaries remain."
+    "Added owner-scoped browser planning for flights, stays, telecom services, and streaming accounts with structured route, date, guest, plan, title, and profile constraints.",
+    "Public search, comparison, itinerary or plan review, cart preparation, and watchlist work remain autonomous; bookings, plan changes, cancellations, purchases, payments, and final confirmations retain approval gates.",
+    "Added catalogue routing for major airlines, Airbnb, Booking.com, Verizon, T-Mobile, AT&T, Netflix, and other common providers; catalogue entries provide workflow hints, not a guarantee of live access or successful completion."
   ],
-  "createdAt": "2026-10-08T22:55:21.569Z"
+  "createdAt": "2026-10-09T00:55:04.492Z"
 }

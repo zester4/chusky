@@ -18,6 +18,25 @@ const RETAILERS: ShoppingRetailer[] = [
   { id: "shipt", name: "Shipt", origin: "https://www.shipt.com", countries: ["US"], categories: ["groceries", "household", "health_beauty"], supportsDelivery: true, supportsPickup: false },
   { id: "freshdirect", name: "FreshDirect", origin: "https://www.freshdirect.com", countries: ["US"], categories: ["groceries", "household", "health_beauty"], supportsDelivery: true, supportsPickup: false },
   { id: "best-buy", name: "Best Buy", origin: "https://www.bestbuy.com", countries: ["US", "CA"], categories: ["electronics", "home"], supportsDelivery: true, supportsPickup: true },
+  // Travel, connectivity, and digital services. These entries provide safe
+  // domain routing and review semantics; live availability and account state
+  // must still be confirmed by the browser on every run.
+  { id: "united-airlines", name: "United Airlines", origin: "https://www.united.com", countries: ["US", "CA", "GB", "MX", "DE", "JP"], categories: ["flights"], supportsDelivery: false, supportsPickup: false },
+  { id: "delta", name: "Delta", origin: "https://www.delta.com", countries: ["US", "CA", "GB", "MX"], categories: ["flights"], supportsDelivery: false, supportsPickup: false },
+  { id: "american-airlines", name: "American Airlines", origin: "https://www.aa.com", countries: ["US", "CA", "MX", "GB"], categories: ["flights"], supportsDelivery: false, supportsPickup: false },
+  { id: "southwest", name: "Southwest", origin: "https://www.southwest.com", countries: ["US", "MX"], categories: ["flights"], supportsDelivery: false, supportsPickup: false },
+  { id: "alaska-airlines", name: "Alaska Airlines", origin: "https://www.alaskaair.com", countries: ["US", "CA", "MX"], categories: ["flights"], supportsDelivery: false, supportsPickup: false },
+  { id: "jetblue", name: "JetBlue", origin: "https://www.jetblue.com", countries: ["US", "CA", "MX", "GB"], categories: ["flights"], supportsDelivery: false, supportsPickup: false },
+  { id: "airbnb", name: "Airbnb", origin: "https://www.airbnb.com", countries: ["US", "CA", "GB", "AU", "DE", "FR", "ES", "IT", "JP", "MX"], categories: ["stays"], supportsDelivery: false, supportsPickup: false },
+  { id: "booking-com", name: "Booking.com", origin: "https://www.booking.com", countries: ["US", "CA", "GB", "AU", "DE", "FR", "ES", "IT", "JP", "MX"], categories: ["stays"], supportsDelivery: false, supportsPickup: false },
+  { id: "expedia", name: "Expedia", origin: "https://www.expedia.com", countries: ["US", "CA", "GB", "AU", "DE", "FR", "ES", "IT", "JP", "MX"], categories: ["stays", "flights"], supportsDelivery: false, supportsPickup: false },
+  { id: "verizon", name: "Verizon", origin: "https://www.verizon.com", countries: ["US"], categories: ["telecom"], supportsDelivery: false, supportsPickup: false },
+  { id: "t-mobile", name: "T-Mobile", origin: "https://www.t-mobile.com", countries: ["US"], categories: ["telecom"], supportsDelivery: false, supportsPickup: false },
+  { id: "att", name: "AT&T", origin: "https://www.att.com", countries: ["US"], categories: ["telecom"], supportsDelivery: false, supportsPickup: false },
+  { id: "netflix", name: "Netflix", origin: "https://www.netflix.com", countries: ["US", "CA", "GB", "AU", "DE", "FR", "ES", "IT", "JP", "MX"], categories: ["streaming"], supportsDelivery: false, supportsPickup: false },
+  { id: "disney-plus", name: "Disney+", origin: "https://www.disneyplus.com", countries: ["US", "CA", "GB", "AU", "DE", "FR", "ES", "IT", "JP"], categories: ["streaming"], supportsDelivery: false, supportsPickup: false },
+  { id: "hulu", name: "Hulu", origin: "https://www.hulu.com", countries: ["US"], categories: ["streaming"], supportsDelivery: false, supportsPickup: false },
+  { id: "max", name: "Max", origin: "https://www.max.com", countries: ["US", "CA", "GB", "AU", "DE", "FR", "ES", "IT", "MX"], categories: ["streaming"], supportsDelivery: false, supportsPickup: false },
   // United Kingdom and Ireland
   { id: "hellofresh", name: "HelloFresh", origin: "https://www.hellofresh.com", countries: ["US", "GB", "CA", "AU", "DE", "FR", "NL"], categories: ["meal_kit"], supportsDelivery: true, supportsPickup: false },
   { id: "blue-apron", name: "Blue Apron", origin: "https://www.blueapron.com", countries: ["US"], categories: ["meal_kit"], supportsDelivery: true, supportsPickup: false },
@@ -52,17 +71,27 @@ const RETAILERS: ShoppingRetailer[] = [
 
 function key(value: string): string { return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, ""); }
 
-export function shoppingWorkflowFor(retailer: Pick<ShoppingRetailer, "categories" | "workflow">): ShoppingWorkflow {
-  if (retailer.workflow) return retailer.workflow;
-  if (retailer.categories.includes("dining_reservations")) return "reservation";
-  if (retailer.categories.includes("meal_kit")) return "meal_plan";
+function workflowForCategory(category: ShoppingCategory): ShoppingWorkflow {
+  if (category === "flights") return "flight_search";
+  if (category === "stays") return "stay_search";
+  if (category === "telecom") return "service_plan";
+  if (category === "streaming") return "streaming_account";
+  if (category === "dining_reservations") return "reservation";
+  if (category === "meal_kit") return "meal_plan";
   return "product_cart";
 }
 
-export function getRetailer(value: string): ShoppingRetailer | undefined {
+export function shoppingWorkflowFor(retailer: Pick<ShoppingRetailer, "categories" | "workflow">, preferredCategory?: ShoppingCategory): ShoppingWorkflow {
+  if (preferredCategory && retailer.categories.includes(preferredCategory)) return workflowForCategory(preferredCategory);
+  if (retailer.workflow) return retailer.workflow;
+  const category = retailer.categories.find((value) => ["flights", "stays", "telecom", "streaming", "dining_reservations", "meal_kit"].includes(value)) ?? retailer.categories[0] ?? "other";
+  return workflowForCategory(category);
+}
+
+export function getRetailer(value: string, preferredCategory?: ShoppingCategory): ShoppingRetailer | undefined {
   const target = key(value);
   const retailer = RETAILERS.find((item) => item.id === target || key(item.name) === target || key(item.origin) === target);
-  return retailer ? { ...retailer, workflow: shoppingWorkflowFor(retailer) } : undefined;
+  return retailer ? { ...retailer, workflow: shoppingWorkflowFor(retailer, preferredCategory) } : undefined;
 }
 
 export function suggestRetailers(input: { country?: string; category: ShoppingCategory; deliveryPreference?: "delivery" | "pickup" | "either" }): ShoppingRetailer[] {

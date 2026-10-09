@@ -96,6 +96,14 @@ Maintain fixtures for:
 21. If an image-aware action asks the owner to reattach its missing image, the next attachment resumes that exact still-authorized user request through the image-aware adapter; cancellation or unrelated follow-up breaks the continuation, and text-only fallback never executes.
 22. A generated image whose private asset save fails remains available during the current run, but the tool result clearly reports that it cannot be reused in a later turn.
 
+For browser domain coverage, run `npm run e2b:domain:live-matrix` with the
+E2B template configured. The matrix uses one isolated sandbox per provider and
+only opens public HTTPS pages, observes the page, captures a screenshot and
+diagnostics, and classifies challenges. It never logs in, enters personal or
+payment data, changes a plan, books, purchases, or submits an order. A green
+row proves public navigation and observation only; it is not proof of an
+authenticated provider workflow.
+
 ## Test command
 
 Run:
