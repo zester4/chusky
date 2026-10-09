@@ -17,6 +17,7 @@ const liveSmoke = readFileSync(resolve(root, "scripts", "e2b-browser-live-smoke.
 const retailerMatrix = readFileSync(resolve(root, "scripts", "e2b-retailer-live-matrix.ts"), "utf8");
 const envExample = readFileSync(resolve(root, ".env.example"), "utf8");
 const nativeTools = readFileSync(resolve(root, "src", "nativeTools.ts"), "utf8");
+const agentRuntime = readFileSync(resolve(root, "src", "agent.ts"), "utf8");
 
 test("E2B browser template installs readable Chromium for the non-root runtime", () => {
   assert.match(templateDockerfile, /PLAYWRIGHT_BROWSERS_PATH=\/opt\/ms-playwright/);
@@ -104,6 +105,13 @@ test("E2B browser exposes an owner-only live stream for the retained Chromium di
   assert.match(browserEngine, /stream: \{ startedAt: stream\.startedAt, expiresAt: stream\.expiresAt, port: stream\.port \}/);
   assert.match(browserEngine, /Live browser streams are available only in the owner's private conversation/);
   assert.ok(chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER")?.function.parameters.properties.action.enum.includes("stream_start"));
+});
+
+test("browser screenshots return to the vision-capable model and repeated runs have a safety stop", () => {
+  assert.match(agentRuntime, /Fresh owner-private browser screenshot/);
+  assert.match(agentRuntime, /browserRunProgressMarker\(execResult/);
+  assert.match(agentRuntime, /Browser safety stop: the last/);
+  assert.match(envExample, /MAX_BROWSER_NO_PROGRESS_CALLS=8/);
 });
 
 test("E2B browser configuration is opt-in and exposes the backend-neutral browser slug", () => {

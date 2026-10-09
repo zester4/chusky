@@ -10,6 +10,7 @@ import { initStore, saveBrowserHandoff } from "../src/store.js";
 import { chuckTools } from "../src/agentTools.js";
 import { pendingVaultInspectionOrigins } from "../src/vault/browserGuard.js";
 import { auxiliaryBrowserRequest } from "../src/lib/e2b/auxiliaryActions.js";
+import { browserRunHasProgress, browserRunProgressMarker } from "../src/lib/e2b/runProgress.js";
 import { scoreBrowserControlRemap, selectBrowserControlRemapCandidate } from "../src/lib/e2b/browser.js";
 import { browserChallengeStillActive } from "../src/lib/e2b/handoffStatus.js";
 
@@ -36,6 +37,67 @@ test("new E2B auxiliary actions forward bounded arguments and require fresh visu
     x: 1441, y: 1, screenshotHash: "a".repeat(32), visualFallback: true,
   }), /inside the 1440x900/);
   assert.throws(() => auxiliaryBrowserRequest("clipboard_write", { text: "x".repeat(8_001) }), /at most 8000/);
+});
+
+test("adaptive browser primitives preserve their execution payloads", () => {
+  const step = { action: "click", selector: { role: "button", name: "Search" } };
+  const schema = { type: "object", properties: { title: { type: "string" } } };
+  assert.deepEqual(auxiliaryBrowserRequest("observe", {
+    includeScreenshot: true,
+    includeForms: false,
+    includePageContent: true,
+    includeLinks: true,
+  }), {
+    action: "observe",
+    includeScreenshot: true,
+    includeForms: false,
+    includePageContent: true,
+    includeLinks: true,
+  });
+  assert.deepEqual(auxiliaryBrowserRequest("act", { step }), { action: "act", step });
+  assert.deepEqual(auxiliaryBrowserRequest("extract", { schema }), { action: "extract", schema });
+  assert.throws(() => auxiliaryBrowserRequest("act", {}), /one bounded browser step/);
+  assert.throws(() => auxiliaryBrowserRequest("extract", {}), /bounded object schema/);
+});
+
+test("browser run progress markers ignore volatile screenshot data but detect page movement", () => {
+  const first = browserRunProgressMarker({
+    observedUrl: "https://example.test/search",
+    title: "Search",
+    accessibilityHash: "abc",
+    pageGeneration: 4,
+    screenshotHash: "volatile-a",
+    screenshotId: "shot-a",
+  });
+  const samePage = browserRunProgressMarker({
+    observedUrl: "https://example.test/search",
+    title: "Search",
+    accessibilityHash: "abc",
+    pageGeneration: 4,
+    screenshotHash: "volatile-b",
+    screenshotId: "shot-b",
+  });
+  const nextPage = browserRunProgressMarker({
+    observedUrl: "https://example.test/cart",
+    title: "Cart",
+    accessibilityHash: "def",
+    pageGeneration: 5,
+  });
+  assert.equal(browserRunHasProgress(first, samePage), false);
+  assert.equal(browserRunHasProgress(first, nextPage), true);
+});
+
+test("browser run progress markers detect non-sensitive form advancement", () => {
+  const empty = browserRunProgressMarker({
+    observedUrl: "https://example.test/signup",
+    forms: [{ controls: [{ id: "email", role: "textbox", name: "Email", valuePresent: false, valueLength: 0 }] }],
+  });
+  const filled = browserRunProgressMarker({
+    observedUrl: "https://example.test/signup",
+    forms: [{ controls: [{ id: "email", role: "textbox", name: "Email", valuePresent: true, valueLength: 22 }] }],
+  });
+  assert.equal(browserRunHasProgress(empty, filled), true);
+  assert.equal(filled.includes("example-password"), false);
 });
 
 test("form inspection is a structured, safe browser capability", () => {

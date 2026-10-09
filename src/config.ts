@@ -646,6 +646,10 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // Dynamic retail pages must not be allowed to consume an unbounded model
   // retry loop while the user is waiting for a result.
   maxBrowserToolCalls: boundedInt("MAX_BROWSER_TOOL_CALLS", 24, 4, 60),
+  // Stop when successive browser calls leave the observed page frontier
+  // unchanged. This is separate from the total call budget so a model can
+  // still complete long workflows that are genuinely progressing.
+  maxBrowserNoProgressCalls: boundedInt("MAX_BROWSER_NO_PROGRESS_CALLS", 8, 2, 12),
   userCostCap: Number(process.env.USER_COST_CAP ?? 0),
   // Each upstream attempt has a bounded wall-clock deadline. OpenRouter may
   // still choose a healthy provider/model fallback within that deadline.
