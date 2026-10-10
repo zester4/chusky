@@ -5288,6 +5288,7 @@ export async function getSession(uid: number): Promise<UserSession> {
     .slice(-100)
     .map(([id, value]) => [id, value.slice(0, 2_000)]));
   const savedCalls = Array.isArray(s.phoneCalls) ? s.phoneCalls as unknown[] : Array.isArray(legacyCalls) ? legacyCalls : [];
+  const migratingLegacyCalls = !Array.isArray(s.phoneCalls) && Array.isArray(legacyCalls);
   s.executionReservations = Array.isArray(s.executionReservations) ? s.executionReservations.filter((item): item is ExecutionReservation => Boolean(item) && typeof item.id === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(item.id) && typeof item.operation === "string" && item.operation.length <= 100 && Number.isFinite(item.createdAt) && Number.isFinite(item.expiresAt)).slice(-100) : [];
   const phoneCalls = savedCalls.flatMap((value): PhoneCallRecord[] => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return [];
@@ -5302,7 +5303,7 @@ export async function getSession(uid: number): Promise<UserSession> {
       ...(item.callVerification === "public" || item.callVerification === "identified" || item.callVerification === "verified" ? { callVerification: item.callVerification } : {}),
       phoneNumber: item.phoneNumber.slice(0, 32), purpose: item.purpose.slice(0, 1000), status,
       ...(item.runtimeState === "healthy" || item.runtimeState === "degraded" || item.runtimeState === "reconnecting" || item.runtimeState === "ended" ? { runtimeState: item.runtimeState } : {}),
-      ...(typeof item.bridgeSessionId === "string" && /^[A-Za-z0-9:_-]{1,160}$/.test(item.bridgeSessionId) ? { bridgeSessionId: item.bridgeSessionId } : {}),
+      ...(!migratingLegacyCalls && typeof item.bridgeSessionId === "string" && /^[A-Za-z0-9:_-]{1,160}$/.test(item.bridgeSessionId) ? { bridgeSessionId: item.bridgeSessionId } : {}),
       ...(typeof item.lastCommittedTurnId === "string" && /^[A-Za-z0-9:_-]{1,160}$/.test(item.lastCommittedTurnId) ? { lastCommittedTurnId: item.lastCommittedTurnId } : {}),
       ...(item.continuity && typeof item.continuity === "object" && !Array.isArray(item.continuity) && typeof (item.continuity as Record<string, unknown>).sourceCallId === "string" && typeof (item.continuity as Record<string, unknown>).summary === "string" ? {
         continuity: {
