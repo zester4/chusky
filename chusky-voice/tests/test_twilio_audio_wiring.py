@@ -233,6 +233,7 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings.chusky_turn_url, "https://chusky.example/internal/twilio/turn")
         self.assertEqual(settings.chusky_status_url, "https://chusky.example/internal/twilio/status")
         self.assertFalse(settings.elevenlabs_enabled)
+        self.assertEqual(settings.turn_start_budget_ms, 2500)
 
     def test_elevenlabs_requires_credentials_only_when_enabled(self):
         base = {
@@ -335,6 +336,19 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         media = next(item for item in self.websocket.sent if item.get("event") == "media")
         encoded_payload = media["media"]["payload"]
         self.assertEqual(base64.b64decode(encoded_payload), b"\xff" * 160)
+
+    async def test_tts_resegments_arbitrary_provider_chunks_and_emits_playback_mark(self):
+        await self.call._forward_tts_audio(b"\xff" * 100)
+        await self.call._forward_tts_audio(b"\x00" * 220)
+        await self.call._finish_tts_playback()
+
+        media = [item for item in self.websocket.sent if item.get("event") == "media"]
+        self.assertEqual([len(base64.b64decode(item["media"]["payload"])) for item in media], [160, 160])
+        self.assertEqual(base64.b64decode(media[0]["media"]["payload"]), b"\xff" * 100 + b"\x00" * 60)
+        self.assertEqual(base64.b64decode(media[1]["media"]["payload"]), b"\x00" * 160)
+        self.assertEqual([item["event"] for item in self.websocket.sent], ["media", "media", "mark"])
+        self.assertEqual(self.call.metrics.tts_audio_frames, 2)
+        self.assertEqual(self.call.metrics.playback_marks_sent, 1)
 
     async def test_selected_voice_overrides_bridge_default_for_tts_connection(self):
         opened_urls = []
