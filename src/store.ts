@@ -5878,11 +5878,12 @@ function sdkThreadMessageKey(message: Message): string {
 }
 
 function mergeImportedWebSdkThreads(target: UserSession, sourceThreads: SdkThreadRecord[]): void {
-  target.sdkThreads ??= [];
+  const targetThreads: SdkThreadRecord[] = target.sdkThreads ?? [];
+  target.sdkThreads = targetThreads;
   for (const sourceThread of sourceThreads) {
-    const targetThread = target.sdkThreads.find((thread) => thread.id === sourceThread.id);
+    const targetThread: SdkThreadRecord | undefined = targetThreads.find((thread: SdkThreadRecord) => thread.id === sourceThread.id);
     if (!targetThread) {
-      target.sdkThreads.push(structuredClone(sourceThread));
+      targetThreads.push(structuredClone(sourceThread));
       continue;
     }
 
@@ -5892,14 +5893,14 @@ function mergeImportedWebSdkThreads(target: UserSession, sourceThreads: SdkThrea
       targetThread.history.push(structuredClone(message));
       knownMessages.add(sdkThreadMessageKey(message));
     }
-    const runsById = new Map(targetThread.runs.map((run) => [run.id, run]));
+    const runsById = new Map<string, SdkRunRecord>(targetThread.runs.map((run: SdkRunRecord) => [run.id, run]));
     for (const sourceRun of sourceThread.runs) {
       const existingRun = runsById.get(sourceRun.id);
       if (!existingRun) {
         targetThread.runs.push(structuredClone(sourceRun));
-        runsById.set(sourceRun.id, targetThread.runs.at(-1)!);
+        runsById.set(sourceRun.id, targetThread.runs[targetThread.runs.length - 1]!);
       } else if (sourceRun.updatedAt > existingRun.updatedAt) {
-        const index = targetThread.runs.findIndex((run) => run.id === sourceRun.id);
+        const index = targetThread.runs.findIndex((run: SdkRunRecord) => run.id === sourceRun.id);
         if (index >= 0) targetThread.runs[index] = structuredClone(sourceRun);
       }
     }
@@ -5907,6 +5908,7 @@ function mergeImportedWebSdkThreads(target: UserSession, sourceThreads: SdkThrea
     targetThread.createdAt = Math.min(targetThread.createdAt, sourceThread.createdAt);
     targetThread.updatedAt = Math.max(targetThread.updatedAt, sourceThread.updatedAt);
   }
+  target.sdkThreads = targetThreads.slice(-100);
 }
 
 function sdkThreadImportComplete(
