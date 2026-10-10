@@ -57,6 +57,73 @@ test("starter Gmail watches resolve Composio toolSchemas when no toolSlugs were 
   });
   assert.equal(result[0]?.status, "completed");
   assert.deepEqual(resolved, ["GMAIL_FETCH_EMAILS"]);
+  assert.deepEqual((await listAttentionRecords(userId, "autonomy_watch") as any[])[0]?.toolSlugs, ["GMAIL_FETCH_EMAILS"]);
+});
+
+test("starter watch discovery falls back from a broad toolkit query to the watch intent", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 990013;
+  const queries: string[] = [];
+  const session = {
+    sessionId: "watch-search-fallback-session",
+    search: async ({ query }: { query: string }) => {
+      queries.push(query);
+      return query === "gmail"
+        ? { toolSchemas: {} }
+        : { toolSchemas: { GMAIL_FETCH_EMAILS: { tool_slug: "GMAIL_FETCH_EMAILS", description: "Read inbox messages" } } };
+    },
+  };
+  setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } } });
+  await createAttentionRecord(userId, "autonomy_watch", {
+    name: "Recent inbox", domain: "gmail", toolkit: "gmail", query: "Gmail newest five inbox messages read only",
+    objective: "Check the newest owner inbox messages", cadenceSeconds: 3600, authority: "observe", status: "active", maxItems: 5, nextCheckAt: 1,
+  });
+  const result = await runDueAutonomyWatches(userId, {
+    mode: "personal", now: Date.now(), execute: async ({ toolSlugs }) => ({ text: 'AUTONOMY_RESULT: {"changed":false,"summary":"No new inbox changes"}', toolsSucceeded: toolSlugs }),
+  });
+  assert.equal(result[0]?.status, "completed");
+  assert.deepEqual(queries.slice(0, 2), ["gmail", "Gmail newest five inbox messages read only"]);
+});
+
+test("unresolved provider watch creates one actionable repair candidate", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 990014;
+  const session = { sessionId: "watch-search-empty-session", search: async () => ({ toolSchemas: {} }) };
+  setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } } });
+  await createAttentionRecord(userId, "autonomy_watch", {
+    name: "Recent inbox", domain: "gmail", toolkit: "gmail", query: "Gmail newest five inbox messages read only",
+    objective: "Check the newest owner inbox messages", cadenceSeconds: 3600, authority: "observe", status: "active", maxItems: 5, nextCheckAt: 1,
+  });
+  const execute = async () => ({ text: 'AUTONOMY_RESULT: {"changed":false,"summary":"should not execute"}' });
+  const first = await runDueAutonomyWatches(userId, { mode: "personal", now: Date.now(), execute: execute as any });
+  assert.equal(first[0]?.status, "failed");
+  const candidates = await listAttentionRecords(userId, "attention_candidate") as any[];
+  assert.equal(candidates.length, 1);
+  assert.match(candidates[0].reason, /watch-repair/);
+  assert.deepEqual(candidates[0].suggestedActions.map((action: any) => action.id), ["repair_watch", "reconnect_app", "review_tools"]);
+  const second = await runDueAutonomyWatches(userId, { mode: "personal", now: Date.now() + 3_600_001, execute: execute as any });
+  assert.equal(second[0]?.status, "failed");
+  assert.equal((await listAttentionRecords(userId, "attention_candidate") as any[]).length, 1);
+});
+
+test("real provider reconciliation fails closed when no owned account matches the watch", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 990015;
+  setAgentDependenciesForTests({
+    composio: {
+      connectedAccounts: { list: async () => [] },
+      create: async () => ({ sessionId: "unused-session" }),
+      sessions: { use: async () => ({ sessionId: "unused-session" }) },
+    },
+  });
+  await createAttentionRecord(userId, "autonomy_watch", {
+    name: "Recent inbox", domain: "gmail", toolkit: "gmail", toolSlugs: ["GMAIL_FETCH_EMAILS"],
+    objective: "Check the newest owner inbox messages", cadenceSeconds: 3600, authority: "observe", status: "active", maxItems: 5, nextCheckAt: 1,
+  });
+  const result = await runDueAutonomyWatches(userId, { mode: "personal", now: Date.now() });
+  assert.equal(result[0]?.status, "failed");
+  assert.match(result[0]?.error ?? "", /active connected account matched/);
+  assert.equal((await listAttentionRecords(userId, "attention_candidate") as any[]).length, 1);
 });
 
 test("reconciliation writes deduplicated owner observations for changes, failures, and recovery", async () => {

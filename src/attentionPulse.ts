@@ -44,6 +44,10 @@ const MAX_DUE_WATCHES_PER_MODE = 4;
 // Elena's worker manifest; this prompt should carry only the current owner
 // state needed for this pulse and its recovery decisions.
 const MAX_PROMPT_CHARS = 8_000;
+// A living checklist keeps Elena's horizon alive, but it must not force a
+// full model invocation every hour when there is no new durable evidence.
+// Provider watches and actionable records still wake the pulse immediately.
+const CHECKLIST_DISCOVERY_INTERVAL_MS = 6 * 60 * 60_000;
 const STALE_EXECUTION_MS = 30 * 60_000;
 const APPROVAL_REMINDER_WINDOW_MS = 2 * 60 * 60_000;
 const MEETING_LOOKAHEAD_MS = 24 * 60 * 60_000;
@@ -616,11 +620,20 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now(), 
     .slice(0, MAX_DUE_WATCHES_PER_MODE));
   const relevantProfiles = (profiles as AutonomyProfileRecord[])
     .filter((profile) => dueWatches.some((watch) => (watch.mode ?? "personal") === profile.mode));
-  // Once Elena has a living checklist, keep the hourly wake-up alive even when
-  // the current durable queues are quiet. Elena may discover work outside the
-  // checklist; the governor only controls the wake-up, budget, and safety
-  // boundaries, not the agent's curiosity or final prioritization.
-  const hasWork = Boolean(checklist) || actionableLoops.length > 0 || actionableCandidates.length > 0 || attentionTasks.length > 0 || attentionMissions.length > 0 || operationalSignals.length > 0 || dueWatches.length > 0;
+  // A checklist keeps Elena's horizon alive, but a recent quiet pulse should
+  // not spend another full model turn merely because the checklist exists.
+  // This is a resource guard, not a decision cage: new evidence, due watches,
+  // durable blockers, or changed checklist content always wake her immediately.
+  const activePulseJobIds = new Set((jobs as Array<{ id: string; kind?: string; status?: string }>)
+    .filter((job) => job.kind === "attention_pulse" && job.status === "active")
+    .map((job) => job.id));
+  const latestPulseCompletionAt = (occurrences as Array<{ jobId: string; status: string; completedAt?: number; updatedAt: number }>)
+    .filter((occurrence) => activePulseJobIds.has(occurrence.jobId) && occurrence.status === "completed")
+    .map((occurrence) => occurrence.completedAt ?? occurrence.updatedAt)
+    .filter((value) => Number.isFinite(value))
+    .sort((left, right) => right - left)[0];
+  const checklistDiscoveryDue = Boolean(checklist && (!latestPulseCompletionAt || checklist.updatedAt > latestPulseCompletionAt || now - latestPulseCompletionAt >= CHECKLIST_DISCOVERY_INTERVAL_MS));
+  const hasWork = checklistDiscoveryDue || actionableLoops.length > 0 || actionableCandidates.length > 0 || attentionTasks.length > 0 || attentionMissions.length > 0 || operationalSignals.length > 0 || dueWatches.length > 0;
   const decisionContext = buildAutonomyDecisionContext({
     now,
     loops: actionableLoops,

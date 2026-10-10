@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { attentionPulseCloseoutOutput, attentionPulseDeliveredToday, attentionPulseDeliveryConfirmation, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, attentionPulseRefreshOwnerState, attentionPulseRequireDueWatchReport, buildAttentionPulsePlan, isWithinQuietHours, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "../src/attentionPulse.js";
 import { validateNativeToolArguments } from "../src/agentTools.js";
 import { configureAttentionPulse } from "../src/nativeTools.js";
-import { addJob, addRecallMeeting, addReminder, blockTask, createApproval, createAttentionRecord, createJobOccurrence, createMission, createTask, createTriggerEvent, initStore, listAttentionRecords, listHandoffRecords, pauseMission, repairMission, saveCalendarMeetingPreparation, updateAttentionRecord, updateTask, type DeliveryPreferenceRecord } from "../src/store.js";
+import { addJob, addRecallMeeting, addReminder, blockTask, createApproval, createAttentionRecord, createJobOccurrence, createMission, createTask, createTriggerEvent, initStore, listAttentionRecords, listHandoffRecords, pauseMission, repairMission, saveCalendarMeetingPreparation, updateAttentionRecord, updateTask, writeScratchpad, type DeliveryPreferenceRecord } from "../src/store.js";
 import { executeDelegation } from "../src/subagents/executor.js";
 
 const preference = (patch: Partial<DeliveryPreferenceRecord> = {}): DeliveryPreferenceRecord => ({
@@ -306,6 +306,24 @@ test("attention pulse bounds context and deduplicates unchanged state", async ()
   if (record && "id" in record) await updateAttentionRecord(userId, "open_loop", record.id, { nextAction: "Book the partner review" });
   const changed = await buildAttentionPulsePlan(userId);
   assert.notEqual(changed.dedupeKey, first.dedupeKey);
+});
+
+test("a recent quiet pulse does not spend a model turn only because a checklist exists", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910025;
+  await writeScratchpad(userId, "attention-pulse/checklist", "- Review the owner's current horizon and discover useful work.");
+  const checklistUpdatedAt = Date.now();
+  const recentCompletion = checklistUpdatedAt + 1_000;
+  const now = recentCompletion + 60 * 60_000;
+  const jobId = `pulse_${userId}`;
+  await addJob(userId, { id: jobId, userId, text: "Run attention pulse", cron: "0 * * * *", scheduleId: `schedule_${userId}`, status: "active", kind: "attention_pulse", createdAt: now - 2 * 60 * 60_000 });
+  await createJobOccurrence({ id: "occ_pulse_recent_quiet", userId, jobId, occurrenceId: "run_recent", status: "completed", mode: "act", idempotencyKey: "run_recent", completedAt: recentCompletion, createdAt: recentCompletion, updatedAt: recentCompletion, version: 0 });
+
+  const recent = await buildAttentionPulsePlan(userId, now);
+  assert.equal(recent.hasWork, false);
+
+  const discovery = await buildAttentionPulsePlan(userId, now + 6 * 60 * 60_000 + 1);
+  assert.equal(discovery.hasWork, true);
 });
 
 test("attention pulse preserves a durable trigger recovery without creating duplicate follow-up work", async () => {

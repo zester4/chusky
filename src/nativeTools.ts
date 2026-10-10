@@ -10,6 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { classifyMemory } from "./memory/classifier.js";
 import { config } from "./config.js";
 import { ensureAttentionPulseCapabilityCandidates, getAttentionPulseWatchCoverage } from "./attentionPulse.js";
+import { classifyPulseHealth } from "./proactive/pulseHealth.js";
 import { DEFAULT_PROACTIVE_WATCHES, DEFAULT_WATCH_CONNECTION_WAIT_ERROR, defaultWatchInput, defaultWatchSpecsForConnectedAccounts, missingDefaultWatchKeys, normalizeProactiveCapabilityIds } from "./proactive/watches.js";
 import { logger } from "./logger.js";
 import { assertPublicHttpUrl, createTinyFishClient } from "./tinyfish.js";
@@ -1068,10 +1069,29 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
     }));
     const latestOccurrence = occurrences[0];
     const latestActivityAt = latestOccurrence?.completedAt ?? latestOccurrence?.startedAt;
+    const cadence = pulseJobs[0]?.cron === "*/30 * * * *" ? "every_30_minutes" as const : pulseJobs[0]?.cron === "0 9 * * *" ? "daily" as const : "hourly" as const;
+    const productHealth = classifyPulseHealth({
+      enabled: pulseJobs.some((job) => job.status === "active"),
+      cadence,
+      jobStatus: pulseJobs[0]?.status === "paused" || pulseJobs[0]?.status === "cancelled" ? pulseJobs[0].status : pulseJobs[0]?.status === "active" ? "active" : undefined,
+      scheduleError: pulseJobs[0]?.scheduleError,
+      latestOccurrence,
+      activeWatches: watchCoverage.length,
+      currentWatches: watchCoverage.filter((watch) => watch.status === "current").length,
+      scheduledWatches: watchCoverage.filter((watch) => watch.status === "scheduled").length,
+      staleWatches: watchCoverage.filter((watch) => watch.status === "stale").length,
+      failedWatches: watchCoverage.filter((watch) => watch.status === "failed").length,
+      neverCheckedWatches: watchCoverage.filter((watch) => watch.status === "not_checked").length,
+      pendingSuggestions: proactiveState.candidates.filter((candidate) => candidate.status === "pending").length,
+      connectedAccountsVerified: proactiveState.verified,
+    });
     return {
       enabled: pulseJobs.some((job) => job.status === "active"),
       jobs: pulseJobs,
-      health: { lastOccurrence: latestOccurrence, recentFailures: occurrences.filter((item) => item.status === "failed" || item.status === "blocked").length, neverRun: Boolean(pulseJobs[0] && !latestActivityAt), stale: Boolean(pulseJobs[0] && (!latestActivityAt || Date.now() - latestActivityAt > 2 * 60 * 60_000)) },
+      // Keep the legacy occurrence counters for older callers, but include the
+      // canonical product classifier so Telegram, the API, and the dashboard
+      // can describe one durable state consistently.
+      health: { ...productHealth, lastOccurrence: latestOccurrence, recentFailures: occurrences.filter((item) => item.status === "failed" || item.status === "blocked").length, neverRun: Boolean(pulseJobs[0] && !latestActivityAt), stale: Boolean(pulseJobs[0] && (!latestActivityAt || Date.now() - latestActivityAt > 2 * 60 * 60_000)) },
       occurrences,
       connectedAccountsVerified: proactiveState.verified,
       capabilitySuggestions: proactiveState.candidates.filter((candidate) => candidate.status === "pending").slice(0, 3),

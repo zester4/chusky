@@ -31,6 +31,14 @@ unbounded tool authority.
   Slack/Teams/Discord, Drive/Notion, GitHub/Linear/Jira, Sheets, Stripe, or
   HubSpot. These watches are keyed to the exact connected account, capped at
   twelve, and created idempotently.
+- `reconciliation.ts` resolves provider actions in stages: persisted exact
+  read-only slugs first, then the provider toolkit, then the watch intent. A
+  resolved action is persisted back onto the watch after a confirmed check so
+  later hourly runs do not depend on the same search result. Real provider
+  runs also require one active owner-owned account matching the watch toolkit;
+  an unresolved action or account creates one deduplicated repair candidate
+  with `Repair watch`, `Reconnect app`, and `Review tools` actions instead of
+  silently retrying an unscoped call.
 - `detectors.ts` converts normalized provider evidence into bounded findings.
 Findings create owner-scoped candidates; they never send, spend, delete,
 change permissions, or treat source text as authorization.
@@ -42,6 +50,12 @@ change permissions, or treat source text as authorization.
   treats it as continuity context rather than an exhaustive queue, permission,
   or final decision-maker. Elena may investigate valuable work outside the
   checklist when current evidence warrants it.
+
+  A recent quiet Pulse does not invoke the model on every hourly wake merely
+  because the checklist exists. New evidence, due watches, durable blockers,
+  candidates, or changed checklist content still wake Elena immediately; a
+  checklist-only discovery wake occurs at least every six hours. This limits
+  token spend without turning the checklist into a closed task queue.
 
 ## Onboarding and settings API
 
@@ -74,7 +88,8 @@ stalled scheduler: an enabled Pulse with no active watch and pending capability
 suggestions is `waiting_for_connection`, while a configured watch with no
 completed run is `never_run` and an old run is `stale`. This prevents the
 dashboard, SDK, and Elena from reporting an overdue provider watch that was
-never authorized.
+never authorized. The native Pulse status keeps legacy occurrence counters for
+compatibility but now includes the same canonical health classification.
 
 The worker also runs a bounded QStash schedule-recovery sweep. It discovers
 owners from durable job state, takes one provider schedule snapshot, removes

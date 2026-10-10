@@ -33,6 +33,7 @@ const activeRuns = new Set<string>();
 const MAX_OUTPUT = 5000;
 
 function compact(value: unknown, max: number): string { return String(value ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max); }
+function normalizeToolkit(value: unknown): string { return String(value ?? "").toLowerCase().replace(/[^a-z0-9]/g, ""); }
 function safeErrorMessage(error: unknown): string {
   return compact(error instanceof Error ? error.message : error, 1000)
     .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [redacted]")
@@ -140,14 +141,59 @@ async function defaultExecute(userId: number, watch: AutonomyWatchRecord, toolSl
   return { text: result.text, toolsSucceeded: result.toolsSucceeded };
 }
 
+function searchToolSlug(item: any): string {
+  return String(item?.function?.name ?? item?.toolSlug ?? item?.tool_slug ?? item?.name ?? item?.slug ?? "").trim();
+}
+
+function searchToolkits(item: any): string[] {
+  return [
+    item?.toolkit?.slug,
+    item?.toolkit?.name,
+    item?.toolkitSlug,
+    item?.appName,
+    item?.metadata?.toolkit,
+    item?.metadata?.app,
+  ].filter((value): value is string => typeof value === "string" && Boolean(value.trim())).map(normalizeToolkit);
+}
+
+function toolMatchesWatch(watch: AutonomyWatchRecord, item: any, slug: string): boolean {
+  const toolkit = normalizeToolkit(watch.toolkit);
+  if (!toolkit) return true;
+  const normalizedSlug = normalizeToolkit(slug.split("_")[0]);
+  return normalizedSlug === toolkit || searchToolkits(item).includes(toolkit);
+}
+
 async function resolveToolSlugs(userId: number, watch: AutonomyWatchRecord): Promise<string[]> {
   if (watch.toolkit?.trim().toLowerCase() === "treg") return ["CHUCK_TREG_SEARCH", "CHUCK_TREG_RESOLVE"];
   const explicit = (watch.toolSlugs ?? []).map((slug) => String(slug).trim()).filter((slug) => /^[A-Z][A-Z0-9]{1,31}_[A-Z0-9_]+$/.test(slug) && isReadOnlyToolSlug(slug));
   if (explicit.length) return [...new Set(explicit)].slice(0, 12);
   if (!watch.query && !watch.toolkit) return [];
   const { searchTools } = await import("../agent.js");
-  const results = await searchTools(userId, `${watch.toolkit ?? ""} ${watch.query ?? watch.objective}`.trim());
-  return [...new Set(results.map((item: any) => String(item?.function?.name ?? item?.toolSlug ?? item?.tool_slug ?? item?.name ?? item?.slug ?? "").trim()).filter((slug) => /^[A-Z][A-Z0-9]{1,31}_[A-Z0-9_]+$/.test(slug) && isReadOnlyToolSlug(slug) && (!watch.toolkit || slug.toLowerCase().startsWith(`${watch.toolkit.toLowerCase().replace(/[^a-z0-9]/g, "")}_`))))].slice(0, 8);
+  // Long intent queries are useful for ranking but can return no result in a
+  // provider session. Search the exact toolkit first, then the watch intent;
+  // only exact, read-only actions belonging to that toolkit may survive.
+  const queries = [...new Set([
+    watch.toolkit?.trim(),
+    watch.query?.trim(),
+    `${watch.toolkit ?? ""} ${watch.query ?? watch.objective}`.trim(),
+  ].filter((value): value is string => Boolean(value)))];
+  const resolved: string[] = [];
+  let lastError: unknown;
+  for (const query of queries) {
+    try {
+      const results = await searchTools(userId, query);
+      for (const item of results) {
+        const slug = searchToolSlug(item);
+        if (!/^[A-Z][A-Z0-9]{1,31}_[A-Z0-9_]+$/.test(slug) || !isReadOnlyToolSlug(slug) || !toolMatchesWatch(watch, item, slug)) continue;
+        if (!resolved.includes(slug)) resolved.push(slug);
+        if (resolved.length >= 8) return resolved;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (!resolved.length && lastError) throw lastError;
+  return resolved;
 }
 
 function signalIdentity(watch: AutonomyWatchRecord, signal: NormalizedBusinessSignal): string {
@@ -183,12 +229,47 @@ async function resolveComposioAccount(userId: number, watch: AutonomyWatchRecord
   if (requested) {
     const match = accounts.find((account) => account.id === requested || account.alias === requested);
     if (!match) throw new Error("The selected connected account is not active or is not owned by this user.");
+    if (watch.toolkit && normalizeToolkit(match.toolkit) !== normalizeToolkit(watch.toolkit)) throw new Error("The selected connected account belongs to a different toolkit than this watch.");
     return match.id;
   }
-  const prefixes = new Set(toolSlugs.map((slug) => slug.split("_", 1)[0].toLowerCase()));
-  const matches = accounts.filter((account) => prefixes.has(String(account.toolkit).replace(/[^a-z0-9]/gi, "").toLowerCase()));
+  const prefixes = new Set(toolSlugs.map((slug) => normalizeToolkit(slug.split("_", 1)[0])));
+  const expectedToolkit = normalizeToolkit(watch.toolkit);
+  const matches = accounts.filter((account) => prefixes.has(normalizeToolkit(account.toolkit)) || (expectedToolkit && expectedToolkit === normalizeToolkit(account.toolkit)));
   if (matches.length > 1 && config.composioRequireExplicitAccount) throw new Error("This watch matches multiple active connected accounts. Set connectedAccountId or accountAlias on the watch.");
   return matches.length === 1 ? matches[0]!.id : undefined;
+}
+
+function isProviderWatch(watch: AutonomyWatchRecord): boolean {
+  const toolkit = normalizeToolkit(watch.toolkit);
+  return Boolean(toolkit && toolkit !== "treg" && toolkit !== "chusky" && toolkit !== "native");
+}
+
+async function recordWatchRepairCandidate(userId: number, watch: AutonomyWatchRecord, message: string, now: number): Promise<void> {
+  const existing = await listAttentionRecords(userId, "attention_candidate", { limit: 200 }) as AttentionCandidateRecord[];
+  const prefix = `[watch-repair:${watch.id}]`;
+  if (existing.some((item) => item.status === "pending" && item.reason.startsWith(prefix))) return;
+  const provider = compact(watch.toolkit ?? watch.domain, 80);
+  await createAttentionRecord(userId, "attention_candidate", {
+    candidateType: "ask",
+    reason: `${prefix} ${compact(watch.name, 120)} cannot run safely: ${compact(message, 500)}`,
+    proposedAction: `Repair the ${provider} watch, verify an exact read-only action, and retry only after the account is available.`,
+    providerSlug: provider,
+    suggestedActions: [
+      { id: "repair_watch", label: "Repair watch", prompt: `Inspect the ${compact(watch.name, 120)} watch and resolve an exact read-only ${provider} action before retrying.` },
+      { id: "reconnect_app", label: "Reconnect app", prompt: `Check whether the connected ${provider} account needs to be reconnected before this watch can run.` },
+      { id: "review_tools", label: "Review tools", prompt: `Review the currently available read-only ${provider} tools for this watch and explain what is missing.` },
+    ],
+    score: 0.96,
+    status: "pending",
+    availableAt: now,
+    expiresAt: now + 7 * 24 * 60 * 60_000,
+  });
+}
+
+async function dismissWatchRepairCandidates(userId: number, watchId: string): Promise<void> {
+  const candidates = await listAttentionRecords(userId, "attention_candidate", { limit: 200 }) as AttentionCandidateRecord[];
+  const prefix = `[watch-repair:${watchId}]`;
+  await Promise.all(candidates.filter((item) => item.status === "pending" && item.reason.startsWith(prefix)).map((item) => updateAttentionRecord(userId, "attention_candidate", item.id, { status: "dismissed" })));
 }
 
 async function recordGaps(userId: number, gaps: ReturnType<typeof detectBusinessGaps>): Promise<void> {
@@ -274,6 +355,7 @@ export async function runDueAutonomyWatches(userId: number, options: Reconciliat
       const toolSlugs = await resolveToolSlugs(userId, watch);
       if (!toolSlugs.length) throw new Error("No read-only connected tool was resolved for this watch. Add exact toolSlugs or connect the requested app.");
       const composioAccount = options.execute || tregMonitor ? undefined : await resolveComposioAccount(userId, watch, toolSlugs);
+      if (!options.execute && isProviderWatch(watch) && !composioAccount) throw new Error("No active connected account matched this watch. Connect or select the exact provider account before retrying.");
       const tregBudget = tregMonitor ? { maxCalls: 1, maxSpendUsd: Math.min(config.tregMissionBudgetUsd, config.tregPerCallSoftCapUsd) } : undefined;
       const prompt = [`Reconcile the owner’s standing watch “${compact(watch.name, 160)}” for domain ${compact(watch.domain, 100)}.`, `Objective: ${compact(watch.objective, 1500)}`, watch.query ? `Query: ${compact(watch.query, 800)}` : "", watch.cursor ? `Last cursor/checkpoint: ${compact(watch.cursor, 300)}` : "", composioAccount ? `Use only connected account ${compact(composioAccount, 200)} for every provider call.` : "", tregMonitor ? `This is an explicitly owner-configured Treg external lead-signal monitor. Use CHUCK_TREG_SEARCH to discover relevant data/signal endpoints, then make at most one paid CHUCK_TREG_RESOLVE provider call and return at most ${watch.maxItems} results. The trusted runtime enforces maxSpendUsd=$${tregBudget!.maxSpendUsd.toFixed(2)} and maxCalls=1 for this check; Treg also enforces its configured per-call, daily, and rate limits. Search for signals newer than the last check (${watch.lastCheckedAt ? new Date(watch.lastCheckedAt).toISOString() : "the first run"}) when supported. Score relevance to the owner's stated objective; do not invent contacts or intent. Return stable provider signal IDs, company/person or account, signal type/date, fit reason, and an HTTPS source URL if supplied. Never contact anyone or write to CRM/sheets.` : "", `Inspect at most ${watch.maxItems} records. Compare with the checkpoint and report only new, changed, overdue, missing, or unresolved items. Never mutate provider state.`, "Return AUTONOMY_RESULT: {changed, summary, cursor?, signals:[{id,source,kind,subject,status,createdAt,updatedAt,dueAt,lastActivityAt,repliedAt,assignedTo,expectedCount,actualCount,amount,currency,metadata:{company,domain,url,signal,evidence,confidence,score}}] }"].filter(Boolean).join("\n");
       const executed = await (options.execute ? options.execute({ userId, watch, toolSlugs, prompt }) : defaultExecute(userId, watch, toolSlugs, prompt, composioAccount, tregBudget));
@@ -308,10 +390,14 @@ export async function runDueAutonomyWatches(userId: number, options: Reconciliat
       if (changed && digestKey !== watch.lastDigestKey) {
         await recordWatchObservation(userId, watch, "watch.changed", summary, digestKey, now);
       }
-      await updateAttentionRecord(userId, "autonomy_watch", watch.id, { lastCheckedAt: now, lastObservedAt: now, nextCheckAt, lastChangedAt: changed ? now : watch.lastChangedAt, lastResult: summary, lastError: undefined, cursor: parsed.cursor ?? watch.cursor, ...(newLeadSignals ? { seenSignalKeys: newLeadSignals.seenSignalKeys } : {}), lastDigestKey: digestKey, consecutiveFailures: 0 });
+      await updateAttentionRecord(userId, "autonomy_watch", watch.id, { lastCheckedAt: now, lastObservedAt: now, nextCheckAt, lastChangedAt: changed ? now : watch.lastChangedAt, lastResult: summary, lastError: undefined, cursor: parsed.cursor ?? watch.cursor, toolSlugs, ...(composioAccount ? { connectedAccountId: composioAccount } : {}), ...(newLeadSignals ? { seenSignalKeys: newLeadSignals.seenSignalKeys } : {}), lastDigestKey: digestKey, consecutiveFailures: 0 });
+      await dismissWatchRepairCandidates(userId, watch.id);
       results.push({ watchId: watch.id, status: "completed", changed, summary, toolSlugs, gaps: gaps.length, nextCheckAt });
     } catch (error) {
       const message = safeErrorMessage(error);
+      if (isProviderWatch(watch) && /read-only connected tool|active connected account|selected connected account|different toolkit/i.test(message)) {
+        await recordWatchRepairCandidate(userId, watch, message, now);
+      }
       if (!watch.lastError) {
         const failureKey = createHash("sha256").update(`${watch.lastCheckedAt ?? 0}:${message}`).digest("hex").slice(0, 32);
         await recordWatchObservation(userId, watch, "watch.failed", `Watch “${compact(watch.name, 120)}” failed: ${message}`, failureKey, now);
