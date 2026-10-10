@@ -32,7 +32,7 @@ import type { ChannelProvider } from "./channels/contracts.js";
 import type { VoiceCallProfileInput } from "./calls/voiceProfile.js";
 import { isBlandVoiceConfigured } from "./calls/bland.js";
 import { isTwilioVoiceConfigured } from "./calls/twilio.js";
-import { cancelJob, cancelReminder, nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow, scheduleJob, setReminder } from "./nativeTools.js";
+import { cancelJob, cancelReminder, nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow, scheduleJob, setReminder, syncAttentionPulseProactiveState } from "./nativeTools.js";
 import { confirmRecallMeetingParticipant } from "./meetings/service.js";
 import { defaultMediaInstruction } from "./mediaInput.js";
 import { fetchPublicWebsite, normalizePublicWebsiteUrl } from "./onboardingWebsite.js";
@@ -427,17 +427,50 @@ function sdkUserFromRequest(c: any): SdkOwner | undefined {
   return principal ? { externalId, userId: userIdFor(externalId, principal.projectId), projectId: principal.projectId, ...(principal.organizationId ? { organizationId: principal.organizationId } : {}) } : undefined;
 }
 function sdkUser(c: any): SdkOwner | undefined { return c.get("sdkOwner") as SdkOwner | undefined; }
+
+// Linking a web identity to Telegram is a one-time reconciliation, not request
+// middleware. Dashboard pages fan out into many authenticated /v1 requests, so
+// awaiting the reconciliation here makes every page load contend on the same
+// session lease. Coalesce work within a replica and let the durable import
+// marker make retries safe across replicas and process restarts.
+const webSessionReconciliationInFlight = new Map<string, Promise<boolean>>();
+const webSessionReconciliationComplete = new Set<string>();
+
+function scheduleWebSessionReconciliation(sourceUserId: number, telegramUserId?: number): Promise<boolean> | undefined {
+  const key = telegramUserId ? `linked:${sourceUserId}:${telegramUserId}` : `web:${sourceUserId}`;
+  if (webSessionReconciliationComplete.has(key)) return Promise.resolve(true);
+  const existing = webSessionReconciliationInFlight.get(key);
+  if (existing) return existing;
+
+  const work = (async () => {
+    const backfilled = await backfillSdkPrivateRunHistory(sourceUserId, { skipIfBusy: true });
+    if (!backfilled || !telegramUserId) return backfilled;
+    return mergeLinkedWebSession(sourceUserId, telegramUserId, { skipIfBusy: true });
+  })();
+
+  const tracked = work.then((completed) => {
+    if (completed) webSessionReconciliationComplete.add(key);
+    return completed;
+  }).catch((error) => {
+    logger.warn({ errorType: error instanceof Error ? error.name : typeof error, telegramUserId }, "Web account history reconciliation deferred");
+    return false;
+  }).finally(() => {
+    webSessionReconciliationInFlight.delete(key);
+  });
+  webSessionReconciliationInFlight.set(key, tracked);
+  return tracked;
+}
+
 async function resolveSdkUser(c: any): Promise<SdkOwner | undefined> {
   const owner = sdkUserFromRequest(c);
   if (!owner) return undefined;
   const webAuthUserId = c.get("webAuthUserId") as string | undefined;
   const telegramUserId = webAuthUserId ? await getTelegramUserIdForWebAuth(webAuthUserId) : undefined;
   if (owner.projectId === "web") {
-    try {
-      await backfillSdkPrivateRunHistory(owner.userId);
-      if (telegramUserId) await mergeLinkedWebSession(owner.userId, telegramUserId);
-    }
-    catch (error) { logger.warn({ err: error, telegramUserId }, "Linked web account history merge will retry on the next request"); }
+    // This is deliberately fire-and-forget. The durable import marker and the
+    // canonical Telegram owner keep reads correct while reconciliation catches
+    // up, and no dashboard route should wait on a cross-session lease.
+    void scheduleWebSessionReconciliation(owner.userId, telegramUserId);
   }
   return telegramUserId ? { ...owner, userId: telegramUserId } : owner;
 }
@@ -2329,6 +2362,10 @@ export function registerSdkApi(app: Hono): void {
     const owner = sdkUser(c);
     if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before reading autonomy state.");
     const mode = c.req.query("mode") === "business" ? "business" : "personal";
+    // The queue endpoint is also the dashboard refresh boundary. Repair the
+    // durable starter-watch projection before reading it, so a connected app
+    // cannot remain invisible until a background schedule happens to run.
+    await syncAttentionPulseProactiveState(owner.userId);
     return c.json(await getAutonomySnapshot(owner.userId, mode));
   });
 
@@ -2341,7 +2378,10 @@ export function registerSdkApi(app: Hono): void {
     const mode = body.mode === "business" ? "business" : "personal";
     const maxWatches = body.maxWatches === undefined ? 8 : Math.max(1, Math.min(20, Number.isFinite(Number(body.maxWatches)) ? Math.floor(Number(body.maxWatches)) : 8));
     const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify({ mode, maxWatches })}`).digest("hex");
-    return sdkAutonomyMutation(c, owner.userId, fingerprint, async () => ({ data: await runDueAutonomyWatches(owner.userId, { mode, maxWatches }) }));
+    return sdkAutonomyMutation(c, owner.userId, fingerprint, async () => {
+      await syncAttentionPulseProactiveState(owner.userId);
+      return { data: await runDueAutonomyWatches(owner.userId, { mode, maxWatches }) };
+    });
   });
 
   app.get("/v1/account/attention-pulse", async (c) => {

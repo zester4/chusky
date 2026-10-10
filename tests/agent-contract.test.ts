@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { addRecallMeeting, claimAgentUpgrade, completeMissionStep, createMission, finalizeMissionIfReady, getApproval, getMission, getSession, initStore, listAgentRuns, listMissions, listTasks, saveSession, setApprovalStatus, startMission, updateMeetingRepresentativeProfile } from "../src/store.js";
-import { appendPreviewLinks, cleanModelText, getReconnectUrl, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, searchTools, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
+import { appendPreviewLinks, cleanModelText, getReconnectUrl, getToolkitStatesPage, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, searchTools, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { formatAgentUpgradeNotice, loadAgentUpgrade } from "../src/upgradeNotice.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -1877,6 +1877,49 @@ test("lists only safe connected-account metadata", async () => {
     { id: "ca_personal", alias: "personal-gmail", toolkit: "gmail", status: "ACTIVE", createdAt: undefined, updatedAt: undefined },
   ]);
   assert.equal(JSON.stringify(accounts).includes("secret"), false);
+});
+
+test("does not claim a session-only toolkit connection is owner-watchable", async () => {
+  await initStore({ memoryOnly: true });
+  setAgentDependenciesForTests({ composio: {
+    create: async () => ({
+      sessionId: "catalogue-only-session",
+      toolkits: async () => ({ items: [{ slug: "gmail", name: "Gmail", connection: { isActive: true } }] }),
+    }),
+    connectedAccounts: { list: async () => ({ items: [] }) },
+  } });
+  const page = await getToolkitStatesPage(830018, { enrich: false, includeAccounts: true });
+  assert.equal(page.items.find((item) => item.slug === "gmail")?.connected, false);
+  assert.equal(page.items.find((item) => item.slug === "gmail")?.accountCount, 0);
+});
+
+test("resolves provider accounts from the exact linked web owner without exposing that owner", async () => {
+  await initStore({ memoryOnly: true });
+  const sourceUserId = 830019;
+  const linkedUserId = 830020;
+  const sourceSession = await getSession(sourceUserId);
+  sourceSession.composioSessionId = "legacy-web-composio-session";
+  await saveSession(sourceUserId, sourceSession);
+  const linkedSession = await getSession(linkedUserId);
+  linkedSession.linkedWebSessionImports = [{ sourceUserId, sourceUpdatedAt: 1, sourceMessageIds: [], sourceSdkThreadsUpdatedAt: 0, sourceSdkThreadIds: [], sourcePhoneCallIds: [], sourceApprovalIds: [] }];
+  await saveSession(linkedUserId, linkedSession);
+  const requestedUsers: string[] = [];
+  setAgentDependenciesForTests({
+    composio: {
+      connectedAccounts: {
+        list: async ({ userIds }: { userIds: string[] }) => {
+          requestedUsers.push(...userIds);
+          return userIds[0] === `user_${sourceUserId}`
+            ? { items: [{ id: "ca_legacy_gmail", toolkit: { slug: "gmail" }, status: "ACTIVE" }] }
+            : { items: [] };
+        },
+      },
+    },
+  });
+  const accounts = await listConnectedAccounts(linkedUserId);
+  assert.deepEqual(requestedUsers, [`user_${linkedUserId}`, `user_${sourceUserId}`]);
+  assert.deepEqual(Object.keys(accounts[0] ?? {}).sort(), ["alias", "createdAt", "id", "status", "toolkit", "updatedAt"].sort());
+  assert.equal((accounts[0] as { composioOwnerUserId?: number }).composioOwnerUserId, sourceUserId);
 });
 
 test("reconnects one expired connected account by its existing Composio ID", async () => {

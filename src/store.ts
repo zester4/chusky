@@ -5160,6 +5160,7 @@ function normalizePulseEvidence(value: unknown): JobOccurrenceRecord["pulseEvide
     ...(typeof input.completedAt === "number" && Number.isFinite(input.completedAt) ? { completedAt: input.completedAt } : {}),
     ...(typeof input.nextCheckAt === "number" && Number.isFinite(input.nextCheckAt) ? { nextCheckAt: input.nextCheckAt } : {}),
     ...(typeof input.deliveryReason === "string" && input.deliveryReason.trim() ? { deliveryReason: input.deliveryReason.slice(0, 240) } : {}),
+    ...(typeof input.setupError === "string" && input.setupError.trim() ? { setupError: input.setupError.slice(0, 500) } : {}),
     ...(Array.isArray(input.watchReports) ? {
       watchReports: input.watchReports.slice(0, 20).flatMap((item) => {
         if (!item || typeof item !== "object" || Array.isArray(item)) return [];
@@ -5681,25 +5682,40 @@ export async function releaseTregSpendLock(userId: number, dayKey: string, token
  * reconciling Neon domains can exceed a short fixed lease, so this uses the
  * same renewable lease discipline as durable session writes.
  */
-export async function mutateSession<T>(uid: number, mutator: (session: UserSession) => T | Promise<T>, options: { sdkThreadId?: string; allSdkRuns?: boolean } = {}): Promise<T> {
+type SessionMutationOptions = {
+  sdkThreadId?: string;
+  allSdkRuns?: boolean;
+  /** Return immediately when another worker owns the session lease. */
+  skipIfBusy?: boolean;
+};
+
+export function mutateSession<T>(uid: number, mutator: (session: UserSession) => T | Promise<T>, options: SessionMutationOptions & { skipIfBusy: true }): Promise<T | undefined>;
+export function mutateSession<T>(uid: number, mutator: (session: UserSession) => T | Promise<T>, options?: SessionMutationOptions): Promise<T>;
+export async function mutateSession<T>(uid: number, mutator: (session: UserSession) => T | Promise<T>, options: SessionMutationOptions = {}): Promise<T | undefined> {
   const token = randomUUID();
   const key = `session-mutate:${uid}`;
-  return withDistributedLease({
-    acquire: async () => backend.acquireKeyLock(key, token, 60),
-    renew: async () => backend.renewKeyLock(key, token, 60),
-    release: async () => backend.releaseKeyLock(key, token),
-  }, async () => {
-    const session = options.allSdkRuns ? await getSessionWithSdkRuns(uid) : options.sdkThreadId ? await getSessionWithSdkRuns(uid, options.sdkThreadId) : await getSession(uid);
-    const result = await mutator(session);
-    await saveSession(uid, session);
-    return result;
-  }, {
-    acquisitionAttempts: 20,
-    retryDelayMs: 50,
-    renewalIntervalMs: 10_000,
-    busyMessage: "Session mutation is busy; retry shortly.",
-    lostMessage: "Session mutation lease was lost; verify the session before retrying.",
-  });
+  const busyMessage = "Session mutation is busy; retry shortly.";
+  try {
+    return await withDistributedLease({
+      acquire: async () => backend.acquireKeyLock(key, token, 60),
+      renew: async () => backend.renewKeyLock(key, token, 60),
+      release: async () => backend.releaseKeyLock(key, token),
+    }, async () => {
+      const session = options.allSdkRuns ? await getSessionWithSdkRuns(uid) : options.sdkThreadId ? await getSessionWithSdkRuns(uid, options.sdkThreadId) : await getSession(uid);
+      const result = await mutator(session);
+      await saveSession(uid, session);
+      return result;
+    }, {
+      acquisitionAttempts: options.skipIfBusy ? 1 : 20,
+      retryDelayMs: options.skipIfBusy ? 0 : 50,
+      renewalIntervalMs: 10_000,
+      busyMessage,
+      lostMessage: "Session mutation lease was lost; verify the session before retrying.",
+    });
+  } catch (error) {
+    if (options.skipIfBusy && error instanceof Error && error.message === busyMessage) return undefined;
+    throw error;
+  }
 }
 
 export async function listProviderProofs(now = Date.now()): Promise<ProviderProof[]> {
@@ -5890,12 +5906,12 @@ export function appendSdkRunHistoryToSession(session: UserSession, threadId: str
 }
 
 /** One-time import of completed first-party dashboard runs written before account history was canonical. */
-export async function backfillSdkPrivateRunHistory(userId: number): Promise<void> {
-  if (!Number.isSafeInteger(userId) || userId <= 0) return;
-  if ((await getSessionWithSdkRuns(userId)).sdkPrivateHistoryBackfilled) return;
+export async function backfillSdkPrivateRunHistory(userId: number, options: { skipIfBusy?: boolean } = {}): Promise<boolean> {
+  if (!Number.isSafeInteger(userId) || userId <= 0) return true;
+  if ((await getSessionWithSdkRuns(userId)).sdkPrivateHistoryBackfilled) return true;
 
-  await mutateSession(userId, (session) => {
-    if (session.sdkPrivateHistoryBackfilled) return;
+  const completed = await mutateSession(userId, (session) => {
+    if (session.sdkPrivateHistoryBackfilled) return true;
     const knownSourceIds = new Set(session.history.map((message) => message.sourceId).filter((value): value is string => typeof value === "string"));
     const completedRuns = (session.sdkThreads ?? []).flatMap((thread) => thread.runs)
       .filter((run) => run.ownerPrivateRun !== false && !run.companyProjectId && run.status === "completed" && typeof run.output === "string")
@@ -5921,7 +5937,9 @@ export async function backfillSdkPrivateRunHistory(userId: number): Promise<void
       }
     }
     session.sdkPrivateHistoryBackfilled = true;
-  }, { allSdkRuns: true });
+    return true;
+  }, { allSdkRuns: true, ...(options.skipIfBusy ? { skipIfBusy: true as const } : {}) });
+  return completed !== undefined;
 }
 
 function isPrivateWebSdkRun(run: SdkRunRecord): boolean {
@@ -5997,8 +6015,8 @@ function sdkThreadImportComplete(
 }
 
 /** Merge only private web conversation context into its explicitly linked Telegram owner. */
-export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId: number): Promise<void> {
-  if (!Number.isSafeInteger(sourceUserId) || sourceUserId <= 0 || !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 || sourceUserId === telegramUserId) return;
+export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId: number, options: { skipIfBusy?: boolean } = {}): Promise<boolean> {
+  if (!Number.isSafeInteger(sourceUserId) || sourceUserId <= 0 || !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 || sourceUserId === telegramUserId) return true;
   const source = await getSessionWithSdkRuns(sourceUserId);
   const sourceSdkThreads = importableWebSdkThreads(source);
   const sourcePhoneCallIds = (source.phoneCalls ?? []).map((call) => call.id).slice(-100);
@@ -6007,15 +6025,15 @@ export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId
   const priorImport = existingTarget.linkedWebSessionImports?.find((item) => item.sourceUserId === sourceUserId);
   const durableMemoryNeedsMerge = durableMemoryConfigured() && priorImport?.sourceDurableMemoryUpdatedAt !== source.updatedAt;
   const linkedRecordsComplete = Boolean(priorImport && sourcePhoneCallIds.every((id) => priorImport.sourcePhoneCallIds?.includes(id)) && sourceApprovalIds.every((id) => priorImport.sourceApprovalIds?.includes(id)));
-  if (priorImport?.sourceUpdatedAt === source.updatedAt && !durableMemoryNeedsMerge && linkedRecordsComplete && sdkThreadImportComplete(priorImport, sourceSdkThreads, existingTarget)) return;
+  if (priorImport?.sourceUpdatedAt === source.updatedAt && !durableMemoryNeedsMerge && linkedRecordsComplete && sdkThreadImportComplete(priorImport, sourceSdkThreads, existingTarget)) return true;
   let importedMemories: MemoryFact[] = [];
 
   if (durableMemoryNeedsMerge) await mergeDurablePersonalMemories(sourceUserId, telegramUserId);
 
-  await mutateSession(telegramUserId, async (target) => {
+  const completed = await mutateSession(telegramUserId, async (target) => {
     const currentPriorImport = target.linkedWebSessionImports?.find((item) => item.sourceUserId === sourceUserId);
     const currentRecordsComplete = Boolean(currentPriorImport && sourcePhoneCallIds.every((id) => currentPriorImport.sourcePhoneCallIds?.includes(id)) && sourceApprovalIds.every((id) => currentPriorImport.sourceApprovalIds?.includes(id)));
-    if (currentPriorImport?.sourceUpdatedAt === source.updatedAt && !durableMemoryNeedsMerge && currentRecordsComplete && sdkThreadImportComplete(currentPriorImport, sourceSdkThreads, target)) return;
+    if (currentPriorImport?.sourceUpdatedAt === source.updatedAt && !durableMemoryNeedsMerge && currentRecordsComplete && sdkThreadImportComplete(currentPriorImport, sourceSdkThreads, target)) return true;
     const previouslyImportedSourceIds = new Set(currentPriorImport?.sourceMessageIds ?? []);
 
     const canonicalCounts = new Map<string, number>();
@@ -6109,7 +6127,10 @@ export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId
       sourcePhoneCallIds,
       sourceApprovalIds,
     }].slice(-20);
-  }, { allSdkRuns: true });
+    return true;
+  }, { allSdkRuns: true, ...(options.skipIfBusy ? { skipIfBusy: true as const } : {}) });
+
+  if (completed === undefined) return false;
 
   if (importedMemories.length && vectorConfigured()) {
     const vector = new UpstashKnowledgeStore();
@@ -6118,6 +6139,7 @@ export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId
         .catch((error) => { recordVectorFailure(error, { phase: "linked_memory_index", errorClass: "vector_indexing" }); logger.warn({ err: error, userId: telegramUserId }, "Linked web memory retained but vector indexing is unavailable"); });
     }
   }
+  return true;
 }
 
 export async function updatePhoneCall(uid: number, id: string, patch: PhoneCallPatch): Promise<PhoneCallRecord | undefined> {
@@ -10068,6 +10090,20 @@ export async function redeemWebTelegramLinkCode(code: string, telegramUserId: nu
 export async function getTelegramUserIdForWebAuth(webAuthUserId: string): Promise<number | undefined> {
   const owner = webAuthUserId.trim();
   return owner && owner.length <= 200 ? backend.getTelegramUserIdForWebAuth(owner) : undefined;
+}
+
+/**
+ * Return the exact legacy web-session owners explicitly imported into this
+ * Telegram owner.  This is used only to reconcile provider state created
+ * before the dashboard account was linked; it is never a global account
+ * search or an ownership grant.
+ */
+export async function listLinkedWebSessionSourceUserIds(userId: number): Promise<number[]> {
+  if (!Number.isSafeInteger(userId) || userId <= 0) return [];
+  const session = await getSession(userId);
+  return [...new Set((session.linkedWebSessionImports ?? [])
+    .map((item) => item.sourceUserId)
+    .filter((sourceUserId): sourceUserId is number => Number.isSafeInteger(sourceUserId) && sourceUserId > 0 && sourceUserId !== userId))];
 }
 
 export async function claimChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds = 24 * 60 * 60): Promise<boolean> {
