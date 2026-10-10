@@ -1638,6 +1638,8 @@ export function registerSdkApi(app: Hono): void {
       listApprovals(owner.userId, 100),
       listAttentionRecords(owner.userId, "attention_candidate", { limit: 50 }),
     ]);
+    const pulseJob = jobs.find((item) => item.kind === "attention_pulse");
+    const pulseOccurrence = pulseJob ? (await listJobOccurrences(owner.userId, pulseJob.id, 1))[0] : undefined;
     return c.json({
       model: session.model,
       voiceReplies: Boolean(session.voiceReplies),
@@ -1647,6 +1649,7 @@ export function registerSdkApi(app: Hono): void {
       channels: channels.filter((item) => !item.disabledAt).map((item) => ({ id: identityFingerprint(item), provider: item.provider, externalUserId: item.externalUserId, workspaceId: item.workspaceId, displayName: item.displayName, verifiedAt: new Date(item.verifiedAt).toISOString(), proactiveOptIn: item.proactiveOptIn !== false })),
       reminders: reminders.map((item) => ({ ...item, runAt: new Date(item.runAt).toISOString(), createdAt: new Date(item.createdAt).toISOString() })),
       jobs: jobs.map((item) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
+      attentionPulse: pulseOccurrence ? { lastOccurrence: occurrenceView(pulseOccurrence) } : undefined,
       memory: memoryProjectionResult.memory.map(memoryView),
       memoryStatus: memoryProjectionResult.status,
       scratchpad: Object.entries(session.scratchpad).map(([key, item]) => ({ key, content: item.content, updatedAt: new Date(item.updatedAt).toISOString() })),

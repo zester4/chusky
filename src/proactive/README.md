@@ -108,6 +108,24 @@ the result was surfaced on the dashboard or an external channel. The receipt is
 execution evidence for Chusky's control plane, not provider payload or proof
 that an external write succeeded.
 
+The first run and an owner-requested `Run now` carry an explicit force-check
+flag through the workflow. That flag allows the reconciler to perform one
+bounded read-only check before a watch's normal cadence, while preserving its
+next scheduled checkpoint and all profile limits. A legacy enabled Pulse is
+also given a guarded recovery kick when its dashboard status is read and it has
+never checked an active watch or has gone materially stale; the guard is
+durable-store-only and recent-occurrence aware, so refreshing the dashboard does
+not create a run loop.
+
+Pulse delivery policy controls external notification, not monitoring. Quiet
+hours or a daily delivery cap cannot prevent a configured read-only watch from
+being checked. When no external channel is available—or external delivery is
+suppressed—the occurrence still becomes a dashboard receipt. The web Pulse
+report shows the run kind, provider-watch outcomes, bounded summaries/errors,
+next checks, and Elena's owner-facing report. Actionable candidates continue to
+use the bell/Approvals-to-Chat flow; a quiet no-change run remains visible as
+evidence without becoming an approval or a fake provider success.
+
 ## Candidate-to-Chat lifecycle
 
 The web bell, Autonomy page, and Approvals page route an owner-scoped candidate

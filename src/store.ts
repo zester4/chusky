@@ -5120,6 +5120,26 @@ function normalizePulseEvidence(value: unknown): JobOccurrenceRecord["pulseEvide
     delegated: count("delegated"),
     approvalRequired: input.approvalRequired,
     delivery: input.delivery as NonNullable<JobOccurrenceRecord["pulseEvidence"]>["delivery"],
+    ...(input.runKind === "scheduled" || input.runKind === "manual" || input.runKind === "first_run" ? { runKind: input.runKind } : {}),
+    ...(typeof input.startedAt === "number" && Number.isFinite(input.startedAt) ? { startedAt: input.startedAt } : {}),
+    ...(typeof input.completedAt === "number" && Number.isFinite(input.completedAt) ? { completedAt: input.completedAt } : {}),
+    ...(typeof input.nextCheckAt === "number" && Number.isFinite(input.nextCheckAt) ? { nextCheckAt: input.nextCheckAt } : {}),
+    ...(typeof input.deliveryReason === "string" && input.deliveryReason.trim() ? { deliveryReason: input.deliveryReason.slice(0, 240) } : {}),
+    ...(Array.isArray(input.watchReports) ? {
+      watchReports: input.watchReports.slice(0, 20).flatMap((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+        const report = item as Record<string, unknown>;
+        const status = report.status;
+        if (typeof report.id !== "string" || typeof report.name !== "string" || typeof report.domain !== "string" || !["checked", "failed", "not_checked", "scheduled"].includes(String(status))) return [];
+        return [{
+          id: report.id.slice(0, 160), name: report.name.slice(0, 120), domain: report.domain.slice(0, 80), status: status as "checked" | "failed" | "not_checked" | "scheduled",
+          ...(typeof report.summary === "string" && report.summary.trim() ? { summary: report.summary.slice(0, 500) } : {}),
+          ...(typeof report.error === "string" && report.error.trim() ? { error: report.error.slice(0, 500) } : {}),
+          ...(typeof report.lastCheckedAt === "number" && Number.isFinite(report.lastCheckedAt) ? { lastCheckedAt: report.lastCheckedAt } : {}),
+          ...(typeof report.nextCheckAt === "number" && Number.isFinite(report.nextCheckAt) ? { nextCheckAt: report.nextCheckAt } : {}),
+        }];
+      }),
+    } : {}),
   };
 }
 

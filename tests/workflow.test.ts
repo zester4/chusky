@@ -182,6 +182,30 @@ test("web-only attention pulse records a dashboard run receipt", async () => {
   assert.equal(state.sentChannels.length, 0);
 });
 
+test("web-only attention pulse keeps a receipt when external delivery is suppressed", async () => {
+  let occurrence: JobOccurrenceRecord | undefined;
+  const state = deps({
+    getTelegramChatId: async () => undefined,
+    getJob: async () => ({ ...deps().job, kind: "attention_pulse", mode: "act", workerBinding: { worker: "elena", objective: "Run the attention pulse", expectedOutput: "Pulse result", allowedTools: [], approvalPolicy: "require_chusky_approval" as const, timeoutSeconds: 60, maxToolCalls: 4 } }),
+    getJobOccurrence: async () => occurrence,
+    createJobOccurrence: async (record) => { occurrence = record; return record; },
+    updateJobOccurrence: async (_userId, _id, patch, expectedVersion) => {
+      assert.equal(expectedVersion, occurrence?.version);
+      occurrence = { ...occurrence!, ...patch, version: occurrence!.version + 1, updatedAt: Date.now() };
+      return occurrence;
+    },
+    runWorker: async () => ({
+      text: "Elena checked Gmail and found no new owner-visible action.",
+      suppressDelivery: true,
+      pulseEvidence: { state: "completed" as const, dueWatches: 1, watchesReconciled: 1, pendingObservations: 0, pendingCandidates: 0, handled: false, delegated: 0, approvalRequired: false, delivery: "none" as const, runKind: "manual" as const },
+    }),
+  });
+  const result = await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "pulse-web-suppressed" }, state);
+  assert.deepEqual(result, { delivered: true });
+  assert.equal(occurrence?.status, "completed");
+  assert.equal(occurrence?.pulseEvidence?.delivery, "dashboard");
+});
+
 test("attention pulse resolves a fresh linked iMessage route for execution and delivery", async () => {
   let runnerTarget: string | undefined;
   const state = deps({
@@ -280,6 +304,7 @@ test("workflow payload validation rejects malformed and cross-tenant payloads", 
   assert.deepEqual(parseReminderWorkflowPayload({ reminderId: "rem_abc", userId: 7 }), { reminderId: "rem_abc", userId: 7 });
   assert.deepEqual(parseJobWorkflowPayload({ jobId: "job_abc", userId: 7, occurrenceId: "run-1" }), { jobId: "job_abc", userId: 7, occurrenceId: "run-1" });
   assert.deepEqual(parseJobWorkflowPayload({ jobId: "pulse_abc", userId: 7 }), { jobId: "pulse_abc", userId: 7 });
+  assert.deepEqual(parseJobWorkflowPayload({ jobId: "pulse_abc", userId: 7, forceAttentionPulse: true }), { jobId: "pulse_abc", userId: 7, forceAttentionPulse: true });
   assert.throws(() => parseReminderWorkflowPayload({ reminderId: "rem_abc", userId: 0 }));
   assert.throws(() => parseJobWorkflowPayload({ jobId: "other", userId: 7 }));
 });

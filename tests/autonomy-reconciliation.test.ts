@@ -85,6 +85,30 @@ test("starter watch discovery falls back from a broad toolkit query to the watch
   assert.deepEqual(queries.slice(0, 2), ["gmail", "Gmail newest five inbox messages read only"]);
 });
 
+test("starter watch discovery falls back to the exact toolkit catalogue when session search is empty", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 990016;
+  const session = { sessionId: "watch-toolkit-catalogue-session", search: async () => ({ toolSchemas: {} }) };
+  setAgentDependenciesForTests({ composio: {
+    create: async () => session,
+    sessions: { use: async () => session },
+    tools: { getRawComposioTools: async () => [{ slug: "GMAIL_FETCH_EMAILS", description: "Read inbox messages", toolkit: { slug: "gmail" } }] },
+  } });
+  await createAttentionRecord(userId, "autonomy_watch", {
+    name: "Recent inbox", domain: "gmail", toolkit: "gmail", query: "Gmail newest five inbox messages read only",
+    objective: "Check the newest owner inbox messages", cadenceSeconds: 3600, authority: "observe", status: "active", maxItems: 5, nextCheckAt: 1,
+  });
+  let resolved: string[] = [];
+  const result = await runDueAutonomyWatches(userId, {
+    mode: "personal", now: Date.now(), execute: async ({ toolSlugs }) => {
+      resolved = toolSlugs;
+      return { text: 'AUTONOMY_RESULT: {"changed":false,"summary":"No new inbox changes"}', toolsSucceeded: toolSlugs };
+    },
+  });
+  assert.equal(result[0]?.status, "completed");
+  assert.deepEqual(resolved, ["GMAIL_FETCH_EMAILS"]);
+});
+
 test("unresolved provider watch creates one actionable repair candidate", async () => {
   await initStore({ memoryOnly: true });
   const userId = 990014;

@@ -70,7 +70,7 @@ import { deliverSubagentResult } from "./subagents/delivery.js";
 import { enqueueSubagentToolContinuation, SUBAGENT_TOOL_WAIT_TIMEOUT, subagentWorkflowUrl, type SubagentToolDecision } from "./subagents/workflow.js";
 import { workflowEventId } from "./workflowIds.js";
 import type { CapabilityWorkerName } from "./memory/types.js";
-import type { AttentionPulseRunEvidence } from "./autonomy/types.js";
+import type { AttentionPulseRunEvidence, AttentionPulseWatchEvidence } from "./autonomy/types.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 import { normalizeVoiceDelta, normalizeVoiceText } from "./voiceText.js";
@@ -2399,7 +2399,7 @@ async function main(): Promise<void> {
             throw error;
           }
         }),
-        runWorker: async (job) => withCliLock(payload.userId, undefined, async () => {
+        runWorker: async (job, workflowPayload) => withCliLock(payload.userId, undefined, async () => {
           const pulseEvidence = (patch: Partial<AttentionPulseRunEvidence> = {}): AttentionPulseRunEvidence => ({
             state: "skipped",
             dueWatches: 0,
@@ -2419,7 +2419,9 @@ async function main(): Promise<void> {
             const now = Date.now();
             const deliveredToday = attentionPulseDeliveredToday(job.attentionPulse, now);
             const delivery = attentionPulseDeliveryDecision(preferences as DeliveryPreferenceRecord[], now, deliveredToday, job.deliveryTarget);
-            if (delivery.suppressed) return { text: "", suppressDelivery: true, pulseEvidence: pulseEvidence({ state: "skipped" }) };
+            const heartbeat = job.heartbeat !== false;
+            // Delivery policy must not prevent a read-only monitoring check.
+            // It only controls where the resulting report is surfaced.
             let connectedAccounts: Awaited<ReturnType<typeof listConnectedAccounts>> = [];
             let connectedAccountsVerified = false;
             let connectedActions: Array<{ toolkit: string; slug: string; name?: string; description?: string }> = [];
@@ -2441,12 +2443,17 @@ async function main(): Promise<void> {
               connectedAccountsVerified,
               connectedActions,
               connectedActionsVerified,
-            });
-            if (!plan.hasWork) return { text: "", suppressDelivery: true, pulseEvidence: pulseEvidence({ state: "completed" }) };
-            if (job.attentionPulse?.lastDigestKey === plan.dedupeKey) {
+            }, { forceWatchChecks: workflowPayload?.forceAttentionPulse === true });
+            const runKind = workflowPayload?.forceAttentionPulse ? (job.attentionPulse?.lastDeliveredAt ? "manual" : "first_run") : "scheduled";
+            if (!plan.hasWork) return {
+              text: "Elena pulse woke up, but there are no active configured watches or owner-visible changes to inspect yet.",
+              suppressDelivery: Boolean(delivery.suppressed),
+              pulseEvidence: pulseEvidence({ state: "completed", runKind, startedAt: now, completedAt: Date.now(), deliveryReason: delivery.reason ?? "No provider watch was configured or due." }),
+            };
+            if (!plan.forceWatchChecks && job.attentionPulse?.lastDigestKey === plan.dedupeKey) {
               return {
-                text: "", suppressDelivery: true,
-                pulseEvidence: pulseEvidence({ state: "skipped", dueWatches: plan.dueWatchIds.length, pendingObservations: plan.observationIds.length, pendingCandidates: plan.candidateIds.length }),
+                text: "Elena pulse woke up, but the owner-visible state is unchanged since the last delivered digest.", suppressDelivery: Boolean(delivery.suppressed),
+                pulseEvidence: pulseEvidence({ state: "skipped", runKind, startedAt: now, completedAt: Date.now(), dueWatches: plan.dueWatchIds.length, pendingObservations: plan.observationIds.length, pendingCandidates: plan.candidateIds.length, deliveryReason: "Unchanged state was deduplicated." }),
               };
             }
             const proactiveRoute = await routeProactiveWork(plan.prompt, plan.decisionContext, {
@@ -2539,6 +2546,19 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             const noAction = isNoActionPulseOutput(output);
             const handled = attentionPulseHasHandlingEvidence(result.toolCallsLog);
             const delegated = result.toolCallsLog.filter((entry) => ["CHUCK_DELEGATE_SUBAGENT", "CHUCK_HANDOFF_SUBAGENT", "CHUCK_DEPARTMENT_HANDOFF"].includes(entry.tool) && entry.status === "completed").length;
+            const watchReports: AttentionPulseWatchEvidence[] = closeoutPlan.watchCoverage
+              .filter((watch) => plan.dueWatchIds.includes(watch.id))
+              .map((watch) => ({
+                id: watch.id,
+                name: watch.name,
+                domain: watch.domain,
+                status: watch.lastError ? "failed" : watch.lastCheckedAt && watch.lastCheckedAt >= now ? "checked" : watch.nextCheckAt && watch.nextCheckAt > now ? "scheduled" : "not_checked",
+                ...(watch.lastResult ? { summary: watch.lastResult } : {}),
+                ...(watch.lastError ? { error: watch.lastError } : {}),
+                ...(watch.lastCheckedAt ? { lastCheckedAt: watch.lastCheckedAt } : {}),
+                ...(watch.nextCheckAt ? { nextCheckAt: watch.nextCheckAt } : {}),
+              }));
+            const nextCheckAt = watchReports.map((watch) => watch.nextCheckAt).filter((value): value is number => typeof value === "number").sort((left, right) => left - right)[0];
             // A successfully delivered owner digest should suppress an identical
             // hourly repeat even when the signal only needs the owner's decision.
             // Candidate records remain pending unless the worker actually handled
@@ -2547,13 +2567,13 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             const text = !noAction && !handled
               ? `The attention pulse did not complete or delegate an actionable step. The unchanged item remains open and will be reconsidered when its state changes or new evidence arrives.\n\n${output}`
               : output;
-            const heartbeatText = noAction && job.heartbeat
+            const heartbeatText = noAction && heartbeat
               ? "Elena pulse checked the configured attention state. No new owner-visible action was found in this run."
               : text;
             return {
               text: heartbeatText,
-              suppressDelivery: noAction && !job.heartbeat,
-              pulseEvidence: pulseEvidence({ state: "completed", dueWatches: plan.dueWatchIds.length, watchesReconciled: reconciliationCompleted ? plan.dueWatchIds.length : 0, pendingObservations: closeoutPlan.observationIds?.length ?? plan.observationIds.length, pendingCandidates: closeoutPlan.candidateIds.length, handled, delegated }),
+              suppressDelivery: (noAction && !heartbeat) || Boolean(delivery.suppressed),
+              pulseEvidence: pulseEvidence({ state: "completed", runKind, startedAt: now, completedAt: Date.now(), dueWatches: plan.dueWatchIds.length, watchesReconciled: watchReports.filter((watch) => watch.status === "checked").length, pendingObservations: closeoutPlan.observationIds?.length ?? plan.observationIds.length, pendingCandidates: closeoutPlan.candidateIds.length, handled, delegated, watchReports, ...(nextCheckAt ? { nextCheckAt } : {}), ...(delivery.reason ? { deliveryReason: delivery.reason } : {}) }),
               ...(deliveryConfirmation ? { deliveryConfirmation } : {}),
             };
           }

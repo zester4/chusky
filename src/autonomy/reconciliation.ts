@@ -22,6 +22,8 @@ export interface ReconciliationOptions {
   mode?: "personal" | "business";
   now?: number;
   maxWatches?: number;
+  /** Explicit owner/manual runs may check a watch before its normal cadence. */
+  force?: boolean;
   /** Tests may enable the isolated Treg route without external credentials. */
   tregEnabled?: boolean;
   profileOverrides?: Partial<Pick<AutonomyProfileRecord, "enabled" | "defaultAuthority" | "maxChecksPerDay" | "maxAutonomousActionsPerDay" | "allowedDomains" | "deniedDomains" | "notifyOn">>;
@@ -168,7 +170,7 @@ async function resolveToolSlugs(userId: number, watch: AutonomyWatchRecord): Pro
   const explicit = (watch.toolSlugs ?? []).map((slug) => String(slug).trim()).filter((slug) => /^[A-Z][A-Z0-9]{1,31}_[A-Z0-9_]+$/.test(slug) && isReadOnlyToolSlug(slug));
   if (explicit.length) return [...new Set(explicit)].slice(0, 12);
   if (!watch.query && !watch.toolkit) return [];
-  const { searchTools } = await import("../agent.js");
+  const { listComposioToolkitActions, searchTools } = await import("../agent.js");
   // Long intent queries are useful for ranking but can return no result in a
   // provider session. Search the exact toolkit first, then the watch intent;
   // only exact, read-only actions belonging to that toolkit may survive.
@@ -187,6 +189,24 @@ async function resolveToolSlugs(userId: number, watch: AutonomyWatchRecord): Pro
         if (!/^[A-Z][A-Z0-9]{1,31}_[A-Z0-9_]+$/.test(slug) || !isReadOnlyToolSlug(slug) || !toolMatchesWatch(watch, item, slug)) continue;
         if (!resolved.includes(slug)) resolved.push(slug);
         if (resolved.length >= 8) return resolved;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  // Session search is useful for intent ranking, but it can return an empty
+  // result for a valid connected toolkit. Fall back to the provider's exact
+  // action catalogue before declaring the watch unrecoverable. The same
+  // read-only and toolkit filters still apply; this does not grant access to
+  // an unconnected account or to a mutating action.
+  if (!resolved.length && watch.toolkit) {
+    try {
+      const actions = await listComposioToolkitActions(watch.toolkit);
+      for (const action of actions) {
+        const slug = String(action.slug ?? "").trim();
+        if (!/^[A-Z][A-Z0-9]{1,31}_[A-Z0-9_]+$/.test(slug) || !isReadOnlyToolSlug(slug) || !toolMatchesWatch(watch, action, slug)) continue;
+        if (!resolved.includes(slug)) resolved.push(slug);
+        if (resolved.length >= 8) break;
       }
     } catch (error) {
       lastError = error;
@@ -334,7 +354,7 @@ export async function runDueAutonomyWatches(userId: number, options: Reconciliat
   const profile = storedProfile || (options.profileOverrides ? { id: `profile_override_${mode}`, userId, mode, enabled: true, defaultAuthority: "observe" as const, maxChecksPerDay: 24, maxAutonomousActionsPerDay: 20, notifyOn: "important" as const, allowedDomains: [], deniedDomains: [], createdAt: 0, updatedAt: 0 } : undefined);
   const effectiveProfile = profile ? { ...profile, ...(options.profileOverrides ?? {}) } : undefined;
   const allDue = (await listAttentionRecords(userId, "autonomy_watch", { limit: 200 }) as AutonomyWatchRecord[])
-    .filter((watch) => watch.status === "active" && (watch.mode ?? "personal") === mode && (!watch.nextCheckAt || watch.nextCheckAt <= now));
+    .filter((watch) => watch.status === "active" && (watch.mode ?? "personal") === mode && (options.force === true || !watch.nextCheckAt || watch.nextCheckAt <= now));
   if (effectiveProfile && !effectiveProfile.enabled) return allDue.slice(0, Math.max(1, Math.min(20, options.maxWatches ?? 8))).map((watch) => ({ watchId: watch.id, status: "skipped" as const, changed: false, summary: "Autonomy is disabled for this profile.", gaps: 0, nextCheckAt: watch.nextCheckAt }));
   const day = utcDay(now);
   const checksToday = effectiveProfile?.checksDayUtc === day ? effectiveProfile.checksToday ?? 0 : 0;

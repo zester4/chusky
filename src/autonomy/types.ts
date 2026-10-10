@@ -38,6 +38,17 @@ export type AutonomyExecutionStatus =
   | "failed"
   | "cancelled";
 
+export interface AttentionPulseWatchEvidence {
+  id: string;
+  name: string;
+  domain: string;
+  status: "checked" | "failed" | "not_checked" | "scheduled";
+  summary?: string;
+  error?: string;
+  lastCheckedAt?: number;
+  nextCheckAt?: number;
+}
+
 /**
  * Bounded, provider-neutral proof that one Attention Pulse occurrence ran.
  * This is deliberately a receipt of Chusky work, not a copy of provider
@@ -53,6 +64,12 @@ export interface AttentionPulseRunEvidence {
   delegated: number;
   approvalRequired: boolean;
   delivery: "dashboard" | "external" | "suppressed" | "none";
+  runKind?: "scheduled" | "manual" | "first_run";
+  startedAt?: number;
+  completedAt?: number;
+  watchReports?: AttentionPulseWatchEvidence[];
+  nextCheckAt?: number;
+  deliveryReason?: string;
 }
 
 export interface AutonomousRunRecord {

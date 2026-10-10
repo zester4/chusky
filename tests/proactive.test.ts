@@ -144,6 +144,22 @@ test("a typed watch produces a normalized observation and capability candidate",
   assert.equal(candidates.some((item) => item.reason.includes("calendar_conflict")), true);
 });
 
+test("an explicit Pulse run can force a future watch once without changing its cadence", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 920005;
+  const now = Date.UTC(2026, 9, 8, 12);
+  await createAttentionRecord(userId, "autonomy_watch", {
+    name: "Inbox check", domain: "gmail", toolkit: "gmail", objective: "Read recent inbox items", toolSlugs: ["GMAIL_FETCH_EMAILS"], cadenceSeconds: 3600, authority: "observe", status: "active", maxItems: 5, nextCheckAt: now + 30 * 60_000,
+  });
+  const result = await runDueAutonomyWatches(userId, {
+    mode: "personal", now, force: true,
+    execute: async () => ({ text: `AUTONOMY_RESULT: ${JSON.stringify({ changed: false, summary: "No new inbox items", signals: [] })}` }),
+  });
+  assert.equal(result[0]?.status, "completed");
+  assert.equal(result[0]?.summary, "No new inbox items");
+  assert.equal(result[0]?.nextCheckAt, now + 3600_000);
+});
+
 test("native attention state rejects invented or writable typed watch capabilities", async () => {
   await initStore({ memoryOnly: true });
   const base = { action: "create", kind: "autonomy_watch", name: "Inbox", domain: "gmail", objective: "Read inbox", cadenceSeconds: 3600, maxItems: 5 };

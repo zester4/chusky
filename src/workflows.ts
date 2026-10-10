@@ -4,7 +4,7 @@ import { posthog } from "./posthog.js";
 import type { AttentionPulseRunEvidence, AutonomyExecutionStatus, AutonomyMode, JobOccurrenceRecord } from "./autonomy/types.js";
 
 export interface ReminderWorkflowPayload { reminderId: string; userId: number; approvalId?: string; attemptId?: string; }
-export interface JobWorkflowPayload { jobId: string; userId: number; occurrenceId?: string; approvalId?: string; }
+export interface JobWorkflowPayload { jobId: string; userId: number; occurrenceId?: string; approvalId?: string; forceAttentionPulse?: boolean; }
 
 export interface WorkflowDependencies {
   getReminder(userId: number, id: string): Promise<ReminderRecord | undefined>;
@@ -19,7 +19,7 @@ export interface WorkflowDependencies {
   rescheduleReminder?(reminder: ReminderRecord, runAt: number): Promise<void>;
   runReminder?(reminder: ReminderRecord): Promise<WorkflowExecutionResult>;
   runAgent?(job: JobRecord): Promise<WorkflowExecutionResult>;
-  runWorker?(job: JobRecord): Promise<WorkflowExecutionResult>;
+  runWorker?(job: JobRecord, payload?: JobWorkflowPayload): Promise<WorkflowExecutionResult>;
   getJobOccurrence?(userId: number, jobId: string, occurrenceId: string): Promise<JobOccurrenceRecord | undefined>;
   createJobOccurrence?(record: JobOccurrenceRecord): Promise<JobOccurrenceRecord>;
   updateJobOccurrence?(userId: number, id: string, patch: Partial<JobOccurrenceRecord>, expectedVersion?: number): Promise<JobOccurrenceRecord | undefined>;
@@ -62,7 +62,13 @@ export function parseJobWorkflowPayload(value: unknown): JobWorkflowPayload {
   if (typeof payload.jobId !== "string" || !/^(?:job|pulse)_[\w-]+$/.test(payload.jobId)) throw new Error("Invalid jobId");
   if (!Number.isSafeInteger(payload.userId) || Number(payload.userId) < 1) throw new Error("Invalid userId");
   if (payload.approvalId !== undefined && (typeof payload.approvalId !== "string" || !/^appr_[A-Za-z0-9_-]{1,160}$/.test(payload.approvalId))) throw new Error("Invalid approvalId");
-  return { jobId: payload.jobId, userId: Number(payload.userId), ...(typeof payload.occurrenceId === "string" ? { occurrenceId: payload.occurrenceId } : {}), ...(payload.approvalId ? { approvalId: payload.approvalId } : {}) };
+  return {
+    jobId: payload.jobId,
+    userId: Number(payload.userId),
+    ...(typeof payload.occurrenceId === "string" ? { occurrenceId: payload.occurrenceId } : {}),
+    ...(payload.approvalId ? { approvalId: payload.approvalId } : {}),
+    ...(payload.forceAttentionPulse === true ? { forceAttentionPulse: true } : {}),
+  };
 }
 
 export async function deliverReminder(payload: ReminderWorkflowPayload, deps: WorkflowDependencies): Promise<{ skipped?: boolean; delivered: boolean }> {
@@ -156,7 +162,7 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
     const result = job.mode === "notify"
       ? { text: job.text }
       : deliveryJob.workerBinding && deps.runWorker
-      ? await deps.runWorker(deliveryJob)
+      ? await deps.runWorker(deliveryJob, payload)
         : deps.runAgent
         ? await deps.runAgent(deliveryJob)
         : { text: deliveryJob.text };
@@ -175,7 +181,10 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
       if (deps.completeDelivery) await deps.completeDelivery(deliveryKey, 24 * 60 * 60);
       return { skipped: true, delivered: false };
     }
-    if (result.suppressDelivery) {
+    // A Pulse with no external channel still has a first-class dashboard
+    // delivery surface. Preserve its durable receipt even when Telegram/
+    // Slack/iMessage delivery is suppressed by quiet hours or a daily cap.
+    if (result.suppressDelivery && !dashboardOnly) {
       if (deps.completeDelivery) await deps.completeDelivery(deliveryKey, 7 * 24 * 60 * 60);
       if (occurrence && deps.updateJobOccurrence) await deps.updateJobOccurrence(payload.userId, occurrence.id, { status: "completed", completedAt: Date.now() }, occurrence.version);
       return { skipped: true, delivered: false };

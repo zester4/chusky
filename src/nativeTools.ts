@@ -17,7 +17,7 @@ import { assertPublicHttpUrl, createTinyFishClient } from "./tinyfish.js";
 import { receiveTinyFishMonitorWebhook, tinyFishMonitorSignature, tinyFishMonitorSnapshotHash, validateTinyFishMonitorSchedule } from "./tinyfishMonitors.js";
 import { reconcileTinyFishResearchRun } from "./tinyfishResearch.js";
 import {
-  addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, listJobs, listJobOccurrences, createJobOccurrence, updateJobOccurrence, listReminders, claimHandoffBudget, searchConversationMessages, getConversationMessage,
+  addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, listJobs, listJobOccurrences, createJobOccurrence, updateJobOccurrence, listReminders, claimHandoffBudget, searchConversationMessages, getConversationMessage, isDurableStore,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
   upsertMeetingContact, listMeetingContacts, deleteMeetingContact, getMeetingContact, updateMeetingContact,
   readScratchpad, updateJob, updateReminder, transitionReminderStatus, writeScratchpad,
@@ -887,8 +887,9 @@ async function autonomyReconcileTool(userId: number, args: Record<string, unknow
   if (runtime.sharedConversation) throw new Error("Autonomy reconciliation is only available in a private owner conversation");
   const mode = args.mode === "business" ? "business" : "personal";
   const maxWatches = args.maxWatches === undefined ? 8 : Math.max(1, Math.min(20, Math.floor(Number(args.maxWatches))));
-  const results = await runDueAutonomyWatches(userId, { mode, maxWatches });
-  return { mode, checked: results.length, results, message: results.length ? "Due watches were reconciled with read-only scopes; proposed gaps remain subject to the normal approval boundary." : "No autonomy watches are due." };
+  const force = args.force === true;
+  const results = await runDueAutonomyWatches(userId, { mode, maxWatches, force });
+  return { mode, forced: force, checked: results.length, results, message: results.length ? "Configured watches were reconciled with read-only scopes; proposed gaps remain subject to the normal approval boundary." : force ? "No active watches are configured for this mode." : "No autonomy watches are due." };
 }
 
 async function autonomyPlaybookTool(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime): Promise<unknown> {
@@ -1061,6 +1062,18 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
       accounts: [] as PulseConnectedAccount[],
       candidates: [] as Awaited<ReturnType<typeof ensureAttentionPulseCapabilityCandidates>>,
     };
+    const pulseJob = active.find((job) => job.id === ATTENTION_PULSE_JOB_ID(userId));
+    if (pulseJob?.status === "active" && config.qstashToken && isDurableStore()) {
+      const latest = (await listJobOccurrences(userId, pulseJob.id, 1))[0];
+      const watchCoverage = await getAttentionPulseWatchCoverage(userId);
+      const needsFirstCheck = watchCoverage.some((watch) => watch.status === "not_checked");
+      const latestAt = latest?.completedAt ?? latest?.startedAt ?? latest?.createdAt;
+      const needsRecoveryKick = !latestAt || Date.now() - latestAt > 2 * 60 * 60_000;
+      if (needsFirstCheck || needsRecoveryKick) {
+        try { await runJobNow(userId, pulseJob.id); }
+        catch (error) { logger.warn({ err: error, userId, jobId: pulseJob.id }, "Could not queue the Attention Pulse recovery kick"); }
+      }
+    }
     const watchCoverage = await getAttentionPulseWatchCoverage(userId);
     const pulseJobs = active.filter((job) => job.id === ATTENTION_PULSE_JOB_ID(userId));
     const occurrences = (await listJobOccurrences(userId, ATTENTION_PULSE_JOB_ID(userId), 12)).map((occurrence) => ({
@@ -1118,6 +1131,12 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
       await ensureAttentionPulseDeliveryPreference(userId, runtime);
       await syncAttentionPulseProactiveState(userId);
       if (!existing.heartbeat) await updateJob(userId, existing.id, { heartbeat: true });
+      // A legacy Pulse can be active while its first provider check was never
+      // admitted. Give an existing job the same observable first run as a new
+      // job when QStash is available; status/enable remains usable in tests or
+      // installations that have not configured the scheduler yet.
+      const latestOccurrence = (await listJobOccurrences(userId, existing.id, 1))[0];
+      if (config.qstashToken && isDurableStore() && process.env.NODE_ENV !== "test" && (!latestOccurrence || Date.now() - latestOccurrence.createdAt > 30 * 60_000)) await runJobNow(userId, existing.id);
       return existing;
     }
     const client = new QStashClient({ token: requireQStash() });
@@ -1435,7 +1454,10 @@ export async function runJobNow(userId: number, id: string): Promise<{ jobId: st
   });
   const workflow = await new WorkflowClient({ token: requireQStash(), baseUrl: config.qstashUrl || undefined }).trigger({
     url: workflowUrl(config.jobWorkflowUrl, "JOB_WORKFLOW_URL", "/workflows/job"),
-    body: { jobId: job.id, userId, occurrenceId },
+    // Manual Pulse runs are explicit owner requests. The workflow uses this
+    // flag to force one bounded read-only watch check even when the watch's
+    // normal hourly checkpoint is still in the future.
+    body: { jobId: job.id, userId, occurrenceId, ...(job.kind === "attention_pulse" ? { forceAttentionPulse: true } : {}) },
     delay: 1,
     workflowRunId: `job-${job.id}-${occurrenceId}`,
     retries: 3,
