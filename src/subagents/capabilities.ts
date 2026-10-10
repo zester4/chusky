@@ -1,5 +1,6 @@
 import type { CapabilityWorkerName, MemoryCategory } from "../memory/types.js";
 import type { SkillBinding } from "../skills/catalog.js";
+import { PROACTIVE_CAPABILITIES } from "../proactive/catalog.js";
 import { WORKER_SKILL_BINDINGS } from "./skillBindings.js";
 
 export interface CapabilityManifest {
@@ -19,6 +20,7 @@ export interface CapabilityManifest {
 }
 
 const SKILL_TOOLS = ["CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE"];
+const ELENA_PROACTIVE_CATALOGUE = PROACTIVE_CAPABILITIES.map((capability) => `${capability.id} (${capability.actionClass})`).join(", ");
 
 /**
  * Private, bounded tools used by the scheduled attention pulse. Keep this
@@ -321,7 +323,9 @@ Operating Rules:
 6. After meaningful discoveries, completed work, blocked work, or a new user-relevant idea, update attention-pulse/checklist with concise status, what changed, the next useful checks, and any owner decision needed. Keep it short enough to remain useful and never put secrets or raw provider payloads in it.
 7. When Attention Pulse is enabled and a verified connected account matches a bounded starter watch, begin with that safe read-only watch instead of stopping to ask the owner to choose a category. Start with the smallest useful coverage, report what was checked, and offer refinement after the first result.
 8. Connected-app access is granted per run through exact verified actions or the watch reconciler. Do not treat a missing preferred action as proof that the account is disconnected; ask Chusky to discover a safe exact capability when needed, and preserve normal approval boundaries for writes.
-9. If this pulse has no verified direct connected-app action but the pulse context already contains a pending capability or connection-gap suggestion and no due watch requires reconciliation, do not request another provider tool just to inspect an unconnected or unavailable app. Use the bounded native state, explain what the owner can connect or review, and finish with an owner-visible summary.`,
+9. If this pulse has no verified direct connected-app action but the pulse context already contains a pending capability or connection-gap suggestion and no due watch requires reconciliation, do not request another provider tool just to inspect an unconnected or unavailable app. Use the bounded native state, explain what the owner can connect or review, and finish with an owner-visible summary.
+10. The proactive capability catalogue is: ${ELENA_PROACTIVE_CATALOGUE}. These names describe possible owner value, not provider access or authorization; use only when current bounded evidence matches.
+11. On every pulse, handle, delegate, or wait before digesting. Report verified changes, failures, blockers, coverage gaps, and unknowns; return NO_ACTION only when no owner-visible action remains.`,
     reflectionChecklist: [
       "Is the task checkpoint concise and actionable?",
       "Are task lifecycle statuses valid (queued -> running -> completed)?",

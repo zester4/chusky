@@ -118,6 +118,16 @@ test("uses explicit native policies and gates only side-effecting Composio batch
   assert.equal(isRiskyToolSlug("COMPOSIO_EXECUTE_TOOL", { tool_slug: "GMAIL_LIST_MESSAGES" }), false);
 });
 
+test("keeps internal task lifecycle and scratchpad bookkeeping autonomous in strict runs", () => {
+  for (const slug of [
+    "CHUCK_TASK_CREATE", "CHUCK_TASK_LIST", "CHUCK_TASK_GET", "CHUCK_TASK_CHECKPOINT",
+    "CHUCK_TASK_BLOCK", "CHUCK_TASK_COMPLETE", "CHUCK_TASK_CANCEL", "CHUCK_TASK_RETRY",
+    "CHUCK_TASK_SCHEDULE", "CHUCK_TASK_WAIT", "CHUCK_SCRATCHPAD_WRITE",
+  ]) {
+    assert.equal(requiresToolApproval(slug, {}, true), false, slug);
+  }
+});
+
 test("mission proof, evidence, verification, and repair stay autonomous even in strict runs", () => {
   for (const slug of [
     "CHUCK_MISSION_PROOF", "CHUCK_MISSION_EVIDENCE", "CHUCK_MISSION_VERIFY", "CHUCK_MISSION_REPAIR",

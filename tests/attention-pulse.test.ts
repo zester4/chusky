@@ -299,7 +299,8 @@ test("attention pulse bounds context and deduplicates unchanged state", async ()
   const second = await buildAttentionPulsePlan(userId);
   assert.equal(first.hasWork, true);
   assert.equal(first.dedupeKey, second.dedupeKey);
-  assert.equal(first.prompt.length <= 12_000, true);
+  assert.equal(first.prompt.length <= 8_000, true);
+  assert.doesNotMatch(first.prompt, /inbox_priority_scan: Review a bounded number/);
   assert.match(first.prompt, /Do not churn nextAction/);
   const record = (await listAttentionRecords(userId, "open_loop"))[0];
   if (record && "id" in record) await updateAttentionRecord(userId, "open_loop", record.id, { nextAction: "Book the partner review" });
