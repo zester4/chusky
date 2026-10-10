@@ -47,6 +47,14 @@ test("attention pulse grant is catalogued and permitted by Elena's manifest", ()
   }
 });
 
+test("keeps Elena's proactive vocabulary in her stable worker instructions", () => {
+  const prompt = WORKER_CAPABILITIES.elena.systemPrompt;
+  assert.match(prompt, /inbox_priority_scan/);
+  assert.match(prompt, /connection-gap/);
+  assert.match(prompt, /daily_operating_briefing/);
+  assert.match(prompt, /not provider access or authorization/);
+});
+
 test("worker scopes reject generic Composio execution and remote-shell meta-tools", () => {
   for (const worker of Object.keys(WORKER_CAPABILITIES).filter((name) => name !== "chusky") as Array<keyof typeof WORKER_CAPABILITIES>) {
     for (const slug of ["COMPOSIO_EXECUTE_TOOL", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_REMOTE_BASH_TOOL", "COMPOSIO_REMOTE_WORKBENCH"]) {
@@ -655,6 +663,10 @@ test("allows Elena to persist internal continuity under strict worker approval p
     {
       name: "CHUCK_TASK_CHECKPOINT",
       args: { id: task.id, checkpoint: "Pulse state reconciled", nextAction: "Review the next due item" },
+    },
+    {
+      name: "CHUCK_TASK_COMPLETE",
+      args: { id: task.id, result: "Pulse bookkeeping completed" },
     },
     {
       name: "CHUCK_SCRATCHPAD_WRITE",

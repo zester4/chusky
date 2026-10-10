@@ -290,7 +290,14 @@ export interface UserSession {
   /** Owner-scoped context graph nodes. Sensitive values are never returned to models unless selected by purpose. */
   contextNodes?: ContextNodeRecord[];
   /** Web sessions already merged into this canonical owner session, keyed by source snapshot time. */
-  linkedWebSessionImports?: Array<{ sourceUserId: number; sourceUpdatedAt: number; sourceDurableMemoryUpdatedAt?: number; sourceMessageIds?: string[] }>;
+  linkedWebSessionImports?: Array<{
+    sourceUserId: number;
+    sourceUpdatedAt: number;
+    sourceDurableMemoryUpdatedAt?: number;
+    sourceMessageIds?: string[];
+    sourceSdkThreadsUpdatedAt?: number;
+    sourceSdkThreadIds?: string[];
+  }>;
   /** Existing first-party dashboard runs copied into canonical private history. */
   sdkPrivateHistoryBackfilled?: boolean;
   /** Department operating spaces and typed handoff packets for company workflows. */
@@ -5341,6 +5348,8 @@ export async function getSession(uid: number): Promise<UserSession> {
     sourceUpdatedAt: item.sourceUpdatedAt,
     ...(Number.isFinite(item.sourceDurableMemoryUpdatedAt) ? { sourceDurableMemoryUpdatedAt: item.sourceDurableMemoryUpdatedAt } : {}),
     sourceMessageIds: Array.isArray(item.sourceMessageIds) ? item.sourceMessageIds.filter((id): id is string => typeof id === "string" && id.startsWith("web-import:") && id.length <= 100).slice(-400) : [],
+    ...(Number.isFinite(item.sourceSdkThreadsUpdatedAt) ? { sourceSdkThreadsUpdatedAt: item.sourceSdkThreadsUpdatedAt } : {}),
+    ...(Array.isArray(item.sourceSdkThreadIds) ? { sourceSdkThreadIds: item.sourceSdkThreadIds.filter((id): id is string => typeof id === "string" && id.length <= 180).slice(-100) } : {}),
   })) : [];
   s.sdkPrivateHistoryBackfilled = s.sdkPrivateHistoryBackfilled === true;
   s.departmentSpaces = Array.isArray(s.departmentSpaces) ? s.departmentSpaces.filter((item): item is DepartmentSpaceRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string").slice(-50) : [];
@@ -5843,21 +5852,94 @@ export async function backfillSdkPrivateRunHistory(userId: number): Promise<void
   }, { allSdkRuns: true });
 }
 
+function isPrivateWebSdkRun(run: SdkRunRecord): boolean {
+  return run.ownerPrivateRun !== false && !run.companyProjectId;
+}
+
+function importableWebSdkThreads(source: UserSession): SdkThreadRecord[] {
+  return (source.sdkThreads ?? []).map((thread) => ({
+    ...structuredClone(thread),
+    // Durable run versions belong to the source owner. Clearing them makes
+    // saveSession create the copied record in the canonical owner's namespace
+    // instead of treating it as an already-persisted source record.
+    runs: thread.runs.filter(isPrivateWebSdkRun).map((run) => {
+      const copy = structuredClone(run);
+      delete copy.durableVersion;
+      delete copy.durablePayloadHash;
+      return copy;
+    }),
+  }));
+}
+
+function sdkThreadMessageKey(message: Message): string {
+  if (message.id) return `id:${message.id}`;
+  if (message.sourceId) return `source:${message.sourceId}`;
+  return `${message.role}\u0000${message.content}\u0000${message.createdAt ?? "legacy"}`;
+}
+
+function mergeImportedWebSdkThreads(target: UserSession, sourceThreads: SdkThreadRecord[]): void {
+  const targetThreads: SdkThreadRecord[] = target.sdkThreads ?? [];
+  target.sdkThreads = targetThreads;
+  for (const sourceThread of sourceThreads) {
+    const targetThread: SdkThreadRecord | undefined = targetThreads.find((thread: SdkThreadRecord) => thread.id === sourceThread.id);
+    if (!targetThread) {
+      targetThreads.push(structuredClone(sourceThread));
+      continue;
+    }
+
+    const knownMessages = new Set(targetThread.history.map(sdkThreadMessageKey));
+    for (const message of sourceThread.history) {
+      if (knownMessages.has(sdkThreadMessageKey(message))) continue;
+      targetThread.history.push(structuredClone(message));
+      knownMessages.add(sdkThreadMessageKey(message));
+    }
+    const runsById = new Map<string, SdkRunRecord>(targetThread.runs.map((run: SdkRunRecord) => [run.id, run]));
+    for (const sourceRun of sourceThread.runs) {
+      const existingRun = runsById.get(sourceRun.id);
+      if (!existingRun) {
+        targetThread.runs.push(structuredClone(sourceRun));
+        runsById.set(sourceRun.id, targetThread.runs[targetThread.runs.length - 1]!);
+      } else if (sourceRun.updatedAt > existingRun.updatedAt) {
+        const index = targetThread.runs.findIndex((run: SdkRunRecord) => run.id === sourceRun.id);
+        if (index >= 0) targetThread.runs[index] = structuredClone(sourceRun);
+      }
+    }
+    targetThread.metadata = { ...sourceThread.metadata, ...targetThread.metadata };
+    targetThread.createdAt = Math.min(targetThread.createdAt, sourceThread.createdAt);
+    targetThread.updatedAt = Math.max(targetThread.updatedAt, sourceThread.updatedAt);
+  }
+  target.sdkThreads = targetThreads.slice(-100);
+}
+
+function sdkThreadImportComplete(
+  priorImport: NonNullable<UserSession["linkedWebSessionImports"]>[number] | undefined,
+  sourceThreads: SdkThreadRecord[],
+  target: UserSession,
+): boolean {
+  if (!priorImport || !Array.isArray(priorImport.sourceSdkThreadIds) || !Number.isFinite(priorImport.sourceSdkThreadsUpdatedAt)) return false;
+  const sourceIds = sourceThreads.map((thread) => thread.id).slice(-100);
+  if (priorImport.sourceSdkThreadsUpdatedAt !== Math.max(0, ...sourceThreads.map((thread) => Number.isFinite(thread.updatedAt) ? thread.updatedAt : 0))) return false;
+  if (priorImport.sourceSdkThreadIds.length !== sourceIds.length || priorImport.sourceSdkThreadIds.some((id, index) => id !== sourceIds[index])) return false;
+  const targetIds = new Set((target.sdkThreads ?? []).map((thread) => thread.id));
+  return sourceIds.every((id) => targetIds.has(id));
+}
+
 /** Merge only private web conversation context into its explicitly linked Telegram owner. */
 export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId: number): Promise<void> {
   if (!Number.isSafeInteger(sourceUserId) || sourceUserId <= 0 || !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 || sourceUserId === telegramUserId) return;
   const source = await getSessionWithSdkRuns(sourceUserId);
+  const sourceSdkThreads = importableWebSdkThreads(source);
   const existingTarget = await getSession(telegramUserId);
   const priorImport = existingTarget.linkedWebSessionImports?.find((item) => item.sourceUserId === sourceUserId);
   const durableMemoryNeedsMerge = durableMemoryConfigured() && priorImport?.sourceDurableMemoryUpdatedAt !== source.updatedAt;
-  if (priorImport?.sourceUpdatedAt === source.updatedAt && !durableMemoryNeedsMerge) return;
+  if (priorImport?.sourceUpdatedAt === source.updatedAt && !durableMemoryNeedsMerge && sdkThreadImportComplete(priorImport, sourceSdkThreads, existingTarget)) return;
   let importedMemories: MemoryFact[] = [];
 
   if (durableMemoryNeedsMerge) await mergeDurablePersonalMemories(sourceUserId, telegramUserId);
 
   await mutateSession(telegramUserId, (target) => {
     const currentPriorImport = target.linkedWebSessionImports?.find((item) => item.sourceUserId === sourceUserId);
-    if (currentPriorImport?.sourceUpdatedAt === source.updatedAt && !durableMemoryNeedsMerge) return;
+    if (currentPriorImport?.sourceUpdatedAt === source.updatedAt && !durableMemoryNeedsMerge && sdkThreadImportComplete(currentPriorImport, sourceSdkThreads, target)) return;
     const previouslyImportedSourceIds = new Set(currentPriorImport?.sourceMessageIds ?? []);
 
     const canonicalCounts = new Map<string, number>();
@@ -5876,8 +5958,8 @@ export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId
       return { ...message, sourceId: `web-import:${sourceUserId}:${digest}` };
     });
 
-    const runs = (source.sdkThreads ?? []).flatMap((thread) => thread.runs)
-      .filter((run) => run.status === "completed" && typeof run.output === "string" && !run.companyProjectId)
+    const runs = (sourceSdkThreads ?? []).flatMap((thread) => thread.runs)
+      .filter((run) => run.status === "completed" && typeof run.output === "string")
       .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
     const legacyRunImports: Message[] = [];
     for (const run of currentPriorImport ? [] : runs) {
@@ -5908,6 +5990,7 @@ export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId
     target.history = chronological.map(({ message, at }) => ({ ...message, createdAt: message.createdAt ?? at }));
     target.totalMessages += importedHistory.filter((message) => message.role === "user").length;
     appendSessionHistory(target, []);
+    mergeImportedWebSdkThreads(target, sourceSdkThreads);
 
     target.summaries = [...new Set([...target.summaries, ...source.summaries])].slice(-10);
     target.scratchpad ??= {};
@@ -5931,8 +6014,10 @@ export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId
       sourceUserId, sourceUpdatedAt: source.updatedAt,
       ...(durableMemoryConfigured() ? { sourceDurableMemoryUpdatedAt: source.updatedAt } : {}),
       sourceMessageIds: historyImports.map((message) => message.sourceId!).slice(-400),
+      sourceSdkThreadsUpdatedAt: Math.max(0, ...sourceSdkThreads.map((thread) => Number.isFinite(thread.updatedAt) ? thread.updatedAt : 0)),
+      sourceSdkThreadIds: sourceSdkThreads.map((thread) => thread.id).slice(-100),
     }].slice(-20);
-  });
+  }, { allSdkRuns: true });
 
   if (importedMemories.length && vectorConfigured()) {
     const vector = new UpstashKnowledgeStore();
