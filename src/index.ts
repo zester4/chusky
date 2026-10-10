@@ -11,7 +11,8 @@ import { getJobOccurrence, listJobOccurrences, createJobOccurrence, updateJobOcc
 import { createAttentionRecord } from "./store.js";
 import { registerHandlers } from "./handlers.js";
 import { listAttentionRecords } from "./store.js";
-import type { AttentionCandidateRecord, DeliveryPreferenceRecord, ObservationRecord } from "./store.js";
+import { updateAttentionRecord } from "./store.js";
+import type { AttentionCandidateRecord, AutonomyProfileRecord, DeliveryPreferenceRecord, ObservationRecord, AutonomyWatchRecord } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
 import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
@@ -51,7 +52,7 @@ import { recordMeetingTurn } from "./decisions/telemetry.js";
 import { twilioVoiceInstructions } from "./calls/twilioContext.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
 import { attentionPulseCloseoutOutput, attentionPulseDeliveredToday, attentionPulseDeliveryConfirmation, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, attentionPulseRefreshOwnerState, attentionPulseRequireDueWatchReport, buildAttentionPulsePlan, getAttentionPulseWatchCoverage, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "./attentionPulse.js";
-import { connectedWatchInput, connectedWatchSpecs } from "./proactive/watches.js";
+import { DEFAULT_PULSE_DOMAINS, DEFAULT_WATCH_CONNECTION_WAIT_ERROR, DEFAULT_WATCH_PROFILE_SCOPE_ERROR, connectedWatchInput, connectedWatchSpecs, filterWatchSpecsByAllowedDomains } from "./proactive/watches.js";
 import { hasExternalRecallParticipants, resolveRecallMeetingSpeaker } from "./meetings/participants.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import { createSignedWebBotAuthDirectory, WEB_BOT_AUTH_DIRECTORY_CONTENT_TYPE, WEB_BOT_AUTH_DIRECTORY_PATH, webBotAuthConfigurationIssue, webBotAuthConfigurationStatus, webBotAuthSigningEnabled } from "./webBotAuth.js";
@@ -239,10 +240,28 @@ async function ensureConnectedProactiveWatches(
   accounts: Awaited<ReturnType<typeof listConnectedAccounts>>,
   now: number,
 ): Promise<void> {
-  const specs = connectedWatchSpecs(accounts.map((account) => ({ id: account.id, toolkit: account.toolkit, alias: account.alias, status: account.status })));
+  const profiles = await listAttentionRecords(userId, "autonomy_profile", { limit: 20 }) as AutonomyProfileRecord[];
+  const profile = profiles.find((item) => item.mode === "personal");
+  const allowedDomains = profile?.allowedDomains?.length ? profile.allowedDomains : [...DEFAULT_PULSE_DOMAINS];
+  const allSpecs = connectedWatchSpecs(accounts.map((account) => ({ id: account.id, toolkit: account.toolkit, alias: account.alias, status: account.status })));
+  const specs = filterWatchSpecsByAllowedDomains(allSpecs, allowedDomains);
+  const existing = await listAttentionRecords(userId, "autonomy_watch", { limit: 200 }) as AutonomyWatchRecord[];
+  const allowedKeys = new Set(specs.map((spec) => `${spec.connectedAccountId}:${spec.domain}:${spec.name}`.toLowerCase()));
+  const availableAccountKeys = new Set(allSpecs.map((spec) => `${spec.connectedAccountId}:${spec.domain}:${spec.name}`.toLowerCase()));
+  for (const watch of existing) {
+    if (!watch.connectedAccountId) continue;
+    const key = `${watch.connectedAccountId}:${watch.domain}:${watch.name}`.toLowerCase();
+    if (watch.status === "active" && !allowedKeys.has(key)) {
+      await updateAttentionRecord(userId, "autonomy_watch", watch.id, {
+        status: "paused",
+        lastError: availableAccountKeys.has(key) ? DEFAULT_WATCH_PROFILE_SCOPE_ERROR : DEFAULT_WATCH_CONNECTION_WAIT_ERROR,
+      });
+    } else if (watch.status === "paused" && allowedKeys.has(key) && [DEFAULT_WATCH_PROFILE_SCOPE_ERROR, DEFAULT_WATCH_CONNECTION_WAIT_ERROR].includes(watch.lastError ?? "")) {
+      await updateAttentionRecord(userId, "autonomy_watch", watch.id, { status: "active", nextCheckAt: now, lastError: "" });
+    }
+  }
   if (!specs.length) return;
-  const existing = await listAttentionRecords(userId, "autonomy_watch", { limit: 200 });
-  const watches = existing as Array<{ connectedAccountId?: string; name: string; domain: string; status: string }>;
+  const watches = existing;
   for (const spec of specs) {
     const alreadyExists = watches.some((watch) => watch.status !== "revoked" && watch.connectedAccountId === spec.connectedAccountId && watch.domain === spec.domain && watch.name === spec.name);
     if (alreadyExists) continue;
@@ -2556,8 +2575,14 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                 ...(watch.lastResult ? { summary: watch.lastResult } : {}),
                 ...(watch.lastError ? { error: watch.lastError } : {}),
                 ...(watch.lastCheckedAt ? { lastCheckedAt: watch.lastCheckedAt } : {}),
-                ...(watch.nextCheckAt ? { nextCheckAt: watch.nextCheckAt } : {}),
-              }));
+                 ...(watch.nextCheckAt ? { nextCheckAt: watch.nextCheckAt } : {}),
+               }));
+            const checkedWatchCount = watchReports.filter((watch) => watch.status === "checked").length;
+            const failedWatchCount = watchReports.filter((watch) => watch.status === "failed").length;
+            const notCheckedWatchCount = watchReports.filter((watch) => watch.status === "not_checked" || watch.status === "scheduled").length;
+            const watchEvidenceLine = watchReports.length === 0
+              ? "Verified run evidence: no configured provider watch was due in this run."
+              : `Verified run evidence: ${checkedWatchCount} provider check${checkedWatchCount === 1 ? "" : "s"} completed, ${notCheckedWatchCount} not checked, ${failedWatchCount} failed.`;
             const nextCheckAt = watchReports.map((watch) => watch.nextCheckAt).filter((value): value is number => typeof value === "number").sort((left, right) => left - right)[0];
             // A successfully delivered owner digest should suppress an identical
             // hourly repeat even when the signal only needs the owner's decision.
@@ -2565,15 +2590,15 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             // or delegated the underlying work.
             const deliveryConfirmation = attentionPulseDeliveryConfirmation(closeoutPlan, output, handled);
             const text = !noAction && !handled
-              ? `The attention pulse did not complete or delegate an actionable step. The unchanged item remains open and will be reconsidered when its state changes or new evidence arrives.\n\n${output}`
-              : output;
+              ? `${watchEvidenceLine}\n\nThe attention pulse did not complete or delegate an actionable step. The unchanged item remains open and will be reconsidered when its state changes or new evidence arrives.\n\n${output}`
+              : `${watchEvidenceLine}\n\n${output}`;
             const heartbeatText = noAction && heartbeat
-              ? "Elena pulse checked the configured attention state. No new owner-visible action was found in this run."
+              ? `${watchEvidenceLine}\n\nElena pulse checked the configured attention state. No new owner-visible action was found in this run.`
               : text;
             return {
               text: heartbeatText,
               suppressDelivery: (noAction && !heartbeat) || Boolean(delivery.suppressed),
-              pulseEvidence: pulseEvidence({ state: "completed", runKind, startedAt: now, completedAt: Date.now(), dueWatches: plan.dueWatchIds.length, watchesReconciled: watchReports.filter((watch) => watch.status === "checked").length, pendingObservations: closeoutPlan.observationIds?.length ?? plan.observationIds.length, pendingCandidates: closeoutPlan.candidateIds.length, handled, delegated, watchReports, ...(nextCheckAt ? { nextCheckAt } : {}), ...(delivery.reason ? { deliveryReason: delivery.reason } : {}) }),
+              pulseEvidence: pulseEvidence({ state: "completed", runKind, startedAt: now, completedAt: Date.now(), dueWatches: plan.dueWatchIds.length, watchesReconciled: checkedWatchCount, pendingObservations: closeoutPlan.observationIds?.length ?? plan.observationIds.length, pendingCandidates: closeoutPlan.candidateIds.length, handled, delegated, watchReports, ...(nextCheckAt ? { nextCheckAt } : {}), ...(delivery.reason ? { deliveryReason: delivery.reason } : {}) }),
               ...(deliveryConfirmation ? { deliveryConfirmation } : {}),
             };
           }
