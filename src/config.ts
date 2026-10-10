@@ -110,10 +110,13 @@ export const config = {
   // Calls need first-token speed, but retain the same Chusky context and
   // owner-scoped tool boundary. Gemini Flash is a tool-capable, latency-first
   // route; applications may override it without changing the chat model.
-  voiceModel: optional("VOICE_MODEL", "google/gemini-3.5-flash"),
-  voiceFallbackModels: optional("VOICE_FALLBACK_MODELS", "google/gemini-2.5-flash")
+  voiceModel: optional("VOICE_MODEL", "google/gemini-3.1-flash-lite"),
+  voiceFallbackModels: optional("VOICE_FALLBACK_MODELS", "google/gemini-3.5-flash")
     .split(",").map((model) => model.trim()).filter(Boolean),
   voiceMaxTokens: positiveInt("VOICE_MAX_TOKENS", 192),
+  // Optional memory/knowledge enrichment must not hold up the first spoken
+  // response. A slow read simply becomes unavailable for that turn.
+  voiceContextDeadlineMs: boundedInt("VOICE_CONTEXT_DEADLINE_MS", 350, 100, 2_000),
   visionModel: optional("VISION_MODEL", "openai/gpt-5.6-luna"),
   transcriptionModel: optional("TRANSCRIPTION_MODEL", "openai/gpt-transcribe"),
   ttsModel: optional("TTS_MODEL", "deepgram/flux-tts:free"),
@@ -298,10 +301,17 @@ export const config = {
   twilioWebhookBaseUrl: optional("TWILIO_WEBHOOK_BASE_URL", ""),
   twilioMediaStreamUrl: optional("TWILIO_MEDIA_STREAM_URL", ""),
   twilioMediaBridgeSecret: optional("TWILIO_MEDIA_BRIDGE_SECRET", ""),
+  // Synchronous DetectMessageEnd lets Twilio wait for the voicemail beep
+  // before Chusky speaks, which is compatible with one Media Stream per call.
+  twilioVoicemailEnabled: optional("TWILIO_VOICEMAIL_ENABLED", "false") === "true",
+  twilioVoicemailMessage: optional("TWILIO_VOICEMAIL_MESSAGE", "Hi, this is Chusky calling. Please call back when you can."),
   // Inbound calls stay fail-closed until an owner and caller allowlist are
   // explicitly configured. This protects private memory from random callers.
   twilioInboundEnabled: optional("TWILIO_INBOUND_ENABLED", "false") === "true",
   twilioInboundOwnerUserId: optional("TWILIO_INBOUND_OWNER_USER_ID", ""),
+  // Optional comma-separated E.164 destination to owner mappings, e.g.
+  // +15550000001=123,+15550000002=456. The legacy owner remains the fallback.
+  twilioInboundRoutes: optional("TWILIO_INBOUND_ROUTES", ""),
   twilioInboundAllowedCallers: optional("TWILIO_INBOUND_ALLOWED_CALLERS", ""),
   twilioInboundVerifiedCallers: optional("TWILIO_INBOUND_VERIFIED_CALLERS", ""),
   // Personal keeps inbound callers on the private owner brief. Business uses

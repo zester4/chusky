@@ -16,6 +16,23 @@ export function inboundTwilioOwner(value: string): number {
   return userId;
 }
 
+export function parseTwilioInboundRoutes(value: string): Map<string, number> {
+  const routes = new Map<string, number>();
+  for (const entry of value.split(",").map((item) => item.trim()).filter(Boolean)) {
+    const [phoneNumber, owner] = entry.split("=", 2).map((item) => item?.trim() ?? "");
+    if (!E164.test(phoneNumber)) throw new Error("TWILIO_INBOUND_ROUTES must map E.164 numbers to positive owner IDs");
+    const userId = Number(owner);
+    if (!Number.isSafeInteger(userId) || userId <= 0) throw new Error("TWILIO_INBOUND_ROUTES must map E.164 numbers to positive owner IDs");
+    routes.set(phoneNumber, userId);
+  }
+  return routes;
+}
+
+export function inboundTwilioOwnerForNumber(to: string, fallbackOwner: string, routes: string): number {
+  if (!E164.test(to)) throw new Error("Invalid Twilio inbound destination");
+  return parseTwilioInboundRoutes(routes).get(to) ?? inboundTwilioOwner(fallbackOwner);
+}
+
 /** Persist a safe inbound call record once. The Twilio Call SID is used only
  * for idempotency and lifecycle correlation; no call audio is retained. */
 export async function registerTwilioInboundCall(input: { userId: number; from: string; to: string; callSid: string; callProfile?: CallProfile; verification?: "public" | "identified" | "verified" }): Promise<PhoneCallRecord> {
