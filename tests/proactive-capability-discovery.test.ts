@@ -33,6 +33,16 @@ test("capability discovery ignores disabled accounts and bounds suggestions", ()
   assert.equal(gaps.some((gap) => gap.key === "team-communication"), false);
 });
 
+test("capability discovery asks to reconnect an existing inactive account", () => {
+  const gaps = discoverMissingCapabilityGaps([{ toolkit: "GMAIL", status: "EXPIRED" }], { maxSuggestions: 3 });
+
+  assert.equal(gaps[0]?.key, "gmail");
+  assert.equal(gaps[0]?.connectionState, "needs_reconnect");
+  assert.equal(gaps[0]?.title, "Reconnect Gmail");
+  assert.match(gaps[0]?.reason ?? "", /needs reconnection/);
+  assert.match(gaps[0]?.proposedAction ?? "", /Reconnect Gmail from Connected Apps/);
+});
+
 test("connected action discovery recommends a capability gap without pretending the provider is disconnected", () => {
   const gaps = discoverConnectedActionGaps(
     [{ toolkit: "GMAIL", status: "ACTIVE" }],

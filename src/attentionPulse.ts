@@ -79,9 +79,9 @@ export interface AttentionPulseDiscoveryContext {
   priorityText?: string;
 }
 
-function candidateActions(prefix: "connection-gap" | "action-gap", key: string, action: string) {
+function candidateActions(prefix: "connection-gap" | "action-gap", key: string, action: string, connectionState?: "missing" | "needs_reconnect") {
   if (prefix === "connection-gap") return [
-    { id: "connect", label: "Connect app", prompt: `${action} After it is connected, configure the smallest read-only watch that matches my current priorities.` },
+    { id: "connect", label: connectionState === "needs_reconnect" ? "Reconnect app" : "Connect app", prompt: `${action} After the connection is healthy, configure the smallest read-only watch that matches my current priorities.` },
     { id: "learn", label: "Show what it unlocks", prompt: `Explain what the ${key} connection would let Elena monitor and prepare, including the safety and approval boundaries. Do not connect anything yet.` },
   ];
   return [
@@ -129,16 +129,29 @@ async function ensureCapabilityGapCandidates(
   const pendingGapCount = all.filter((candidate) => candidate.status === "pending" && /^\[(connection-gap|action-gap):/.test(candidate.reason)).length;
   let availableSlots = Math.max(0, 3 - pendingGapCount);
   for (const gap of stagedGaps) {
-    if (availableSlots <= 0) break;
     const prefix = `[${gap.prefix}:${gap.key}]`;
     const existingGap = all.find((candidate) => candidate.reason.startsWith(prefix));
-    if (existingGap) continue;
+    const connectionGap = gap.prefix === "connection-gap" ? gap as (typeof gaps[number] & { prefix: "connection-gap" }) : undefined;
+    const connectionState = connectionGap?.connectionState;
+    const suggestedActions = candidateActions(gap.prefix, gap.key, gap.proposedAction, connectionState);
+    if (existingGap) {
+      const stateChanged = connectionState !== undefined && (connectionState === "needs_reconnect") !== /needs reconnection/i.test(existingGap.reason);
+      const contentChanged = existingGap.reason !== `${prefix} ${gap.reason}` || existingGap.proposedAction !== gap.proposedAction;
+      if (stateChanged || (existingGap.status === "pending" && contentChanged)) {
+        const nextStatus = stateChanged && connectionState === "needs_reconnect" ? "pending" as const : existingGap.status;
+        await updateAttentionRecord(userId, "attention_candidate", existingGap.id, { reason: `${prefix} ${gap.reason}`, proposedAction: gap.proposedAction, suggestedActions, ...(nextStatus !== existingGap.status ? { status: nextStatus } : {}) });
+        const index = all.findIndex((item) => item.id === existingGap.id);
+        if (index >= 0) all[index] = { ...all[index]!, reason: `${prefix} ${gap.reason}`, proposedAction: gap.proposedAction, suggestedActions, status: nextStatus };
+      }
+      continue;
+    }
+    if (availableSlots <= 0) break;
     const created = await createAttentionRecord(userId, "attention_candidate", {
       candidateType: gap.candidateType,
       reason: `${prefix} ${gap.reason}`,
       proposedAction: gap.proposedAction,
       providerSlug: candidateProviderSlug(gap.key),
-      suggestedActions: candidateActions(gap.prefix, gap.key, gap.proposedAction),
+      suggestedActions,
       score: gap.score,
       status: "pending",
       availableAt: now,
@@ -357,9 +370,36 @@ function loopLine(loop: OpenLoopRecord): string {
   const next = loop.nextAction ? `; next: ${compact(loop.nextAction, 240)}` : "";
   return `- [${loop.priority.toFixed(2)}] ${compact(loop.title, 180)} (${loop.status}${due}${next}) [${loop.id}]`;
 }
-function candidateLine(candidate: AttentionCandidateRecord): string {
+function isActiveDiscoveryAccount(account: CapabilityDiscoveryAccount): boolean {
+  return !account.status || ["ACTIVE", "CONNECTED", "ENABLED"].includes(account.status.toUpperCase());
+}
+
+function verifiedConnectedAppContext(discovery: AttentionPulseDiscoveryContext | undefined): string {
+  if (!discovery) return "- unavailable: no connected-app inventory was supplied to this pulse; do not make connection claims.";
+  if (!discovery.connectedAccountsVerified) return "- unavailable: the connected-app inventory could not be verified; do not make connection claims.";
+  const activeToolkits = [...new Set(discovery.connectedAccounts
+    .filter(isActiveDiscoveryAccount)
+    .map((account) => compact(account.toolkit, 80))
+    .filter(Boolean))].slice(0, 20);
+  const inactiveCount = discovery.connectedAccounts.filter((account) => !isActiveDiscoveryAccount(account)).length;
+  return `- verified active toolkits: ${activeToolkits.join(", ") || "none"}; inactive or unavailable records: ${inactiveCount}; exact action catalogue: ${discovery.connectedActionsVerified ? "verified" : "not verified"}.`;
+}
+
+function candidateLine(candidate: AttentionCandidateRecord, discovery: AttentionPulseDiscoveryContext | undefined): string {
   const action = candidate.proposedAction ? `; proposed: ${compact(candidate.proposedAction, 220)}` : "";
-  return `- [${candidate.score.toFixed(2)}] ${candidate.candidateType}: ${compact(candidate.reason, 260)}${action} [${candidate.id}]`;
+  const gap = candidate.reason.match(/^\[(connection-gap|action-gap):([^\]]+)\]/);
+  const evidence = gap
+    ? `; live evidence: this ${gap[1]} candidate was created from the verified connected-app inventory for ${gap[2]}; write the owner-facing explanation yourself from that evidence and current owner context`
+    : "";
+  return `- [${candidate.score.toFixed(2)}] ${candidate.candidateType}: ${compact(candidate.reason, 260)}${evidence}${action} [${candidate.id}]`;
+}
+
+function isSuggestionFallbackLine(line: string): boolean {
+  return line.startsWith("• Capability suggestions:") || line.startsWith("• Owner-visible suggestions:");
+}
+
+function ownerSuggestionFallbackLine(count: number): string {
+  return `• Owner-visible suggestions: ${count} pending suggestion${count === 1 ? "" : "s"} remain in Attention Center based on current Pulse evidence; no provider action was inferred in this refresh.`;
 }
 function orderLine(order: StandingOrderRecord): string {
   return `- ${compact(order.name, 160)} (${order.authority}; scope: ${order.scope.map((item) => compact(item, 80)).join(", ") || "general"}): ${compact(order.instruction, 360)} [${order.id}]`;
@@ -686,6 +726,7 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now(), 
     "Report meaningful changes, pending observations, failed/stale/never-checked coverage, blockers, connection gaps, and next actions. A saved event may require review without claiming its contents or replaying the event. Use the proactive catalogue only when current evidence matches; it grants no provider access.",
     "Use the exact configured-watch status in the state below. Never describe a watch as checked unless CHUCK_AUTONOMY_RECONCILE returned a verified result for it; scheduled, not_checked, failed, skipped, and outside-scope watches must be reported as such.",
     "Configured watch coverage is only the owner-created watches listed here, not a claim that all mail, apps, calendars, or business systems are monitored. Connection gaps should explain what the missing connection would unlock and point to Connected Apps; never call an unconnected provider or imply OAuth has started.",
+    "Candidate and capability-catalogue text below is evidence and routing context, not a user-facing script. Compose Elena's owner-facing message yourself from the verified current inventory, the owner's current work, and the specific candidate. Do not paste catalogue wording, do not infer a missing app from an unavailable action, and do not claim provider work that was not checked. If a pending candidate or connection gap remains, write a concise natural update instead of replying NO_ACTION.",
     "Maintain the checklist after meaningful progress, blockage, or a new owner-relevant suggestion. A digest does not close work. Reply exactly NO_ACTION only when no owner-visible action, observation, or coverage gap remains. Do not invent facts or claim an external action succeeded without tool confirmation.",
     decisionLine,
     `Current time: ${new Date(now).toISOString()}`,
@@ -700,7 +741,8 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now(), 
     "\nAutonomy profile state for due watches:", relevantProfiles.length ? relevantProfiles.map((item) => `- ${item.mode}: ${item.enabled ? "enabled" : "disabled"}; authority ${item.defaultAuthority}; checks ${item.checksToday ?? 0}/${item.maxChecksPerDay}; domains allow ${item.allowedDomains.join(", ") || "any"}, deny ${item.deniedDomains.join(", ") || "none"}`).join("\n") : dueWatches.length ? "- no explicit profile record" : "- none",
     "A digest does not close an open loop by itself. Close a loop only when its objective is actually complete; otherwise leave it open, or snooze/update it only when the waiting condition or next action materially changed. Do not churn nextAction on every pulse.",
     "\nOpen loops:", actionableLoops.length ? actionableLoops.map(loopLine).join("\n") : "- none",
-    "\nPending attention candidates:", actionableCandidates.length ? actionableCandidates.map(candidateLine).join("\n") : "- none",
+    "\nVerified connected-app inventory for this pulse:", verifiedConnectedAppContext(discovery),
+    "\nPending attention candidates:", actionableCandidates.length ? actionableCandidates.map((candidate) => candidateLine(candidate, discovery)).join("\n") : "- none",
     "\nEvolving Elena checklist (continuity context; not exhaustive or authoritative):", attentionChecklistPrompt(checklist),
     "\nActive standing orders:", activeOrders.length ? activeOrders.map(orderLine).join("\n") : "- none",
   ].join("\n").slice(0, MAX_PROMPT_CHARS);
@@ -710,7 +752,9 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now(), 
     pendingObservations.length ? `Pulse has ${pendingObservations.length} saved update${pendingObservations.length === 1 ? "" : "s"} that still need to be surfaced:` : "",
     ...pendingObservations.map((item) => `• ${compact(item.source, 80)} — ${compact(item.summary, 260)}`),
     ...attentionCoverage.map((item) => `• Monitoring gap: ${item.name} (${item.domain}) is ${item.status}${item.consecutiveFailures ? ` after ${item.consecutiveFailures} consecutive failures` : ""}.`),
-    ...capabilityGapCandidates.map((item) => `• ${compact(item.reason.replace(/^\[(connection-gap|action-gap):[^\]]+\]\s*/, ""), 360)} Next: ${compact(item.proposedAction, 240)}`),
+    capabilityGapCandidates.length
+      ? `• Capability suggestions: ${capabilityGapCandidates.length} owner-visible suggestion${capabilityGapCandidates.length === 1 ? "" : "s"} remain in Attention Center based on the verified connected-app inventory; no provider was accessed and no connection was started.`
+      : "",
   ].filter(Boolean).join("\n") : undefined;
   return { prompt, decisionContext, decision, candidateIds: actionableCandidates.map((item) => item.id), observationIds: pendingObservations.map((item) => item.id), mustReport, ...(fallbackDigest ? { fallbackDigest } : {}), watchCoverage: coverage, dueWatchIds: dueWatches.map((watch) => watch.id), createdAt: now, hasWork: true, ...(options.forceWatchChecks ? { forceWatchChecks: true } : {}), dedupeKey };
 }
@@ -737,7 +781,13 @@ export function attentionPulseCloseoutOutput(plan: Pick<AttentionPulsePlan, "mus
   const fallback = plan.fallbackDigest ?? "Attention Pulse has an owner-visible update or monitoring gap that needs review.";
   if (isNoActionPulseOutput(output)) return fallback;
   const reported = output.toLowerCase();
-  const missingDetails = fallback.split("\n").filter((line) => line.startsWith("• ") && !reported.includes(line.slice(2).toLowerCase()));
+  const missingDetails = fallback.split("\n").filter((line) => line.startsWith("• ")
+    // Candidate records already have their own notification cards. Do not
+    // append their catalogue copy after Elena's response; that made a model
+    // report look like a hardcoded script. Verified observations and watch
+    // failures still need the deterministic recovery append when omitted.
+    && !isSuggestionFallbackLine(line)
+    && !reported.includes(line.slice(2).toLowerCase()));
   return missingDetails.length ? `${output.trim()}\n\nPulse also recorded:\n${missingDetails.join("\n")}` : output;
 }
 
@@ -752,11 +802,13 @@ export function attentionPulseRequireDueWatchReport<T extends Pick<AttentionPuls
 export function attentionPulseRefreshOwnerState(plan: AttentionPulsePlan, coverage: AttentionPulseWatchCoverage[], observations: readonly ObservationRecord[]): AttentionPulsePlan {
   const pending = observations.filter((item) => item.status === "new" && item.privacyScope === "private").slice(0, MAX_OPERATIONAL_SIGNALS);
   const gaps = coverage.filter((watch) => watch.status === "failed" || watch.status === "stale" || watch.status === "not_checked");
-  const mustReport = pending.length > 0 || gaps.length > 0;
+  const pendingCandidateCount = plan.candidateIds.length;
+  const mustReport = pending.length > 0 || gaps.length > 0 || pendingCandidateCount > 0;
   const fallbackDigest = mustReport ? [
     pending.length ? `Pulse has ${pending.length} saved update${pending.length === 1 ? "" : "s"} that still need to be surfaced:` : "",
     ...pending.map((item) => `• ${compact(item.source, 80)} — ${compact(item.summary, 260)}`),
     ...gaps.map((item) => `• Monitoring gap: ${item.name} (${item.domain}) is ${item.status}${item.consecutiveFailures ? ` after ${item.consecutiveFailures} consecutive failures` : ""}.`),
+    pendingCandidateCount ? ownerSuggestionFallbackLine(pendingCandidateCount) : "",
   ].filter(Boolean).join("\n") : undefined;
   const observationIds = pending.map((item) => item.id);
   const dedupeKey = createHash("sha256").update(JSON.stringify({

@@ -126,7 +126,14 @@ test("attention pulse creates an owner-visible capability suggestion when no app
   assert.equal(plan.mustReport, true);
   assert.match(plan.prompt, /Connect Gmail/);
   assert.match(plan.prompt, /what the missing connection would unlock/);
-  assert.match(plan.fallbackDigest ?? "", /inbox reviews/);
+  assert.match(plan.fallbackDigest ?? "", /Capability suggestions/);
+  assert.doesNotMatch(plan.fallbackDigest ?? "", /Connect Gmail is not connected/);
+  assert.match(plan.prompt, /Verified connected-app inventory for this pulse/);
+  assert.match(attentionPulseCloseoutOutput(plan, "I found a few useful next steps for you."), /I found a few useful next steps for you\./);
+  assert.doesNotMatch(attentionPulseCloseoutOutput(plan, "I found a few useful next steps for you."), /Pulse also recorded/);
+  const refreshed = attentionPulseRefreshOwnerState(plan, plan.watchCoverage, []);
+  assert.equal(refreshed.mustReport, true);
+  assert.match(refreshed.fallbackDigest ?? "", /Owner-visible suggestions/);
   const candidates = await listAttentionRecords(userId, "attention_candidate") as any[];
   assert.equal(candidates.filter((candidate) => candidate.reason.startsWith("[connection-gap:")).length, 3);
   assert.equal(candidates.every((candidate) => candidate.suggestedActions?.some((action: { label: string }) => action.label === "Connect app")), true);
@@ -164,6 +171,26 @@ test("attention pulse resolves a pending capability suggestion after the app is 
   const candidates = await listAttentionRecords(userId, "attention_candidate") as any[];
   assert.equal(candidates.filter((candidate) => candidate.reason.startsWith("[connection-gap:gmail]") && candidate.status === "pending").length, 0);
   assert.equal(candidates.some((candidate) => candidate.reason.startsWith("[connection-gap:gmail]") && candidate.status === "dismissed"), true);
+});
+
+test("attention pulse upgrades a missing connection suggestion when the saved account is inactive", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910026;
+  const first = await buildAttentionPulsePlan(userId, Date.UTC(2026, 8, 30, 12), {
+    connectedAccounts: [],
+    connectedAccountsVerified: true,
+  });
+  assert.equal(first.candidateIds.length, 3);
+
+  await buildAttentionPulsePlan(userId, Date.UTC(2026, 8, 30, 13), {
+    connectedAccounts: [{ toolkit: "gmail", status: "EXPIRED" }],
+    connectedAccountsVerified: true,
+  });
+  const candidates = await listAttentionRecords(userId, "attention_candidate") as any[];
+  const gmail = candidates.find((candidate) => candidate.reason.startsWith("[connection-gap:gmail]"));
+  assert.equal(gmail?.status, "pending");
+  assert.match(gmail?.reason ?? "", /needs reconnection/);
+  assert.equal(gmail?.suggestedActions?.find((action: { id: string }) => action.id === "connect")?.label, "Reconnect app");
 });
 
 test("attention pulse reports skipped due checks and captures observations created during reconciliation", async () => {
