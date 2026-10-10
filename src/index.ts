@@ -2101,7 +2101,21 @@ async function main(): Promise<void> {
               await new Promise((resolve) => setTimeout(resolve, 250));
             }
             send({ type: "start", model: s.model });
-            const result = await runAgent(device.userId, message, s.history, s.model, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined, undefined, { ownerPrivateRun: true });
+            const result = await runAgent(device.userId, message, s.history, s.model, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined, undefined, {
+              ownerPrivateRun: true,
+              onToolActivity: (activity) => send({
+                type: "tool",
+                tool: {
+                  toolSlug: activity.toolSlug,
+                  status: activity.status,
+                  message: activity.message,
+                  ...(activity.summary ? { summary: activity.summary } : {}),
+                  ...(activity.durationMs !== undefined ? { durationMs: activity.durationMs } : {}),
+                  ...(activity.actionLabel ? { actionLabel: activity.actionLabel } : {}),
+                  ...(activity.toolkitName ? { toolkitName: activity.toolkitName } : {}),
+                },
+              }),
+            });
             await appendMessages(device.userId, [{ role: "user", content: message }, { role: "assistant", content: result.text }]);
             if (result.cost) await addUsage(device.userId, result.cost);
             send({ type: "done", text: result.text, model: s.model, toolsUsed: result.toolsUsed, cost: result.cost ?? 0, images: (result.generatedImages ?? []).map((image) => ({ data: image.data.toString("base64"), mediaType: image.mediaType })), files: (result.generatedFiles ?? []).map((file) => ({ data: file.data.toString("base64"), name: file.name, contentType: file.contentType, artifactId: file.artifactId, type: file.type })), speech: await cliSpeech(device.userId, result.text) });

@@ -1,8 +1,8 @@
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { ChuskyClient, getCliConfigPath, loadCliConfig, saveCliConfig, type CliTask, type CliGeneratedFile } from "./cli/client.js";
-import { formatApproval, formatError, formatSessionBanner, formatStatus, formatSuccess, formatToolSummary, formatWarning, paint, renderMarkdown } from "./cli/renderer.js";
+import { ChuskyClient, getCliConfigPath, getCliSecretBackend, loadCliConfig, saveCliConfig, type CliTask, type CliGeneratedFile } from "./cli/client.js";
+import { formatApproval, formatError, formatSessionBanner, formatStatus, formatSuccess, formatToolActivity, formatToolSummary, formatWarning, paint, renderMarkdown } from "./cli/renderer.js";
 import { pickModel } from "./cli/modelPicker.js";
 import { approveFromPicker } from "./cli/approvalPicker.js";
 import { readPrompt } from "./cli/input.js";
@@ -26,6 +26,29 @@ async function pair(): Promise<void> {
   if (!response.ok || typeof response.token !== "string") throw new Error(response.error || "Pairing failed");
   await saveCliConfig({ serverUrl, token: response.token, deviceName });
   console.log(`Linked successfully as ${deviceName}. Configured durable Chusky session for user ${response.userId}.`);
+}
+
+async function authStatus(): Promise<void> {
+  const config = await loadCliConfig();
+  const color = config.color ?? process.stdout.isTTY === true;
+  if (!config.token) { console.log(formatStatus("Auth", "Not linked", color)); return; }
+  const session = await new ChuskyClient(config).session();
+  if (!session.ok) { console.log(formatError(session.error || "The saved CLI credential is not usable.", color)); return; }
+  console.log(`${formatStatus("Auth", "Linked", color)}\n${formatStatus("Server", config.serverUrl, color)}\n${formatStatus("Device", session.device, color)}\n${formatStatus("User", String(session.userId), color)}\n${formatStatus("Secret storage", String(getCliSecretBackend()), color)}`);
+}
+
+async function authLogout(): Promise<void> {
+  const config = await loadCliConfig();
+  const color = config.color ?? process.stdout.isTTY === true;
+  let remoteError: string | undefined;
+  if (config.token && config.deviceName && config.serverUrl) {
+    try {
+      const result = await new ChuskyClient(config).revokeDevice(config.deviceName);
+      if (!result.ok) remoteError = result.error || "remote device revocation failed";
+    } catch (error) { remoteError = error instanceof Error ? error.message : String(error); }
+  }
+  await saveCliConfig({ serverUrl: config.serverUrl, deviceName: config.deviceName, color: config.color });
+  console.log(remoteError ? formatWarning(`Logged out locally, but remote revocation could not be confirmed: ${remoteError}`, color) : formatSuccess("Logged out and revoked this terminal when the server was reachable.", color));
 }
 
 async function prompt(message: string): Promise<string> {
@@ -365,7 +388,8 @@ async function chat(): Promise<void> {
       if (line === "/dashboard") { const result = await client.dashboard(); console.log(result.ok ? `${formatSuccess("Dashboard:", color)} ${result.url}` : formatError(result.error || "Dashboard is not configured.", color)); continue; }
       if (line === "/export") {
         const current = await client.session(); if (!current.ok) { console.log(formatError(current.error || "Could not load session.", color)); continue; }
-        const path = join(process.cwd(), `chusky-export-${Date.now()}.txt`); const text = [`Chusky AI Agent`, `Model: ${current.model}`, `Exported: ${new Date().toISOString()}`, "─".repeat(50), "", ...(current.history || []).flatMap((m: any) => [`[${m.role === "user" ? "You" : "Chusky"}]`, m.content, ""])].join("\n");
+        const history = await loadCollection(client, "history");
+        const path = join(process.cwd(), `chusky-export-${Date.now()}.txt`); const text = [`Chusky AI Agent`, `Model: ${current.model}`, `Exported: ${new Date().toISOString()}`, "─".repeat(50), "", ...history.flatMap((m: any) => [`[${m.role === "user" ? "You" : "Chusky"}]`, m.content, ""])].join("\n");
         await writeFile(path, text, "utf8"); console.log(formatSuccess(`Conversation exported to ${path}`, color)); continue;
       }
       if (line === "/history") { const items = await loadCollection(client, "history"); await showPaged(items.map((m) => `${m.role}: ${m.content}`).join("\n") || "No history.", true); continue; }
@@ -648,6 +672,7 @@ async function chat(): Promise<void> {
             }
           }
           else if (event.type === "start") process.stdout.write(`${formatStatus("Model", event.model || session.model, color)}\n`);
+          else if (event.type === "tool" && event.tool) process.stdout.write(`${formatToolActivity(event.tool, color)}\n`);
           else if (event.type === "approval_required" && event.approval) { pendingApproval = event.approval; }
           else if (event.type === "done") final = event;
           else if (event.type === "error") console.log(`\n${formatError(event.error || "Unknown Chusky error", color)}`);
@@ -697,13 +722,15 @@ async function devicesCommand(name?: string): Promise<void> {
 async function main(): Promise<void> {
   const command = process.argv[2] || "chat";
   if (command === "auth" && process.argv[3] === "link") await pair();
+  else if (command === "auth" && process.argv[3] === "status") await authStatus();
+  else if (command === "auth" && process.argv[3] === "logout") await authLogout();
   else if (command === "setup") await runSetup();
   else if (command === "doctor" || command === "health") await runDoctor(arg("--server"));
   else if (command === "telegram" || command === "start") await service();
   else if (command === "chat") await chat();
   else if (command === "devices") await devicesCommand();
   else if (command === "revoke") await devicesCommand(process.argv.slice(3).join(" ").trim());
-  else if (command === "help" || command === "--help" || command === "-h") console.log("chusky setup | doctor | chat | telegram | start | auth link");
+  else if (command === "help" || command === "--help" || command === "-h") console.log("chusky setup | doctor | chat | telegram | start | auth link [--token <token> | --code <code>] | auth status | auth logout");
   else throw new Error(`Unknown command: ${command}`);
 }
 

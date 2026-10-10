@@ -93,6 +93,22 @@ export function formatToolSummary(tools: string[], cost: number | undefined, col
   return formatStatus("Done", details, color);
 }
 
+function humanizeToolSlug(slug: string): string {
+  const parts = slug.replace(/^CHUCK_/, "").split("_").filter(Boolean);
+  if (!parts.length) return slug;
+  const toolkit = parts.shift()!.toLowerCase();
+  const action = parts.join(" ").toLowerCase();
+  return action ? `${toolkit} · ${action}` : toolkit;
+}
+
+export function formatToolActivity(activity: { toolSlug: string; status: "started" | "completed" | "failed" | "approval_required" | "cancelled"; summary?: string; durationMs?: number; actionLabel?: string; toolkitName?: string }, color = process.stdout.isTTY === true): string {
+  const label = activity.actionLabel || (activity.toolkitName ? `${activity.toolkitName} · ${humanizeToolSlug(activity.toolSlug).split(" · ").slice(1).join(" · ") || "action"}` : humanizeToolSlug(activity.toolSlug));
+  const symbol = activity.status === "started" ? "→" : activity.status === "completed" ? "✓" : activity.status === "approval_required" ? "!" : activity.status === "cancelled" ? "×" : "✗";
+  const tone = activity.status === "completed" ? "green" : activity.status === "started" ? "cyan" : activity.status === "approval_required" ? "yellow" : "red";
+  const detail = [activity.summary, typeof activity.durationMs === "number" ? `${activity.durationMs}ms` : undefined].filter(Boolean).join("  ·  ");
+  return `  ${paint(symbol, tone, color)} ${paint(label, activity.status === "started" ? "cyan" : "white", color)}${detail ? `  ${paint(detail, "dim", color)}` : ""}`;
+}
+
 function inline(text: string, color: boolean): string {
   let out = text.replace(/\\([*_`\[\]\\])/g, "$1");
   const link = (_match: string, label: string, target: string) => {

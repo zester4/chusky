@@ -115,6 +115,28 @@ test("CLI client polls authenticated event snapshots with a monotonic cursor", a
   } finally { globalThis.fetch = original; }
 });
 
+test("CLI event stream reconnects after a dropped connection and advances its cursor", async () => {
+  const original = globalThis.fetch;
+  const calls: string[] = [];
+  const controller = new AbortController();
+  globalThis.fetch = (async (input) => {
+    calls.push(String(input));
+    if (calls.length === 1) return new Response(new ReadableStream<Uint8Array>({ start(stream) { stream.close(); } }), { status: 200 });
+    const body = `event: notification\ndata: ${JSON.stringify({ ok: true, now: 2000, tasks: [], runs: [], approvals: [], reminders: [], jobs: [] })}\n\n`;
+    return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+  }) as typeof fetch;
+  try {
+    const events = [];
+    for await (const event of new ChuskyClient({ serverUrl: "https://example.test", token: "token" }).eventStream(1000, controller.signal)) {
+      events.push(event);
+      controller.abort();
+    }
+    assert.equal(events.length, 1);
+    assert.match(calls[0]!, /since=1000/);
+    assert.match(calls[1]!, /since=1000/);
+  } finally { globalThis.fetch = original; }
+});
+
 test("CLI client exposes Telegram parity management APIs", async () => {
   const original = globalThis.fetch;
   const calls: { path: string; method: string; body?: any }[] = [];

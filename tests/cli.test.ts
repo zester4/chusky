@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatApproval, formatError, formatSessionBanner, formatSuccess, formatToolSummary, renderMarkdown } from "../src/cli/renderer.js";
+import { formatApproval, formatError, formatSessionBanner, formatSuccess, formatToolActivity, formatToolSummary, renderMarkdown } from "../src/cli/renderer.js";
 
 test("terminal renderer keeps Markdown readable without ANSI", () => {
   const output = renderMarkdown("# Hello\n\n**bold** and `code`\n\n- one\n- two\n\n```ts\nconst ok = true;\n```", false);
@@ -28,6 +28,14 @@ test("terminal renderer adds distinct ANSI colors only when enabled", () => {
   assert.match(formatError("failed", true), /✗/);
   assert.match(formatToolSummary(["GITHUB_LIST_REPOS"], 0.0012, true), /1 tool/);
   assert.doesNotMatch(formatSessionBanner("test/model", 42, "laptop", false), /\u001b\[/);
+});
+
+test("terminal renderer presents tool activity as compact safe status lines", () => {
+  const started = formatToolActivity({ toolSlug: "GMAIL_SEND_EMAIL", status: "started" }, false);
+  const completed = formatToolActivity({ toolSlug: "GMAIL_SEND_EMAIL", status: "completed", summary: "1 result returned", durationMs: 420 }, false);
+  assert.equal(started, "  → gmail · send email");
+  assert.equal(completed, "  ✓ gmail · send email  1 result returned  ·  420ms");
+  assert.doesNotMatch(completed, /recipient|subject|args/i);
 });
 
 test("colored Markdown tables keep visible columns aligned", () => {

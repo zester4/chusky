@@ -4,6 +4,8 @@ import { StringDecoder } from "node:string_decoder";
 
 const COMMANDS = [
   "/help", "/status", "/history", "/memory", "/scratchpad", "/reminders", "/jobs", "/tasks", "/task",
+  "/autonomy", "/missions", "/mission", "/context", "/departments", "/outcomes", "/workers", "/worker",
+  "/skills", "/skill", "/artifacts", "/artifact", "/videos", "/video", "/runs", "/run", "/webhooks", "/webhook", "/deliveries",
   "/apps", "/connect", "/tools", "/triggers", "/trigger", "/channel", "/meetings", "/meeting", "/voice", "/call", "/usage", "/export", "/dashboard",
   "/attach", "/devices", "/revoke", "/model", "/approve", "/deny", "/clear history", "/clear session", "/exit",
 ];
