@@ -14,6 +14,7 @@ export interface CapabilityGapSuggestion {
   score: number;
   candidateType: "ask";
   expectedToolkits: string[];
+  connectionState: "missing" | "needs_reconnect";
 }
 
 export interface ConnectedActionMetadata {
@@ -130,6 +131,14 @@ function activeToolkitSet(accounts: readonly CapabilityDiscoveryAccount[]): Set<
     .filter(Boolean));
 }
 
+function hasUnavailableMatchingAccount(accounts: readonly CapabilityDiscoveryAccount[], expectedToolkits: readonly string[]): boolean {
+  return accounts.some((account) =>
+    Boolean(account.status) &&
+    !["ACTIVE", "CONNECTED", "ENABLED"].includes(account.status!.toUpperCase()) &&
+    expectedToolkits.some((toolkit) => normalizeToolkit(toolkit) === normalizeToolkit(account.toolkit)),
+  );
+}
+
 function readableCapabilities(ids: readonly string[]): string {
   return ids.map((id) => capabilityById.get(id)?.title ?? id).slice(0, 5).join(", ");
 }
@@ -150,16 +159,25 @@ export function discoverMissingCapabilityGaps(
     .filter((definition) => !definition.expectedToolkits.some((toolkit) => connected.has(normalizeToolkit(toolkit))))
     .sort((a, b) => (b.score + relevance(b)) - (a.score + relevance(a)))
     .slice(0, maxSuggestions)
-    .map((definition) => ({
+    .map((definition) => {
+      const connectionState = hasUnavailableMatchingAccount(accounts, definition.expectedToolkits) ? "needs_reconnect" as const : "missing" as const;
+      const target = definition.title.replace(/^Connect\s+/i, "");
+      return {
       key: definition.key,
-      title: definition.title,
-      reason: `${definition.title} is not connected. Elena could use it for ${definition.unlocks}. Useful capabilities: ${readableCapabilities(definition.capabilityIds)}.`,
-      proposedAction: definition.action,
+      title: connectionState === "needs_reconnect" ? `Reconnect ${target}` : definition.title,
+      reason: connectionState === "needs_reconnect"
+        ? `${target} needs reconnection. Elena found an existing connection, but it is not currently active, so she cannot monitor or use it yet. Useful capabilities after reconnection: ${readableCapabilities(definition.capabilityIds)}.`
+        : `${definition.title} is not connected. Elena could use it for ${definition.unlocks}. Useful capabilities: ${readableCapabilities(definition.capabilityIds)}.`,
+      proposedAction: connectionState === "needs_reconnect"
+        ? `Reconnect ${target} from Connected Apps. Once it is active, Elena can resume the smallest safe read-only watch for ${definition.unlocks}.`
+        : definition.action,
       capabilityIds: [...definition.capabilityIds],
       score: Math.min(0.99, definition.score + relevance(definition)),
       candidateType: "ask" as const,
       expectedToolkits: [...definition.expectedToolkits],
-    }));
+      connectionState,
+      };
+    });
 }
 
 const ACTION_REQUIREMENTS: readonly { key: string; title: string; toolkitKeys: string[]; terms: string[]; score: number }[] = [
