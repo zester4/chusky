@@ -2183,6 +2183,26 @@ test("connected-app catalogue returns official Composio metadata with cursor pag
   });
 });
 
+test("connected-app fast catalogue skips provider enrichment and account metadata", async () => {
+  let metadataCalls = 0;
+  let accountCalls = 0;
+  setAgentDependenciesForTests({ composio: {
+    connectedAccounts: { list: async () => { accountCalls += 1; return { items: [] }; } },
+    toolkits: { get: async () => { metadataCalls += 1; return { name: "Gmail" }; } },
+    create: async () => ({ toolkits: async () => ({ items: [{ slug: "gmail", name: "Gmail", isNoAuth: false, connection: { isActive: false } }], currentPage: 1, totalPages: 1, totalItems: 1 }) }),
+  } });
+  const response = await app().fetch(new Request("http://local/v1/apps?limit=30&enrich=false", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "apps-fast-owner" } }));
+  assert.equal(response.status, 200);
+  assert.equal(metadataCalls, 0);
+  assert.equal(accountCalls, 0);
+  const item = (await response.json() as { data: Array<Record<string, unknown>> }).data[0]!;
+  assert.equal(item.slug, "gmail");
+  assert.equal(item.name, "Gmail");
+  assert.equal(item.connected, false);
+  assert.equal(item.noAuth, false);
+  assert.equal(item.accountCount, 0);
+});
+
 test("meeting capabilities expose safe exact actions with connected-account state", async () => {
   setAgentDependenciesForTests({ composio: {
     connectedAccounts: {
