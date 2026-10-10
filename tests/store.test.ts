@@ -10,7 +10,7 @@ import {
   claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease,
   type DaytonaWorkspaceRecord, type SdkRunRecord, type TriggerEventRecord,
   createTriggerEvent, getTriggerEvent, listTriggerEvents, updateTriggerEvent,
-  backfillSdkPrivateRunHistory, createWebTelegramLinkCode, getTelegramUserIdForWebAuth, mergeLinkedWebSession, redeemWebTelegramLinkCode,
+  backfillSdkPrivateRunHistory, createWebTelegramLinkCode, getTelegramUserIdForWebAuth, mergeLinkedWebSession, mutateSession, redeemWebTelegramLinkCode,
   createVideoJob, getVideoJob, listVideoJobs, updateVideoJob,
   addRecallMeeting, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, updateRecallMeeting, claimRecallCopilotEvaluation,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
@@ -38,6 +38,30 @@ test("in-memory sessions return detached snapshots like the Redis backend", asyn
   await saveSession(userId, detached);
   detached.history[0]!.content = "post-save mutation";
   assert.equal((await getSession(userId)).history[0]?.content, "unsaved mutation");
+});
+
+test("background session reconciliation skips a lease held by another worker", async () => {
+  const userId = 810135;
+  let releaseHolder!: () => void;
+  const holderReleased = new Promise<void>((resolve) => { releaseHolder = resolve; });
+  let holderStarted!: () => void;
+  const holderReady = new Promise<void>((resolve) => { holderStarted = resolve; });
+
+  const holder = mutateSession(userId, async () => {
+    holderStarted();
+    await holderReleased;
+    return true;
+  }, { allSdkRuns: true });
+  await holderReady;
+
+  const startedAt = performance.now();
+  const skipped = await mutateSession(userId, () => true, { allSdkRuns: true, skipIfBusy: true });
+  const elapsedMs = performance.now() - startedAt;
+  assert.equal(skipped, undefined);
+  assert.ok(elapsedMs < 100, `busy background mutation took ${elapsedMs.toFixed(1)}ms`);
+
+  releaseHolder();
+  await holder;
 });
 
 test("trigger handling instructions persist only for triggers owned by the session", async () => {
