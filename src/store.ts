@@ -297,6 +297,8 @@ export interface UserSession {
     sourceMessageIds?: string[];
     sourceSdkThreadsUpdatedAt?: number;
     sourceSdkThreadIds?: string[];
+    sourcePhoneCallIds?: string[];
+    sourceApprovalIds?: string[];
   }>;
   /** Existing first-party dashboard runs copied into canonical private history. */
   sdkPrivateHistoryBackfilled?: boolean;
@@ -465,10 +467,19 @@ export interface PhoneCallRecord {
   /** Approved representation details and read-only capability scope. */
   voiceProfile?: VoiceCallProfile;
   status: "starting" | "bridging" | "active" | "ended" | "failed";
+  runtimeState?: "healthy" | "degraded" | "reconnecting" | "ended";
+  /** Opaque bridge checkpoint references; never provider credentials. */
+  bridgeSessionId?: string;
+  lastCommittedTurnId?: string;
+  continuity?: { sourceCallId: string; summary: string; decisions: string[]; actionItems: string[] };
   providerCallId?: string;
   error?: string;
   /** Bland's post-call analysis, safely bounded and scoped to this owner. */
   summary?: string;
+  /** Structured owner-private outcome generated from bounded completed turns. */
+  outcome?: import("./calls/outcome.js").PhoneCallOutcome;
+  outcomeStatus?: "pending" | "completed" | "failed";
+  outcomeErrorCode?: string;
   callLengthSeconds?: number;
   postCallProcessedAt?: number;
   createdAt: number;
@@ -5100,6 +5111,30 @@ function normalizeAutonomyRun(value: unknown, uid: number): AutonomousRunRecord 
   };
 }
 
+function normalizePhoneCallOutcome(value: unknown): PhoneCallRecord["outcome"] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const item = value as Record<string, unknown>;
+  const text = (candidate: unknown, max: number): string | undefined => typeof candidate === "string" && candidate.trim() && candidate.length <= max
+    ? candidate.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ").trim()
+    : undefined;
+  const list = (candidate: unknown, maxItem: number): string[] => Array.isArray(candidate)
+    ? candidate.slice(0, 10).flatMap((entry) => { const normalized = text(entry, maxItem); return normalized ? [normalized] : []; })
+    : [];
+  const rawItems = Array.isArray(item.actionItems) ? item.actionItems : [];
+  const actionItems = rawItems.slice(0, 10).flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const action = entry as Record<string, unknown>;
+    const task = text(action.task, 500);
+    const owner = text(action.owner, 120);
+    if (!task || !owner) return [];
+    const dueDate = text(action.dueDate, 80);
+    return [{ task, owner, ...(dueDate ? { dueDate } : {}) }];
+  });
+  const title = text(item.title, 180);
+  const summary = text(item.summary, 2_000);
+  return title && summary ? { title, summary, decisions: list(item.decisions, 700), actionItems, openQuestions: list(item.openQuestions, 700) } : undefined;
+}
+
 function normalizePulseEvidence(value: unknown): JobOccurrenceRecord["pulseEvidence"] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const input = value as Record<string, unknown>;
@@ -5266,10 +5301,24 @@ export async function getSession(uid: number): Promise<UserSession> {
       ...(item.callProfile === "business" || item.callProfile === "personal" ? { callProfile: item.callProfile } : {}),
       ...(item.callVerification === "public" || item.callVerification === "identified" || item.callVerification === "verified" ? { callVerification: item.callVerification } : {}),
       phoneNumber: item.phoneNumber.slice(0, 32), purpose: item.purpose.slice(0, 1000), status,
+      ...(item.runtimeState === "healthy" || item.runtimeState === "degraded" || item.runtimeState === "reconnecting" || item.runtimeState === "ended" ? { runtimeState: item.runtimeState } : {}),
+      ...(typeof item.bridgeSessionId === "string" && /^[A-Za-z0-9:_-]{1,160}$/.test(item.bridgeSessionId) ? { bridgeSessionId: item.bridgeSessionId } : {}),
+      ...(typeof item.lastCommittedTurnId === "string" && /^[A-Za-z0-9:_-]{1,160}$/.test(item.lastCommittedTurnId) ? { lastCommittedTurnId: item.lastCommittedTurnId } : {}),
+      ...(item.continuity && typeof item.continuity === "object" && !Array.isArray(item.continuity) && typeof (item.continuity as Record<string, unknown>).sourceCallId === "string" && typeof (item.continuity as Record<string, unknown>).summary === "string" ? {
+        continuity: {
+          sourceCallId: String((item.continuity as Record<string, unknown>).sourceCallId).slice(0, 128),
+          summary: String((item.continuity as Record<string, unknown>).summary).slice(0, 2_000),
+          decisions: Array.isArray((item.continuity as Record<string, unknown>).decisions) ? ((item.continuity as Record<string, unknown>).decisions as unknown[]).filter((entry): entry is string => typeof entry === "string").slice(0, 10).map((entry: string) => entry.slice(0, 500)) : [],
+          actionItems: Array.isArray((item.continuity as Record<string, unknown>).actionItems) ? ((item.continuity as Record<string, unknown>).actionItems as unknown[]).filter((entry): entry is string => typeof entry === "string").slice(0, 10).map((entry: string) => entry.slice(0, 500)) : [],
+        },
+      } : {}),
       ...(item.voiceProfile && typeof item.voiceProfile === "object" && !Array.isArray(item.voiceProfile) ? { voiceProfile: normalizeVoiceCallProfile(item.voiceProfile) } : {}),
       ...(typeof item.providerCallId === "string" ? { providerCallId: item.providerCallId.slice(0, 100) } : {}),
       ...(typeof item.error === "string" ? { error: item.error.slice(0, 500) } : {}),
       ...(typeof item.summary === "string" ? { summary: item.summary.slice(0, 2000) } : {}),
+      ...(item.outcome && typeof item.outcome === "object" && !Array.isArray(item.outcome) ? { outcome: normalizePhoneCallOutcome(item.outcome) } : {}),
+      ...(item.outcomeStatus === "pending" || item.outcomeStatus === "completed" || item.outcomeStatus === "failed" ? { outcomeStatus: item.outcomeStatus } : {}),
+      ...(typeof item.outcomeErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(item.outcomeErrorCode) ? { outcomeErrorCode: item.outcomeErrorCode } : {}),
       ...(typeof item.callLengthSeconds === "number" && Number.isFinite(item.callLengthSeconds) && item.callLengthSeconds >= 0 ? { callLengthSeconds: Math.min(item.callLengthSeconds, 86_400) } : {}),
       ...(typeof item.postCallProcessedAt === "number" && Number.isFinite(item.postCallProcessedAt) ? { postCallProcessedAt: item.postCallProcessedAt } : {}),
       createdAt: typeof item.createdAt === "number" && Number.isFinite(item.createdAt) ? item.createdAt : Date.now(),
@@ -5370,6 +5419,8 @@ export async function getSession(uid: number): Promise<UserSession> {
     sourceMessageIds: Array.isArray(item.sourceMessageIds) ? item.sourceMessageIds.filter((id): id is string => typeof id === "string" && id.startsWith("web-import:") && id.length <= 100).slice(-400) : [],
     ...(Number.isFinite(item.sourceSdkThreadsUpdatedAt) ? { sourceSdkThreadsUpdatedAt: item.sourceSdkThreadsUpdatedAt } : {}),
     ...(Array.isArray(item.sourceSdkThreadIds) ? { sourceSdkThreadIds: item.sourceSdkThreadIds.filter((id): id is string => typeof id === "string" && id.length <= 180).slice(-100) } : {}),
+    ...(Array.isArray(item.sourcePhoneCallIds) ? { sourcePhoneCallIds: item.sourcePhoneCallIds.filter((id): id is string => typeof id === "string" && id.length <= 128).slice(-100) } : {}),
+    ...(Array.isArray(item.sourceApprovalIds) ? { sourceApprovalIds: item.sourceApprovalIds.filter((id): id is string => typeof id === "string" && id.length <= 160).slice(-100) } : {}),
   })) : [];
   s.sdkPrivateHistoryBackfilled = s.sdkPrivateHistoryBackfilled === true;
   s.departmentSpaces = Array.isArray(s.departmentSpaces) ? s.departmentSpaces.filter((item): item is DepartmentSpaceRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string").slice(-50) : [];
@@ -5780,7 +5831,7 @@ export async function addPhoneCall(uid: number, record: PhoneCallRecord): Promis
   return record;
 }
 
-type PhoneCallPatch = Partial<Pick<PhoneCallRecord, "status" | "providerCallId" | "error" | "summary" | "callLengthSeconds">>;
+type PhoneCallPatch = Partial<Pick<PhoneCallRecord, "status" | "runtimeState" | "bridgeSessionId" | "lastCommittedTurnId" | "continuity" | "providerCallId" | "error" | "summary" | "callLengthSeconds" | "postCallProcessedAt" | "outcome" | "outcomeStatus" | "outcomeErrorCode">>;
 
 function nextPhoneCallStatus(current: PhoneCallRecord["status"], next: PhoneCallRecord["status"], provider?: PhoneCallRecord["provider"]): PhoneCallRecord["status"] {
   if (provider !== "bland") return next;
@@ -5949,17 +6000,21 @@ export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId
   if (!Number.isSafeInteger(sourceUserId) || sourceUserId <= 0 || !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 || sourceUserId === telegramUserId) return;
   const source = await getSessionWithSdkRuns(sourceUserId);
   const sourceSdkThreads = importableWebSdkThreads(source);
+  const sourcePhoneCallIds = (source.phoneCalls ?? []).map((call) => call.id).slice(-100);
+  const sourceApprovalIds = (await listApprovals(sourceUserId, 100)).map((approval) => approval.id).slice(-100);
   const existingTarget = await getSession(telegramUserId);
   const priorImport = existingTarget.linkedWebSessionImports?.find((item) => item.sourceUserId === sourceUserId);
   const durableMemoryNeedsMerge = durableMemoryConfigured() && priorImport?.sourceDurableMemoryUpdatedAt !== source.updatedAt;
-  if (priorImport?.sourceUpdatedAt === source.updatedAt && !durableMemoryNeedsMerge && sdkThreadImportComplete(priorImport, sourceSdkThreads, existingTarget)) return;
+  const linkedRecordsComplete = Boolean(priorImport && sourcePhoneCallIds.every((id) => priorImport.sourcePhoneCallIds?.includes(id)) && sourceApprovalIds.every((id) => priorImport.sourceApprovalIds?.includes(id)));
+  if (priorImport?.sourceUpdatedAt === source.updatedAt && !durableMemoryNeedsMerge && linkedRecordsComplete && sdkThreadImportComplete(priorImport, sourceSdkThreads, existingTarget)) return;
   let importedMemories: MemoryFact[] = [];
 
   if (durableMemoryNeedsMerge) await mergeDurablePersonalMemories(sourceUserId, telegramUserId);
 
-  await mutateSession(telegramUserId, (target) => {
+  await mutateSession(telegramUserId, async (target) => {
     const currentPriorImport = target.linkedWebSessionImports?.find((item) => item.sourceUserId === sourceUserId);
-    if (currentPriorImport?.sourceUpdatedAt === source.updatedAt && !durableMemoryNeedsMerge && sdkThreadImportComplete(currentPriorImport, sourceSdkThreads, target)) return;
+    const currentRecordsComplete = Boolean(currentPriorImport && sourcePhoneCallIds.every((id) => currentPriorImport.sourcePhoneCallIds?.includes(id)) && sourceApprovalIds.every((id) => currentPriorImport.sourceApprovalIds?.includes(id)));
+    if (currentPriorImport?.sourceUpdatedAt === source.updatedAt && !durableMemoryNeedsMerge && currentRecordsComplete && sdkThreadImportComplete(currentPriorImport, sourceSdkThreads, target)) return;
     const previouslyImportedSourceIds = new Set(currentPriorImport?.sourceMessageIds ?? []);
 
     const canonicalCounts = new Map<string, number>();
@@ -6030,12 +6085,28 @@ export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId
       .map((node) => ({ ...structuredClone(node), userId: telegramUserId }));
     if (importedContext.length) target.contextNodes = [...(target.contextNodes ?? []), ...importedContext].slice(-1000);
 
+    const sourceCalls = source.phoneCalls ?? [];
+    const sourceCallSet = new Set(sourcePhoneCallIds);
+    const retainedCalls = (target.phoneCalls ?? []).filter((call) => !sourceCallSet.has(call.id));
+    target.phoneCalls = [...retainedCalls, ...sourceCalls.map((call) => ({ ...structuredClone(call), userId: telegramUserId }))]
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id)).slice(-50);
+
+    const sourceApprovals = await listApprovals(sourceUserId, 100);
+    const targetApprovalIds = new Set((target.approvals ?? []).map((approval) => approval.id));
+    const approvalsToImport = sourceApprovals.filter((approval) => !targetApprovalIds.has(approval.id));
+    for (const approval of approvalsToImport) {
+      await backend.saveApproval({ ...structuredClone(approval), userId: telegramUserId });
+    }
+    if (approvalsToImport.length) target.approvals = [...(target.approvals ?? []), ...approvalsToImport.map((approval) => ({ ...structuredClone(approval), userId: telegramUserId }))].slice(-20);
+
     target.linkedWebSessionImports = [...(target.linkedWebSessionImports ?? []).filter((item) => item.sourceUserId !== sourceUserId), {
       sourceUserId, sourceUpdatedAt: source.updatedAt,
       ...(durableMemoryConfigured() ? { sourceDurableMemoryUpdatedAt: source.updatedAt } : {}),
       sourceMessageIds: historyImports.map((message) => message.sourceId!).slice(-400),
       sourceSdkThreadsUpdatedAt: Math.max(0, ...sourceSdkThreads.map((thread) => Number.isFinite(thread.updatedAt) ? thread.updatedAt : 0)),
       sourceSdkThreadIds: sourceSdkThreads.map((thread) => thread.id).slice(-100),
+      sourcePhoneCallIds,
+      sourceApprovalIds,
     }].slice(-20);
   }, { allSdkRuns: true });
 

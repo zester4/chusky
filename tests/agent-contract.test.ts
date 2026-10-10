@@ -1381,7 +1381,8 @@ test("private voice turns keep the Chusky context but skip Composio setup and du
       sort: { by: "latency", partition: "none" },
     });
     assert.equal(requestBody?.max_tokens, config.voiceMaxTokens);
-    assert.deepEqual(requestBody?.models, ["test/model", "google/gemini-2.5-flash"]);
+    assert.deepEqual(requestBody?.models, ["test/model", "google/gemini-3.5-flash"]);
+    assert.equal(requestBody?.reasoning_effort, "minimal");
     assert.equal((await listAgentRuns(userId)).length, 0);
     await assert.rejects(
       () => runAgent(userId, "place the call", [], "test/model", undefined, undefined, undefined, undefined, undefined, {
@@ -1390,6 +1391,34 @@ test("private voice turns keep the Chusky context but skip Composio setup and du
       }),
       /explicit allowlist of read-only Chusky tools/,
     );
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("voice empty completions are bounded and return a spoken recovery instead of a blank turn", async () => {
+  const userId = 830053;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const originalFetch = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = (async () => {
+    requests += 1;
+    return chatResponse({ role: "assistant", content: "" });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(
+      userId,
+      "Are you there?",
+      [],
+      "test/model",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { voiceTurn: true, toolAllow: [] },
+    );
+    assert.match(result.text, /didn.t get a complete response/i);
+    assert.equal(requests, 2, "voice must perform at most one empty-completion retry");
   } finally { globalThis.fetch = originalFetch; }
 });
 

@@ -1955,8 +1955,9 @@ export function registerSdkApi(app: Hono): void {
     const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(50, Math.floor(rawLimit))) : 30;
     const cursor = c.req.query("cursor")?.trim();
     const search = c.req.query("search")?.trim().slice(0, 120);
+    const enrich = c.req.query("enrich") !== "false";
     try {
-      const page = await getToolkitStatesPage(sdkUser(c)!.userId, { limit, enrich: true, ...(cursor ? { cursor } : {}), ...(search ? { search } : {}) });
+      const page = await getToolkitStatesPage(sdkUser(c)!.userId, { limit, enrich, ...(enrich ? {} : { includeAccounts: false }), ...(cursor ? { cursor } : {}), ...(search ? { search } : {}) });
       return c.json({ data: page.items, nextCursor: page.cursor, currentPage: page.currentPage, totalPages: page.totalPages, total: page.totalItems, pageSize: limit });
     }
     catch (error) { return apiError(c, 502, "apps_unavailable", error instanceof Error ? error.message : "Connected apps are temporarily unavailable."); }
