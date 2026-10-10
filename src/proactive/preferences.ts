@@ -2,6 +2,7 @@ import { configureAttentionPulse, type NativeToolRuntime } from "../nativeTools.
 import { createAttentionRecord, listAttentionRecords, listChannelIdentities, updateAttentionRecord, type AutonomyProfileRecord, type DeliveryPreferenceRecord } from "../store.js";
 import type { ChannelProvider } from "../channels/contracts.js";
 import { classifyPulseHealth, type PulseHealth, type PulseHealthOccurrence } from "./pulseHealth.js";
+import { DEFAULT_PULSE_DOMAINS } from "./watches.js";
 
 export type PulseCadence = "every_30_minutes" | "hourly" | "daily";
 export type PulseAuthority = "observe" | "prepare" | "execute_reversible";
@@ -37,7 +38,7 @@ const CADENCE_CRON: Record<PulseCadence, string> = {
   hourly: "0 * * * *",
   daily: "0 9 * * *",
 };
-const DEFAULT_DOMAINS = ["gmail", "calendar"];
+const DEFAULT_DOMAINS = [...DEFAULT_PULSE_DOMAINS];
 const PROVIDERS = new Set<ChannelProvider>(["telegram", "slack", "whatsapp", "sendblue", "sms", "x", "xchat", "voice", "cli", "webhook"]);
 
 function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {

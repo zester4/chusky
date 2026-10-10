@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { PROACTIVE_CAPABILITIES, proactiveCataloguePrompt } from "../src/proactive/catalog.js";
-import { DEFAULT_PROACTIVE_WATCHES, PROACTIVE_WATCH_DEFINITIONS, connectedWatchInput, connectedWatchSpecs, defaultWatchInput, defaultWatchSpecsForConnectedAccounts, missingDefaultWatchKeys, normalizeProactiveCapabilityIds, proactiveWatchDefinition, watchCapabilityIds } from "../src/proactive/watches.js";
+import { DEFAULT_PROACTIVE_WATCHES, PROACTIVE_WATCH_DEFINITIONS, connectedWatchInput, connectedWatchSpecs, defaultWatchInput, defaultWatchSpecsForConnectedAccounts, filterWatchSpecsByAllowedDomains, missingDefaultWatchKeys, normalizeProactiveCapabilityIds, proactiveWatchDefinition, watchCapabilityIds, watchDomainAllowed } from "../src/proactive/watches.js";
 import { proactiveHeartbeatText } from "../src/proactive/heartbeat.js";
 import { buildDailyOperatingBriefing, detectProactiveFindings, PROACTIVE_RUN_LEVEL_CAPABILITY_IDS, PROACTIVE_SIGNAL_CAPABILITY_IDS } from "../src/proactive/detectors.js";
 import { attentionPulseDeliveryDecision } from "../src/attentionPulse.js";
@@ -56,6 +56,17 @@ test("connected app starter watches are bounded, account-scoped, and read-only",
   assert.equal(input.accountAlias, "Work Slack");
   assert.equal(input.authority, "observe");
   assert.equal(input.nextCheckAt, 1_000);
+});
+
+test("Pulse app scope filters connected watches without losing provider aliases", () => {
+  assert.equal(watchDomainAllowed("gmail", ["mail"]), true);
+  assert.equal(watchDomainAllowed("calendar", ["googlecalendar"]), true);
+  assert.equal(watchDomainAllowed("github", ["gmail", "calendar"]), false);
+  const specs = connectedWatchSpecs([
+    { id: "slack-1", toolkit: "slack", status: "ACTIVE" },
+    { id: "github-1", toolkit: "github", status: "ACTIVE" },
+  ]);
+  assert.deepEqual(filterWatchSpecsByAllowedDomains(specs, ["slack"]).map((spec) => spec.key), ["slack-attention"]);
 });
 
 test("Elena's checklist is continuity context, not a closed task list", () => {

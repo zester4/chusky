@@ -11,7 +11,7 @@ import { classifyMemory } from "./memory/classifier.js";
 import { config } from "./config.js";
 import { ensureAttentionPulseCapabilityCandidates, getAttentionPulseWatchCoverage } from "./attentionPulse.js";
 import { classifyPulseHealth } from "./proactive/pulseHealth.js";
-import { DEFAULT_PROACTIVE_WATCHES, DEFAULT_WATCH_CONNECTION_WAIT_ERROR, defaultWatchInput, defaultWatchSpecsForConnectedAccounts, missingDefaultWatchKeys, normalizeProactiveCapabilityIds } from "./proactive/watches.js";
+import { DEFAULT_PROACTIVE_WATCHES, DEFAULT_PULSE_DOMAINS, DEFAULT_WATCH_CONNECTION_WAIT_ERROR, DEFAULT_WATCH_PROFILE_SCOPE_ERROR, defaultWatchInput, defaultWatchSpecsForConnectedAccounts, filterWatchSpecsByAllowedDomains, missingDefaultWatchKeys, normalizeProactiveCapabilityIds } from "./proactive/watches.js";
 import { logger } from "./logger.js";
 import { assertPublicHttpUrl, createTinyFishClient } from "./tinyfish.js";
 import { receiveTinyFishMonitorWebhook, tinyFishMonitorSignature, tinyFishMonitorSnapshotHash, validateTinyFishMonitorSchedule } from "./tinyfishMonitors.js";
@@ -26,7 +26,7 @@ import {
   blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, createMission, finalizeMissionIfReady, getMission, listMissions, missionProof, pauseMission, startMission, updateMission, updateMissionControl, waitMission, recordTrustedMissionEvidence, verifyMission, repairMission, missionBudgetPreflight, missingMissionEvidenceRequirements, MissionReplanConflictError,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
   countLeadCampaignCandidates, createLeadCampaign, finalizeLeadCampaign, getLeadCampaign, listLeadCampaigns, listLeadCampaignCandidates, reserveLeadCampaignTregSpend, settleLeadCampaignTregSpend, updateLeadCampaign, updateLeadCampaignCandidate, upsertLeadCampaignCandidates,
-  type AttentionEntityKind, type AutonomyWatchRecord, type DeliveryPreferenceRecord, type ImageAsset, type TinyFishMonitorRecord, type TinyFishResearchRunRecord, type LeadCampaignCandidateRecord,
+  type AttentionEntityKind, type AutonomyProfileRecord, type AutonomyWatchRecord, type DeliveryPreferenceRecord, type ImageAsset, type TinyFishMonitorRecord, type TinyFishResearchRunRecord, type LeadCampaignCandidateRecord,
   type TaskStatus, type MissionStatus, type MissionBudget, type MissionWorkSchedule,
   type JobRecord, type ReminderRecord, type ScheduledWorkerBinding, type ReminderDeliveryTarget,
   listPhoneCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
@@ -1007,8 +1007,13 @@ export async function syncDefaultProactiveWatchesForConnectedAccounts(
   now = Date.now(),
 ): Promise<AutonomyWatchRecord[]> {
   const existing = await listAttentionRecords(userId, "autonomy_watch", { limit: 200 }) as AutonomyWatchRecord[];
-  const availableSpecs = defaultWatchSpecsForConnectedAccounts(accounts);
+  const profiles = await listAttentionRecords(userId, "autonomy_profile", { limit: 20 }) as AutonomyProfileRecord[];
+  const profile = profiles.find((item) => item.mode === "personal");
+  const allowedDomains = profile?.allowedDomains?.length ? profile.allowedDomains : [...DEFAULT_PULSE_DOMAINS];
+  const connectedSpecs = defaultWatchSpecsForConnectedAccounts(accounts);
+  const availableSpecs = filterWatchSpecsByAllowedDomains(connectedSpecs, allowedDomains);
   const availableKeys = new Set(availableSpecs.map((spec) => `${spec.domain}:${spec.name}`.toLowerCase()));
+  const connectedKeys = new Set(connectedSpecs.map((spec) => `${spec.domain}:${spec.name}`.toLowerCase()));
   const defaultKeys = new Set(DEFAULT_PROACTIVE_WATCHES.map((spec) => `${spec.domain}:${spec.name}`.toLowerCase()));
 
   for (const watch of existing) {
@@ -1017,9 +1022,9 @@ export async function syncDefaultProactiveWatchesForConnectedAccounts(
     if (!availableKeys.has(key) && watch.status === "active") {
       await updateAttentionRecord(userId, "autonomy_watch", watch.id, {
         status: "paused",
-        lastError: DEFAULT_WATCH_CONNECTION_WAIT_ERROR,
+        lastError: connectedKeys.has(key) ? DEFAULT_WATCH_PROFILE_SCOPE_ERROR : DEFAULT_WATCH_CONNECTION_WAIT_ERROR,
       });
-    } else if (availableKeys.has(key) && watch.status === "paused" && watch.lastError === DEFAULT_WATCH_CONNECTION_WAIT_ERROR) {
+    } else if (availableKeys.has(key) && watch.status === "paused" && [DEFAULT_WATCH_CONNECTION_WAIT_ERROR, DEFAULT_WATCH_PROFILE_SCOPE_ERROR].includes(watch.lastError ?? "")) {
       await updateAttentionRecord(userId, "autonomy_watch", watch.id, {
         status: "active",
         nextCheckAt: now,

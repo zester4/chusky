@@ -35,6 +35,10 @@ export interface ConnectedWatchSpec extends DefaultWatchSpec {
 
 /** Marker used only for starter watches waiting on their matching account. */
 export const DEFAULT_WATCH_CONNECTION_WAIT_ERROR = "Waiting for the matching connected app before monitoring can begin.";
+/** Marker used when a previously-created watch is outside the current Pulse scope. */
+export const DEFAULT_WATCH_PROFILE_SCOPE_ERROR = "This watch is outside the current Attention Pulse app scope.";
+/** The initial personal Pulse scope when the owner has not selected app domains yet. */
+export const DEFAULT_PULSE_DOMAINS = ["gmail", "calendar"] as const;
 
 /**
  * These are intentionally read-only starter watches. They are created only
@@ -79,8 +83,28 @@ const DEFAULT_WATCH_TOOLKIT_ALIASES: Record<string, readonly string[]> = {
   calendar: ["googlecalendar", "calendar", "outlookcalendar", "microsoftoutlookcalendar"],
 };
 
+const WATCH_DOMAIN_ALIASES: Record<string, readonly string[]> = {
+  gmail: ["gmail", "googlemail", "email", "mail", "outlook", "microsoftoutlook"],
+  calendar: ["calendar", "googlecalendar", "outlookcalendar", "microsoftoutlookcalendar"],
+  drive: ["drive", "googledrive"],
+  sheets: ["sheets", "googlesheets"],
+  teams: ["teams", "microsoftteams"],
+};
+
 function normalizeToolkit(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/** Match a watch domain against the profile's normalized app scope. */
+export function watchDomainAllowed(domain: string, allowedDomains: readonly string[]): boolean {
+  if (!allowedDomains.length) return true;
+  const normalizedDomain = normalizeToolkit(domain);
+  const aliases = new Set([normalizedDomain, ...(WATCH_DOMAIN_ALIASES[normalizedDomain] ?? [])].map(normalizeToolkit));
+  return allowedDomains.some((allowed) => aliases.has(normalizeToolkit(allowed)));
+}
+
+export function filterWatchSpecsByAllowedDomains<T extends { domain: string }>(specs: readonly T[], allowedDomains: readonly string[]): T[] {
+  return specs.filter((spec) => watchDomainAllowed(spec.domain, allowedDomains));
 }
 
 function accountIsActive(account: ConnectedWatchAccount): boolean {
