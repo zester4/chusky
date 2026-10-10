@@ -946,6 +946,12 @@ export interface DaytonaAppRecord {
 
 export type TaskStatus = "queued" | "running" | "blocked" | "completed" | "failed" | "cancel_requested" | "cancelled";
 
+/** Narrow durable payload for the one-time web-to-Telegram history repair. */
+export interface WebSessionReconciliationTask {
+  sourceUserId: number;
+  telegramUserId?: number;
+}
+
 export type MissionStatus = "queued" | "running" | "waiting" | "paused" | "blocked" | "completed" | "failed" | "cancelled";
 
 export interface MissionBudget {
@@ -1199,6 +1205,10 @@ export interface TaskRecord {
   approvedApprovalId?: string;
   /** Compact per-step routing result reused across mission slices and restarts. */
   missionRoutingCache?: MissionRoutingCache;
+  /** Internal task implementation selected by the workflow worker. */
+  taskKind?: "web_session_reconciliation";
+  /** IDs only; session content stays in the owner-scoped store. */
+  webSessionReconciliation?: WebSessionReconciliationTask;
 }
 
 export type ComposerStageStatus = "pending" | "running" | "completed" | "blocked" | "failed" | "cancelled";
@@ -1565,6 +1575,10 @@ export interface TriggerEventRecord {
   error?: string;
   /** Delivery is separate from processing: a missing channel must not erase a completed result. */
   notificationStatus?: "pending" | "delivered" | "unavailable" | "failed";
+  /** First-party dashboard projection for the durable trigger notification. */
+  webThreadId?: string;
+  webRunId?: string;
+  webReadAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -1824,6 +1838,7 @@ interface Backend {
   saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord): Promise<void>;
   clearDaytonaWorkspace(userId: number): Promise<void>;
   listSessionOwnerIds(limit?: number): Promise<number[]>;
+  listTaskOwnerIds(limit?: number): Promise<number[]>;
   listJobOwnerIds(limit?: number): Promise<number[]>;
   getTasks(userId: number): Promise<TaskRecord[]>;
   getTask(userId: number, id: string): Promise<TaskRecord | undefined>;
@@ -3091,6 +3106,21 @@ class RedisBackend implements Backend {
       for (const key of keys) {
         const match = String(key).match(/^chuck:session:(\d+)$/);
         if (match) owners.add(Number(match[1]));
+        if (owners.size >= limit) break;
+      }
+    } while (cursor !== "0" && owners.size < limit);
+    return [...owners].sort((a, b) => a - b).slice(0, limit);
+  }
+  async listTaskOwnerIds(limit = 1000): Promise<number[]> {
+    const owners = new Set<number>();
+    let cursor = "0";
+    do {
+      const [next, keys] = await this.r.scan(cursor, "MATCH", "chuck:tasks:*", "COUNT", Math.min(200, Math.max(1, limit)));
+      cursor = String(next);
+      for (const key of keys) {
+        const match = String(key).match(/^chuck:tasks:(\d+)(?::(?:index|v2))?$/);
+        const userId = match ? Number(match[1]) : NaN;
+        if (Number.isSafeInteger(userId) && userId > 0) owners.add(userId);
         if (owners.size >= limit) break;
       }
     } while (cursor !== "0" && owners.size < limit);
@@ -4419,6 +4449,7 @@ class MemoryBackend implements Backend {
   async saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord) { this.daytona.set(userId, workspace); }
   async clearDaytonaWorkspace(userId: number) { this.daytona.delete(userId); }
   async listSessionOwnerIds(limit = 1000) { return [...new Set([...this.sessions.keys(), ...this.daytona.keys()])].filter((id) => id >= 0).sort((a, b) => a - b).slice(0, limit); }
+  async listTaskOwnerIds(limit = 1000) { return [...this.tasks.keys()].filter((id) => Number.isSafeInteger(id) && id > 0).sort((a, b) => a - b).slice(0, limit); }
   async listJobOwnerIds(limit = 1000) { return [...new Set([...await this.listSessionOwnerIds(limit), ...this.jobs.keys()])].filter((id) => id >= 0).sort((a, b) => a - b).slice(0, limit); }
   async getTasks(userId: number) { return this.tasks.get(userId) ?? []; }
   async getTask(userId: number, id: string) { return (this.tasks.get(userId) ?? []).find((task) => task.id === id); }
@@ -5905,6 +5936,60 @@ export function appendSdkRunHistoryToSession(session: UserSession, threadId: str
   return true;
 }
 
+/**
+ * Materialize one trigger result as an owner-private dashboard chat run.
+ * The event ID in run metadata makes workflow retries idempotent.
+ */
+export async function ensureTriggerWebProjection(input: {
+  userId: number;
+  eventId: string;
+  triggerSlug: string;
+  summary: string;
+  result: string;
+  status: "completed" | "failed";
+}): Promise<{ threadId: string; runId: string }> {
+  const now = Date.now();
+  return mutateSession(input.userId, (session) => {
+    session.sdkThreads = session.sdkThreads ?? [];
+    let thread = session.sdkThreads.find((item) => item.metadata.source === "trigger-notifications");
+    if (!thread) {
+      thread = {
+        id: "thr_trigger_updates",
+        externalId: "trigger-updates",
+        metadata: { source: "trigger-notifications", title: "Trigger updates" },
+        history: [],
+        runs: [],
+        createdAt: now,
+        updatedAt: now,
+      };
+      session.sdkThreads.push(thread);
+    }
+
+    const existing = session.sdkThreads.flatMap((candidate) => candidate.runs.map((run) => ({ candidate, run })))
+      .find(({ run }) => run.metadata?.triggerEventId === input.eventId);
+    const run = existing?.run ?? {
+      id: `run_trigger_${createHash("sha256").update(input.eventId).digest("hex").slice(0, 32)}`,
+      ownerPrivateRun: true,
+      status: input.status,
+      input: `[Trigger ${input.triggerSlug}] ${input.summary}`.slice(0, 12_000),
+      model: session.model,
+      metadata: { source: "trigger", triggerEventId: input.eventId, triggerSlug: input.triggerSlug },
+      events: [
+        { id: `evt_trigger_${input.eventId}_started`, type: "run.started", at: now },
+        { id: `evt_trigger_${input.eventId}_completed`, type: input.status === "failed" ? "run.failed" : "run.completed", at: now },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    } satisfies SdkRunRecord;
+    run.status = input.status;
+    run.output = input.result.slice(0, 12_000);
+    run.updatedAt = now;
+    if (!existing) thread.runs.push(run);
+    thread.updatedAt = now;
+    return { threadId: thread.id, runId: run.id };
+  }) as Promise<{ threadId: string; runId: string }>;
+}
+
 /** One-time import of completed first-party dashboard runs written before account history was canonical. */
 export async function backfillSdkPrivateRunHistory(userId: number, options: { skipIfBusy?: boolean } = {}): Promise<boolean> {
   if (!Number.isSafeInteger(userId) || userId <= 0) return true;
@@ -7039,6 +7124,10 @@ export async function listSessionOwnerIds(limit = 1000): Promise<number[]> {
   return backend.listSessionOwnerIds(Math.max(1, Math.min(10_000, Math.floor(limit))));
 }
 
+export async function listTaskOwnerIds(limit = 1000): Promise<number[]> {
+  return backend.listTaskOwnerIds(Math.max(1, Math.min(10_000, Math.floor(limit))));
+}
+
 export async function listJobOwnerIds(limit = 1000): Promise<number[]> {
   return backend.listJobOwnerIds(Math.max(1, Math.min(10_000, Math.floor(limit))));
 }
@@ -7052,6 +7141,16 @@ function normalizeTask(task: TaskRecord): TaskRecord {
     && /(?:^|_)(?:SEND_EMAIL|EMAIL_SEND)(?:_|$)/.test(followUp.emailTool)
     && ["scheduled", "claimed", "completed", "ambiguous"].includes(followUp.state)
     ? { meetingId: followUp.meetingId, contactId: followUp.contactId, emailTool: followUp.emailTool, state: followUp.state }
+    : undefined;
+  const reconciliation = task.webSessionReconciliation
+    && Number.isSafeInteger(task.webSessionReconciliation.sourceUserId)
+    && task.webSessionReconciliation.sourceUserId > 0
+    && (task.webSessionReconciliation.telegramUserId === undefined
+      || (Number.isSafeInteger(task.webSessionReconciliation.telegramUserId) && task.webSessionReconciliation.telegramUserId > 0))
+    ? {
+      sourceUserId: task.webSessionReconciliation.sourceUserId,
+      ...(task.webSessionReconciliation.telegramUserId !== undefined ? { telegramUserId: task.webSessionReconciliation.telegramUserId } : {}),
+    }
     : undefined;
   return {
     ...task,
@@ -7087,6 +7186,7 @@ function normalizeTask(task: TaskRecord): TaskRecord {
       ? { enqueueClaim: { token: task.enqueueClaim.token.slice(0, 120), expiresAt: Number(task.enqueueClaim.expiresAt) } }
       : { enqueueClaim: undefined }),
     ...(meetingFollowUp ? { meetingFollowUp } : { meetingFollowUp: undefined }),
+    ...(reconciliation ? { taskKind: "web_session_reconciliation" as const, webSessionReconciliation: reconciliation } : { taskKind: undefined, webSessionReconciliation: undefined }),
   };
 }
 
@@ -7130,6 +7230,8 @@ export async function createTask(userId: number, input: Pick<TaskRecord, "title"
     missionStepId: input.missionStepId,
     missionAllowedTools: input.missionAllowedTools,
     missionToolHints: input.missionToolHints,
+    taskKind: input.taskKind,
+    webSessionReconciliation: input.webSessionReconciliation,
     events: [taskEvent(input.runAt ? "scheduled" : "created", input.runAt ? "Task scheduled" : "Task created", 0, now)],
     createdAt: now,
     updatedAt: now,
@@ -8414,6 +8516,23 @@ export async function retryTask(userId: number, id: string): Promise<TaskRecord 
       runAt: Date.now(),
       events: [...task.events, taskEvent("retried", "Task requeued", task.attempt)],
     });
+}
+
+/** Requeue an expired worker lease only for a caller that has proven replay is idempotent. */
+export async function requeueExpiredTask(userId: number, id: string, reason: string): Promise<TaskRecord | undefined> {
+  return mutateTask(userId, id, (task) => {
+    if (task.status !== "running" || !task.lease || task.lease.expiresAt > Date.now()) return undefined;
+    return {
+      status: "queued",
+      lease: undefined,
+      workflowRunId: undefined,
+      enqueueClaim: undefined,
+      runAt: Date.now(),
+      error: undefined,
+      nextAction: undefined,
+      events: [...task.events, taskEvent("retried", reason, task.attempt)],
+    };
+  });
 }
 
 export async function claimTask(userId: number, id: string, workerId: string, leaseMs = 120_000): Promise<TaskRecord | undefined> {

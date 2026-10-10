@@ -6,7 +6,7 @@ import { serve, type ServerType } from "@hono/node-server";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
-import { appendSdkRunHistoryToSession, claimRecallCopilotEvaluation, getMeetingRepresentativeProfile, listMeetingContacts, getAttentionRecord } from "./store.js";
+import { appendSdkRunHistoryToSession, ensureTriggerWebProjection, claimRecallCopilotEvaluation, getMeetingRepresentativeProfile, listMeetingContacts, getAttentionRecord } from "./store.js";
 import { getJobOccurrence, listJobOccurrences, createJobOccurrence, updateJobOccurrence } from "./store.js";
 import { createAttentionRecord } from "./store.js";
 import { registerHandlers } from "./handlers.js";
@@ -18,6 +18,7 @@ import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, c
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
+import { publishWebNotification } from "./webNotificationBus.js";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { receiveTinyFishMonitorWebhook } from "./tinyfishMonitors.js";
 import { Readable } from "node:stream";
@@ -25,6 +26,7 @@ import { deliverJob, deliverReminder, parseJobWorkflowPayload, parseReminderWork
 import { WorkflowNonRetryableError } from "@upstash/workflow";
 import { executeDurableTask } from "./taskRunner.js";
 import { executeTaskSlice } from "./taskSlice.js";
+import { executeWebSessionReconciliationTask, recoverWebSessionReconciliationTasks } from "./webSessionReconciliation.js";
 import { requestMissionDurationApproval } from "./missionApproval.js";
 import { reconcileTinyFishResearchRun } from "./tinyfishResearch.js";
 import { completeMissionStepAndAdvance, finalizeMissionCloseout, MissionEnqueueError, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, rescheduleQueuedMissionTasks, resumeMissionAndSchedule, validateMissionStepsPayload } from "./missionScheduler.js";
@@ -52,7 +54,6 @@ import { recordMeetingTurn } from "./decisions/telemetry.js";
 import { twilioVoiceInstructions } from "./calls/twilioContext.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
 import { attentionPulseCloseoutOutput, attentionPulseDeliveredToday, attentionPulseDeliveryConfirmation, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, attentionPulseRefreshOwnerState, attentionPulseRequireDueWatchReport, buildAttentionPulsePlan, getAttentionPulseWatchCoverage, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "./attentionPulse.js";
-import { DEFAULT_PULSE_DOMAINS, DEFAULT_WATCH_CONNECTION_WAIT_ERROR, DEFAULT_WATCH_PROFILE_SCOPE_ERROR, connectedWatchInput, connectedWatchSpecs, filterWatchSpecsByAllowedDomains } from "./proactive/watches.js";
 import { hasExternalRecallParticipants, resolveRecallMeetingSpeaker } from "./meetings/participants.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import { createSignedWebBotAuthDirectory, WEB_BOT_AUTH_DIRECTORY_CONTENT_TYPE, WEB_BOT_AUTH_DIRECTORY_PATH, webBotAuthConfigurationIssue, webBotAuthConfigurationStatus, webBotAuthSigningEnabled } from "./webBotAuth.js";
@@ -237,39 +238,6 @@ async function sdkTaskSkillInstructions(skills: string[] | undefined): Promise<s
 }
 function sdkDurationSeconds(value: string | undefined): number | undefined { return ({ "5m": 300, "30m": 1800, "1h": 3600, "3h": 10800, "6h": 21600, "3d": 259200, "1w": 604800 } as Record<string, number>)[value ?? ""]; }
 
-async function ensureConnectedProactiveWatches(
-  userId: number,
-  accounts: Awaited<ReturnType<typeof listConnectedAccounts>>,
-  now: number,
-): Promise<void> {
-  const profiles = await listAttentionRecords(userId, "autonomy_profile", { limit: 20 }) as AutonomyProfileRecord[];
-  const profile = profiles.find((item) => item.mode === "personal");
-  const allowedDomains = profile?.allowedDomains?.length ? profile.allowedDomains : [...DEFAULT_PULSE_DOMAINS];
-  const allSpecs = connectedWatchSpecs(accounts.map((account) => ({ id: account.id, toolkit: account.toolkit, alias: account.alias, status: account.status })));
-  const specs = filterWatchSpecsByAllowedDomains(allSpecs, allowedDomains);
-  const existing = await listAttentionRecords(userId, "autonomy_watch", { limit: 200 }) as AutonomyWatchRecord[];
-  const allowedKeys = new Set(specs.map((spec) => `${spec.connectedAccountId}:${spec.domain}:${spec.name}`.toLowerCase()));
-  const availableAccountKeys = new Set(allSpecs.map((spec) => `${spec.connectedAccountId}:${spec.domain}:${spec.name}`.toLowerCase()));
-  for (const watch of existing) {
-    if (!watch.connectedAccountId) continue;
-    const key = `${watch.connectedAccountId}:${watch.domain}:${watch.name}`.toLowerCase();
-    if (watch.status === "active" && !allowedKeys.has(key)) {
-      await updateAttentionRecord(userId, "autonomy_watch", watch.id, {
-        status: "paused",
-        lastError: availableAccountKeys.has(key) ? DEFAULT_WATCH_PROFILE_SCOPE_ERROR : DEFAULT_WATCH_CONNECTION_WAIT_ERROR,
-      });
-    } else if (watch.status === "paused" && allowedKeys.has(key) && [DEFAULT_WATCH_PROFILE_SCOPE_ERROR, DEFAULT_WATCH_CONNECTION_WAIT_ERROR].includes(watch.lastError ?? "")) {
-      await updateAttentionRecord(userId, "autonomy_watch", watch.id, { status: "active", nextCheckAt: now, lastError: "" });
-    }
-  }
-  if (!specs.length) return;
-  const watches = existing;
-  for (const spec of specs) {
-    const alreadyExists = watches.some((watch) => watch.status !== "revoked" && watch.connectedAccountId === spec.connectedAccountId && watch.domain === spec.domain && watch.name === spec.name);
-    if (alreadyExists) continue;
-    await createAttentionRecord(userId, "autonomy_watch", connectedWatchInput(spec, now));
-  }
-}
 import { persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts } from "./sdkApi.js";
 import { recoverSdkWebhooks } from "./lib/webhookOutbox.js";
 import type { ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
@@ -294,6 +262,7 @@ async function main(): Promise<void> {
   if (config.betterAuthEnabled) await initAuth();
   let sdkWebhookRecovery: ReturnType<typeof setInterval> | undefined;
   let missionRecovery: ReturnType<typeof setInterval> | undefined;
+  let webSessionReconciliationRecovery: ReturnType<typeof setInterval> | undefined;
   let scheduleRecovery: ReturnType<typeof setInterval> | undefined;
   let memoryProjectionRecovery: ReturnType<typeof setInterval> | undefined;
   let memoryReflectionRecovery: ReturnType<typeof setInterval> | undefined;
@@ -309,6 +278,25 @@ async function main(): Promise<void> {
     void recoverAllMissions(enqueueTaskWorkflow).catch((error) => logger.warn({ error }, "Mission recovery sweep failed"));
   }, 120_000);
   if (typeof missionRecovery === "object" && "unref" in missionRecovery) missionRecovery.unref();
+  let webSessionReconciliationRecoveryInFlight = false;
+  const reconcileWebSessionTasks = async () => {
+    if (webSessionReconciliationRecoveryInFlight || !config.qstashToken || !config.webhookUrl) return;
+    webSessionReconciliationRecoveryInFlight = true;
+    try {
+      const result = await recoverWebSessionReconciliationTasks(enqueueTaskWorkflow);
+      if (result.republished || result.failures.length) {
+        logger.info({ owners: result.owners, checked: result.checked, republished: result.republished, failures: result.failures.length }, "Web session reconciliation tasks recovered");
+      }
+      for (const failure of result.failures) logger.warn({ userId: failure.userId, taskId: failure.taskId, error: failure.error }, "Web session reconciliation task recovery failed");
+    } catch (error) {
+      logger.warn({ errorType: error instanceof Error ? error.name : "WebSessionReconciliationRecoveryError" }, "Web session reconciliation recovery sweep failed");
+    } finally {
+      webSessionReconciliationRecoveryInFlight = false;
+    }
+  };
+  void reconcileWebSessionTasks();
+  webSessionReconciliationRecovery = setInterval(() => { void reconcileWebSessionTasks(); }, 120_000);
+  if (typeof webSessionReconciliationRecovery === "object" && "unref" in webSessionReconciliationRecovery) webSessionReconciliationRecovery.unref();
   let scheduleRecoveryInFlight = false;
   const reconcileSchedules = async () => {
     if (scheduleRecoveryInFlight || !config.qstashToken || (!config.jobWorkflowUrl && !config.webhookUrl)) return;
@@ -455,6 +443,7 @@ async function main(): Promise<void> {
     channelGateway?.stopRecovery();
     if (sdkWebhookRecovery) clearInterval(sdkWebhookRecovery);
     if (missionRecovery) clearInterval(missionRecovery);
+    if (webSessionReconciliationRecovery) clearInterval(webSessionReconciliationRecovery);
     if (scheduleRecovery) clearInterval(scheduleRecovery);
     if (memoryProjectionRecovery) clearInterval(memoryProjectionRecovery);
     if (telegramWebhookRecovery) clearInterval(telegramWebhookRecovery);
@@ -2508,30 +2497,56 @@ async function main(): Promise<void> {
             const heartbeat = job.heartbeat !== false;
             // Delivery policy must not prevent a read-only monitoring check.
             // It only controls where the resulting report is surfaced.
-            let connectedAccounts: Awaited<ReturnType<typeof listConnectedAccounts>> = [];
-            let connectedAccountsVerified = false;
-            let connectedActions: Array<{ toolkit: string; slug: string; name?: string; description?: string }> = [];
-            let connectedActionsVerified = false;
-            try {
-              connectedAccounts = await listConnectedAccounts(payload.userId);
-              connectedAccountsVerified = true;
-              await syncDefaultProactiveWatchesForConnectedAccounts(payload.userId, connectedAccounts, now);
-              await ensureConnectedProactiveWatches(payload.userId, connectedAccounts, now);
-              const activeToolkits = [...new Set(connectedAccounts.filter((account) => account.status.toUpperCase() === "ACTIVE").map((account) => account.toolkit))].slice(0, 8);
-              const actionResults = await Promise.all(activeToolkits.map(async (toolkit) => ({ toolkit, actions: await listComposioToolkitActions(toolkit) })));
-              connectedActions = actionResults.flatMap((result) => result.actions.map((action) => ({ toolkit: result.toolkit, slug: action.slug, name: action.name, description: action.description })));
-              connectedActionsVerified = true;
-            } catch (error) {
-              logger.warn({ err: error, userId: payload.userId, jobId: job.id }, "Could not verify connected accounts for proactive capability discovery");
-            }
-            const plan = await buildAttentionPulsePlan(payload.userId, now, {
-              connectedAccounts,
-              connectedAccountsVerified,
-              connectedActions,
-              connectedActionsVerified,
-            }, { forceWatchChecks: workflowPayload?.forceAttentionPulse === true });
-            const runKind = workflowPayload?.forceAttentionPulse ? (job.attentionPulse?.lastDeliveredAt ? "manual" : "first_run") : "scheduled";
-            if (!plan.hasWork) return {
+             let connectedAccounts: Awaited<ReturnType<typeof listConnectedAccounts>> = [];
+             let connectedAccountsVerified = false;
+             let connectedActions: Array<{ toolkit: string; slug: string; name?: string; description?: string }> = [];
+             let connectedActionsVerified = false;
+             let connectedAccountsError: string | undefined;
+             let watchSetupError: string | undefined;
+             const runKind = workflowPayload?.forceAttentionPulse ? (job.attentionPulse?.lastDeliveredAt ? "manual" : "first_run") : "scheduled";
+             try {
+               connectedAccounts = await listConnectedAccounts(payload.userId);
+               connectedAccountsVerified = true;
+             } catch (error) {
+               connectedAccountsError = "Pulse could not verify the connected-app inventory, so provider watches were not started.";
+               logger.warn({ err: error, userId: payload.userId, jobId: job.id }, "Could not verify connected accounts for proactive monitoring");
+             }
+             if (connectedAccountsVerified) {
+               try {
+                 await syncDefaultProactiveWatchesForConnectedAccounts(payload.userId, connectedAccounts, now);
+               } catch (error) {
+                 watchSetupError = "Pulse saw the connected apps but could not create or reactivate their read-only watches.";
+                 logger.error({ err: error, userId: payload.userId, jobId: job.id }, "Could not reconcile proactive provider watches");
+               }
+               try {
+                 const activeToolkits = [...new Set(connectedAccounts.filter((account) => !account.status || ["ACTIVE", "CONNECTED", "ENABLED"].includes(account.status.toUpperCase())).map((account) => account.toolkit))].slice(0, 8);
+                 const actionResults = await Promise.all(activeToolkits.map(async (toolkit) => ({ toolkit, actions: await listComposioToolkitActions(toolkit) })));
+                 connectedActions = actionResults.flatMap((result) => result.actions.map((action) => ({ toolkit: result.toolkit, slug: action.slug, name: action.name, description: action.description })));
+                 connectedActionsVerified = true;
+               } catch (error) {
+                 // Action discovery only enriches capability suggestions. It must
+                 // never prevent read-only provider watches from running.
+                 logger.warn({ err: error, userId: payload.userId, jobId: job.id }, "Could not inspect connected actions for proactive capability discovery");
+               }
+             }
+             const setupError = connectedAccountsError ?? watchSetupError;
+             if (setupError) {
+               return {
+                 text: `Elena pulse could not prepare connected-app monitoring. ${setupError}`,
+                 terminalStatus: "blocked",
+                 nextAction: "Inspect connected-app monitoring setup before running Pulse again.",
+                 waitReason: setupError,
+                 suppressDelivery: Boolean(delivery.suppressed),
+                 pulseEvidence: pulseEvidence({ state: "failed", runKind, startedAt: now, completedAt: Date.now(), deliveryReason: delivery.reason ?? "Pulse setup failed before provider checks.", setupError }),
+               };
+             }
+             const plan = await buildAttentionPulsePlan(payload.userId, now, {
+               connectedAccounts,
+               connectedAccountsVerified,
+               connectedActions,
+               connectedActionsVerified,
+             }, { forceWatchChecks: workflowPayload?.forceAttentionPulse === true });
+             if (!plan.hasWork) return {
               text: "Elena pulse woke up, but there are no active configured watches or owner-visible changes to inspect yet.",
               suppressDelivery: Boolean(delivery.suppressed),
               pulseEvidence: pulseEvidence({ state: "completed", runKind, startedAt: now, completedAt: Date.now(), deliveryReason: delivery.reason ?? "No provider watch was configured or due." }),
@@ -2718,10 +2733,12 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
       const execute = async (attempt: number) => workflow.run(`execute-task-${attempt}`, async () => {
         const run = await executeDurableTask(payload, {
           workerId: `workflow:${workflow.workflowRunId ?? "task"}:${attempt}`,
-          execute: (task, leaseSignal) => executeTaskSlice(task, leaseSignal, {
-            workflowRunId: workflow.workflowRunId, attempt, sdkTaskMessage, sdkTaskSkillInstructions, sdkDurationSeconds, withUserLock,
-            sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options),
-          }),
+          execute: (task, leaseSignal) => task.taskKind === "web_session_reconciliation"
+            ? executeWebSessionReconciliationTask(task)
+            : executeTaskSlice(task, leaseSignal, {
+              workflowRunId: workflow.workflowRunId, attempt, sdkTaskMessage, sdkTaskSkillInstructions, sdkDurationSeconds, withUserLock,
+              sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options),
+            }),
         });
         return { claimed: run.claimed, status: run.task?.status, runAt: run.task?.runAt, taskId: run.task?.id, missionId: run.task?.missionId };
       });
@@ -2929,6 +2946,9 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                 : `I didn’t schedule a join for${title}: ${result.reason === "missing-link" ? "the event has no supported meeting link" : result.reason === "invalid-time" ? "the event start time is missing or invalid" : result.reason === "expired" ? "the event has already ended" : result.reason === "too-far" ? "Recall can schedule at most 30 days ahead; I’ll need a Google Calendar starting-soon trigger to schedule it later" : "this event does not qualify for automatic joining"}.`;
           await updateTriggerEvent(event.eventId, { status: "running", result: notice, notificationStatus: "pending" });
           const chatId = await getTelegramChatId(event.userId);
+          const webProjection = await workflow.run("project-calendar-trigger-web", async () => ensureTriggerWebProjection({ userId: event.userId, eventId: event.eventId, triggerSlug: event.triggerSlug, summary: event.summary, result: notice, status: "completed" }));
+          await updateTriggerEvent(event.eventId, { webThreadId: webProjection.threadId, webRunId: webProjection.runId });
+          publishWebNotification({ userId: event.userId, eventId: event.eventId, threadId: webProjection.threadId, runId: webProjection.runId });
           if (chatId) await workflow.run("deliver-calendar-auto-join-result", async () => {
             await channelGateway.send({ accountId: `account_${event.userId}`, userId: event.userId, target: { provider: "telegram", conversationId: String(chatId) }, text: notice, idempotencyKey: `trigger:${event.eventId}:calendar-autojoin:${chatId}`, correlationId: event.eventId, kind: "notification" });
           });
@@ -2987,6 +3007,9 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
         await workflow.run("append-trigger-history", async () => appendMessages(event.userId, [{ role: "user", content: `[Trigger ${event.triggerSlug}] ${event.summary}` }, { role: "assistant", content: safeResult }]));
         const triggerCost = result.cost;
         if (triggerCost) await workflow.run("record-trigger-usage", async () => addUsage(event.userId, triggerCost));
+        const webProjection = await workflow.run("project-trigger-web", async () => ensureTriggerWebProjection({ userId: event.userId, eventId: event.eventId, triggerSlug: event.triggerSlug, summary: event.summary, result: safeResult, status: closeout.reportMissing ? "failed" : "completed" }));
+        await updateTriggerEvent(event.eventId, { webThreadId: webProjection.threadId, webRunId: webProjection.runId });
+        publishWebNotification({ userId: event.userId, eventId: event.eventId, threadId: webProjection.threadId, runId: webProjection.runId });
         const chatId = await getTelegramChatId(event.userId);
         if (!chatId) {
           await updateTriggerEvent(event.eventId, { status: closeout.reportMissing ? "failed" : "completed", notificationStatus: "unavailable", error: "No private Telegram destination is linked; the result remains available in the dashboard." });
@@ -3008,6 +3031,16 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
         if (error instanceof ApprovalRequiredError) {
           await updateTriggerEvent(event.eventId, { status: "awaiting_approval", approvalId: error.approvalId });
           const approval = await getApproval(event.userId, error.approvalId);
+          const approvalWebProjection = await workflow.run("project-trigger-approval-web", async () => ensureTriggerWebProjection({
+            userId: event.userId,
+            eventId: event.eventId,
+            triggerSlug: event.triggerSlug,
+            summary: event.summary,
+            result: `Approval needed before this trigger can continue. Review the requested action: ${error.toolSlug}. Approval ID: ${error.approvalId}`,
+            status: "completed",
+          }));
+          await updateTriggerEvent(event.eventId, { webThreadId: approvalWebProjection.threadId, webRunId: approvalWebProjection.runId });
+          publishWebNotification({ userId: event.userId, eventId: event.eventId, threadId: approvalWebProjection.threadId, runId: approvalWebProjection.runId });
           const chatId = await getTelegramChatId(event.userId);
           if (!chatId) {
             await updateTriggerEvent(event.eventId, { notificationStatus: "unavailable" });
@@ -3016,7 +3049,10 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           if (chatId && approval) await workflow.run("request-trigger-approval", async () => bot.api.sendMessage(chatId, `⚠️ <b>Approval needed</b>\n\nI need your approval to run <code>${error.toolSlug}</code>.\nApproval ID: <code>${error.approvalId}</code>`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Approve", `appr:approve:${error.approvalId}`).text("🛑 Deny", `appr:deny:${error.approvalId}`) }));
           const decision = await workflow.waitForEvent<{ approved: boolean }>("trigger-approval", workflowEventId("trigger-approval", error.approvalId), { timeout: "24h" });
           if (decision.timeout || !decision.eventData?.approved) {
-            await updateTriggerEvent(event.eventId, { status: "completed", result: "The requested triggered action was denied or expired.", notificationStatus: chatId ? "delivered" : "unavailable" });
+            const denialResult = "The requested triggered action was denied or expired.";
+            const denialProjection = await workflow.run("project-denied-trigger-web", async () => ensureTriggerWebProjection({ userId: event.userId, eventId: event.eventId, triggerSlug: event.triggerSlug, summary: event.summary, result: denialResult, status: "completed" }));
+            await updateTriggerEvent(event.eventId, { status: "completed", result: denialResult, notificationStatus: chatId ? "delivered" : "unavailable", webThreadId: denialProjection.threadId, webRunId: denialProjection.runId });
+            publishWebNotification({ userId: event.userId, eventId: event.eventId, threadId: denialProjection.threadId, runId: denialProjection.runId });
             return;
           }
           const resumed = await workflow.run("resume-trigger-agent", async () => withUserLock(event.userId, undefined, () => runAgent(
@@ -3030,6 +3066,9 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           await workflow.run("append-resumed-trigger-history", async () => appendMessages(event.userId, [{ role: "user", content: `[Trigger ${event.triggerSlug}] ${event.summary}` }, { role: "assistant", content: safeResumed }]));
           const resumedTriggerCost = resumed.cost;
           if (resumedTriggerCost) await workflow.run("record-resumed-trigger-usage", async () => addUsage(event.userId, resumedTriggerCost));
+          const resumedWebProjection = await workflow.run("project-resumed-trigger-web", async () => ensureTriggerWebProjection({ userId: event.userId, eventId: event.eventId, triggerSlug: event.triggerSlug, summary: event.summary, result: safeResumed, status: resumedCloseout.reportMissing ? "failed" : "completed" }));
+          await updateTriggerEvent(event.eventId, { webThreadId: resumedWebProjection.threadId, webRunId: resumedWebProjection.runId });
+          publishWebNotification({ userId: event.userId, eventId: event.eventId, threadId: resumedWebProjection.threadId, runId: resumedWebProjection.runId });
           const resumedChatId = await getTelegramChatId(event.userId);
           if (!resumedChatId) {
             await updateTriggerEvent(event.eventId, { status: resumedCloseout.reportMissing ? "failed" : "completed", notificationStatus: "unavailable", error: "No private Telegram destination is linked; the result remains available in the dashboard." });

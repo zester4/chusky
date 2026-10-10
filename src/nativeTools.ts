@@ -42,8 +42,8 @@ import { isTrustedBrowserUrlObservation } from "./lib/e2b/contracts.js";
 import { browserChallengeStillActive } from "./lib/e2b/handoffStatus.js";
 import { E2B_BROWSER_ACTIONS } from "./lib/e2b/types.js";
 import { transferDaytonaImage, type DaytonaImageTransferInput } from "./daytonaImageTransfer.js";
-import { startTwilioCallForUser } from "./calls/twilio.js";
-import { startBlandCallForUser } from "./calls/bland.js";
+import { controlTwilioCallForUser, isTwilioVoiceConfigured, startTwilioCallForUser } from "./calls/twilio.js";
+import { isBlandVoiceConfigured, startBlandCallForUser } from "./calls/bland.js";
 import { executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
 import type { SubagentActivityUpdate } from "./subagents/contracts.js";
 import type { ComposioToolPresentation } from "./toolActivity.js";
@@ -1039,7 +1039,7 @@ export async function syncDefaultProactiveWatchesForConnectedAccounts(
   return await listAttentionRecords(userId, "autonomy_watch", { limit: 200 }) as AutonomyWatchRecord[];
 }
 
-async function syncAttentionPulseProactiveState(userId: number, now = Date.now()): Promise<{
+export async function syncAttentionPulseProactiveState(userId: number, now = Date.now()): Promise<{
   verified: boolean;
   accounts: PulseConnectedAccount[];
   candidates: Awaited<ReturnType<typeof ensureAttentionPulseCapabilityCandidates>>;
@@ -2001,13 +2001,26 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_START_PHONE_CALL": {
       const profile = args.profile && typeof args.profile === "object" && !Array.isArray(args.profile) ? args.profile as Record<string, unknown> : undefined;
       const callProfile: "business" | "personal" = args.callProfile === "business" ? "business" : "personal";
-      const input = { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose), ...(profile ? { profile } : {}), callProfile };
+      const continuityFromCallId = args.continuityFromCallId === undefined ? undefined : text(args.continuityFromCallId, 128);
+      const input = { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose), ...(profile ? { profile } : {}), ...(continuityFromCallId ? { continuityFromCallId } : {}), callProfile };
       if (phoneCallLauncherForTests) return phoneCallLauncherForTests(userId, input);
-      return config.blandVoiceEnabled
+      // Prefer Bland when it is fully configured, but fall back to a healthy
+      // Twilio transport when Bland is enabled but unavailable. Do not fail
+      // over after an ambiguous provider request: that could place two calls.
+      return config.blandVoiceEnabled && isBlandVoiceConfigured()
         ? startBlandCallForUser(userId, input)
         : startTwilioCallForUser(userId, input);
     }
     case "CHUCK_LIST_PHONE_CALLS": return listPhoneCalls(userId);
+    case "CHUCK_CONTROL_PHONE_CALL": {
+      if (runtime.sharedConversation || !runtime.ownerPrivateRun) throw new Error("Phone call controls are available only to the authenticated owner in a private conversation");
+      const action = args.action === "send_dtmf" || args.action === "transfer" || args.action === "hangup" ? args.action : undefined;
+      if (!action) throw new Error("action must be hangup, send_dtmf, or transfer");
+      const callId = text(args.callId);
+      if (action === "send_dtmf") return controlTwilioCallForUser(userId, callId, { action, digits: text(args.digits) });
+      if (action === "transfer") return controlTwilioCallForUser(userId, callId, { action, phoneNumber: text(args.phoneNumber) });
+      return controlTwilioCallForUser(userId, callId, { action });
+    }
     case "CHUCK_MEETING_CONTEXT_PREPARE": {
       if (runtime.sharedConversation) throw new Error("Client meeting preparation is available only in a private owner conversation");
       return prepareRecallMeetingMission(userId, { clientName: args.clientName, objective: args.objective, clientContext: args.clientContext, preparationId: args.preparationId });
