@@ -11,7 +11,7 @@ import { classifyMemory } from "./memory/classifier.js";
 import { config } from "./config.js";
 import { ensureAttentionPulseCapabilityCandidates, getAttentionPulseWatchCoverage } from "./attentionPulse.js";
 import { classifyPulseHealth } from "./proactive/pulseHealth.js";
-import { DEFAULT_PROACTIVE_WATCHES, DEFAULT_PULSE_DOMAINS, DEFAULT_WATCH_CONNECTION_WAIT_ERROR, DEFAULT_WATCH_PROFILE_SCOPE_ERROR, defaultWatchInput, defaultWatchSpecsForConnectedAccounts, filterWatchSpecsByAllowedDomains, missingDefaultWatchKeys, normalizeProactiveCapabilityIds } from "./proactive/watches.js";
+import { DEFAULT_PROACTIVE_WATCHES, DEFAULT_PULSE_DOMAINS, DEFAULT_WATCH_CONNECTION_WAIT_ERROR, DEFAULT_WATCH_PROFILE_SCOPE_ERROR, connectedWatchInput, connectedWatchSpecs, defaultWatchInput, defaultWatchSpecsForConnectedAccounts, filterWatchSpecsByAllowedDomains, missingDefaultWatchKeys, normalizeProactiveCapabilityIds } from "./proactive/watches.js";
 import { logger } from "./logger.js";
 import { assertPublicHttpUrl, createTinyFishClient } from "./tinyfish.js";
 import { receiveTinyFishMonitorWebhook, tinyFishMonitorSignature, tinyFishMonitorSnapshotHash, validateTinyFishMonitorSchedule } from "./tinyfishMonitors.js";
@@ -1010,15 +1010,35 @@ export async function syncDefaultProactiveWatchesForConnectedAccounts(
   const profiles = await listAttentionRecords(userId, "autonomy_profile", { limit: 20 }) as AutonomyProfileRecord[];
   const profile = profiles.find((item) => item.mode === "personal");
   const allowedDomains = profile?.allowedDomains?.length ? profile.allowedDomains : [...DEFAULT_PULSE_DOMAINS];
-  const connectedSpecs = defaultWatchSpecsForConnectedAccounts(accounts);
-  const availableSpecs = filterWatchSpecsByAllowedDomains(connectedSpecs, allowedDomains);
-  const availableKeys = new Set(availableSpecs.map((spec) => `${spec.domain}:${spec.name}`.toLowerCase()));
-  const connectedKeys = new Set(connectedSpecs.map((spec) => `${spec.domain}:${spec.name}`.toLowerCase()));
+  const universalSpecs = defaultWatchSpecsForConnectedAccounts(accounts);
+  const connectedAppSpecs = connectedWatchSpecs(accounts);
+  const availableUniversalSpecs = filterWatchSpecsByAllowedDomains(universalSpecs, allowedDomains);
+  const availableConnectedSpecs = filterWatchSpecsByAllowedDomains(connectedAppSpecs, allowedDomains);
+  const availableKeys = new Set(availableUniversalSpecs.map((spec) => `${spec.domain}:${spec.name}`.toLowerCase()));
+  const connectedKeys = new Set(universalSpecs.map((spec) => `${spec.domain}:${spec.name}`.toLowerCase()));
+  const connectedAppKeys = new Set(connectedAppSpecs.map((spec) => `${spec.domain}:${spec.name}:${spec.connectedAccountId}`.toLowerCase()));
+  const availableConnectedAppKeys = new Set(availableConnectedSpecs.map((spec) => `${spec.domain}:${spec.name}:${spec.connectedAccountId}`.toLowerCase()));
   const defaultKeys = new Set(DEFAULT_PROACTIVE_WATCHES.map((spec) => `${spec.domain}:${spec.name}`.toLowerCase()));
 
   for (const watch of existing) {
+    if (watch.connectedAccountId) {
+      const key = `${watch.domain}:${watch.name}:${watch.connectedAccountId}`.toLowerCase();
+      if (!availableConnectedAppKeys.has(key) && watch.status === "active") {
+        await updateAttentionRecord(userId, "autonomy_watch", watch.id, {
+          status: "paused",
+          lastError: connectedAppKeys.has(key) ? DEFAULT_WATCH_PROFILE_SCOPE_ERROR : DEFAULT_WATCH_CONNECTION_WAIT_ERROR,
+        });
+      } else if (availableConnectedAppKeys.has(key) && watch.status === "paused" && [DEFAULT_WATCH_CONNECTION_WAIT_ERROR, DEFAULT_WATCH_PROFILE_SCOPE_ERROR].includes(watch.lastError ?? "")) {
+        await updateAttentionRecord(userId, "autonomy_watch", watch.id, {
+          status: "active",
+          nextCheckAt: now,
+          lastError: "",
+        });
+      }
+      continue;
+    }
     const key = `${watch.domain}:${watch.name}`.toLowerCase();
-    if (!defaultKeys.has(key) || watch.connectedAccountId) continue;
+    if (!defaultKeys.has(key)) continue;
     if (!availableKeys.has(key) && watch.status === "active") {
       await updateAttentionRecord(userId, "autonomy_watch", watch.id, {
         status: "paused",
@@ -1033,8 +1053,16 @@ export async function syncDefaultProactiveWatchesForConnectedAccounts(
     }
   }
 
-  for (const spec of missingDefaultWatchKeys(existing, availableSpecs)) {
+  for (const spec of missingDefaultWatchKeys(existing, availableUniversalSpecs)) {
     await createAttentionRecord(userId, "autonomy_watch", defaultWatchInput(spec, now));
+  }
+  const existingConnectedAppKeys = new Set(existing
+    .filter((watch) => watch.status !== "revoked" && watch.connectedAccountId)
+    .map((watch) => `${watch.domain}:${watch.name}:${watch.connectedAccountId}`.toLowerCase()));
+  for (const spec of availableConnectedSpecs) {
+    const key = `${spec.domain}:${spec.name}:${spec.connectedAccountId}`.toLowerCase();
+    if (existingConnectedAppKeys.has(key)) continue;
+    await createAttentionRecord(userId, "autonomy_watch", connectedWatchInput(spec, now));
   }
   return await listAttentionRecords(userId, "autonomy_watch", { limit: 200 }) as AutonomyWatchRecord[];
 }

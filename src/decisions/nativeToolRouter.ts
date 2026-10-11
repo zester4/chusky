@@ -106,6 +106,10 @@ function compactDescription(tool: ToolSchema): string {
 
 function inferBundle(slug: string, description: string): NativeToolBundle {
   const name = slug.toUpperCase();
+  // Call-control is intentionally not part of meeting preparation/search.
+  // It remains discoverable for an explicit phone-call request, but must not
+  // be exposed as an unrelated high-impact side effect during a meeting flow.
+  if (name === "CHUCK_CONTROL_PHONE_CALL") return "other";
   if (/^CHUCK_TINYFISH_/.test(name)) return "tinyfish";
   if (/^CHUCK_(?:SAVE_MEMORY|UPDATE_MEMORY|SEARCH_MEMORY|FORGET_MEMORY|MEMORY_BRIEF|CONTEXT_SEARCH|SCRATCHPAD_)/.test(name)) return "memory";
   if (/^CHUCK_.*REMINDER/.test(name)) return "reminders";
