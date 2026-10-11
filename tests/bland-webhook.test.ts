@@ -56,6 +56,8 @@ test("Bland post-call webhook persists distinct user and assistant turns once", 
     { role: "user", content: `[Bland call ${call.id}] Can you send pricing?` },
   ]);
   assert.equal((await getPhoneCall(call.userId, call.id))?.summary, body.summary);
+  assert.equal((await getPhoneCall(call.userId, call.id))?.outcome?.summary, body.summary);
+  assert.equal((await getPhoneCall(call.userId, call.id))?.outcomeStatus, "completed");
   assert.equal((await processBlandWebhook(request)).body.duplicate, true);
   assert.equal((await getSession(call.userId)).history.length, 2);
 });

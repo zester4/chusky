@@ -36,6 +36,9 @@ const MAX_OUTPUT = 5000;
 
 function compact(value: unknown, max: number): string { return String(value ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max); }
 function normalizeToolkit(value: unknown): string { return String(value ?? "").toLowerCase().replace(/[^a-z0-9]/g, ""); }
+function connectedAccountIsActive(status: unknown): boolean {
+  return !status || ["ACTIVE", "CONNECTED", "ENABLED"].includes(String(status).toUpperCase());
+}
 function safeErrorMessage(error: unknown): string {
   return compact(error instanceof Error ? error.message : error, 1000)
     .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [redacted]")
@@ -245,7 +248,7 @@ async function recordNewLeadSignals(userId: number, watch: AutonomyWatchRecord, 
 async function resolveComposioAccount(userId: number, watch: AutonomyWatchRecord, toolSlugs: string[]): Promise<string | undefined> {
   const requested = watch.connectedAccountId?.trim() || watch.accountAlias?.trim();
   const { listConnectedAccounts } = await import("../agent.js");
-  const accounts = (await listConnectedAccounts(userId)).filter((account) => String(account.status).toUpperCase() === "ACTIVE");
+  const accounts = (await listConnectedAccounts(userId)).filter((account) => connectedAccountIsActive(account.status));
   if (requested) {
     const match = accounts.find((account) => account.id === requested || account.alias === requested);
     if (!match) throw new Error("The selected connected account is not active or is not owned by this user.");

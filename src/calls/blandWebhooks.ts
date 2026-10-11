@@ -122,6 +122,11 @@ function safeError(body: Record<string, unknown>): string | undefined {
   return body.error_message.replace(/[\u0000-\u001F]/g, " ").trim().slice(0, 500);
 }
 
+function blandOutcome(body: Record<string, unknown>): { title: string; summary: string; decisions: string[]; actionItems: []; openQuestions: string[] } | undefined {
+  const summary = typeof body.summary === "string" ? body.summary.replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 2_000) : "";
+  return summary ? { title: "Bland call outcome", summary, decisions: [], actionItems: [], openQuestions: [] } : undefined;
+}
+
 export async function processBlandWebhook(input: {
   rawBody: string;
   signature: string;
@@ -156,6 +161,7 @@ export async function processBlandWebhook(input: {
         ...(blandCallStatus(body, true) ? { status: blandCallStatus(body, true)! } : {}),
         ...(safeError(body) ? { error: safeError(body)! } : {}),
         ...(typeof body.summary === "string" ? { summary: body.summary.replace(/[\u0000-\u001F]/g, " ").trim().slice(0, 2000) } : {}),
+        ...(blandOutcome(body) ? { outcome: blandOutcome(body), outcomeStatus: "completed" as const } : {}),
         ...(Number.isFinite(callLength) && callLength >= 0 ? { callLengthSeconds: Math.min(callLength, 86_400) } : {}),
       };
       const result = await finalizeBlandPhoneCall(identity.userId, identity.callId, patch, blandTranscriptMessages(body, identity.callId));

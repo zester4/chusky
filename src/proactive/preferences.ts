@@ -199,6 +199,9 @@ export async function readPulsePreferences(userId: number): Promise<PulsePrefere
     enabled?: boolean;
     jobs?: Array<{ cron?: string; status?: "active" | "paused" | "cancelled"; scheduleError?: string }>;
     connectedAccountsVerified?: boolean;
+    connectedAccountCount?: number;
+    connectedToolkits?: string[];
+    connectionError?: string;
     capabilitySuggestions?: Array<{ status?: string }>;
     health?: { lastOccurrence?: PulseHealthOccurrence };
     watchCoverage?: { active?: number; current?: number; scheduled?: number; stale?: number; failed?: number; neverChecked?: number };
@@ -221,6 +224,9 @@ export async function readPulsePreferences(userId: number): Promise<PulsePrefere
     neverCheckedWatches: coverage.neverChecked ?? 0,
     pendingSuggestions: status.capabilitySuggestions?.filter((candidate) => candidate.status === "pending").length ?? 0,
     connectedAccountsVerified: status.connectedAccountsVerified === true,
+    connectedAccountCount: status.connectedAccountCount,
+    connectedToolkits: status.connectedToolkits,
+    connectionError: status.connectionError,
   });
   return { enabled: Boolean(job.enabled), cadence, authority: profile?.defaultAuthority ?? "observe", deliveryTargets: deliveryPreferenceView(deliveryTargets), maxPerDay: deliveryTargets.find((item) => item.enabled)?.maxPerDay ?? profile?.maxAutonomousActionsPerDay ?? 4, ...(profile?.quietHoursUtc ? { quietHoursUtc: profile.quietHoursUtc } : {}), monitoredDomains: profile?.allowedDomains?.length ? profile.allowedDomains : [...DEFAULT_DOMAINS], health };
 }

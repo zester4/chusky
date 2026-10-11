@@ -20,8 +20,19 @@ function arg(name: string): string | undefined {
 async function pair(): Promise<void> {
   const current = await loadCliConfig();
   const serverUrl = arg("--server") || current.serverUrl || (await prompt("Chusky server URL: ")).trim();
-  const code = arg("--code") || (await prompt("Telegram pairing code: ")).trim();
+  const directToken = arg("--token")?.trim();
+  const pairingCode = arg("--code")?.trim();
+  if (directToken && pairingCode) throw new Error("Use either --token or --code, not both.");
   const deviceName = arg("--name") || `${process.env.COMPUTERNAME || process.env.HOSTNAME || "terminal"}`;
+  if (directToken) {
+    if (!/^chusky_[A-Za-z0-9_-]{20,200}$/.test(directToken)) throw new Error("Invalid CLI token format.");
+    const session = await new ChuskyClient({ serverUrl, token: directToken }).session();
+    if (!session.ok) throw new Error(session.error || "The CLI token could not be verified.");
+    await saveCliConfig({ serverUrl, token: directToken, deviceName: session.device || deviceName });
+    console.log(`Linked successfully as ${session.device || deviceName}. Configured durable Chusky session for user ${session.userId}.`);
+    return;
+  }
+  const code = pairingCode || (await prompt("Telegram pairing code: ")).trim();
   const response = await new ChuskyClient({ serverUrl }).pair(code, deviceName);
   if (!response.ok || typeof response.token !== "string") throw new Error(response.error || "Pairing failed");
   await saveCliConfig({ serverUrl, token: response.token, deviceName });

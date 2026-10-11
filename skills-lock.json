@@ -61,6 +61,12 @@
       "skillPath": "skills/content-strategy/SKILL.md",
       "computedHash": "4271d06ab1b6669bb39774128e6c0f71fa7f1d5ed4b15efa9353e3b8d8624bce"
     },
+    "create-agent-site-skill": {
+      "source": "kernel/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/kernel-cli/skills/create-agent-site-skill/SKILL.md",
+      "computedHash": "ff3c93f4b0109341c31da5a84b7ca357102cf454e6101b44689e2e211b7923d8"
+    },
     "create-auth": {
       "source": "better-auth/skills",
       "sourceType": "github",
@@ -78,6 +84,18 @@
       "sourceType": "github",
       "skillPath": "skills/daytona/SKILL.md",
       "computedHash": "61f804d4b516509e7c4707ad9f0ac9586764ecac31b7bacbef672549b428a5df"
+    },
+    "debug-browser-session": {
+      "source": "kernel/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/kernel-cli/skills/debug-browser-session/SKILL.md",
+      "computedHash": "298abfe5ceda3356ac4c78b1ff3494ce224fab3e840d8e3c23afd789a0ed6fda"
+    },
+    "diff-profile-archives": {
+      "source": "kernel/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/kernel-cli/skills/diff-profile-archives/SKILL.md",
+      "computedHash": "3837411ea7cf3ca157efbdd2a7ab4b15154843f9d85ecfe0654470bf3de7c6f4"
     },
     "domain-modeling": {
       "source": "mattpocock/skills",
@@ -127,6 +145,12 @@
       "skillPath": "skills/fullstack-guardian/SKILL.md",
       "computedHash": "44019dea8ef287894c7bbcae244797d7b2b0ae536648483585302c21f1d628eb"
     },
+    "generate-video": {
+      "source": "kernel/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/generate-video/skills/generate-video/SKILL.md",
+      "computedHash": "b92649cf11286f777fd59936eb4fbc7ec7b6573789297a16d16c0cb17dc21c5b"
+    },
     "grill-me": {
       "source": "mattpocock/skills",
       "sourceType": "github",
@@ -138,6 +162,42 @@
       "sourceType": "github",
       "skillPath": "skills/productivity/handoff/SKILL.md",
       "computedHash": "9ea2a5de5ca2d717f913356de982fdc4fe27d28a300c16598cd43a4865491008"
+    },
+    "kernel-agent-browser": {
+      "source": "kernel/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/kernel-cli/skills/kernel-agent-browser/SKILL.md",
+      "computedHash": "17425ac5364753e36a7c05f030271115f2699ae63ac60be02cb3bcc918cb5bd6"
+    },
+    "kernel-auth": {
+      "source": "kernel/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/kernel-cli/skills/kernel-auth/SKILL.md",
+      "computedHash": "67dcb9dfbfb6676d664b32ad6052ab1b8d9cea048c7539e2b198eade92f69e74"
+    },
+    "kernel-browser-harness": {
+      "source": "kernel/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/kernel-cli/skills/kernel-browser-harness/SKILL.md",
+      "computedHash": "c7b51fb06d9b4a7ddb9e8de0fdb320cb1db2c534c0b355f103ac49d891bcb843"
+    },
+    "kernel-cli": {
+      "source": "kernel/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/kernel-cli/skills/kernel-cli/SKILL.md",
+      "computedHash": "7cf11a6c30e2e9d9ab674c8c899c7527bdf33fc4f750239c0a392f75a1df30cf"
+    },
+    "kernel-python-sdk": {
+      "source": "kernel/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/kernel-sdks/skills/kernel-python-sdk/SKILL.md",
+      "computedHash": "453f3eec70af8b03e43c33e905dbf121fe43ad4a75f85baa56a67d118cf5f6ca"
+    },
+    "kernel-typescript-sdk": {
+      "source": "kernel/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/kernel-sdks/skills/kernel-typescript-sdk/SKILL.md",
+      "computedHash": "53e574c23403b26c9a619b9d587c7090b77a3d0d42ce38a0049daca2aa6c2d38"
     },
     "lead-magnets": {
       "source": "coreyhaines31/marketingskills",
@@ -174,6 +234,12 @@
       "sourceType": "github",
       "skillPath": "skills/pptx/SKILL.md",
       "computedHash": "d6198c2f85d5d1c737d451b98ebacc3bbc187730c9a79252aa738ddb8d818455"
+    },
+    "profile-website-bot-detection": {
+      "source": "kernel/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/kernel-cli/skills/profile-website-bot-detection/SKILL.md",
+      "computedHash": "0f47a4e10efe1c69b0a85192805bc994dac881d862578c74b761834dcec627fb"
     },
     "prototype": {
       "source": "emilkowalski/skills",

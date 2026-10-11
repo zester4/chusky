@@ -23,6 +23,30 @@ test("Pulse health treats a missing connection as an actionable waiting state", 
   assert.match(health.summary, /connected app/);
 });
 
+test("Pulse health does not call connected apps disconnected when watch setup is missing", () => {
+  const health = classifyPulseHealth({
+    ...base,
+    activeWatches: 0,
+    currentWatches: 0,
+    connectedAccountCount: 4,
+    connectedToolkits: ["gmail", "googlecalendar", "googlesheets", "notion"],
+  });
+  assert.equal(health.status, "waiting_for_setup");
+  assert.equal(health.recoveryAction, "inspect");
+  assert.match(health.title, /not monitored/);
+  assert.match(health.summary, /Pulse sees gmail, googlecalendar, googlesheets, notion/);
+});
+
+test("Pulse health exposes a connected-app reconciliation failure", () => {
+  const health = classifyPulseHealth({
+    ...base,
+    connectionError: "Pulse could not verify the connected-app inventory",
+  });
+  assert.equal(health.status, "failed");
+  assert.equal(health.recoveryAction, "inspect");
+  assert.equal(health.connectionError, "Pulse could not verify the connected-app inventory");
+});
+
 test("Pulse health distinguishes first-run setup from a stale scheduler", () => {
   const firstRun = classifyPulseHealth({ ...base, latestOccurrence: undefined });
   assert.equal(firstRun.status, "never_run");

@@ -182,6 +182,35 @@ test("web-only attention pulse records a dashboard run receipt", async () => {
   assert.equal(state.sentChannels.length, 0);
 });
 
+test("web-only attention pulse preserves a blocked connected-app setup receipt", async () => {
+  let occurrence: JobOccurrenceRecord | undefined;
+  const state = deps({
+    getTelegramChatId: async () => undefined,
+    getJob: async () => ({ ...deps().job, kind: "attention_pulse", mode: "act", workerBinding: { worker: "elena", objective: "Run the attention pulse", expectedOutput: "Pulse result", allowedTools: [], approvalPolicy: "require_chusky_approval" as const, timeoutSeconds: 60, maxToolCalls: 4 } }),
+    getJobOccurrence: async () => occurrence,
+    createJobOccurrence: async (record) => { occurrence = record; return record; },
+    updateJobOccurrence: async (_userId, _id, patch, expectedVersion) => {
+      assert.equal(expectedVersion, occurrence?.version);
+      occurrence = { ...occurrence!, ...patch, version: occurrence!.version + 1, updatedAt: Date.now() };
+      return occurrence;
+    },
+    runWorker: async () => ({
+      text: "Elena pulse could not prepare connected-app monitoring.",
+      terminalStatus: "blocked" as const,
+      nextAction: "Inspect connected-app monitoring setup before running Pulse again.",
+      waitReason: "Pulse saw the connected apps but could not create or reactivate their read-only watches.",
+      pulseEvidence: { state: "failed" as const, dueWatches: 0, watchesReconciled: 0, pendingObservations: 0, pendingCandidates: 0, handled: false, delegated: 0, approvalRequired: false, delivery: "none" as const, setupError: "Pulse saw the connected apps but could not create or reactivate their read-only watches." },
+    }),
+  });
+  const result = await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "pulse-web-setup-failure" }, state);
+  assert.deepEqual(result, { delivered: true });
+  assert.equal(occurrence?.status, "blocked");
+  assert.equal(occurrence?.pulseEvidence?.state, "failed");
+  assert.match(occurrence?.pulseEvidence?.setupError ?? "", /could not create/);
+  assert.equal(state.sent.length, 0);
+  assert.equal(state.sentChannels.length, 0);
+});
+
 test("web-only attention pulse keeps a receipt when external delivery is suppressed", async () => {
   let occurrence: JobOccurrenceRecord | undefined;
   const state = deps({

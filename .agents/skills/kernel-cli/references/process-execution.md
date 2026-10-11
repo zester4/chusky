@@ -1,0 +1,103 @@
+---
+name: kernel-process-execution
+description: Execute and manage processes inside browser VM environments
+---
+
+# Process Execution
+
+Run arbitrary commands inside the browser VM for advanced control.
+
+## When to Use
+
+Use process execution for:
+- **Custom tooling** - Install specialized tools in the VM (ffmpeg, imagemagick, etc.)
+- **Background services** - Run auxiliary services alongside your browser
+- **Data processing** - Execute scripts for data transformation
+- **System configuration** - Configure the VM environment to your needs
+- **Debugging** - Inspect VM state and processes
+- **Package installation** - Install system packages with apt-get or other package managers
+
+> **Info**: The `<session_id>` argument refers to the browser session ID, not invocation IDs returned by other Kernel commands.
+
+## Prerequisites
+
+Load the `kernel-cli` skill for Kernel CLI installation and authentication.
+
+## Execute Command (Synchronous)
+
+```bash
+# Execute and wait for completion
+kernel browsers process exec <session_id> -- ls -la /tmp
+
+# Execute as root
+kernel browsers process exec <session_id> --as-root -- apt-get update
+
+# With timeout (in seconds)
+kernel browsers process exec <session_id> --timeout 30 -- long-running-command
+
+# With working directory
+kernel browsers process exec <session_id> --cwd /tmp -- pwd
+
+# With specific user
+kernel browsers process exec <session_id> --as-user chromium -- whoami
+
+# Set repeatable process-scoped environment variables
+kernel browsers process exec <session_id> \
+  --env REGION=us-east --env MODE=debug -- printenv REGION MODE
+```
+
+## Spawn Background Process (Asynchronous)
+
+```bash
+# Start long-running process
+kernel browsers process spawn <session_id> -- long-running-command
+
+# With timeout
+kernel browsers process spawn <session_id> --timeout 300 -- background-task
+
+# Start web server with a process-scoped environment variable
+kernel browsers process spawn <session_id> --env PORT=8080 -- \
+  /bin/bash -c 'python3 -m http.server "$PORT"'
+
+# Allocate a PTY for a shell or another TTY-dependent program
+kernel browsers process spawn <session_id> --allocate-tty --cols 120 --rows 40 -- /bin/bash
+```
+
+Repeat `--env KEY=VALUE` as needed. `--cols` and `--rows` are valid only with `--allocate-tty`.
+
+## Additional Process Commands
+
+### Check Process Status
+
+```bash
+# Get process status
+kernel browsers process status <session_id> <process-id>
+```
+
+Returns process state, CPU usage, memory usage, and exit code.
+
+### Stream Process Output
+
+```bash
+# Stream stdout and stderr from a running process
+kernel browsers process stdout-stream <session_id> <process-id>
+```
+
+This will continuously stream output until the process exits.
+
+### Write to Process stdin
+
+```bash
+# Send base64-encoded data to process stdin
+echo "input data" | base64 | xargs -I {} kernel browsers process stdin <session_id> <process-id> --data-b64 {}
+```
+Base64 payload to write is required.
+
+## Kill Process
+
+```bash
+# Kill with TERM signal (graceful, default)
+kernel browsers process kill <session_id> <process-id>
+kernel browsers process kill <session_id> <process-id> --signal TERM
+```
+Available signals: (TERM, KILL, INT, HUP; default: TERM).

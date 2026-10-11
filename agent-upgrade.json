@@ -1,11 +1,11 @@
 {
-  "id": "release-4.50.0",
-  "version": "4.50.0",
+  "id": "release-4.51.0",
+  "version": "4.51.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added an opt-in Kernel browser hosted remotely and controlled from E2B, with stealth, owner-scoped profiles, native visual controls, private live view, and replay recordings.",
-    "Supported CAPTCHA challenges receive a bounded provider-solver wait and fresh page verification; unresolved challenges and MFA still require private owner takeover. Success is never guaranteed.",
-    "Managed authentication uses private hosted login and owned profile references without sending credentials to the model. Approvals and no-replay recovery remain enforced; live activation requires a rebuilt browser template."
+    "Twilio calls now support owner-scoped hangup, DTMF, cold transfer, bounded continuity from an ended call, and optional voicemail delivery after DetectMessageEnd.",
+    "Completed phone conversations produce a bounded, structured owner-private outcome with decisions, action items, and open questions across Twilio and provider summaries.",
+    "Inbound numbers can route to explicit owners, provider configuration can fall back safely, and voice operations expose reconnecting state plus durable bridge checkpoints."
   ],
-  "createdAt": "2026-10-09T17:50:07.390Z"
+  "createdAt": "2026-10-10T01:10:12.297Z"
 }

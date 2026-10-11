@@ -2,6 +2,13 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.13.1 - 2026-10-09
+
+- Align the standalone SDK repository with the published `@chusky/sdk@1.13.1`
+  package and its verified release tag.
+- No runtime API changes; this patch records the release synchronization after
+  the hosted application and SDK verification passed.
+
 ## 1.13.0 - 2026-10-09
 
 - Bind connected-app trigger actions opened from the dashboard to a validated,
