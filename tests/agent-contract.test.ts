@@ -160,6 +160,7 @@ test("mission provider allowlists receive the routed direct action schema", asyn
     globalThis.fetch = originalFetch;
     Object.assign(config, previous);
     setJevClientForTests(undefined);
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
   }
 });
 
@@ -966,6 +967,66 @@ test("agent uses the selected model for a normal text response", async () => {
     assert.deepEqual(requests.map((request) => request.model), ["test/model"]);
     assert.deepEqual(requests[0]?.provider, { allow_fallbacks: true, preferred_max_latency: { p90: 45 } });
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test("turn-wide Jev none keeps irrelevant connected-app schemas out of a conversational turn", async () => {
+  const userId = 839101;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const previous = {
+    jevMode: config.jevMode,
+    jevSurfaces: config.jevSurfaces,
+    jevTurnBudgetMs: config.jevTurnBudgetMs,
+    conversationalFastPath: config.conversationalFastPath,
+  };
+  const originalFetch = globalThis.fetch;
+  const jevRequests: Array<Record<string, any>> = [];
+  const modelRequests: Array<Record<string, any>> = [];
+  let connectedAccountLookups = 0;
+  const session = {
+    sessionId: "turn-wide-none-session",
+    tools: async () => [
+      { type: "function", function: { name: "COMPOSIO_SEARCH_TOOLS", description: "Search connected apps", parameters: { type: "object", properties: {} } } },
+      { type: "function", function: { name: "GMAIL_FETCH_EMAILS", description: "Read Gmail messages", parameters: { type: "object", properties: {} } } },
+    ],
+    execute: async () => { throw new Error("A conversational turn must not invoke Composio"); },
+  };
+  setAgentDependenciesForTests({ composio: {
+    create: async () => session,
+    connectedAccounts: { list: async () => { connectedAccountLookups += 1; return { items: [{ id: "ca_test", toolkit: { slug: "gmail" }, status: "ACTIVE" }] }; } },
+  } });
+  config.jevMode = "enforce";
+  config.jevSurfaces = new Set(["native", "skills", "composio", "treg"]);
+  config.jevTurnBudgetMs = 1_000;
+  config.conversationalFastPath = true;
+  setJevClientForTests(new JevClient({ apiKey: "test-jev-key", fetchImpl: (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    jevRequests.push(body);
+    return new Response(JSON.stringify({ model: body.model, answers: { action_required: { type: "noul", noul: 0.02 } } }), { status: 200 });
+  }) as typeof fetch }));
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/chat/completions")) {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      modelRequests.push(body);
+      return chatResponse({ role: "assistant", content: "The proposal sounds reasonable." });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(userId, "What do you think about this proposal?", [], "test/model");
+    assert.equal(result.text, "The proposal sounds reasonable.");
+    assert.deepEqual(result.toolsUsed, []);
+    assert.equal(jevRequests.length, 1, "the turn-wide none check should be the only Jev request");
+    assert.deepEqual(Object.keys(jevRequests[0].questions), ["action_required"]);
+    assert.equal(connectedAccountLookups, 0, "no-app turns must skip connected-account lookup");
+    const visibleTools = modelRequests[0]?.tools?.map((tool: any) => tool.function.name).sort() ?? [];
+    assert.deepEqual(visibleTools, ["CHUCK_FIND_TOOLS", "COMPOSIO_SEARCH_TOOLS"], "generic native and connected-app discovery remain available as recovery paths");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Object.assign(config, previous);
+    setJevClientForTests(undefined);
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
 });
 
 test("gives a transient OpenRouter retry a bounded larger timeout", () => {
