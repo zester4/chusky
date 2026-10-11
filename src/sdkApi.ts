@@ -22,6 +22,8 @@ import { recordTrustedMissionEvidence } from "./store.js";
 import { listJobOccurrences } from "./store.js";
 import { appendSdkRunHistoryToSession, mutateSession } from "./store.js";
 import { updateTriggerEvent } from "./store.js";
+import { markTriggerWebApprovalResuming } from "./store.js";
+import { notifyTriggerApproval } from "./triggerWorkflow.js";
 import { logger } from "./logger.js";
 import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
@@ -3888,6 +3890,10 @@ export function registerSdkApi(app: Hono): void {
     if (body.decision !== "approve" && body.decision !== "deny") return apiError(c, 400, "invalid_decision", "decision must be approve or deny.");
     if (body.decision === "deny") {
       await setApprovalStatus(owner.userId, pending.id, "denied");
+      if (pending.triggerEventId) {
+        try { await notifyTriggerApproval(pending.id, false, pending.triggerEventId); }
+        catch (error) { logger.warn({ err: error, userId: owner.userId, approvalId: pending.id }, "Web trigger denial notification failed"); }
+      }
       const deniedSession = await getSessionWithSdkRuns(owner.userId);
       const deniedThread = deniedSession.sdkThreads!.find((item) => item.runs.some((run) => run.approvalId === pending.id));
       const deniedRun = deniedThread?.runs.find((run) => run.approvalId === pending.id);
@@ -3910,6 +3916,20 @@ export function registerSdkApi(app: Hono): void {
     }
     const approval = await claimApproval(owner.userId, pending.id);
     if (!approval) return apiError(c, 409, "approval_unavailable", "Approval was already decided, expired, or consumed.");
+    if (approval.triggerEventId) {
+      try {
+        await notifyTriggerApproval(approval.id, true, approval.triggerEventId);
+      } catch (error) {
+        logger.error({ err: error, userId: owner.userId, approvalId: approval.id, triggerEventId: approval.triggerEventId }, "Web trigger approval resume notification failed");
+        return apiError(c, 503, "trigger_resume_unavailable", "Approval was saved, but the triggered workflow could not be resumed yet. Check the trigger activity before retrying.");
+      }
+      await markTriggerWebApprovalResuming(owner.userId, approval.triggerEventId, approval.id);
+      const resumedSession = await getSessionWithSdkRuns(owner.userId);
+      const resumedThread = resumedSession.sdkThreads?.find((item) => item.runs.some((run) => run.metadata?.triggerEventId === approval.triggerEventId));
+      const resumedRun = resumedThread?.runs.find((run) => run.metadata?.triggerEventId === approval.triggerEventId);
+      if (resumedThread && resumedRun) return c.json({ id: approval.id, status: "approved", triggerEventId: approval.triggerEventId, run: runView(resumedThread.id, resumedRun) }, 202);
+      return c.json({ id: approval.id, status: "approved", triggerEventId: approval.triggerEventId }, 202);
+    }
     const token = randomUUID();
     if (!(await acquireUserLock(owner.userId, token))) {
       // claimApproval is an atomic state transition. If the user lock is busy,

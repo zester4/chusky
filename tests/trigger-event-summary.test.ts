@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { displayTriggerSummary, safeTriggerSummary, triggerRecoveryActions } from "../src/triggerEventSummary.js";
+import { displayTriggerSummary, safeTriggerAgentContext, safeTriggerSummary, triggerRecoveryActions } from "../src/triggerEventSummary.js";
 
 test("trigger summary turns Gmail payloads into a readable owner-facing preview", () => {
   const summary = safeTriggerSummary({
@@ -44,4 +44,31 @@ test("trigger summary has strict bounds on depth, field count, and total text si
   const summary = safeTriggerSummary({ triggerSlug: "TEST", payload });
   assert.ok(summary.length <= 3_500);
   assert.ok((summary.match(/field\d+:/g) ?? []).length <= 40);
+});
+
+test("private agent context retains actionable provider references and application content without credentials", () => {
+  const context = safeTriggerAgentContext({
+    triggerSlug: "ASHBY_NEW_APPLICATION",
+    toolkit: "ashby",
+    payload: {
+      application: { id: "app_123", candidate: { name: "Taylor Candidate", resume_text: "Built and led a five-person support team." }, job: { title: "Support Lead" } },
+      message_id: "msg_456",
+      thread_id: "thread_789",
+      access_token: "secret-token",
+      attachment_data: "base64-secret",
+      metadata: { connection_id: "private-connection", trigger_id: "private-trigger", user_id: "user_123" },
+    },
+  });
+  assert.match(context, /application\.id: app_123/);
+  assert.match(context, /message_id: msg_456/);
+  assert.match(context, /thread_id: thread_789/);
+  assert.match(context, /Taylor Candidate/);
+  assert.match(context, /Support Lead/);
+  assert.doesNotMatch(context, /secret-token|base64-secret|private-connection|private-trigger|user_123/);
+  assert.ok(context.length <= 24_000);
+});
+
+test("private agent context remains bounded for large provider payloads", () => {
+  const payload = Object.fromEntries(Array.from({ length: 100 }, (_, index) => [`field${index}`, "x".repeat(4_000)]));
+  assert.ok(safeTriggerAgentContext({ triggerSlug: "LARGE_EVENT", payload }).length <= 24_000);
 });

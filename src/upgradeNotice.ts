@@ -99,8 +99,8 @@ export const AGENT_UPGRADE_PRESETS = {
   ],
   triggers: [
     "Manage provider-backed triggers from the authenticated dashboard or typed SDK using the same live Composio catalogue as Chusky's chat interfaces.",
-    "Signed events are saved to a durable inbox before acknowledgment; retries reuse a stable workflow ID, and owner-scoped results remain available in Telegram and the authenticated dashboard Chat.",
-    "Connected-account expiry and automatically disabled-trigger events now reach the same owner-scoped handling flow, while approval policy remains in force and Chusky never reconnects, recreates, or blindly replays an external action.",
+    "Every signed event now receives bounded private provider context and source references so Chusky can inspect the originating record and carry routine work through provider execution and confirmation.",
+    "Trigger runs autonomously handle routine writes across Composio toolkits, pause for refunds, deletion, and critical actions, and report verified completion, drafts, decisions, or blockers in Telegram and the dashboard.",
   ],
   treg: [
     "Added Treg as Chusky's first-class live-data gateway with bounded native tools for provider catalog search, endpoint inspection, provider comparison, enrichment, data resolution, organization-tool discovery, usage, and balance checks.",

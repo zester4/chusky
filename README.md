@@ -764,14 +764,19 @@ owner and persisted as waiting until the approval or verified continuation is re
 
 ### Event-driven Composio triggers
 
-Composio trigger events are verified, ownership-checked, deduplicated, stored as a bounded safe
-summary, and handed to the durable `/workflows/trigger-event` endpoint. The webhook returns `202`
-before the agent runs. Set `TRIGGER_WORKFLOW_URL` explicitly when the public workflow URL differs
-from `${WEBHOOK_URL}/workflows/trigger-event`; otherwise Chusky derives it from `WEBHOOK_URL`.
+Composio trigger events are verified, ownership-checked, deduplicated, and handed to the durable
+`/workflows/trigger-event` endpoint. The webhook returns `202` before the agent runs. Set
+`TRIGGER_WORKFLOW_URL` explicitly when the public workflow URL differs from
+`${WEBHOOK_URL}/workflows/trigger-event`; otherwise Chusky derives it from `WEBHOOK_URL`.
 Trigger workflow runs use `trigger-<event-id>` as their stable QStash workflow ID, so provider
-retries do not start a second agent run. If a triggered action needs approval, the workflow waits
-for the approval callback and resumes with the same event context. Only a bounded, redacted summary
-is persisted and shown to the model; raw provider payloads are not stored by default.
+retries do not start a second agent run. Chusky stores a bounded safe summary for owner-facing
+activity and a separate, bounded private event context for the agent. The private context excludes
+credentials and binary data while retaining provider record references needed to inspect and act on
+the exact source event. Routine provider writes run autonomously across connected Composio
+toolkits; refunds, deletion, and critical or provider-declared high-impact actions pause for an exact
+owner decision. The workflow verifies writes, resumes the same event after approval, and reports
+completed work, drafts, decisions, or operational blockers in the authenticated dashboard and
+Telegram when linked.
 
 ### Daytona persistence
 

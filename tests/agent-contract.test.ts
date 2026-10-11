@@ -42,13 +42,86 @@ test("verified triggers receive executor framing while ordinary conversations do
   assert.equal(triggerAutonomyInstructions(undefined), undefined);
   const instructions = triggerAutonomyInstructions("evt_trigger_1");
   assert.match(instructions ?? "", /AUTONOMOUS TRIGGER EXECUTION/);
-  assert.match(instructions ?? "", /not a user chat message/i);
-  assert.match(instructions ?? "", /No custom per-trigger instructions are required/i);
-  assert.match(instructions ?? "", /Reply in that same thread when it asks a clear, routine question/i);
-  assert.match(instructions ?? "", /financial, legal, HR, medical, sensitive/i);
-  assert.match(instructions ?? "", /always close out to the owner/i);
+  assert.match(instructions ?? "", /standing trigger policy authorizes routine business handling/i);
+  assert.match(instructions ?? "", /Complete the routine business action/i);
+  assert.match(instructions ?? "", /Pause only for refunds, deletion, or a critical decision/i);
+  assert.match(instructions ?? "", /provider receipt or read-back/i);
   assert.doesNotMatch(instructions ?? "", /return exactly NO_ACTION/i);
-  assert.match(instructions ?? "", /not create a durable attention record.*guess/i);
+});
+
+test("verified trigger runs execute an unfamiliar toolkit write and pause a refund before provider dispatch", async () => {
+  const userId = 830071;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const previous = { jevMode: config.jevMode, jevSurfaces: config.jevSurfaces, jevTurnBudgetMs: config.jevTurnBudgetMs };
+  const executed: string[] = [];
+  const executionOptions: Array<Record<string, unknown> | undefined> = [];
+  const requests: Array<Record<string, any>> = [];
+  const actions = [
+    { slug: "ASHBY_CREATE_APPLICATION_NOTE", name: "Create internal application review note", toolkit: "ashby", properties: { application_id: { type: "string" }, note: { type: "string" } }, required: ["application_id", "note"] },
+    { slug: "STRIPE_CREATE_REFUND", name: "Refund a charge", toolkit: "stripe", properties: { charge_id: { type: "string" } }, required: ["charge_id"] },
+  ];
+  const session = {
+    sessionId: "trigger-autonomy-session",
+    tools: async () => [{ type: "function", function: { name: "COMPOSIO_SEARCH_TOOLS", description: "Find connected-app actions", parameters: { type: "object", properties: {} } } }],
+    execute: async (slug: string, _args: Record<string, unknown>, options?: Record<string, unknown>) => { executed.push(slug); executionOptions.push(options); return { successful: true, data: { id: "note_1" } }; },
+  };
+  const originalFetch = globalThis.fetch;
+  let callIndex = 0;
+  let nextSlug = "ASHBY_CREATE_APPLICATION_NOTE";
+  let nextArgs: Record<string, string> = { application_id: "app_1", note: "Reviewed; strong evidence of support-team leadership." };
+  setAgentDependenciesForTests({ composio: {
+    create: async () => session,
+    sessions: { use: async () => session },
+    connectedAccounts: { list: async () => ({ items: actions.map((action) => ({ id: `ca_${action.toolkit}`, toolkit: { slug: action.toolkit }, status: "ACTIVE" })) }) },
+    tools: { getRawComposioTools: async () => actions.map((action) => ({ slug: action.slug, name: action.name, description: action.name, toolkit: { slug: action.toolkit }, inputParameters: { type: "object", properties: action.properties, required: action.required, additionalProperties: false } })) },
+  } });
+  config.jevMode = "enforce";
+  config.jevSurfaces = new Set(["composio"]);
+  config.jevTurnBudgetMs = 5_000;
+  setJevClientForTests(new JevClient({ apiKey: "trigger-test-key", fetchImpl: (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    const state = String((body.state as Record<string, unknown> | undefined)?.request ?? "").toLowerCase();
+    const selected = state.includes("refund") ? "STRIPE_CREATE_REFUND" : "ASHBY_CREATE_APPLICATION_NOTE";
+    const answers: Record<string, unknown> = {};
+    for (const [key, question] of Object.entries<any>(body.questions ?? {})) {
+      if (question.type === "noul") { answers[key] = { type: "noul", noul: 0.99 }; continue; }
+      const ids = Object.keys(question.criteria).filter((id) => id !== "__none__");
+      const winner = ids.find((id) => id === selected) ?? ids[0] ?? "__none__";
+      const probabilities = Object.fromEntries(Object.keys(question.criteria).map((id) => [id, id === winner ? 0.99 : 0.01 / Math.max(1, Object.keys(question.criteria).length - 1)]));
+      answers[key] = { type: "choice", choice: winner, confidence: 0.99, probabilities };
+    }
+    return new Response(JSON.stringify({ model: body.model, answers, usage: { input_tokens: 20, cost: 0 } }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch }));
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    requests.push(JSON.parse(String(init?.body ?? "{}")));
+    return callIndex++ === 0
+      ? toolResponse(nextSlug, JSON.stringify(nextArgs))
+      : chatResponse({ role: "assistant", content: "I added and verified the internal review note." });
+  }) as typeof fetch;
+  try {
+    const context = { accountId: `account_${userId}`, provider: "telegram", conversationId: String(userId), triggerEventId: "evt_ashby_1", triggerConnectionId: "ca_ashby", triggerToolkit: "ashby" };
+    const result = await runAgent(userId, "Handle this Ashby application event.", [], "test/model", undefined, undefined, undefined, undefined, context);
+    assert.match(result.text, /added and verified/i);
+    assert.deepEqual(executed, ["ASHBY_CREATE_APPLICATION_NOTE"], "ordinary writes from a new toolkit execute during trigger handling");
+    assert.equal(executionOptions[0]?.account, "ca_ashby", "source-toolkit writes are bound to the verified originating account");
+    assert.match(String(requests[0]?.messages?.[0]?.content), /AUTONOMOUS TRIGGER EXECUTION/);
+
+    nextSlug = "STRIPE_CREATE_REFUND";
+    nextArgs = { charge_id: "ch_123" };
+    callIndex = 0;
+    await assert.rejects(
+      () => runAgent(userId, "Handle this refund event.", [], "test/model", undefined, undefined, undefined, undefined, context),
+      (error: unknown) => error instanceof ApprovalRequiredError && error.toolSlug === "STRIPE_CREATE_REFUND",
+    );
+    assert.deepEqual(executed, ["ASHBY_CREATE_APPLICATION_NOTE"], "refunds pause before provider execution");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Object.assign(config, previous);
+    setJevClientForTests(undefined);
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "trigger-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
 });
 
 test("private runs receive a capability-neutral operating kernel", () => {

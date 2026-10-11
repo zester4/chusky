@@ -1,5 +1,5 @@
 //src/policy.ts
-import { composioMetadataPolicy } from "./composioRisk.js";
+import { composioMetadataPolicy, composioMetadataRequiresCriticalApproval } from "./composioRisk.js";
 import { canonicalNativeToolSlug } from "./agentTools.js";
 
 // Restricted/background runs use risk classification and explicit grants.
@@ -13,11 +13,11 @@ const COMPOSIO_WRITE_PATTERN = /(^|_)(CREATE|UPDATE|SET|ADD|SEND|POST|PUBLISH|WR
 // actions eligible for outcome verification or compensation read-back.
 const ADDITIONAL_MUTATING_TOOL_PATTERN = /(^|_)(MARK|ACKNOWLEDGE|ACK|STAR|UNSTAR|REACT|LIKE|FOLLOW|UNFOLLOW|ASSIGN|RESOLVE|REOPEN|COMPLETE|APPROVE|DECLINE|ACCEPT|REJECT|TRASH|RESTORE|ATTACH|DETACH|PIN|UNPIN|HIDE|SNOOZE)(_|$)/i;
 const COMPOSIO_AUTONOMOUS_PATTERN = /(^|_)(SEND_EMAIL|SEND_CAMPAIGN|POST_MESSAGE|PUBLISH_POST|CREATE_DRAFT|UPDATE_DRAFT|CREATE_ISSUE|CREATE_NOTE|ADD_COMMENT)(_|$)/i;
+const KNOWN_COMPOSIO_TOOLKIT_PATTERN = /^(GMAIL|GOOGLECALENDAR|CALENDLY|SLACK|X|INSTAGRAM|NEWSLETTER|HUBSPOT|SALESFORCE|PIPEDRIVE|NOTION|ZENDESK|INTERCOM|OUTLOOK|MICROSOFT|LINKEDIN|TRELLO|ASANA|LINEAR|JIRA|GITHUB|GITLAB|DROPBOX|GOOGLEDRIVE|SHOPIFY|WOOCOMMERCE|STRIPE|TWILIO|SENDGRID|MAILCHIMP|TAVILY|EXA|FIRECRAWL)_/i;
 const FACEBOOK_PUBLISH_ACTIONS = new Set([
   "FACEBOOK_CREATE_POST", "FACEBOOK_CREATE_PHOTO_POST", "FACEBOOK_CREATE_MULTI_PHOTO_POST", "FACEBOOK_CREATE_VIDEO_POST",
   "FACEBOOK_PUBLISH_SCHEDULED_POST", "FACEBOOK_UPLOAD_PHOTO", "FACEBOOK_UPLOAD_PHOTOS_BATCH", "FACEBOOK_UPLOAD_VIDEO",
 ]);
-const KNOWN_COMPOSIO_TOOLKIT_PATTERN = /^(GMAIL|GOOGLECALENDAR|CALENDLY|SLACK|X|INSTAGRAM|NEWSLETTER|HUBSPOT|SALESFORCE|PIPEDRIVE|NOTION|ZENDESK|INTERCOM|OUTLOOK|MICROSOFT|LINKEDIN|TRELLO|ASANA|LINEAR|JIRA|GITHUB|GITLAB|DROPBOX|GOOGLEDRIVE|SHOPIFY|WOOCOMMERCE|STRIPE|TWILIO|SENDGRID|MAILCHIMP|TAVILY|EXA|FIRECRAWL)_/i;
 
 export type ToolApprovalPolicy = "private" | "approval_required";
 
@@ -185,9 +185,8 @@ function composioActionPolicy(slug: string): ToolApprovalPolicy {
   // Ordinary provider writes (CRM updates, drafts, notes, calendar changes,
   // routine messages, and similar reversible work) are autonomous. The
   // high-impact pattern above still gates money, purchases, deletion,
-  // permissions, and Git/deploy operations. Unknown
-  // write-shaped actions remain fail-closed; an unclassified read/utility
-  // slug keeps the legacy autonomous behavior used by native test adapters.
+  // permissions, and Git/deploy operations. Unknown write-shaped actions
+  // remain fail-closed outside owner-authorized trigger execution.
   if (COMPOSIO_WRITE_PATTERN.test(slug)) {
     return KNOWN_COMPOSIO_TOOLKIT_PATTERN.test(slug) ? "private" : "approval_required";
   }
@@ -435,7 +434,43 @@ export function isDeletionToolCall(slug: string, args: Record<string, unknown> =
   return false;
 }
 
-export function requiresToolApproval(slug: string, args: Record<string, unknown> = {}, forceApproval = false, ownerPrivateRun = false): boolean {
+const TRIGGER_CRITICAL_ACTION_PATTERN = /(^|_)(PAYMENT|CHARGE|TRANSFER|REFUND|PURCHASE|CHECKOUT|PLACE_ORDER|CREATE_ORDER|ADD_PAYMENT_METHOD|GRANT|REVOKE|PERMISSIONS?|CHANGE_ROLE|UPDATE_ROLE|SET_ROLE|ADD_MEMBER|REMOVE_MEMBER|MERGE|DEPLOY)(_|$)|(^|_)(GIT|GITHUB|GITLAB|BITBUCKET)_?PUSH(_|$)/i;
+
+function triggerCriticalToolCall(slug: string, args: Record<string, unknown>, depth = 0): boolean {
+  if (depth > 5) return true;
+  const normalized = canonicalPolicySlug(slug);
+  if (!normalized || isDeletionToolCall(normalized, args) || TRIGGER_CRITICAL_ACTION_PATTERN.test(normalized)) return true;
+  if (composioMetadataRequiresCriticalApproval(normalized)) return true;
+  if (normalized === "COMPOSIO_EXECUTE_TOOL") {
+    const nestedSlug = String(args.tool_slug ?? args.slug ?? "");
+    const nestedArgs = args.arguments && typeof args.arguments === "object" && !Array.isArray(args.arguments)
+      ? args.arguments as Record<string, unknown>
+      : {};
+    return !nestedSlug || triggerCriticalToolCall(nestedSlug, nestedArgs, depth + 1);
+  }
+  if (normalized === "COMPOSIO_MULTI_EXECUTE_TOOL") {
+    const nested = Array.isArray(args.tools) ? args.tools : [];
+    return nested.length === 0 || nested.some((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return true;
+      const call = value as Record<string, unknown>;
+      const nestedSlug = String(call.tool_slug ?? call.toolSlug ?? call.name ?? "");
+      const nestedArgs = call.arguments && typeof call.arguments === "object" && !Array.isArray(call.arguments)
+        ? call.arguments as Record<string, unknown>
+        : {};
+      return !nestedSlug || triggerCriticalToolCall(nestedSlug, nestedArgs, depth + 1);
+    });
+  }
+  // Native and MCP tools retain their explicit central policy. Composio's
+  // dynamically catalogued provider actions use the critical-action rules
+  // above, so an unfamiliar toolkit can still perform ordinary business work.
+  if (normalized.startsWith("CHUCK_") || normalized.startsWith("MCP_")) {
+    return requiresToolApproval(normalized, args, false, false, false);
+  }
+  return false;
+}
+
+export function requiresToolApproval(slug: string, args: Record<string, unknown> = {}, forceApproval = false, ownerPrivateRun = false, triggerRun = false): boolean {
+  if (triggerRun) return forceApproval || triggerCriticalToolCall(slug, args);
   if (BROWSER_HANDOFF_CONTROL_TOOLS.has(canonicalPolicySlug(slug))) return false;
   if (TINYFISH_AUTONOMOUS_TOOLS.has(canonicalPolicySlug(slug))) return false;
   if (slug === "CHUCK_LEAD_CAMPAIGN") return false;
