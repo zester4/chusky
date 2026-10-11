@@ -41,6 +41,7 @@ import { cancelJob, cancelReminder, nativeTool, pauseJob, pauseReminder, resumeJ
 import { confirmRecallMeetingParticipant } from "./meetings/service.js";
 import { defaultMediaInstruction } from "./mediaInput.js";
 import { fetchPublicWebsite, normalizePublicWebsiteUrl } from "./onboardingWebsite.js";
+import { displayTriggerSummary, triggerEventDisplayName, triggerRecoveryActions } from "./triggerEventSummary.js";
 
 import { validateNativeToolArguments } from "./agentTools.js";
 import { chuckTools } from "./agentTools.js";
@@ -1701,7 +1702,23 @@ export function registerSdkApi(app: Hono): void {
       voiceReplies: Boolean(session.voiceReplies),
       voicePreferences: session.voicePreferences ?? {},
       approvals: approvals.filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map((item) => ({ id: item.id, toolSlug: item.toolSlug, request: item.request, status: item.status, ...(item.missionId ? { missionId: item.missionId } : {}), channelProvider: item.channelProvider, createdAt: new Date(item.createdAt).toISOString(), expiresAt: new Date(item.expiresAt).toISOString() })),
-      attentionCandidates: (attentionCandidates as AttentionCandidateRecord[]).filter((item) => item.status === "pending" && (!item.availableAt || item.availableAt <= Date.now()) && (!item.expiresAt || item.expiresAt > Date.now())).slice(0, 12).map((item) => ({ id: item.id, candidateType: item.candidateType, reason: item.reason.replace(/^\[(connection-gap|action-gap):[^\]]+\]\s*/, ""), proposedAction: item.proposedAction, providerSlug: item.providerSlug, suggestedActions: item.suggestedActions, score: item.score, createdAt: new Date(item.createdAt).toISOString() })),
+      attentionCandidates: (attentionCandidates as AttentionCandidateRecord[]).filter((item) => item.status === "pending" && (!item.availableAt || item.availableAt <= Date.now()) && (!item.expiresAt || item.expiresAt > Date.now())).slice(0, 12).map((item) => {
+        const sourceEvent = item.sourceTriggerEventId ? triggerEvents.find((event) => event.eventId === item.sourceTriggerEventId) : undefined;
+        const isTriggerCandidate = String(item.candidateType) === "trigger_event" || /^Trigger\s+/i.test(item.reason);
+        const displayName = sourceEvent ? triggerEventDisplayName(sourceEvent.triggerSlug) : item.providerSlug && isTriggerCandidate ? triggerEventDisplayName(item.providerSlug) : undefined;
+        const triggerActions = displayName ? triggerRecoveryActions(displayName) : undefined;
+        return {
+          id: item.id,
+          candidateType: item.candidateType,
+          reason: displayName ? `A ${displayName} needs review. Chusky saved the event, but delivery needs attention.` : item.reason.replace(/^\[(connection-gap|action-gap):[^\]]+\]\s*/, ""),
+          proposedAction: displayName ? `Review the saved ${displayName} result in Chat. Chusky will explain what arrived and what still needs your decision.` : item.proposedAction,
+          providerSlug: sourceEvent?.triggerSlug ?? item.providerSlug,
+          suggestedActions: item.suggestedActions?.length ? item.suggestedActions : triggerActions,
+          ...(item.sourceTriggerEventId ? { sourceTriggerEventId: item.sourceTriggerEventId } : {}),
+          score: item.score,
+          createdAt: new Date(item.createdAt).toISOString(),
+        };
+      }),
       channels: channels.filter((item) => !item.disabledAt).map((item) => ({ id: identityFingerprint(item), provider: item.provider, externalUserId: item.externalUserId, workspaceId: item.workspaceId, displayName: item.displayName, verifiedAt: new Date(item.verifiedAt).toISOString(), proactiveOptIn: item.proactiveOptIn !== false })),
       reminders: reminders.map((item) => ({ ...item, runAt: new Date(item.runAt).toISOString(), createdAt: new Date(item.createdAt).toISOString() })),
       jobs: jobs.map((item) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
@@ -1714,7 +1731,7 @@ export function registerSdkApi(app: Hono): void {
         id: event.eventId,
         triggerId: event.triggerId,
         slug: event.triggerSlug,
-        summary: event.summary.slice(0, 1_200),
+        summary: displayTriggerSummary(event.summary, event.triggerSlug).slice(0, 1_200),
         status: event.status,
         notificationStatus: event.notificationStatus ?? (event.status === "completed" ? "delivered" : event.status === "failed" ? "failed" : "pending"),
         ...(event.result ? { result: event.result.slice(0, 4_000) } : {}),

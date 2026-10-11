@@ -371,6 +371,23 @@ test("attention pulse preserves a durable trigger recovery without creating dupl
   assert.match(plan.prompt, /never replay its external action/);
 });
 
+test("attention pulse closes a legacy trigger recovery after delivery is confirmed", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910017;
+  const now = Date.now();
+  await createTriggerEvent({ eventId: "trigger-event-delivered-1", userId, triggerSlug: "GMAIL_NEW_GMAIL_MESSAGE", summary: "Event: new Gmail message", status: "completed", notificationStatus: "delivered", createdAt: now - 1000, updatedAt: now - 500 });
+  await createAttentionRecord(userId, "attention_candidate", {
+    candidateType: "act", score: 1, status: "pending", sourceTriggerEventId: "trigger-event-delivered-1",
+    reason: "Trigger GMAIL_NEW_GMAIL_MESSAGE needs owner follow-up; its durable result is saved in Recent trigger events.",
+    proposedAction: "Review the saved trigger result.",
+  });
+
+  const plan = await buildAttentionPulsePlan(userId, now);
+  const candidates = await listAttentionRecords(userId, "attention_candidate") as Array<{ status: string }>;
+  assert.equal(candidates[0]?.status, "dismissed");
+  assert.equal(plan.candidateIds.length, 0);
+});
+
 test("attention pulse finds blocked durable work and due watches without waking paused or future work", async () => {
   await initStore({ memoryOnly: true });
   const userId = 910009;
