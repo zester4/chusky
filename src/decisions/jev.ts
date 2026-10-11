@@ -56,9 +56,18 @@ export interface JevClientOptions {
   breakerCooldownMs?: number;
 }
 
+type PendingEvaluation = {
+  state: JevState;
+  questions: Record<string, JevQuestion>;
+  options: { signal?: AbortSignal; timeoutMs?: number; sessionId?: string };
+  resolve: (result: JevResult) => void;
+  reject: (error: unknown) => void;
+};
+
 const OPENROUTER_URL = "https://openrouter.ai/api/alpha/decisions";
 const TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone";
 const MAX_TEXT = 4_000;
+const ROUTE_COALESCE_WINDOW_MS = 20;
 
 /** Remove control characters and bound model-facing text. */
 export function jevText(value: unknown, max = 400): string {
@@ -132,6 +141,8 @@ export class JevClient {
   private readonly breakerThreshold: number;
   private readonly breakerCooldownMs: number;
   private readonly breaker: Breaker = { failures: 0, openUntil: 0 };
+  private readonly pendingEvaluations: PendingEvaluation[] = [];
+  private batchTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: JevClientOptions = {}) {
     this.provider = options.provider ?? config.jevProvider;
@@ -159,8 +170,122 @@ export class JevClient {
   }
 
   async evaluate(state: JevState, questions: Record<string, JevQuestion>, options: { signal?: AbortSignal; timeoutMs?: number; sessionId?: string } = {}): Promise<JevResult> {
+    // Route modules start concurrently. Coalesce only within a single durable
+    // turn, and only when cancellation/timeout semantics are identical.
+    if (options.sessionId && options.signal && !options.signal.aborted && Object.keys(questions).length) {
+      return new Promise<JevResult>((resolve, reject) => {
+        this.pendingEvaluations.push({ state, questions, options, resolve, reject });
+        if (!this.batchTimer) this.batchTimer = setTimeout(() => {
+          this.batchTimer = undefined;
+          void this.flushEvaluations();
+        }, ROUTE_COALESCE_WINDOW_MS);
+      });
+    }
+    return this.evaluateDirect(state, questions, options);
+  }
+
+  private async flushEvaluations(): Promise<void> {
+    const pending = this.pendingEvaluations.splice(0);
+    const groups: PendingEvaluation[][] = [];
+    for (const item of pending) {
+      const group = groups.find((candidate) => {
+        const first = candidate[0];
+        return first.options.sessionId === item.options.sessionId
+          && first.options.signal === item.options.signal
+          && first.options.timeoutMs === item.options.timeoutMs;
+      });
+      if (group) group.push(item); else groups.push([item]);
+    }
+
+    await Promise.all(groups.map(async (group) => {
+      const batches: PendingEvaluation[][] = [];
+      for (const item of group) {
+        const batch = batches.find((candidate) => this.canMergeEvaluations(candidate, item));
+        if (batch) batch.push(item); else batches.push([item]);
+      }
+      await Promise.all(batches.map((batch) => this.runEvaluationBatch(batch)));
+    }));
+  }
+
+  private canMergeEvaluations(batch: PendingEvaluation[], item: PendingEvaluation): boolean {
+    if (!batch.length) return true;
+    const state = this.mergeStates([...batch.map((entry) => entry.state), item.state]);
+    if (state === undefined) return false;
+    const questions: Record<string, JevQuestion> = {};
+    for (const [index, entry] of [...batch, item].entries()) {
+      for (const key of Object.keys(entry.questions)) questions[`r${index}_${key}`] = entry.questions[key];
+    }
+    return estimateTokens({
+      model: this.model,
+      state,
+      questions,
+      ...(this.provider === "openrouter" ? { session_id: "0".repeat(64) } : {}),
+    }) <= config.jevMaxRequestTokens;
+  }
+
+  private mergeStates(states: JevState[]): JevState | undefined {
+    if (states.every((state) => JSON.stringify(state) === JSON.stringify(states[0]))) return states[0];
+    if (!states.every(isObject)) return undefined;
+    const merged: Record<string, unknown> = {};
+    for (const state of states as Record<string, unknown>[]) {
+      for (const [key, value] of Object.entries(state)) {
+        if (key in merged && JSON.stringify(merged[key]) !== JSON.stringify(value)) return undefined;
+        merged[key] = value;
+      }
+    }
+    return merged;
+  }
+
+  private async runEvaluationBatch(batch: PendingEvaluation[]): Promise<void> {
+    if (batch.length === 1) {
+      const item = batch[0];
+      try { item.resolve(await this.evaluateDirect(item.state, item.questions, item.options)); }
+      catch (error) { item.reject(error); }
+      return;
+    }
+    const mergedState = this.mergeStates(batch.map((item) => item.state));
+    if (mergedState === undefined) {
+      await Promise.all(batch.map((item) => this.runEvaluationBatch([item])));
+      return;
+    }
+    const mergedQuestions: Record<string, JevQuestion> = {};
+    const responseKeys: string[][] = [];
+    batch.forEach((item, index) => {
+      const keys: string[] = [];
+      for (const [key, question] of Object.entries(item.questions)) {
+        const mergedKey = `r${index}_${key}`;
+        mergedQuestions[mergedKey] = question;
+        keys.push(mergedKey);
+      }
+      responseKeys.push(keys);
+    });
+    try {
+      const result = await this.evaluateDirect(mergedState, mergedQuestions, batch[0].options);
+      const weights = batch.map((item) => estimateTokens({ state: item.state, questions: item.questions }));
+      const totalWeight = weights.reduce((sum, weight) => sum + weight, 0) || batch.length;
+      batch.forEach((item, index) => {
+        const answers: Record<string, JevAnswer> = {};
+        Object.keys(item.questions).forEach((key, questionIndex) => {
+          answers[key] = result.answers[responseKeys[index][questionIndex]];
+        });
+        const share = weights[index] / totalWeight;
+        item.resolve({
+          model: result.model,
+          answers,
+          latencyMs: result.latencyMs,
+          ...(result.inputTokens !== undefined ? { inputTokens: Math.round(result.inputTokens * share) } : {}),
+          ...(result.costUsd !== undefined ? { costUsd: result.costUsd * share } : {}),
+        });
+      });
+    } catch (error) {
+      batch.forEach((item) => item.reject(error));
+    }
+  }
+
+  private async evaluateDirect(state: JevState, questions: Record<string, JevQuestion>, options: { signal?: AbortSignal; timeoutMs?: number; sessionId?: string } = {}): Promise<JevResult> {
     if (!this.apiKey) throw new JevUnavailableError("Jev API key is not configured", "disabled");
     if (this.now() < this.breaker.openUntil) throw new JevUnavailableError("Jev circuit breaker is open", "circuit_open");
+    if (options.signal?.aborted) throw new JevUnavailableError("Jev request was cancelled", "timeout");
     const keys = Object.keys(questions);
     if (!keys.length) return { model: this.model, answers: {}, latencyMs: 0 };
     const boundedState = typeof state === "string" ? jevText(state, MAX_TEXT) : state;

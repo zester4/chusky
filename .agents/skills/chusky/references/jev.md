@@ -11,6 +11,7 @@ and Treg spend guards are unchanged.
 - `src/decisions/jev.ts` — HTTP client (OpenRouter `POST /api/alpha/decisions`
   with `typesafe/jev-1.13`, or TypeSafe `POST /v1/systemone` with
   `jev-1.13.0`), strict answer validation, timeout, circuit breaker,
+  same-turn request coalescing for independent route questions,
   `rankOptions` (sharded tournament for large option sets), and
   `verifyCandidates` (parallel Noul multi-label checks).
 - `src/decisions/skillRouter.ts` — ranks every installed skill, then verifies
@@ -61,10 +62,18 @@ and Treg spend guards are unchanged.
   errors, invalid answers, an open breaker, or low confidence fall back to
   keyword routing for that turn.
 
-Skill, Treg, Composio, and autonomy routing (including the connected-account lookup)
-start together and share one per-turn deadline (`JEV_TURN_BUDGET_MS`). Its
+Skill, Treg, Composio, and native-tool routing start concurrently and share
+one per-turn deadline (`JEV_TURN_BUDGET_MS`). Their first independent Jev
+questions can be coalesced into one provider request when they share the same
+durable run ID and abort signal, have compatible state, and fit the request
+token budget. Questions retain separate IDs and explicit `__none__` choices;
+dependent follow-ups (for example action ranking after fetching an app's
+schema) remain separate. Conflicting state, missing run/signal identity,
+different turns, or a full token budget prevents coalescing. Per-surface cost
+and token telemetry is apportioned from the shared provider usage. The shared
 signal aborts in-flight Jev and catalogue requests, so routing adds at most
-that budget to the critical path. Deadline aborts do not open the breaker.
+the configured budget to the critical path. Deadline aborts do not open the
+breaker.
 
 Browser routing is used only when `CHUCK_BROWSER_NEXT` is called for an
 inspected E2B browser page. It does not add a Jev request to ordinary chat or

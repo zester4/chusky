@@ -92,6 +92,36 @@ test("Jev client sends the OpenRouter decisions contract and validates answers",
   assert.equal(typesafe[0].body.model, "jev-1.13.0");
 });
 
+test("Jev coalesces independent same-turn routes and fans answers and cost back safely", async () => {
+  const captured: Captured[] = [];
+  const client = new JevClient({ apiKey: "k", fetchImpl: fakeJev(captured) });
+  const controller = new AbortController();
+  const sessionId = "owner:run:one";
+  const results = await Promise.all([
+    client.evaluate({ request: "find interview schedule", recent_conversation: "interview tomorrow" }, { native: { type: "noul", instructions: "Need a native tool?" } }, { sessionId, signal: controller.signal }),
+    client.evaluate({ request: "find interview schedule", connected_toolkits: ["googlecalendar"] }, { app: { type: "noul", instructions: "Need a connected app?" } }, { sessionId, signal: controller.signal }),
+    client.evaluate({ request: "find interview schedule" }, { skill: { type: "choice", instructions: "Which skill?", criteria: { calendar: "calendar scheduling", [NONE_OPTION]: "none" } } }, { sessionId, signal: controller.signal }),
+  ]);
+  assert.equal(captured.length, 1, "independent routes in one turn share one provider round trip");
+  assert.deepEqual(Object.keys(captured[0].body.questions).sort(), ["r0_native", "r1_app", "r2_skill"]);
+  assert.deepEqual(results.map((result) => Object.keys(result.answers)), [["native"], ["app"], ["skill"]]);
+  assert.ok(Math.abs(results.reduce((sum, result) => sum + (result.costUsd ?? 0), 0) - 0.000004) < 1e-12, "allocated costs sum to provider cost");
+  assert.equal(results[2].answers.skill?.type, "choice");
+});
+
+test("Jev never coalesces across turns or conflicting state", async () => {
+  const captured: Captured[] = [];
+  const client = new JevClient({ apiKey: "k", fetchImpl: fakeJev(captured) });
+  const controller = new AbortController();
+  const question = { q: { type: "noul" as const, instructions: "Is this needed?" } };
+  await Promise.all([
+    client.evaluate({ request: "same", detail: "first" }, question, { sessionId: "run-a", signal: controller.signal }),
+    client.evaluate({ request: "same", detail: "second" }, question, { sessionId: "run-a", signal: controller.signal }),
+    client.evaluate({ request: "same" }, question, { sessionId: "run-b", signal: controller.signal }),
+  ]);
+  assert.equal(captured.length, 3, "conflicting states and different run IDs stay isolated");
+});
+
 test("Jev client rejects out-of-set choices and opens the circuit breaker", async () => {
   let now = 1_000;
   const client = new JevClient({ apiKey: "k", fetchImpl: fakeJev([], { badChoice: true }), breakerThreshold: 2, breakerCooldownMs: 5_000, now: () => now });
