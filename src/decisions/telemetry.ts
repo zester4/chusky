@@ -1,6 +1,6 @@
 import { logger } from "../logger.js";
 
-export type DecisionSurface = "skills" | "composio_toolkit" | "composio_action" | "treg_tool" | "treg_endpoint" | "autonomy" | "browser" | "memory" | "native_tool" | "turn_mode";
+export type DecisionSurface = "skills" | "composio_toolkit" | "composio_action" | "treg_tool" | "treg_endpoint" | "autonomy" | "browser" | "memory" | "native_tool" | "turn_action" | "turn_mode";
 
 type SurfaceStats = { decisions: number; applied: number; fallbacks: number; agreements: number; comparisons: number; latencyMsTotal: number; costUsdTotal: number };
 

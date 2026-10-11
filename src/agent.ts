@@ -55,7 +55,7 @@ import { ROUTED_SKILL_REFERENCES, readSkillFile, routedSkillContext, skillContex
 import { routeSkillsForTurn } from "./decisions/skillRouter.js";
 import { composioDecisionContext, routeComposioForTurn, toComposioAction, toComposioToolkitInfo, type ComposioAction, type ComposioToolkitInfo } from "./decisions/composioRouter.js";
 import { recordTurnMode } from "./decisions/telemetry.js";
-import { isClearlyConversational } from "./decisions/actionGate.js";
+import { decideTurnAction } from "./decisions/actionGate.js";
 import type { MissionRoutingCache } from "./decisions/missionRoutingCache.js";
 import { routeTregForTurn, tregTurnContext } from "./decisions/tregRouter.js";
 import { createRoutingDeadline } from "./decisions/jev.js";
@@ -2379,7 +2379,7 @@ export async function runAgent(
   let meetingCalendarAvailabilityChecked = false;
   let imageComposioDirectActionGuidanceAdded = false;
 
-  if (!options?.ephemeral && !voiceTurn) {
+  if (!options?.ephemeral && !voiceTurn && requiredModality(userMessage)) {
     const capabilityModel = model.replace(/^~/, "");
     try {
       const modelRes = await fetch(`https://openrouter.ai/api/v1/models/${encodeURIComponent(capabilityModel)}`, {
@@ -2497,6 +2497,19 @@ export async function runAgent(
   }
   let relevantMemories: Awaited<ReturnType<typeof searchMemories>> = [];
   const canReadOwnerContext = (!options?.ephemeral || ownerPrivateRun) && !sharedScope && typeof userMessage === "string" && userMessage.trim();
+  // Start independent owner-context reads together without dropping any
+  // context or imposing the voice turn's lossy deadline on ordinary chat.
+  const textMemoryRead = !voiceTurn && canReadOwnerContext
+    ? searchMemories(userId, userMessage as string, { limit: 8, ...(options?.organizationId ? { organizationId: options.organizationId } : {}) })
+    : undefined;
+  const textKnowledgeRead = !voiceTurn && canReadOwnerContext && vectorConfigured()
+    ? new UpstashKnowledgeStore().query(String(userId), userMessage as string, { topK: 5, filter: "sourceType != 'memory'" }).catch((error) => {
+      logger.warn({ err: error, userId }, "Knowledge search unavailable; continuing without semantic context");
+      return [];
+    })
+    : undefined;
+  // Attach rejection handling immediately while the graph read is in flight.
+  const textMemoryOutcome = textMemoryRead?.then((value) => ({ value }), (error: unknown) => ({ error }));
   let graphContext = "";
   if (!voiceTurn && canReadOwnerContext) {
     try {
@@ -2513,7 +2526,7 @@ export async function runAgent(
   // the channel conversation record.
   if (!voiceTurn && canReadOwnerContext && vectorConfigured()) {
     try {
-      const matches = await new UpstashKnowledgeStore().query(String(userId), userMessage, { topK: 5, filter: "sourceType != 'memory'" });
+      const matches = await textKnowledgeRead!;
       knowledgeContext = matches.filter((match) => match.data).map((match) => `[Knowledge source ${match.metadata?.documentId ?? match.id}${match.metadata?.filename ? ` (${match.metadata.filename})` : ""}]\n${match.data}`).join("\n\n");
     } catch (error) {
       logger.warn({ err: error, userId }, "Knowledge search unavailable; continuing without semantic context");
@@ -2533,7 +2546,9 @@ export async function runAgent(
       withLatencyBudget(knowledgeRead.then((matches) => matches.filter((match) => match.data).map((match) => `[Knowledge source ${match.metadata?.documentId ?? match.id}${match.metadata?.filename ? ` (${match.metadata.filename})` : ""}]\n${match.data}`).join("\n\n")), "", config.voiceContextDeadlineMs),
     ]);
   } else if (canReadOwnerContext) {
-    relevantMemories = await searchMemories(userId, userMessage as string, { limit: 8, ...(options?.organizationId ? { organizationId: options.organizationId } : {}) });
+    const outcome = await textMemoryOutcome!;
+    if ("error" in outcome) throw outcome.error;
+    relevantMemories = outcome.value;
   }
   const memoryContext = [
     !sharedScope && durable.summaries.length ? `Conversation summaries:\n${durable.summaries.slice(-3).join("\n")}` : "",
@@ -2576,14 +2591,27 @@ export async function runAgent(
     && options.missionRoutingCache.objectiveHash === missionObjectiveHash(options.missionStepObjective)
     ? options.missionRoutingCache
     : undefined;
-  // Native Jev routing is the single classifier for simple conversational
-  // turns. Do not spend three more Jev calls on skills, Treg, and Composio
-  // when the request contains no action/data signal.
-  const clearlyConversational = isClearlyConversational(routingQuery, routingRecentContext);
-  const actionRoutingLikely = !clearlyConversational
-    || pendingApproval
-    || pendingContinuation
-    || Boolean(options?.taskId || options?.missionId || options?.meetingId || options?.toolAllow?.length || approvedApprovalId);
+  // Resolve one turn-wide intent before launching independent skill, Treg,
+  // Composio, and native routers. A native-tool `none` is not a global `none`:
+  // an email request may need Composio even when no CHUCK_* tool is relevant.
+  // Durable/trigger/shared/media/approved work bypasses this optimization.
+  const hasNonTextContent = Array.isArray(userMessage) && userMessage.some((part) => part.type !== "text");
+  const forceCapabilityRouting = Boolean(
+    voiceTurn || sharedScope || options?.ephemeral || hasNonTextContent || mediaRequest
+    || pendingApproval || pendingContinuation || approvedApprovalId
+    || options?.taskId || options?.missionId || options?.missionStepId || options?.meetingId || options?.meetingAppAccess
+    || options?.toolAllow?.length || options?.missionRoutingCache || channelContext?.triggerEventId
+  );
+  const turnActionDecision = toolsDisabled && !forceCapabilityRouting
+    ? { noActionNeeded: true, reason: "routing_disabled" as const }
+    : await decideTurnAction(routingQuery, {
+      recentContext: routingRecentContext,
+      forceCapability: forceCapabilityRouting,
+      signal,
+      deadline: routingDeadline,
+      sessionId: durableRunId,
+    });
+  const actionRoutingLikely = !turnActionDecision.noActionNeeded;
   // Media uses a tiny local skill preflight below. Do not run the broad skill
   // router or inject the full creative manual before the generation turn.
   const skillsRoutable = actionRoutingLikely && !mediaRequest && (!options?.ephemeral || ownerPrivateRun) && !voiceTurn;
@@ -2634,13 +2662,23 @@ export async function runAgent(
   const nativeRoutingQuery = options?.missionToolHints?.length
     ? `${routingQuery}\nPlanner preload hints: ${options.missionToolHints.join(", ")}`
     : routingQuery;
-  const nativeToolRoutePromise = routeNativeToolsForTurn(availableTools, nativeRoutingQuery, {
-    signal,
-    deadline: routingDeadline,
-    recentContext: routingRecentContext,
-    sessionId: durableRunId,
-    preserveAll: Boolean(options?.toolAllow?.length && !options?.taskId && !options?.missionId),
-  });
+  const nativeToolRoutePromise = actionRoutingLikely
+    ? routeNativeToolsForTurn(availableTools, nativeRoutingQuery, {
+      signal,
+      deadline: routingDeadline,
+      recentContext: routingRecentContext,
+      sessionId: durableRunId,
+      preserveAll: Boolean(options?.toolAllow?.length && !options?.taskId && !options?.missionId),
+    })
+    : Promise.resolve({
+      tools: availableTools.filter((tool) => toolName(tool) === "CHUCK_FIND_TOOLS" || toolName(tool) === "COMPOSIO_SEARCH_TOOLS"),
+      source: "fallback" as const,
+      candidateCount: availableTools.filter((tool) => toolName(tool).startsWith("CHUCK_")).length,
+      selected: [],
+      noNativeTool: true,
+      noNativeToolConfidence: 1 - (turnActionDecision.actionProbability ?? 0),
+      fallbackReason: turnActionDecision.reason,
+    });
   const [skillRoute, tregRoute, routedAccounts, composioDecision, nativeToolRoute] = await Promise.all([
     skillRoutePromise,
     tregRoutePromise,
@@ -2693,20 +2731,8 @@ export async function runAgent(
       composioRouteContext = `Cached connected-app route for this mission step: ${[...persistedMissionRouting.composioToolkits, ...persistedMissionRouting.composioActions].join(", ")}. Use the gateway and verify the exact schema before execution.`;
     }
   }
-  const noToolTurn = Boolean(
-    config.conversationalFastPath
-    && clearlyConversational
-    &&
-    !options?.taskId
-    && !options?.missionId
-    && !options?.toolAllow?.length
-    && nativeToolRoute.noNativeTool
-    && (nativeToolRoute.noNativeToolConfidence ?? 0) >= 0.85
-    && !skillRoute
-    && !tregRoute
-    && !composioDecision
-  );
-  recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: noToolTurn ? "jev_no_native_tool" : clearlyConversational ? "conversational_gate_requires_capability_check" : "action_gate", noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision) });
+  const noToolTurn = turnActionDecision.noActionNeeded;
+  recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: turnActionDecision.reason, noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision) });
   const revealedNativeTools = new Set<string>();
   routingDeadline.dispose();
   // Project skills are trusted, versioned operating guidance. Select a small
@@ -2917,7 +2943,7 @@ export async function runAgent(
       ? availableTools.filter((tool) => MISSION_WORKER_CONTROL_TOOLS.includes(toolSchemaName(tool) as typeof MISSION_WORKER_CONTROL_TOOLS[number]))
       : [];
     const routedTools = (noToolTurn
-      ? availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || composioGateway.has(toolSchemaName(tool)) || revealedNativeTools.has(toolSchemaName(tool)))
+      ? availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS" || revealedNativeTools.has(toolSchemaName(tool)))
       : missionHintPreload
         ? [...missionRoutedNativeTools, ...preloadedMissionTools, ...missionDiscoveryTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed]
         : [...nativeToolRoute.tools, ...preloadedMissionTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed])
@@ -2945,7 +2971,7 @@ export async function runAgent(
           },
         };
       })
-      : routedTools;
+      : routedToolsWithApproval;
     const toolCounts = modelAvailableTools.reduce((counts, tool) => {
       const name = toolSchemaName(tool);
       const key = name.startsWith("CHUCK_")
@@ -3019,7 +3045,7 @@ export async function runAgent(
           const assetIds = generatedImages.map((image) => image.assetId).filter((value): value is string => Boolean(value));
           const fallback = `The image was generated and saved successfully, but OpenRouter interrupted my final response stream. ${assetIds.length ? `Saved asset${assetIds.length === 1 ? "" : "s"}: ${assetIds.join(", ")}.` : "The generated image is available in this turn."}${models.length ? ` Model used: ${models.join(", ")}.` : ""}`;
           await persistRun("completed", "run.completed_with_media", fallback, { mediaCount: generatedImages.length, assetIds, models, streamError: message.slice(0, 500) });
-          recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: "media_receipt", noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision), capabilityFailureReply: false });
+          recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: turnActionDecision.reason, noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision), capabilityFailureReply: false });
           return { text: fallback, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionRoutingCache: missionRoutingResult, ...(privateLinks.length ? { privateLinks } : {}) };
         }
         await persistRun("failed", "run.failed", undefined, { error: message.slice(0, 1000), model: requestModel, round });
@@ -3029,7 +3055,7 @@ export async function runAgent(
     if (response.usage?.cost) totalCost += response.usage.cost;
     if (response.usage?.prompt_tokens || response.usage?.completion_tokens) {
       logger.info({ model: requestModel, round, promptTokens: response.usage.prompt_tokens, completionTokens: response.usage.completion_tokens, totalTokens: response.usage.total_tokens, cachedTokens: response.usage.prompt_tokens_details?.cached_tokens, costUsd: response.usage.cost }, "OpenRouter token usage");
-      if (noToolTurn) recordTurnMode({ mode: "conversational", reason: "jev_no_native_tool", noNativeTool: true, skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision), promptTokens: response.usage.prompt_tokens, findToolsCalled: toolsUsed.includes("CHUCK_FIND_TOOLS") });
+      if (noToolTurn) recordTurnMode({ mode: "conversational", reason: turnActionDecision.reason, noNativeTool: true, skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision), promptTokens: response.usage.prompt_tokens, findToolsCalled: toolsUsed.includes("CHUCK_FIND_TOOLS") });
     }
 
     const choice = response.choices[0];
@@ -3109,7 +3135,7 @@ export async function runAgent(
         if (!disclosure.allowed && !modelTextStreamed) finalText = "I’ll follow up privately with the owner on that.";
       }
       await persistRun("completed", "run.completed", finalText, { finishReason: finish_reason ?? "unknown" });
-      recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: noToolTurn ? "jev_no_native_tool" : "completed", noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision), capabilityFailureReply: isCapabilityFailureReply(finalText) });
+      recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: noToolTurn ? turnActionDecision.reason : "completed", noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision), capabilityFailureReply: isCapabilityFailureReply(finalText) });
       return { text: finalText, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionRoutingCache: missionRoutingResult, ...(privateLinks.length ? { privateLinks } : {}) };
     }
 
@@ -3960,7 +3986,7 @@ export async function runAgent(
   const closeout = typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks);
   const finalText = `${await addUpgradeNotice(closeout)}\n\nI reached the ${config.maxToolRounds}-round tool limit, so this run may be incomplete. Verify the results above before treating it as done.`.trim();
   await persistRun("completed", "run.completed_after_round_limit", finalText);
-  recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: noToolTurn ? "jev_no_native_tool" : "round_limit", noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision), capabilityFailureReply: isCapabilityFailureReply(finalText) });
+  recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: noToolTurn ? turnActionDecision.reason : "round_limit", noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision), capabilityFailureReply: isCapabilityFailureReply(finalText) });
   return { text: finalText, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionRoutingCache: missionRoutingResult, ...(privateLinks.length ? { privateLinks } : {}) };
 }
 

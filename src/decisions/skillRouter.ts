@@ -25,7 +25,7 @@ export type SkillRoute = {
 };
 
 const MAX_PRIMARY = 2;
-const MAX_TOTAL = 4; // Jev-selected skills; keyword routes are added on top.
+const MAX_TOTAL = 4;
 const VERIFY_CANDIDATES = 6;
 
 function keywordRoute(query: string, reason?: string): SkillRoute {
@@ -54,6 +54,7 @@ export async function computeJevSkillRoute(query: string, options: { client?: Je
   const client = options.client ?? jevClient();
   const skills = await listSkillSummaries(options.root);
   if (!skills.length) return keywordRoute(query, "no_skills_installed");
+  const explicit = explicitlyNamedSkills(query, skills.map((skill) => skill.name));
   const state = {
     request: jevText(query, 3_000),
     ...(options.recentContext ? { recent_conversation: jevText(options.recentContext, 1_200) } : {}),
@@ -66,6 +67,18 @@ export async function computeJevSkillRoute(query: string, options: { client?: Je
     signal: options.signal,
     sessionId: options.sessionId,
   });
+  const strongestCandidate = ranking.ranked[0]?.probability ?? 0;
+  if (ranking.none >= config.jevMinConfidence && ranking.none >= strongestCandidate) {
+    const route: SkillRoute = {
+      binding: { primary: explicit, supporting: [] },
+      source: "jev",
+      allowSearchFallback: false,
+      ranked: ranking.ranked.slice(0, 8),
+      verified: {},
+      telemetry: { latencyMs: ranking.latencyMs, costUsd: ranking.costUsd },
+    };
+    return route;
+  }
   // A Choice concentrates mass on one winner, so a second relevant skill can
   // score low. Verify the top candidates independently instead of cutting at
   // a probability threshold.
@@ -82,7 +95,6 @@ export async function computeJevSkillRoute(query: string, options: { client?: Je
     })
     : { scores: {} as Record<string, number>, latencyMs: 0, costUsd: 0 };
 
-  const explicit = explicitlyNamedSkills(query, skills.map((skill) => skill.name));
   const verified = candidates
     .filter((item) => (verification.scores[item.id] ?? 0) >= config.jevSkillVerifyThreshold)
     .map((item) => ({ ...item, score: item.probability * 0.5 + (verification.scores[item.id] ?? 0) * 0.5 }))
@@ -90,16 +102,13 @@ export async function computeJevSkillRoute(query: string, options: { client?: Je
   const jevPrimary = verified.filter((item, index) => index === 0 || item.probability >= config.jevSkillMinProbability).slice(0, MAX_PRIMARY).map((item) => item.id);
   const primary = [...new Set([...explicit, ...jevPrimary])];
   const jevSupporting = verified.map((item) => item.id).filter((name) => !primary.includes(name));
-  // Jev is additive: deterministic keyword routes are never removed by a
-  // (possibly confident but wrong) Jev answer, including __none__.
-  const keyword = routedSkillNames(query).filter((name) => !primary.includes(name) && !jevSupporting.includes(name));
-  const supporting = [...jevSupporting.slice(0, Math.max(0, MAX_TOTAL - primary.length)), ...keyword];
+  const supporting = jevSupporting.slice(0, Math.max(0, MAX_TOTAL - primary.length));
   const route: SkillRoute = {
     binding: { primary, supporting },
     source: "jev",
-    // Fuzzy term search stays as a fallback unless the user explicitly
-    // selected a skill.
-    allowSearchFallback: !explicit.length,
+    // A successful Jev route is authoritative. Fuzzy search belongs only to
+    // the deterministic fallback path used when Jev is unavailable/uncertain.
+    allowSearchFallback: false,
     ranked: ranking.ranked.slice(0, 8),
     verified: verification.scores,
   };

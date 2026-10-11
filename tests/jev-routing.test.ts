@@ -63,8 +63,9 @@ function fakeJev(captured: Captured[] = [], options: { delayMs?: number; status?
         answers[key] = { type: "choice", choice: options.badChoice ? "not-an-option" : choice, confidence: p, probabilities };
       } else if (question.type === "noul") {
         const candidate = question.instructions?.candidate;
+        const appRequest = /\b(?:gmail|slack|hubspot|notion|google calendar|shopify|zendesk|email|invoice|send|reply|post a message)\b/i.test(String(body.state?.request ?? ""));
         const hits = candidate ? overlap(stateWords, words(`${String(candidate.id).replace(/_/g, " ")} ${candidate.description}`)) : overlap(stateWords, words("email crm calendar invoice store ticket send reply"));
-        answers[key] = { type: "noul", noul: hits >= 2 ? 0.9 : hits === 1 ? 0.55 : 0.05 };
+        answers[key] = { type: "noul", noul: hits >= 2 || appRequest ? 0.9 : hits === 1 ? 0.55 : 0.05 };
       } else {
         answers[key] = { type: "score", score: 0, confidence: 1, probabilities: { 0: 1 } };
       }
@@ -352,28 +353,38 @@ test("routing is inert when JEV_MODE is off", async () => {
   } finally { restore(); setJevClientForTests(undefined); }
 });
 
-test("a confident __none__ never removes keyword skill routes or search fallback", async () => {
+test("a confident skill __none__ stops keyword and fuzzy routing but honors explicit skill requests", async () => {
   const root = await skillRoot();
   const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["skills"]) });
   clearSkillCatalogCache();
   try {
-    const route = await routeSkillsForTurn("Review overdue Stripe billing", { root, client: new JevClient({ apiKey: "k", fetchImpl: fakeJev([], { forceNone: true }) }) });
+    const captured: Captured[] = [];
+    const route = await routeSkillsForTurn("Review overdue Stripe billing", { root, client: new JevClient({ apiKey: "k", fetchImpl: fakeJev(captured, { forceNone: true }) }) });
     const selected = [...route.binding.primary, ...route.binding.supporting];
-    assert.ok(selected.includes("billing-ops-pro"), `keyword route kept, got ${selected}`);
-    assert.equal(route.allowSearchFallback, true, "fuzzy search fallback stays available");
+    assert.deepEqual(selected, [], "a confident none must not be overridden by deterministic keyword routing");
+    assert.equal(route.allowSearchFallback, false, "a confident none must not invoke fuzzy discovery");
+    assert.equal(captured.length, 1, "none returns before candidate verification");
     const explicit = await routeSkillsForTurn("use the seo-audit skill on this page", { root, client: new JevClient({ apiKey: "k", fetchImpl: fakeJev([], { forceNone: true }) }) });
     assert.ok(explicit.binding.primary.includes("seo-audit"));
     assert.equal(explicit.allowSearchFallback, false, "an explicit skill selection disables fuzzy fallback");
   } finally { restore(); clearSkillCatalogCache(); await rm(root, { recursive: true, force: true }); }
 });
 
-test("a confident no-app answer keeps the keyword Composio domain route", async () => {
+test("a confident Composio no-app answer skips public catalogue discovery and keyword override", async () => {
   clearComposioActionCache();
   const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["composio"]) });
   try {
-    const decision = await routeComposioForTurn("Qualify the HubSpot pipeline", { accounts: [{ toolkit: "hubspot", status: "ACTIVE" }], listActions: async () => [], client: new JevClient({ apiKey: "k", fetchImpl: fakeJev([], { forceNone: true }) }) });
-    assert.equal(decision.route?.domain, "crm");
-    assert.deepEqual(decision.route?.connectedToolkits, ["hubspot"]);
+    let listed = 0;
+    const decision = await routeComposioForTurn("Qualify the HubSpot pipeline", {
+      accounts: [{ toolkit: "hubspot", status: "ACTIVE" }],
+      listActions: async () => [],
+      listToolkits: async () => { listed += 1; return TOOLKIT_CATALOGUE; },
+      client: new JevClient({ apiKey: "k", fetchImpl: fakeJev([], { forceNone: true }) }),
+    });
+    assert.equal(decision.noAppNeeded, true);
+    assert.equal(decision.route, undefined, "a confident no-app result is not replaced by keyword routing");
+    assert.equal(composioDecisionContext(decision), "");
+    assert.equal(listed, 0, "the public toolkit catalogue is not loaded for no-app requests");
   } finally { restore(); clearComposioActionCache(); }
 });
 
@@ -437,11 +448,16 @@ test("Composio routing reaches apps the user has not connected and asks to conne
   clearComposioActionCache();
   const restore = withConfig({ jevComposioRouteUnconnected: true });
   try {
+    const captured: Captured[] = [];
     const decision = await computeJevComposioDecision("Post a message to the Slack sales channel about the launch", {
       accounts: [{ toolkit: "hubspot", status: "ACTIVE" }],
       listActions: async (toolkit) => toolkit === "slack" ? slackCatalogue() : [],
-      listToolkits: async () => TOOLKIT_CATALOGUE,
-      client: new JevClient({ apiKey: "k", fetchImpl: fakeJev() }),
+      listToolkits: async () => {
+        assert.equal(captured.length, 1, "app-need triage must finish before public catalogue discovery starts");
+        assert.ok(captured[0].body.questions.needs_app);
+        return TOOLKIT_CATALOGUE;
+      },
+      client: new JevClient({ apiKey: "k", fetchImpl: fakeJev(captured) }),
     });
     assert.equal(decision.toolkits[0].id, "slack");
     assert.equal(decision.toolkits[0].connected, false);
