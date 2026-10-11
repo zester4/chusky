@@ -9,7 +9,7 @@ import { browserFileDownloadResponse, persistSdkCompanyRun, registerSdkApi, sdkR
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
-import { addJob, addRecallMeeting, authenticateCliToken, completeMissionStep, createApproval, createCliDevice, createMission, createTask, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getMission, getOutbox, getSession, getTask, initStore, listAttentionRecords, listTasks, recordTrustedMissionEvidence, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, startMission, updateMission, updateOutbox, upsertMeetingContact, upsertMemory, waitMission } from "../src/store.js";
+import { addJob, addPhoneCall, addRecallMeeting, authenticateCliToken, completeMissionStep, createApproval, createCliDevice, createMission, createTask, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getMission, getOutbox, getSession, getTask, initStore, listAttentionRecords, listTasks, recordTrustedMissionEvidence, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, startMission, updateMission, updateOutbox, upsertMeetingContact, upsertMemory, waitMission } from "../src/store.js";
 import { redeemLinkCode } from "../src/channels/identity.js";
 import { appendTraceEvent, queueCompensation, saveOutcomeVerification } from "../src/reliability/persistence.js";
 import { resetTriggerCatalogueForTests } from "../src/triggerCatalog.js";
@@ -1865,6 +1865,31 @@ test("SDK callers can use scoped voice and call resources with idempotent reques
     assert.equal(mismatch.status, 409);
   } finally {
     Object.assign(config, original);
+  }
+});
+
+test("phone-call idempotency persistence does not overwrite the newly-created call", async () => {
+  const keys = ["twilioVoiceEnabled", "twilioAccountSid", "twilioAuthToken", "twilioCallerId", "twilioWebhookBaseUrl", "twilioMediaStreamUrl", "twilioMediaBridgeSecret"] as const;
+  const original = Object.fromEntries(keys.map((key) => [key, config[key]]));
+  try {
+    Object.assign(config, { twilioVoiceEnabled: true, twilioAccountSid: "AC123", twilioAuthToken: "token", twilioCallerId: "+16452437121", twilioWebhookBaseUrl: "https://chusky.example", twilioMediaStreamUrl: "wss://voice.example/twilio/stream", twilioMediaBridgeSecret: "bridge-secret" });
+    setPhoneCallLauncherForTests(async (userId, input) => {
+      const now = Date.now();
+      const call = { id: "twc_persisted_call", userId, provider: "twilio" as const, direction: "outbound" as const, callProfile: "personal" as const, phoneNumber: String(input.phoneNumber), purpose: String(input.purpose), status: "bridging" as const, createdAt: now, updatedAt: now };
+      await addPhoneCall(userId, call);
+      return call;
+    });
+    const api = app();
+    const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "phone-call-idempotency-owner", "Content-Type": "application/json", "Idempotency-Key": "phone-call-once" };
+    const created = await api.fetch(new Request("http://local/v1/account/calls", { method: "POST", headers, body: JSON.stringify({ phoneNumber: "+15550001", purpose: "Confirm appointment" }) }));
+    assert.equal(created.status, 201);
+    const listed = await api.fetch(new Request("http://local/v1/account/calls", { headers }));
+    assert.equal(listed.status, 200);
+    const data = await listed.json() as { data: Array<{ id: string }> };
+    assert.deepEqual(data.data.map((call) => call.id), ["twc_persisted_call"]);
+  } finally {
+    Object.assign(config, original);
+    setPhoneCallLauncherForTests();
   }
 });
 

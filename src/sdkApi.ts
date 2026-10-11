@@ -1281,6 +1281,21 @@ function idempotency(c: any, session: Awaited<ReturnType<typeof getSession>>, fi
   return existing.fingerprint === fingerprint ? { replay: existing.response } : { mismatch: true };
 }
 
+/** Persist an idempotency result without saving a caller's stale session snapshot. */
+async function recordSdkIdempotency(userId: number, key: string, fingerprint: string, response: unknown): Promise<void> {
+  await mutateSession(userId, (session) => {
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    const entries = Object.entries(session.sdkIdempotency ?? {})
+      .filter(([, record]) => record.createdAt >= cutoff)
+      .sort((left, right) => right[1].createdAt - left[1].createdAt)
+      .slice(0, 500);
+    session.sdkIdempotency = {
+      ...Object.fromEntries(entries),
+      [key]: { fingerprint, response, createdAt: Date.now() },
+    };
+  });
+}
+
 /** Apply an owner-scoped SDK mutation with a durable 24-hour replay record. */
 async function sdkMutation(c: any, fingerprint: string, execute: (userId: number) => Promise<unknown>, status = 200): Promise<Response> {
   const userId = sdkUser(c)!.userId;
@@ -2292,10 +2307,7 @@ export function registerSdkApi(app: Hono): void {
       const record = call as { id?: unknown; provider?: unknown; direction?: unknown; phoneNumber?: unknown; purpose?: unknown; status?: unknown; runtimeState?: unknown; error?: unknown; summary?: unknown; outcome?: unknown; outcomeStatus?: unknown; createdAt?: unknown; updatedAt?: unknown };
       if (typeof record.id !== "string" || typeof record.phoneNumber !== "string" || typeof record.purpose !== "string" || typeof record.status !== "string" || typeof record.createdAt !== "number" || typeof record.updatedAt !== "number") throw new Error("Phone call returned an invalid record");
       const response = callView({ id: record.id, provider: typeof record.provider === "string" ? record.provider : undefined, direction: typeof record.direction === "string" ? record.direction : undefined, phoneNumber: record.phoneNumber, purpose: record.purpose, status: record.status, runtimeState: typeof record.runtimeState === "string" ? record.runtimeState : undefined, error: typeof record.error === "string" ? record.error : undefined, summary: typeof record.summary === "string" ? record.summary : undefined, outcome: record.outcome, outcomeStatus: typeof record.outcomeStatus === "string" ? record.outcomeStatus : undefined, createdAt: record.createdAt, updatedAt: record.updatedAt });
-      if (prior.key) {
-        session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() };
-        await saveSession(owner.userId, session);
-      }
+      if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, response);
       return c.json(response, 201);
     } catch (error) {
       return apiError(c, 400, "invalid_phone_call", error instanceof Error ? error.message : "Invalid call request.");
