@@ -30,7 +30,7 @@ import { assertAgentExecutionEnabled } from "./builderControl.js";
 import { getTriggerTypeBySlug, getTriggerTypeByToken, listTriggerToolkits as listCatalogueToolkits, listTriggerTypesForToolkit, requiredTriggerConfigFields, triggerTypeForAgent, type TriggerCatalogueItem, type TriggerToolkit } from "./triggerCatalog.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { logger } from "./logger.js";
-import { createApproval, createVideoJob, getAgentRun, getApproval, getImageAsset, getSession, isAgentRunCancellationRequested, recordTrustedMissionEvidence, saveAgentRun, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
+import { createApproval, createVideoJob, getAgentRun, getApproval, getImageAsset, getSession, isAgentRunCancellationRequested, listLinkedWebSessionSourceUserIds, recordTrustedMissionEvidence, saveAgentRun, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
 import type { AgentRunRecord, Message } from "./store.js";
 import { nativeTool, type MissionWaitRequest, type NativeToolRuntime } from "./nativeTools.js";
 import { MissionDurationApprovalRequiredError } from "./missionApproval.js";
@@ -610,6 +610,8 @@ export interface ConnectedComposioAccount {
   status: string;
   createdAt?: string;
   updatedAt?: string;
+  /** Internal only. Never enumerable or returned to a model/API caller. */
+  composioOwnerUserId?: number;
 }
 
 function composioUserId(userId: number): string {
@@ -1748,8 +1750,11 @@ async function getOrCreateComposioSession(userId: number): Promise<ComposioSessi
 
   logger.debug({ userId, existingSessionId: stored.composioSessionId }, "Getting Composio session");
 
-  // Create (or re-attach to) a Composio ToolRouter session
-  // composio.create() returns a session we can call .tools() and .execute() on
+  // Create (or re-attach to) a Composio ToolRouter session. When a dashboard
+  // account was linked after it created its provider session, the Telegram
+  // owner may have an explicit imported web-session owner but no local
+  // Composio session yet. Reuse only that exact linked session; never search
+  // Composio globally for a session or account.
   const createSession = () => composio.create(userId_str, {
     manageConnections: {
       enable: config.enableManageConnections,
@@ -1765,9 +1770,23 @@ async function getOrCreateComposioSession(userId: number): Promise<ComposioSessi
       requireExplicitSelection: config.composioRequireExplicitAccount,
     } : { enable: false },
   });
-  const sessionObj = stored.composioSessionId
-    ? await composio.sessions.use(stored.composioSessionId).catch(createSession)
-    : await createSession();
+  let sessionObj: any;
+  if (stored.composioSessionId) {
+    sessionObj = await composio.sessions.use(stored.composioSessionId).catch(createSession);
+  } else {
+    const linkedSourceIds = await listLinkedWebSessionSourceUserIds(userId).catch(() => []);
+    for (const sourceUserId of linkedSourceIds) {
+      const source = await getSession(sourceUserId);
+      if (!source.composioSessionId) continue;
+      try {
+        sessionObj = await composio.sessions.use(source.composioSessionId);
+        break;
+      } catch (error) {
+        logger.warn({ errorName: error instanceof Error ? error.name : "UnknownError", userId, sourceUserId }, "Linked Composio session could not be reattached");
+      }
+    }
+    sessionObj ??= await createSession();
+  }
 
   // Existing sessions predate multi-account support. Patch them in place so
   // Composio keeps all existing connections and sandbox state.
@@ -1955,7 +1974,7 @@ function providerActionReceipt(result: unknown, toolSlug: string, arguments_: Re
 }
 
 function createSessionOutcomeReadAdapter(userId: number, sessionObj: any, tools: any[], allow?: Set<string>, deny = new Set<string>(), signal?: AbortSignal): OutcomeReadAdapter {
-  const resolved = new Map<string, { schema: Record<string, unknown>; accountId: string; alias?: string; version: string }>();
+  const resolved = new Map<string, { schema: Record<string, unknown>; accountId: string; accountOwnerUserId: number; alias?: string; version: string }>();
   return createComposioOutcomeReadAdapter({
     availableToolSlugs: tools.map(toolSchemaName),
     allowedToolSlugs: allow ? [...allow] : undefined,
@@ -1970,7 +1989,7 @@ function createSessionOutcomeReadAdapter(userId: number, sessionObj: any, tools:
       const selector = splitAccountSelector(args).account;
       const account = selector ? accounts.find((item) => item.id === selector || item.alias === selector) : accounts.length === 1 ? accounts[0] : undefined;
       if (!account) throw new Error("Provider verification requires an active owned connection; select the account explicitly when multiple accounts are connected.");
-      resolved.set(slug, { schema, accountId: account.id, alias: account.alias, version: raw.version ?? "latest" });
+      resolved.set(slug, { schema, accountId: account.id, accountOwnerUserId: account.composioOwnerUserId ?? userId, alias: account.alias, version: raw.version ?? "latest" });
       return true;
     },
     execute: async (slug, args) => {
@@ -1979,7 +1998,7 @@ function createSessionOutcomeReadAdapter(userId: number, sessionObj: any, tools:
       const selected = splitAccountSelector(args);
       if (selected.account && selected.account !== action.accountId && selected.account !== action.alias) throw new Error("Provider verification account does not match the active owned connection.");
       validateToolArgumentsAgainstSchema(slug, selected.arguments, action.schema);
-      return abortable(composio.tools.execute(slug, { userId: composioUserId(userId), connectedAccountId: action.accountId, version: action.version, arguments: selected.arguments }, signal ? { signal } : undefined), signal);
+      return abortable(composio.tools.execute(slug, { userId: composioUserId(action.accountOwnerUserId), connectedAccountId: action.accountId, version: action.version, arguments: selected.arguments }, signal ? { signal } : undefined), signal);
     },
   });
 }
@@ -4067,19 +4086,44 @@ export async function listComposioToolkitActions(toolkit: string, signal?: Abort
 }
 
 export async function listConnectedAccounts(userId: number, toolkit?: string): Promise<ConnectedComposioAccount[]> {
-  const result = await composio.connectedAccounts.list({
-    userIds: [composioUserId(userId)],
-    ...(toolkit ? { toolkitSlugs: [toolkit.toLowerCase()] } : {}),
-  });
-  const items = Array.isArray(result) ? result : (result?.items ?? []);
-  return items.map((item: any) => ({
-    id: String(item.id ?? ""),
-    alias: item.alias ? String(item.alias) : undefined,
-    toolkit: String(item.toolkit?.slug ?? item.toolkit?.name ?? item.toolkitSlug ?? "unknown"),
-    status: String(item.status ?? (item.isDisabled ? "DISABLED" : "ACTIVE")),
-    createdAt: item.createdAt ? String(item.createdAt) : undefined,
-    updatedAt: item.updatedAt ? String(item.updatedAt) : undefined,
-  })).filter((item: ConnectedComposioAccount) => item.id);
+  const ownerIds = [userId, ...(await listLinkedWebSessionSourceUserIds(userId).catch(() => []))];
+  const seen = new Set<string>();
+  const accounts: ConnectedComposioAccount[] = [];
+  for (const ownerId of ownerIds) {
+    let result: any;
+    try {
+      result = await composio.connectedAccounts.list({
+        userIds: [composioUserId(ownerId)],
+        ...(toolkit ? { toolkitSlugs: [toolkit.toLowerCase()] } : {}),
+      });
+    } catch (error) {
+      // A stale linked web owner must not hide the current owner's accounts.
+      // The current owner remains fail-closed; legacy compatibility owners are
+      // best-effort because Composio has no safe account-reassignment API.
+      if (ownerId === userId) throw error;
+      logger.warn({ err: error, userId, linkedOwnerId: ownerId }, "Could not read a linked web owner's connected accounts");
+      continue;
+    }
+    const items = Array.isArray(result) ? result : (result?.items ?? []);
+    for (const item of items) {
+      const id = String(item.id ?? "");
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const account: ConnectedComposioAccount = {
+        id,
+        alias: item.alias ? String(item.alias) : undefined,
+        toolkit: String(item.toolkit?.slug ?? item.toolkit?.name ?? item.toolkitSlug ?? "unknown"),
+        status: String(item.status ?? (item.isDisabled ? "DISABLED" : "ACTIVE")),
+        createdAt: item.createdAt ? String(item.createdAt) : undefined,
+        updatedAt: item.updatedAt ? String(item.updatedAt) : undefined,
+      };
+      // Keep the compatibility owner available to trusted execution code,
+      // without exposing it through JSON, model context, or SDK responses.
+      Object.defineProperty(account, "composioOwnerUserId", { value: ownerId, enumerable: false, configurable: false });
+      accounts.push(account);
+    }
+  }
+  return accounts;
 }
 
 type MeetingMissionToolDiscovery = { tools: any[]; accountAliases: Record<string, string> };
@@ -4248,8 +4292,12 @@ export async function getToolkitStatesPage(
       triggersCount: typeof meta.triggersCount === "number" ? meta.triggersCount : undefined,
       authSchemes: Array.isArray(detail?.composioManagedAuthSchemes) ? detail.composioManagedAuthSchemes.map((scheme: unknown) => String(scheme)) : undefined,
       noAuth: Boolean(t.isNoAuth),
-      connected: Boolean(t.connection?.isActive) || matching.length > 0,
-      accountCount: matching.length || (t.connection?.isActive ? 1 : 0),
+      // `toolkits()` may expose session-level connection hints from an older
+      // Composio session. They are not sufficient proof of an exact owner
+      // account that Pulse can safely execute against. Only the owner-scoped
+      // connected-account rows count as connected here.
+      connected: matching.length > 0,
+      accountCount: matching.length,
       aliases: matching.map((account) => account.alias ?? account.id),
     };
   }));

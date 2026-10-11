@@ -2,7 +2,7 @@ import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import {
-  addHistorySummary, appendMessages, acquireUserLock, addReminder, addJob, claimTriggerEvent, clearHistory, clearSession,
+  addHistorySummary, appendMessages, acquireUserLock, addReminder, addJob, addPhoneCall, claimTriggerEvent, clearHistory, clearSession,
   createApproval, createCliDevice, createCliPairing, getApproval, getDaytonaWorkspace, getSession, initStore,
   listReminders, releaseUserLock, saveDaytonaWorkspace, saveSession, setApprovalStatus, setComposioSessionId, setModel,
   upsertMemory, updateMemory, searchMemories, forgetMemory, writeScratchpad, readScratchpad, clearScratchpad,
@@ -10,7 +10,7 @@ import {
   claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease,
   type DaytonaWorkspaceRecord, type SdkRunRecord, type TriggerEventRecord,
   createTriggerEvent, getTriggerEvent, listTriggerEvents, updateTriggerEvent,
-  backfillSdkPrivateRunHistory, createWebTelegramLinkCode, getTelegramUserIdForWebAuth, mergeLinkedWebSession, mutateSession, redeemWebTelegramLinkCode,
+  backfillSdkPrivateRunHistory, createWebTelegramLinkCode, ensureTriggerWebProjection, getTelegramUserIdForWebAuth, mergeLinkedWebSession, mutateSession, redeemWebTelegramLinkCode,
   createVideoJob, getVideoJob, listVideoJobs, updateVideoJob,
   addRecallMeeting, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, updateRecallMeeting, claimRecallCopilotEvaluation,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
@@ -38,30 +38,6 @@ test("in-memory sessions return detached snapshots like the Redis backend", asyn
   await saveSession(userId, detached);
   detached.history[0]!.content = "post-save mutation";
   assert.equal((await getSession(userId)).history[0]?.content, "unsaved mutation");
-});
-
-test("background session reconciliation skips a lease held by another worker", async () => {
-  const userId = 810135;
-  let releaseHolder!: () => void;
-  const holderReleased = new Promise<void>((resolve) => { releaseHolder = resolve; });
-  let holderStarted!: () => void;
-  const holderReady = new Promise<void>((resolve) => { holderStarted = resolve; });
-
-  const holder = mutateSession(userId, async () => {
-    holderStarted();
-    await holderReleased;
-    return true;
-  }, { allSdkRuns: true });
-  await holderReady;
-
-  const startedAt = performance.now();
-  const skipped = await mutateSession(userId, () => true, { allSdkRuns: true, skipIfBusy: true });
-  const elapsedMs = performance.now() - startedAt;
-  assert.equal(skipped, undefined);
-  assert.ok(elapsedMs < 100, `busy background mutation took ${elapsedMs.toFixed(1)}ms`);
-
-  releaseHolder();
-  await holder;
 });
 
 test("trigger handling instructions persist only for triggers owned by the session", async () => {
@@ -600,6 +576,22 @@ test("trigger event records are durable, owner-scoped, and listed newest first",
   assert.deepEqual((await listTriggerEvents(810099)).map((item) => item.eventId), [record.eventId]);
 });
 
+test("trigger web projections are owner-private and idempotent", async () => {
+  const input = { userId: 810101, eventId: "evt-web-projection-1", triggerSlug: "GMAIL_NEW_GMAIL_MESSAGE", summary: "A new message arrived.", result: "I reviewed the message.", status: "completed" as const };
+  const first = await ensureTriggerWebProjection(input);
+  const second = await ensureTriggerWebProjection({ ...input, result: "I reviewed the updated message." });
+  assert.deepEqual(second, first);
+  const session = await getSession(input.userId);
+  const thread = session.sdkThreads?.find((item) => item.id === first.threadId);
+  assert.equal(thread?.metadata.source, "trigger-notifications");
+  assert.equal(thread?.runs.length, 1);
+  assert.equal(thread?.runs[0]?.id, first.runId);
+  assert.equal(thread?.runs[0]?.output, "I reviewed the updated message.");
+  assert.equal(thread?.runs[0]?.metadata?.triggerEventId, input.eventId);
+  const other = await getSession(810102);
+  assert.equal(other.sdkThreads?.some((item) => item.id === first.threadId), false);
+});
+
 test("Telegram update claims deduplicate retries", async () => {
   assert.equal(await claimTelegramUpdate(991001), true);
   assert.equal(await claimTelegramUpdate(991001), false);
@@ -679,6 +671,8 @@ test("redeeming a web link merges its private history and memory into the Telegr
   await saveSession(sourceUserId, webSession);
   await upsertMemory(sourceUserId, { category: "preference", key: "coffee", value: "Oat milk", confidence: 0.9 });
   await writeScratchpad(sourceUserId, "web-plan", "Finish the launch checklist");
+  await addPhoneCall(sourceUserId, { id: "twc_web-before-link", userId: sourceUserId, provider: "twilio", direction: "outbound", callProfile: "personal", phoneNumber: "+14155550123", purpose: "Web-created call", status: "ended", summary: "Discussed the launch date.", createdAt: now - 500, updatedAt: now - 400 });
+  const webApproval = await createApproval({ userId: sourceUserId, toolSlug: "CHUCK_START_PHONE_CALL", args: { phoneNumber: "+14155550124", purpose: "Pending web call", callProfile: "personal" }, request: "Pending web call", history: [], model: "test/model" });
 
   const telegramSession = await getSession(telegramUserId);
   telegramSession.history = [{ role: "user", content: "Telegram context", createdAt: now }];
@@ -695,11 +689,15 @@ test("redeeming a web link merges its private history and memory into the Telegr
   assert.equal(merged.summaries.includes("Earlier web context"), true);
   assert.equal(merged.memories.some((memory) => memory.key === "coffee" && memory.value === "Oat milk"), true);
   assert.equal(merged.scratchpad["web-plan"]?.content, "Finish the launch checklist");
+  assert.equal(merged.phoneCalls?.find((call) => call.id === "twc_web-before-link")?.userId, telegramUserId);
+  assert.equal(merged.phoneCalls?.find((call) => call.id === "twc_web-before-link")?.summary, "Discussed the launch date.");
+  assert.equal((await getApproval(telegramUserId, webApproval.id))?.userId, telegramUserId);
   assert.equal(merged.composioSessionId, "telegram-composio-session", "linking must preserve the Telegram provider session");
   assert.equal(await redeemWebTelegramLinkCode(code, telegramUserId), "invalid");
   const mergedUpdatedAt = merged.updatedAt;
   await mergeLinkedWebSession(sourceUserId, telegramUserId);
   assert.equal((await getSession(telegramUserId)).history.length, 3, "replaying the code cannot duplicate imported history");
+  assert.equal((await getSession(telegramUserId)).phoneCalls?.filter((call) => call.id === "twc_web-before-link").length, 1, "replaying a link cannot duplicate phone calls");
   assert.equal((await getSession(telegramUserId)).updatedAt, mergedUpdatedAt, "an unchanged web session does not rewrite the Telegram session");
 
   webSession.history.push(
@@ -714,4 +712,73 @@ test("redeeming a web link merges its private history and memory into the Telegr
   assert.deepEqual((await getSession(telegramUserId)).history.map(({ content }) => content), [
     "Telegram context", "A later web turn", "Later web answer",
   ], "a changed source snapshot does not re-import web messages that were already merged and later trimmed");
+});
+
+test("web-to-Telegram linking preserves dashboard threads and repairs legacy imports", async () => {
+  const sourceUserId = 810133;
+  const telegramUserId = 810134;
+  const now = Date.now();
+  const source = await getSession(sourceUserId);
+  source.sdkThreads = [{
+    id: "thr_web-history",
+    externalId: "web-account",
+    metadata: { title: "Original web conversation" },
+    history: [{ role: "user", content: "Keep this thread", createdAt: now - 2_000, sourceId: "web-thread-user" }],
+    runs: [
+      { id: "run_web-private", status: "completed", input: "Keep this run", output: "This run must remain visible", ownerPrivateRun: true, events: [], createdAt: now - 1_500, updatedAt: now - 1_400 },
+      { id: "run_web-company", status: "completed", input: "Do not import company data", output: "Company output", companyProjectId: "company-project", events: [], createdAt: now - 1_300, updatedAt: now - 1_200 },
+      { id: "run_web-non-private", status: "completed", input: "Do not import non-private data", output: "Non-private output", ownerPrivateRun: false, events: [], createdAt: now - 1_100, updatedAt: now - 1_000 },
+    ],
+    createdAt: now - 2_500,
+    updatedAt: now - 1_000,
+  }];
+  await saveSession(sourceUserId, source);
+  const savedSource = await getSession(sourceUserId);
+
+  // This is the marker shape written by the old merge implementation: the
+  // canonical history is already marked imported, but SDK threads are not.
+  const target = await getSession(telegramUserId);
+  target.sdkThreads = [{ id: "thr_telegram-native", externalId: "telegram", metadata: {}, history: [], runs: [], createdAt: now, updatedAt: now }];
+  target.linkedWebSessionImports = [{ sourceUserId, sourceUpdatedAt: savedSource.updatedAt, sourceMessageIds: [] }];
+  await saveSession(telegramUserId, target);
+
+  await mergeLinkedWebSession(sourceUserId, telegramUserId);
+  const merged = await getSession(telegramUserId);
+  const imported = merged.sdkThreads?.find((thread) => thread.id === "thr_web-history");
+  assert.ok(imported, "the original dashboard thread is available after linking");
+  assert.equal(imported?.metadata.title, "Original web conversation");
+  assert.deepEqual(imported?.history.map(({ content }) => content), ["Keep this thread"]);
+  assert.deepEqual(imported?.runs.map(({ id }) => id), ["run_web-private"]);
+  assert.equal(merged.sdkThreads?.some((thread) => thread.id === "thr_telegram-native"), true, "native Telegram threads are preserved");
+  assert.equal(merged.linkedWebSessionImports?.[0]?.sourceSdkThreadIds?.[0], "thr_web-history");
+
+  const mergedUpdatedAt = merged.updatedAt;
+  await mergeLinkedWebSession(sourceUserId, telegramUserId);
+  const replayed = await getSession(telegramUserId);
+  assert.equal(replayed.updatedAt, mergedUpdatedAt, "replaying an unchanged link does not rewrite the canonical session");
+  assert.equal(replayed.sdkThreads?.find((thread) => thread.id === "thr_web-history")?.runs.length, 1, "replaying a link does not duplicate runs");
+});
+
+test("background session reconciliation skips a lease held by another worker", async () => {
+  const userId = 810135;
+  let releaseHolder!: () => void;
+  const holderReleased = new Promise<void>((resolve) => { releaseHolder = resolve; });
+  let holderStarted!: () => void;
+  const holderReady = new Promise<void>((resolve) => { holderStarted = resolve; });
+
+  const holder = mutateSession(userId, async () => {
+    holderStarted();
+    await holderReleased;
+    return true;
+  }, { allSdkRuns: true });
+  await holderReady;
+
+  const startedAt = performance.now();
+  const skipped = await mutateSession(userId, () => true, { allSdkRuns: true, skipIfBusy: true });
+  const elapsedMs = performance.now() - startedAt;
+  assert.equal(skipped, undefined);
+  assert.ok(elapsedMs < 100, `busy background mutation took ${elapsedMs.toFixed(1)}ms`);
+
+  releaseHolder();
+  await holder;
 });

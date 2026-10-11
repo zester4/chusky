@@ -14,15 +14,18 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type TriggerEventRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createCliDevice, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type TriggerEventRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
 import { listJobOccurrences } from "./store.js";
-import { appendSdkRunHistoryToSession, backfillSdkPrivateRunHistory, mergeLinkedWebSession, mutateSession } from "./store.js";
+import { appendSdkRunHistoryToSession, mutateSession } from "./store.js";
+import { updateTriggerEvent } from "./store.js";
 import { logger } from "./logger.js";
 import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
+import { subscribeWebNotifications } from "./webNotificationBus.js";
+import { ensureWebSessionReconciliationTask } from "./webSessionReconciliation.js";
 import { findMissionApprovalTarget, resumeMissionTaskAfterApproval } from "./missionApproval.js";
 import type { ContentPart } from "./types.js";
 import { FLUX_TTS_VOICES } from "./voiceSettings.js";
@@ -431,27 +434,29 @@ function sdkUser(c: any): SdkOwner | undefined { return c.get("sdkOwner") as Sdk
 // Linking a web identity to Telegram is a one-time reconciliation, not request
 // middleware. Dashboard pages fan out into many authenticated /v1 requests, so
 // awaiting the reconciliation here makes every page load contend on the same
-// session lease. Coalesce work within a replica and let the durable import
-// marker make retries safe across replicas and process restarts.
+// session lease. The durable task is published once and the task recovery
+// sweep can republish it after a process crash.
 const webSessionReconciliationInFlight = new Map<string, Promise<boolean>>();
-const webSessionReconciliationComplete = new Set<string>();
+const webSessionReconciliationScheduled = new Set<string>();
 
 function scheduleWebSessionReconciliation(sourceUserId: number, telegramUserId?: number): Promise<boolean> | undefined {
   const key = telegramUserId ? `linked:${sourceUserId}:${telegramUserId}` : `web:${sourceUserId}`;
-  if (webSessionReconciliationComplete.has(key)) return Promise.resolve(true);
+  if (webSessionReconciliationScheduled.has(key)) return Promise.resolve(true);
   const existing = webSessionReconciliationInFlight.get(key);
   if (existing) return existing;
 
-  const work = (async () => {
-    const backfilled = await backfillSdkPrivateRunHistory(sourceUserId, { skipIfBusy: true });
-    if (!backfilled || !telegramUserId) return backfilled;
-    return mergeLinkedWebSession(sourceUserId, telegramUserId, { skipIfBusy: true });
-  })();
+  const work = ensureWebSessionReconciliationTask(sourceUserId, telegramUserId, sdkTaskWorkflowEnqueuer)
+    .then(({ task }) => {
+      // A queued task with a recorded workflow, or a currently running task,
+      // is durably owned by the task system. Do not enqueue it on each page
+      // request while the workflow is still in flight.
+      if (task.status === "queued" || task.status === "running" || task.status === "completed") {
+        webSessionReconciliationScheduled.add(key);
+      }
+      return true;
+    });
 
-  const tracked = work.then((completed) => {
-    if (completed) webSessionReconciliationComplete.add(key);
-    return completed;
-  }).catch((error) => {
+  const tracked = work.catch((error) => {
     logger.warn({ errorType: error instanceof Error ? error.name : typeof error, telegramUserId }, "Web account history reconciliation deferred");
     return false;
   }).finally(() => {
@@ -647,22 +652,24 @@ async function linkedWebCallOwner(c: any): Promise<{ userId: number } | undefine
 }
 
 async function callOwner(c: any): Promise<{ userId: number } | undefined> {
-  const linked = await linkedWebCallOwner(c);
-  if (linked) return linked;
-  // Preserve the dashboard's existing Telegram-link requirement while allowing
-  // server-side SDK callers to use their explicit project/end-user identity.
-  return c.get("webAuthUserId") ? undefined : sdkUser(c);
+  const web = webProjectOwner(c);
+  if (web) {
+    if (!web.verified) return undefined;
+    return (await linkedWebCallOwner(c)) ?? sdkUser(c);
+  }
+  return sdkUser(c);
 }
 
 function phoneCallingProvider(): "bland" | "twilio" | undefined {
-  if (config.blandVoiceEnabled) return isBlandVoiceConfigured() ? "bland" : undefined;
+  if (config.blandVoiceEnabled && isBlandVoiceConfigured()) return "bland";
   return isTwilioVoiceConfigured() ? "twilio" : undefined;
 }
 
-function callView(call: { id: string; provider?: string; direction?: string; phoneNumber: string; purpose: string; status: string; error?: string; summary?: string; createdAt: number; updatedAt: number }) {
+function callView(call: { id: string; provider?: string; direction?: string; phoneNumber: string; purpose: string; status: string; runtimeState?: string; error?: string; summary?: string; outcome?: unknown; outcomeStatus?: string; createdAt: number; updatedAt: number }) {
   const digits = call.phoneNumber.replace(/\D/g, "");
   const phoneNumber = digits.length > 4 ? `${call.phoneNumber.slice(0, Math.max(2, call.phoneNumber.length - 4)).replace(/\d/g, "•")}${digits.slice(-4)}` : "••••";
-  return { id: call.id, provider: call.provider ?? "twilio", direction: call.direction ?? "outbound", phoneNumber, purpose: call.purpose, status: call.status, summary: call.summary, error: call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
+  const outcome = call.outcome && typeof call.outcome === "object" && !Array.isArray(call.outcome) ? call.outcome : undefined;
+  return { id: call.id, provider: call.provider ?? "twilio", direction: call.direction ?? "outbound", phoneNumber, purpose: call.purpose, status: call.status, ...(call.runtimeState ? { runtimeState: call.runtimeState } : {}), summary: call.summary, ...(outcome ? { outcome, outcomeStatus: call.outcomeStatus } : {}), error: call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
 }
 
 function meetingRoomView(room: MeetingRoomRecord) {
@@ -1696,7 +1703,10 @@ export function registerSdkApi(app: Hono): void {
         notificationStatus: event.notificationStatus ?? (event.status === "completed" ? "delivered" : event.status === "failed" ? "failed" : "pending"),
         ...(event.result ? { result: event.result.slice(0, 4_000) } : {}),
         ...(event.suggestedActions?.length ? { actions: event.suggestedActions.slice(0, 3).map((action) => ({ id: action.id, label: action.label, prompt: action.prompt })) } : {}),
-        ...(event.status === "failed" || event.notificationStatus === "unavailable" || event.notificationStatus === "failed" ? { needsAttention: true } : {}),
+        ...(event.status === "failed" || event.status === "awaiting_approval" || event.notificationStatus === "unavailable" || event.notificationStatus === "failed" || !event.webReadAt ? { needsAttention: true } : {}),
+        ...(event.webThreadId ? { webThreadId: event.webThreadId } : {}),
+        ...(event.webRunId ? { webRunId: event.webRunId } : {}),
+        ...(event.webReadAt ? { webReadAt: new Date(event.webReadAt).toISOString() } : {}),
         createdAt: new Date(event.createdAt).toISOString(),
         updatedAt: new Date(event.updatedAt).toISOString(),
       })),
@@ -1706,6 +1716,43 @@ export function registerSdkApi(app: Hono): void {
       telegramLink: { linked: Boolean(webAuthUserId && await getTelegramUserIdForWebAuth(webAuthUserId)) },
       deliveries: deliveries.filter((item) => item.userId === owner.userId && !item.webhook).sort((a, b) => b.createdAt - a.createdAt).slice(0, 20).map((item) => ({ id: item.id, provider: item.provider, status: item.status, kind: item.kind, attempts: item.attempts, providerStatus: item.providerStatus, lastError: item.lastError, durationMs: item.deliveredAt ? Math.max(0, item.deliveredAt - item.createdAt) : undefined, createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString(), deliveredAt: item.deliveredAt ? new Date(item.deliveredAt).toISOString() : undefined })),
     });
+  });
+
+  app.get("/v1/account/notifications/stream", async (c) => {
+    const userId = sdkUser(c)!.userId;
+    return streamSSE(c, async (stream) => {
+      let closed = false;
+      let wake: (() => void) | undefined;
+      const queue: Array<{ eventId: string; threadId: string; runId: string }> = [];
+      const unsubscribe = subscribeWebNotifications(userId, (event) => {
+        queue.push({ eventId: event.eventId, threadId: event.threadId, runId: event.runId });
+        wake?.();
+      });
+      const abort = () => { closed = true; wake?.(); };
+      c.req.raw.signal.addEventListener("abort", abort, { once: true });
+      try {
+        await stream.writeSSE({ event: "ready", data: String(Date.now()) });
+        while (!closed) {
+          if (!queue.length) await new Promise<void>((resolve) => { wake = resolve; });
+          wake = undefined;
+          if (closed) break;
+          const events = queue.splice(0, queue.length);
+          await stream.writeSSE({ event: "notification", data: JSON.stringify({ events }) });
+        }
+      } finally {
+        unsubscribe();
+        c.req.raw.signal.removeEventListener("abort", abort);
+      }
+    });
+  });
+
+  app.post("/v1/account/trigger-events/:eventId/read", async (c) => {
+    const userId = sdkUser(c)!.userId;
+    const eventId = c.req.param("eventId");
+    const event = await getTriggerEvent(eventId);
+    if (!event || event.userId !== userId) return apiError(c, 404, "not_found", "Trigger event not found.");
+    const updated = await updateTriggerEvent(eventId, { webReadAt: Date.now() });
+    return c.json({ ok: true, eventId, readAt: updated?.webReadAt ? new Date(updated.webReadAt).toISOString() : new Date().toISOString() });
   });
 
   app.get("/v1/account/export", async (c) => {
@@ -2199,7 +2246,7 @@ export function registerSdkApi(app: Hono): void {
 
   app.get("/v1/account/calls", async (c) => {
     const owner = await callOwner(c);
-    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your email and link your Telegram workspace before using calls.");
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before using calls.");
     const provider = phoneCallingProvider();
     return c.json({ available: Boolean(provider), provider: provider ?? null, data: (await listPhoneCalls(owner.userId)).map(callView) });
   });
@@ -2208,9 +2255,9 @@ export function registerSdkApi(app: Hono): void {
     // Dashboard users resolve to their linked Telegram owner; SDK callers use
     // the project/end-user session established by the v1 middleware.
     const owner = await callOwner(c);
-    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your email and link your Telegram workspace before using calls.");
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before using calls.");
     if (!phoneCallingProvider()) return apiError(c, 503, "phone_calling_unavailable", "The selected phone provider is not configured on this Chusky deployment.");
-    const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; purpose?: unknown; profile?: unknown };
+    const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; purpose?: unknown; profile?: unknown; continuityFromCallId?: unknown };
     if (body.profile !== undefined && (!body.profile || typeof body.profile !== "object" || Array.isArray(body.profile))) return apiError(c, 400, "invalid_call_profile", "profile must be an object.");
     const session = await getSession(owner.userId);
     const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
@@ -2219,13 +2266,14 @@ export function registerSdkApi(app: Hono): void {
     if (prior.replay) return c.json(prior.replay, 201);
     if (!(await checkRateLimit(owner.userId))) return apiError(c, 429, "rate_limit_exceeded", "Too many requests. Try again shortly.");
     try {
-      const phoneNumber = String(body.phoneNumber ?? "").trim();
+      const phoneNumber = String(body.phoneNumber ?? "").replace(/[\s().-]/g, "").trim();
       const purpose = String(body.purpose ?? "").trim();
-      const call = await nativeTool(owner.userId, "CHUCK_START_PHONE_CALL", { phoneNumber, purpose, callProfile: "personal", ...(body.profile ? { profile: body.profile as VoiceCallProfileInput } : {}) });
+      const continuityFromCallId = body.continuityFromCallId === undefined ? undefined : String(body.continuityFromCallId).trim();
+      const call = await nativeTool(owner.userId, "CHUCK_START_PHONE_CALL", { phoneNumber, purpose, callProfile: "personal", ...(body.profile ? { profile: body.profile as VoiceCallProfileInput } : {}), ...(continuityFromCallId ? { continuityFromCallId } : {}) });
       if (!call || typeof call !== "object") throw new Error("Phone call did not return a call record");
-      const record = call as { id?: unknown; provider?: unknown; direction?: unknown; phoneNumber?: unknown; purpose?: unknown; status?: unknown; error?: unknown; summary?: unknown; createdAt?: unknown; updatedAt?: unknown };
+      const record = call as { id?: unknown; provider?: unknown; direction?: unknown; phoneNumber?: unknown; purpose?: unknown; status?: unknown; runtimeState?: unknown; error?: unknown; summary?: unknown; outcome?: unknown; outcomeStatus?: unknown; createdAt?: unknown; updatedAt?: unknown };
       if (typeof record.id !== "string" || typeof record.phoneNumber !== "string" || typeof record.purpose !== "string" || typeof record.status !== "string" || typeof record.createdAt !== "number" || typeof record.updatedAt !== "number") throw new Error("Phone call returned an invalid record");
-      const response = callView({ id: record.id, provider: typeof record.provider === "string" ? record.provider : undefined, direction: typeof record.direction === "string" ? record.direction : undefined, phoneNumber: record.phoneNumber, purpose: record.purpose, status: record.status, error: typeof record.error === "string" ? record.error : undefined, summary: typeof record.summary === "string" ? record.summary : undefined, createdAt: record.createdAt, updatedAt: record.updatedAt });
+      const response = callView({ id: record.id, provider: typeof record.provider === "string" ? record.provider : undefined, direction: typeof record.direction === "string" ? record.direction : undefined, phoneNumber: record.phoneNumber, purpose: record.purpose, status: record.status, runtimeState: typeof record.runtimeState === "string" ? record.runtimeState : undefined, error: typeof record.error === "string" ? record.error : undefined, summary: typeof record.summary === "string" ? record.summary : undefined, outcome: record.outcome, outcomeStatus: typeof record.outcomeStatus === "string" ? record.outcomeStatus : undefined, createdAt: record.createdAt, updatedAt: record.updatedAt });
       if (prior.key) {
         session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() };
         await saveSession(owner.userId, session);
@@ -2389,6 +2437,29 @@ export function registerSdkApi(app: Hono): void {
     if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before reading Attention Pulse settings.");
     try { return c.json(await readPulsePreferences(owner.userId)); }
     catch (error) { return apiError(c, 503, "attention_pulse_unavailable", error instanceof Error ? error.message : "Attention Pulse settings are unavailable."); }
+  });
+
+  app.post("/v1/account/calls/:callId/control", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before using calls.");
+    const body = await c.req.json().catch(() => ({})) as { action?: unknown; digits?: unknown; phoneNumber?: unknown };
+    const action = body.action;
+    if (action !== "hangup" && action !== "send_dtmf" && action !== "transfer") return apiError(c, 400, "invalid_call_control", "action must be hangup, send_dtmf, or transfer.");
+    if (action === "send_dtmf" && typeof body.digits !== "string") return apiError(c, 400, "invalid_call_control", "digits are required for send_dtmf.");
+    if (action === "transfer" && typeof body.phoneNumber !== "string") return apiError(c, 400, "invalid_call_control", "phoneNumber is required for transfer.");
+    try {
+      const result = await nativeTool(owner.userId, "CHUCK_CONTROL_PHONE_CALL", {
+        callId: c.req.param("callId"), action,
+        ...(action === "send_dtmf" ? { digits: body.digits } : {}),
+        ...(action === "transfer" ? { phoneNumber: String(body.phoneNumber).replace(/[\s().-]/g, "") } : {}),
+      }, { ownerPrivateRun: true });
+      if (!result || typeof result !== "object") throw new Error("Call control did not return a call record");
+      const record = result as { id?: unknown; provider?: unknown; direction?: unknown; phoneNumber?: unknown; purpose?: unknown; status?: unknown; runtimeState?: unknown; error?: unknown; summary?: unknown; outcome?: unknown; outcomeStatus?: unknown; createdAt?: unknown; updatedAt?: unknown };
+      if (typeof record.id !== "string" || typeof record.phoneNumber !== "string" || typeof record.purpose !== "string" || typeof record.status !== "string" || typeof record.createdAt !== "number" || typeof record.updatedAt !== "number") throw new Error("Phone call returned an invalid record");
+      return c.json(callView({ id: record.id, provider: typeof record.provider === "string" ? record.provider : undefined, direction: typeof record.direction === "string" ? record.direction : undefined, phoneNumber: record.phoneNumber, purpose: record.purpose, status: record.status, runtimeState: typeof record.runtimeState === "string" ? record.runtimeState : undefined, error: typeof record.error === "string" ? record.error : undefined, summary: typeof record.summary === "string" ? record.summary : undefined, outcome: record.outcome, outcomeStatus: typeof record.outcomeStatus === "string" ? record.outcomeStatus : undefined, createdAt: record.createdAt, updatedAt: record.updatedAt }));
+    } catch (error) {
+      return apiError(c, 400, "invalid_call_control", error instanceof Error ? error.message : "Call control failed.");
+    }
   });
 
   app.post("/v1/account/attention-candidates/:id/activate", async (c) => {
@@ -3107,6 +3178,25 @@ export function registerSdkApi(app: Hono): void {
     const identity = (await listChannelIdentities(sdkUser(c)!.userId)).find((item) => item.provider === provider && identityFingerprint(item) === c.req.param("identityId"));
     if (!identity) return apiError(c, 404, "channel_not_found", "Linked channel not found for this Chusky account.");
     return await unlinkChannelIdentity(sdkUser(c)!.userId, c.req.param("identityId")) ? c.body(null, 204) : apiError(c, 404, "channel_not_found", "Linked channel not found for this Chusky account.");
+  });
+  app.post("/v1/devices", async (c) => {
+    // A raw CLI bearer token is intentionally available only through the
+    // authenticated first-party dashboard. Project/API-key callers can list
+    // and revoke their scoped devices, but cannot mint a token that may be
+    // copied out of their server environment.
+    const webAuthUserId = (c as any).get("webAuthUserId") as string | undefined;
+    if (!webAuthUserId) return apiError(c, 403, "web_auth_required", "CLI tokens can only be generated from the authenticated dashboard.");
+    const body = await c.req.json().catch(() => ({})) as { name?: unknown };
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (!name || name.length > 80 || /[\u0000-\u001f\u007f]/.test(name)) return apiError(c, 400, "invalid_device_name", "A device name is required and must be 80 characters or fewer.");
+    try {
+      const owner = sdkUser(c)!;
+      const result = await createCliDevice(owner.userId, name);
+      return c.json({ token: result.token, device: { id: createHash("sha256").update(result.device.tokenHash).digest("hex").slice(0, 24), name: result.device.name, createdAt: new Date(result.device.createdAt).toISOString(), lastSeenAt: new Date(result.device.lastSeenAt).toISOString() } }, 201);
+    } catch (error) {
+      logger.error({ errorName: error instanceof Error ? error.name : "UnknownError", userId: sdkUser(c)?.userId }, "Dashboard CLI token generation failed");
+      return apiError(c, 503, "device_token_unavailable", "The CLI token could not be generated. Retry without refreshing the page.");
+    }
   });
   app.get("/v1/devices", async (c) => {
     const data = (await listCliDevices(sdkUser(c)!.userId)).filter((item) => !item.revokedAt).map(({ tokenHash, ...item }) => ({ id: createHash("sha256").update(tokenHash).digest("hex").slice(0, 24), name: item.name, createdAt: new Date(item.createdAt).toISOString(), lastSeenAt: new Date(item.lastSeenAt).toISOString() }));
