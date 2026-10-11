@@ -37,7 +37,7 @@ import type { VoiceCallProfileInput } from "./calls/voiceProfile.js";
 import { normalizePhoneCallOutcome } from "./calls/outcome.js";
 import { isBlandVoiceConfigured } from "./calls/bland.js";
 import { isTwilioVoiceConfigured } from "./calls/twilio.js";
-import { cancelJob, cancelReminder, nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow, scheduleJob, setReminder, syncAttentionPulseProactiveState } from "./nativeTools.js";
+import { cancelJob, cancelReminder, nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow, scheduleJob, setReminder, syncAttentionPulseProactiveState, syncDefaultProactiveWatchesForConnectedAccounts } from "./nativeTools.js";
 import { confirmRecallMeetingParticipant } from "./meetings/service.js";
 import { defaultMediaInstruction } from "./mediaInput.js";
 import { fetchPublicWebsite, normalizePublicWebsiteUrl } from "./onboardingWebsite.js";
@@ -2054,7 +2054,24 @@ export function registerSdkApi(app: Hono): void {
   });
 
   app.get("/v1/apps/connections", async (c) => {
-    try { return c.json({ data: await listConnectedAccounts(sdkUser(c)!.userId) }); }
+    try {
+      const userId = sdkUser(c)!.userId;
+      const accounts = await listConnectedAccounts(userId);
+      // A connected-account refresh is the earliest reliable signal that a
+      // provider is ready for Pulse. Repair the durable starter-watch
+      // projection here instead of making the owner wait for QStash's next
+      // hourly invocation. This remains bounded to the accounts returned by
+      // the authenticated inventory call and only runs for an active Pulse.
+      const pulseActive = (await listJobs(userId)).some((job) => job.kind === "attention_pulse" && job.status === "active");
+      if (pulseActive) {
+        try {
+          await syncDefaultProactiveWatchesForConnectedAccounts(userId, accounts);
+        } catch (error) {
+          logger.warn({ err: error, userId }, "Connected account inventory succeeded but Attention Pulse watch sync was deferred");
+        }
+      }
+      return c.json({ data: accounts });
+    }
     catch (error) { return apiError(c, 502, "connections_unavailable", error instanceof Error ? error.message : "Connected accounts are temporarily unavailable."); }
   });
 
@@ -2429,7 +2446,9 @@ export function registerSdkApi(app: Hono): void {
     const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify({ mode, maxWatches })}`).digest("hex");
     return sdkAutonomyMutation(c, owner.userId, fingerprint, async () => {
       await syncAttentionPulseProactiveState(owner.userId);
-      return { data: await runDueAutonomyWatches(owner.userId, { mode, maxWatches }) };
+      // This endpoint is the owner-facing Run now action. Do not make an
+      // explicit request wait for a watch's next hourly cadence.
+      return { data: await runDueAutonomyWatches(owner.userId, { mode, maxWatches, force: true }) };
     });
   });
 

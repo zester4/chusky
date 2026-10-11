@@ -9,7 +9,7 @@ import { browserFileDownloadResponse, persistSdkCompanyRun, registerSdkApi, sdkR
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
-import { addRecallMeeting, authenticateCliToken, completeMissionStep, createApproval, createCliDevice, createMission, createTask, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getMission, getOutbox, getSession, getTask, initStore, listTasks, recordTrustedMissionEvidence, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, startMission, updateMission, updateOutbox, upsertMeetingContact, upsertMemory, waitMission } from "../src/store.js";
+import { addJob, addRecallMeeting, authenticateCliToken, completeMissionStep, createApproval, createCliDevice, createMission, createTask, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getMission, getOutbox, getSession, getTask, initStore, listAttentionRecords, listTasks, recordTrustedMissionEvidence, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, startMission, updateMission, updateOutbox, upsertMeetingContact, upsertMemory, waitMission } from "../src/store.js";
 import { redeemLinkCode } from "../src/channels/identity.js";
 import { appendTraceEvent, queueCompensation, saveOutcomeVerification } from "../src/reliability/persistence.js";
 import { resetTriggerCatalogueForTests } from "../src/triggerCatalog.js";
@@ -2161,6 +2161,29 @@ test("connected-app disconnect is scoped to an account-owned Composio connection
   const removed = await api.fetch(new Request(`http://local/v1/apps/connections/${account.id}`, { method: "DELETE", headers: headers("owner") }));
   assert.equal(removed.status, 204);
   assert.deepEqual(deleted, [account.id]);
+});
+
+test("connected-app inventory immediately bootstraps an active pulse watch", async () => {
+  const externalUserId = "pulse-connect-owner";
+  const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalUserId}`).digest("hex").slice(0, 12), 16);
+  await addJob(userId, {
+    id: `pulse_${userId}`, userId, text: "Run the owner's proactive attention pulse.", cron: "0 * * * *",
+    scheduleId: `chuck-attention-pulse-${userId}`, status: "active", kind: "attention_pulse", createdAt: Date.now(),
+  });
+  setAgentDependenciesForTests({ composio: {
+    connectedAccounts: {
+      list: async () => ({ items: [{ id: "conn_gmail", alias: "Inbox", toolkit: { slug: "gmail" }, status: "ACTIVE" }] }),
+    },
+  } });
+
+  const response = await app().fetch(new Request("http://local/v1/apps/connections", {
+    headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalUserId },
+  }));
+
+  assert.equal(response.status, 200);
+  assert.equal((await response.json() as { data: Array<{ toolkit: string }> }).data[0]?.toolkit, "gmail");
+  const watches = await listAttentionRecords(userId, "autonomy_watch") as Array<{ name?: string; domain?: string; status?: string }>;
+  assert.ok(watches.some((watch) => watch.name === "Recent inbox" && watch.domain === "gmail" && watch.status === "active"));
 });
 
 test("connected-app reconnect targets the exact expired account and cannot cross owners", async () => {
