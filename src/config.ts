@@ -11,6 +11,14 @@ function optional(key: string, fallback: string): string {
   return process.env[key] ?? fallback;
 }
 
+function booleanOption(key: string, fallback: boolean): boolean {
+  const raw = process.env[key];
+  if (raw === undefined || !raw.trim()) return fallback;
+  if (raw.trim().toLowerCase() === "true") return true;
+  if (raw.trim().toLowerCase() === "false") return false;
+  throw new Error(`${key} must be true or false, got: ${raw}`);
+}
+
 function positiveInt(key: string, fallback: number): number {
   const raw = process.env[key];
   if (!raw) return fallback;
@@ -693,6 +701,10 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   port: positiveInt("PORT", 8080),
   webhookUrl: optional("WEBHOOK_URL", ""),
   dashboardUrl: optional("DASHBOARD_URL", ""),
+  // One deployment-level switch for Elena and Attention Pulse. The dashboard
+  // reads the effective value from the authenticated backend projection; it
+  // must not maintain a second independent frontend flag.
+  elenaEnabled: booleanOption("CHUSKY_ELENA_ENABLED", true),
   // Better Auth is opt-in so existing Telegram polling deployments keep their
   // current startup contract until the auth database and origins are configured.
   betterAuthEnabled: optional("BETTER_AUTH_ENABLED", "false") === "true",

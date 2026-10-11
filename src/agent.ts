@@ -85,6 +85,7 @@ import { executeOutcomeVerification, type OutcomeReadAdapter } from "./reliabili
 import type { OutcomeCheck } from "./reliability/contracts.js";
 import { buildComposioBatchActions, collectComposioToolPresentations, composioToolkitSlugsNeedingMetadata, enrichComposioToolPresentationsFromToolkits, settleComposioBatchActions, successfulComposioBatchActions, type ComposioBatchAction, type ComposioToolPresentation } from "./toolActivity.js";
 import { MISSION_WORKER_CONTROL_TOOLS } from "./missionWorker.js";
+import { ELENA_DISABLED_PROMPT } from "./proactive/featureFlag.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -2920,7 +2921,7 @@ export async function runAgent(
         ? compactMissionCustomization(config.chuckSystemPrompt)
         : compactActionCustomization(config.chuckSystemPrompt),
     mandatorySections: [
-      ATTENTION_PULSE_IDENTITY,
+      config.elenaEnabled ? ATTENTION_PULSE_IDENTITY : ELENA_DISABLED_PROMPT,
       ...(noToolTurn ? [] : ownerPrivateRun
         ? [AUTONOMY_OPERATING_KERNEL, ...(shoppingPromptRelevant ? [SHOPPING_AGENT_PLAYBOOK] : []), ...(meetingPromptRelevant ? [MEETING_MISSION_PLAYBOOK] : []), ...(triggerAutonomy ? [triggerAutonomy] : [])]
         : !voiceTurn && !sharedScope

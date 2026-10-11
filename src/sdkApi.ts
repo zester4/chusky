@@ -91,6 +91,7 @@ import { diagnoseMission } from "./reliability/missionDoctor.js";
 import { checkExecutionQuota, reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
 import { assertSafeBrowserUrl } from "./lib/e2b/urlSafety.js";
 import { durableStorageMetrics } from "./store.js";
+import { elenaDisabledMessage } from "./proactive/featureFlag.js";
 
 let sdkTaskWorkflowEnqueuer = enqueueTaskWorkflow;
 /** Test-only seam for durable task submission; production uses the configured QStash workflow client. */
@@ -1704,14 +1705,16 @@ export function registerSdkApi(app: Hono): void {
       listApprovals(owner.userId, 100),
       listAttentionRecords(owner.userId, "attention_candidate", { limit: 50 }),
     ]);
-    const pulseJob = jobs.find((item) => item.kind === "attention_pulse");
+    const visibleJobs = config.elenaEnabled ? jobs : jobs.filter((item) => item.kind !== "attention_pulse");
+    const pulseJob = config.elenaEnabled ? jobs.find((item) => item.kind === "attention_pulse") : undefined;
     const pulseOccurrence = pulseJob ? (await listJobOccurrences(owner.userId, pulseJob.id, 1))[0] : undefined;
     return c.json({
+      features: { attentionPulse: config.elenaEnabled },
       model: session.model,
       voiceReplies: Boolean(session.voiceReplies),
       voicePreferences: session.voicePreferences ?? {},
       approvals: approvals.filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map((item) => ({ id: item.id, toolSlug: item.toolSlug, request: item.request, status: item.status, ...(item.missionId ? { missionId: item.missionId } : {}), channelProvider: item.channelProvider, createdAt: new Date(item.createdAt).toISOString(), expiresAt: new Date(item.expiresAt).toISOString() })),
-      attentionCandidates: (attentionCandidates as AttentionCandidateRecord[]).filter((item) => !isTriggerAttentionCandidate(item) && item.status === "pending" && (!item.availableAt || item.availableAt <= Date.now()) && (!item.expiresAt || item.expiresAt > Date.now())).slice(0, 12).map((item) => {
+      attentionCandidates: config.elenaEnabled ? (attentionCandidates as AttentionCandidateRecord[]).filter((item) => !isTriggerAttentionCandidate(item) && item.status === "pending" && (!item.availableAt || item.availableAt <= Date.now()) && (!item.expiresAt || item.expiresAt > Date.now())).slice(0, 12).map((item) => {
         return {
           id: item.id,
           candidateType: item.candidateType,
@@ -1722,11 +1725,11 @@ export function registerSdkApi(app: Hono): void {
           score: item.score,
           createdAt: new Date(item.createdAt).toISOString(),
         };
-      }),
+      }) : [],
       channels: channels.filter((item) => !item.disabledAt).map((item) => ({ id: identityFingerprint(item), provider: item.provider, externalUserId: item.externalUserId, workspaceId: item.workspaceId, displayName: item.displayName, verifiedAt: new Date(item.verifiedAt).toISOString(), proactiveOptIn: item.proactiveOptIn !== false })),
       reminders: reminders.map((item) => ({ ...item, runAt: new Date(item.runAt).toISOString(), createdAt: new Date(item.createdAt).toISOString() })),
-      jobs: jobs.map((item) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
-      attentionPulse: pulseOccurrence ? { lastOccurrence: occurrenceView(pulseOccurrence) } : undefined,
+      jobs: visibleJobs.map((item) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
+      attentionPulse: config.elenaEnabled && pulseOccurrence ? { lastOccurrence: occurrenceView(pulseOccurrence) } : undefined,
       memory: memoryProjectionResult.memory.map(memoryView),
       memoryStatus: memoryProjectionResult.status,
       scratchpad: Object.entries(session.scratchpad).map(([key, item]) => ({ key, content: item.content, updatedAt: new Date(item.updatedAt).toISOString() })),
@@ -2098,7 +2101,7 @@ export function registerSdkApi(app: Hono): void {
       // projection here instead of making the owner wait for QStash's next
       // hourly invocation. This remains bounded to the accounts returned by
       // the authenticated inventory call and only runs for an active Pulse.
-      const pulseActive = (await listJobs(userId)).some((job) => job.kind === "attention_pulse" && job.status === "active");
+      const pulseActive = config.elenaEnabled && (await listJobs(userId)).some((job) => job.kind === "attention_pulse" && job.status === "active");
       if (pulseActive) {
         try {
           await syncDefaultProactiveWatchesForConnectedAccounts(userId, accounts);
@@ -2462,6 +2465,7 @@ export function registerSdkApi(app: Hono): void {
     // autonomy must work before or after that optional link.
     const owner = sdkUser(c);
     if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before reading autonomy state.");
+    if (!config.elenaEnabled) return apiError(c, 404, "elena_disabled", elenaDisabledMessage());
     const mode = c.req.query("mode") === "business" ? "business" : "personal";
     // The queue endpoint is also the dashboard refresh boundary. Repair the
     // durable starter-watch projection before reading it, so a connected app
@@ -2475,6 +2479,7 @@ export function registerSdkApi(app: Hono): void {
     // linking Telegram later must not move or hide the user's existing state.
     const owner = sdkUser(c);
     if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before running autonomy reconciliation.");
+    if (!config.elenaEnabled) return apiError(c, 404, "elena_disabled", elenaDisabledMessage());
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
     const mode = body.mode === "business" ? "business" : "personal";
     const maxWatches = body.maxWatches === undefined ? 8 : Math.max(1, Math.min(20, Number.isFinite(Number(body.maxWatches)) ? Math.floor(Number(body.maxWatches)) : 8));
@@ -2490,6 +2495,7 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/account/attention-pulse", async (c) => {
     const owner = sdkUser(c);
     if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before reading Attention Pulse settings.");
+    if (!config.elenaEnabled) return apiError(c, 404, "elena_disabled", elenaDisabledMessage());
     try { return c.json(await readPulsePreferences(owner.userId)); }
     catch (error) { return apiError(c, 503, "attention_pulse_unavailable", error instanceof Error ? error.message : "Attention Pulse settings are unavailable."); }
   });
@@ -2520,6 +2526,7 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/account/attention-candidates/:id/activate", async (c) => {
     const owner = sdkUser(c);
     if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before opening an Elena suggestion.");
+    if (!config.elenaEnabled) return apiError(c, 404, "elena_disabled", elenaDisabledMessage());
     const candidateId = c.req.param("id");
     const body = await c.req.json().catch(() => ({})) as { actionId?: unknown };
     const actionId = typeof body.actionId === "string" ? body.actionId.trim().slice(0, 80) : undefined;
@@ -2540,6 +2547,7 @@ export function registerSdkApi(app: Hono): void {
   app.put("/v1/account/attention-pulse", async (c) => {
     const owner = sdkUser(c);
     if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before changing Attention Pulse settings.");
+    if (!config.elenaEnabled) return apiError(c, 404, "elena_disabled", elenaDisabledMessage());
     const body = await c.req.json().catch(() => ({})) as PulsePreferencesInput;
     try { normalizePulsePreferences(body); }
     catch (error) { return apiError(c, 400, "invalid_attention_pulse", error instanceof Error ? error.message : "Attention Pulse settings are invalid."); }
@@ -2554,6 +2562,7 @@ export function registerSdkApi(app: Hono): void {
     if (!project || !(await accountCanAccessProject(c, project, false))) return apiError(c, 404, "not_found", "Company project not found.");
     const owner = (await linkedWebCallOwner(c)) ?? sdkUser(c);
     if (!owner) return apiError(c, 403, "owner_link_required", "Link this company project to an owner before reading autonomy state.");
+    if (!config.elenaEnabled) return apiError(c, 404, "elena_disabled", elenaDisabledMessage());
     const policy = project.companyPolicy?.autonomy;
     return c.json(await getAutonomySnapshot(owner.userId, "business", policy ? {
       ...(policy.enabled !== undefined ? { enabled: policy.enabled } : {}),
@@ -2572,6 +2581,7 @@ export function registerSdkApi(app: Hono): void {
     if (!project || !(await accountCanAccessProject(c, project, false))) return apiError(c, 404, "not_found", "Company project not found.");
     const owner = (await linkedWebCallOwner(c)) ?? sdkUser(c);
     if (!owner) return apiError(c, 403, "owner_link_required", "Link this company project to an owner before running autonomy reconciliation.");
+    if (!config.elenaEnabled) return apiError(c, 404, "elena_disabled", elenaDisabledMessage());
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
     const policy = project.companyPolicy?.autonomy;
     if (policy?.enabled === false) return apiError(c, 409, "autonomy_disabled", "Autonomy is disabled for this company project.");
@@ -3592,7 +3602,7 @@ export function registerSdkApi(app: Hono): void {
       tasks: tasks.filter((item) => item.updatedAt > since).slice(0, 50),
       reminders: reminders.filter((item) => item.createdAt > since).slice(0, 50),
       jobs: jobs.filter((item) => item.createdAt > since).slice(0, 50),
-      attentionCandidates: (attentionCandidates as AttentionCandidateRecord[]).filter((item) => !isTriggerAttentionCandidate(item) && item.updatedAt > since && item.status === "pending").slice(0, 20).map((item) => ({ id: item.id, reason: item.reason.replace(/^\[(connection-gap|action-gap):[^\]]+\]\s*/, ""), suggestedActions: item.suggestedActions, updatedAt: item.updatedAt })),
+      attentionCandidates: config.elenaEnabled ? (attentionCandidates as AttentionCandidateRecord[]).filter((item) => !isTriggerAttentionCandidate(item) && item.updatedAt > since && item.status === "pending").slice(0, 20).map((item) => ({ id: item.id, reason: item.reason.replace(/^\[(connection-gap|action-gap):[^\]]+\]\s*/, ""), suggestedActions: item.suggestedActions, updatedAt: item.updatedAt })) : [],
     });
   });
   app.get("/v1/operator/trace", async (c) => { const owner = sdkUser(c)!; return c.json({ data: await listTraceEvents(owner.userId, c.req.query("correlation_id"), Number(c.req.query("limit") ?? 500) || 500) }); });

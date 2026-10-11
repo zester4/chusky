@@ -4,6 +4,25 @@
 Attention Pulse/Elena. It does not contain credentials, provider payloads, or
 unbounded tool authority.
 
+## Deployment feature flag
+
+`CHUSKY_ELENA_ENABLED` is the single deployment-level source of truth. It is
+`true` by default and must be either `true` or `false` when set. With
+`CHUSKY_ELENA_ENABLED=false`, the backend removes Pulse tools from native/model
+tool discovery, rejects Pulse and autonomy endpoints, suppresses Pulse job
+execution and starter-watch reconciliation, and projects
+`features.attentionPulse=false` through the account overview. The dashboard
+uses that projection to hide the Pulse navigation, page, onboarding step, and
+Pulse-only overview surfaces. Existing Pulse records and schedules are kept
+intact so changing the flag back to `true` restores the feature without
+recreating or widening provider access. Chusky's ordinary connected-app
+triggers, tasks, missions, reminders, and approvals are not disabled by this
+flag.
+
+The flag is read at process startup. After changing it, restart or redeploy
+the backend and dashboard against that backend; do not add a separate frontend
+environment flag.
+
 ## Boundaries
 
 - `catalog.ts` defines the twenty proactive behaviors the governor can choose

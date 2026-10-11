@@ -1,4 +1,6 @@
 import { E2B_BROWSER_ACTIONS } from "./lib/e2b/types.js";
+import { config } from "./config.js";
+import { isElenaToolSlug } from "./proactive/featureFlag.js";
 
 /**
  * Keep the catalogue schemas runtime-shaped without asking TypeScript to carry
@@ -410,7 +412,8 @@ export const chuckTools: NativeToolDefinition[] = [...baseChuckTools, ...shoppin
     };
   }
   return { ...tool, function: { ...tool.function, name, description, parameters } };
-  });
+  })
+  .filter((tool) => config.elenaEnabled || !isElenaToolSlug(tool.function.name));
 
 // Kept in the native catalog for existing SDK/API clients and resumed runs,
 // but image transfer is now resolved transparently at Composio dispatch.

@@ -9,6 +9,7 @@ import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { createHash, randomUUID } from "node:crypto";
 import { classifyMemory } from "./memory/classifier.js";
 import { config } from "./config.js";
+import { elenaDisabledMessage, isElenaToolSlug } from "./proactive/featureFlag.js";
 import { ensureAttentionPulseCapabilityCandidates, getAttentionPulseWatchCoverage } from "./attentionPulse.js";
 import { classifyPulseHealth } from "./proactive/pulseHealth.js";
 import { DEFAULT_PROACTIVE_WATCHES, DEFAULT_PULSE_DOMAINS, DEFAULT_WATCH_CONNECTION_WAIT_ERROR, DEFAULT_WATCH_PROFILE_SCOPE_ERROR, connectedWatchInput, connectedWatchSpecs, defaultWatchInput, defaultWatchSpecsForConnectedAccounts, filterWatchSpecsByAllowedDomains, missingDefaultWatchKeys, normalizeProactiveCapabilityIds } from "./proactive/watches.js";
@@ -1007,6 +1008,7 @@ export async function syncDefaultProactiveWatchesForConnectedAccounts(
   now = Date.now(),
 ): Promise<AutonomyWatchRecord[]> {
   const existing = await listAttentionRecords(userId, "autonomy_watch", { limit: 200 }) as AutonomyWatchRecord[];
+  if (!config.elenaEnabled) return existing;
   const profiles = await listAttentionRecords(userId, "autonomy_profile", { limit: 20 }) as AutonomyProfileRecord[];
   const profile = profiles.find((item) => item.mode === "personal");
   const allowedDomains = profile?.allowedDomains?.length ? profile.allowedDomains : [...DEFAULT_PULSE_DOMAINS];
@@ -1081,6 +1083,7 @@ export async function syncAttentionPulseProactiveState(userId: number, now = Dat
   accounts: PulseConnectedAccount[];
   candidates: Awaited<ReturnType<typeof ensureAttentionPulseCapabilityCandidates>>;
 }> {
+  if (!config.elenaEnabled) return { verified: false, accounts: [], candidates: [] };
   const connectionState = await loadPulseConnectedAccounts(userId);
   if (!connectionState.verified) return { ...connectionState, candidates: [] };
   await syncDefaultProactiveWatchesForConnectedAccounts(userId, connectionState.accounts, now);
@@ -1580,6 +1583,7 @@ async function resumeBrowserHandoff(userId: number, id: string, ownerPrivateRun:
 export async function nativeTool(userId: number, slug: string, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<unknown> {
   const canonicalSlug = canonicalNativeToolSlug(slug);
   if (canonicalSlug !== slug) return nativeTool(userId, canonicalSlug, args, runtime);
+  if (!config.elenaEnabled && isElenaToolSlug(slug)) throw new Error(elenaDisabledMessage());
   if (runtime.sharedConversation && isSharedChannelToolDenied(slug)) {
     throw new Error(`${slug} is available only in a private owner conversation`);
   }

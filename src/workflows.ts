@@ -2,6 +2,7 @@ import type { JobRecord, ReminderRecord, ReminderDeliveryTarget } from "./store.
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { posthog } from "./posthog.js";
 import type { AttentionPulseRunEvidence, AutonomyExecutionStatus, AutonomyMode, JobOccurrenceRecord } from "./autonomy/types.js";
+import { config } from "./config.js";
 
 export interface ReminderWorkflowPayload { reminderId: string; userId: number; approvalId?: string; attemptId?: string; }
 export interface JobWorkflowPayload { jobId: string; userId: number; occurrenceId?: string; approvalId?: string; forceAttentionPulse?: boolean; }
@@ -124,6 +125,11 @@ export async function deliverReminder(payload: ReminderWorkflowPayload, deps: Wo
 export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDependencies): Promise<{ skipped?: boolean; delivered: boolean }> {
   const job = await deps.getJob(payload.userId, payload.jobId);
   if (!job || job.status !== "active") return { skipped: true, delivered: false };
+  // Existing QStash schedules may still wake after an environment rollout.
+  // Keep the durable job intact so enabling Elena again resumes it, but do not
+  // create an occurrence, inspect provider state, or deliver anything while
+  // the deployment-level feature flag is off.
+  if (job.kind === "attention_pulse" && !config.elenaEnabled) return { skipped: true, delivered: false };
   const resolvedTarget = await deps.resolveJobDeliveryTarget?.(payload.userId, job);
   const deliveryJob = resolvedTarget === undefined ? job : { ...job, deliveryTarget: resolvedTarget ?? undefined };
   const deliveryKey = `job:${payload.jobId}:${payload.occurrenceId ?? "legacy"}${payload.approvalId ? `:approval:${payload.approvalId}` : ""}`;
