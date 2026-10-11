@@ -26,9 +26,7 @@ function safeList(value: unknown, field: string): string[] {
   return value.map((item, index) => safeText(item, `${field}[${index}]`, 700));
 }
 
-export function parsePhoneCallOutcome(value: string): PhoneCallOutcome {
-  let parsed: unknown;
-  try { parsed = JSON.parse(value); } catch { throw new Error("Model did not return valid phone call outcome JSON"); }
+function validatePhoneCallOutcome(parsed: unknown): PhoneCallOutcome {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Phone call outcome must be a JSON object");
   const record = parsed as Record<string, unknown>;
   const rawItems = record.actionItems;
@@ -48,6 +46,64 @@ export function parsePhoneCallOutcome(value: string): PhoneCallOutcome {
     decisions: safeList(record.decisions, "decisions"),
     actionItems,
     openQuestions: safeList(record.openQuestions, "openQuestions"),
+  };
+}
+
+function tryParseJsonObject(value: string): unknown | undefined {
+  try { return JSON.parse(value); } catch { /* Try common model wrappers below. */ }
+
+  const fenced = value.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)?.[1];
+  if (fenced) {
+    try { return JSON.parse(fenced); } catch { /* Continue to balanced-object extraction. */ }
+  }
+
+  // Models sometimes add one sentence before the object. Find a balanced JSON
+  // object instead of using the last brace, because braces may occur in text.
+  for (let start = value.indexOf("{"); start >= 0; start = value.indexOf("{", start + 1)) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < value.length; index += 1) {
+      const character = value[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') { inString = true; continue; }
+      if (character === "{") depth += 1;
+      else if (character === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          try { return JSON.parse(value.slice(start, index + 1)); } catch { break; }
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+/** Parse bounded outcome JSON even when a provider wraps it in markdown or prose. */
+export function parsePhoneCallOutcome(value: string): PhoneCallOutcome {
+  const parsed = tryParseJsonObject(value);
+  if (parsed === undefined) throw new Error("Model did not return valid phone call outcome JSON");
+  return validatePhoneCallOutcome(parsed);
+}
+
+/** Keep malformed historical/provider data from reaching a dashboard renderer. */
+export function normalizePhoneCallOutcome(value: unknown): PhoneCallOutcome | undefined {
+  try { return validatePhoneCallOutcome(value); } catch { return undefined; }
+}
+
+/** Honest, non-speculative result when structured post-call generation fails. */
+export function fallbackPhoneCallOutcome(): PhoneCallOutcome {
+  return {
+    title: "Call completed — outcome needs review",
+    summary: "The call completed, but Chusky could not produce a structured outcome. Review the call history before taking follow-up action.",
+    decisions: [],
+    actionItems: [],
+    openQuestions: ["Structured outcome requires owner review."],
   };
 }
 
