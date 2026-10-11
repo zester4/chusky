@@ -40,7 +40,7 @@ export async function answerBlandQuestion(input: { userId: number; callId: strin
     // Memory is helpful but not required to keep an active call responsive.
   }
   const prompt = [
-    "A caller on an owner-authorized private phone call is speaking to Chusky.",
+    `This is an ${call.direction === "outbound" ? "outbound" : "inbound"} phone call. The person speaking is the external contact, client, patient, customer, or caller—not the owner and not Chusky's chat user. ${call.direction === "outbound" ? "Chusky placed this call on the owner's behalf and must explain why it is calling if asked; never say that it is not calling them." : "Treat the caller as someone requesting help from the represented person or organization."}`,
     `Call profile: ${call.callProfile === "business" ? "business" : "personal"}.`,
     `Call purpose: ${input.purpose.slice(0, 1000)}`,
     `Caller question: ${input.question.slice(0, 1500)}`,

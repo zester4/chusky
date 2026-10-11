@@ -51,7 +51,7 @@ import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
 import { recordMeetingTurn } from "./decisions/telemetry.js";
-import { twilioVoiceInstructions } from "./calls/twilioContext.js";
+import { twilioVoiceInstructions, twilioVoiceOpening, twilioVoiceTranscript } from "./calls/twilioContext.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
 import { attentionPulseCloseoutOutput, attentionPulseDeliveredToday, attentionPulseDeliveryConfirmation, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, attentionPulseRefreshOwnerState, attentionPulseRequireDueWatchReport, buildAttentionPulsePlan, getAttentionPulseWatchCoverage, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "./attentionPulse.js";
 import { hasExternalRecallParticipants, resolveRecallMeetingSpeaker } from "./meetings/participants.js";
@@ -96,7 +96,7 @@ import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { defaultMediaInstruction } from "./mediaInput.js";
 import { routeProactiveWork } from "./autonomy/proactiveRouter.js";
 import { decideAutonomyStep, decideFollowUp, decideRecovery } from "./autonomy/decisionLoop.js";
-import { safeTriggerSummary, triggerEventDisplayName, triggerRecoveryActions } from "./triggerEventSummary.js";
+import { safeTriggerSummary } from "./triggerEventSummary.js";
 import { ensureTriggerCloseout, parseTriggerSuggestedActions, TRIGGER_DEFAULT_HANDLING } from "./triggerGuidance.js";
 import { captureMissionSliceState, missionHasTimerWakeContinuation, missionPostWakeNextAction, missionStepInstruction, missionWakeNeedsRecovery, missionWorkerToolAllowlist } from "./missionWorker.js";
 import { settleMissionSlice } from "./missionSlice.js";
@@ -130,17 +130,6 @@ async function notifyOwnerApproval(bot: Bot, userId: number, approval: ApprovalR
 
 function redactMeetingLinks(text: string): string {
   return text.replace(/https:\/\/[^\s<>()]+/gi, (url) => /(?:meet\.google\.com|\.zoom\.us|teams\.microsoft\.com|\.teams\.microsoft\.com|\.webex\.com)/i.test(url) ? "[private meeting link]" : url);
-}
-
-async function createTriggerRecoveryCandidate(event: { eventId: string; userId: number; triggerSlug: string; toolkit?: string }): Promise<void> {
-  const displayName = triggerEventDisplayName(event.triggerSlug, event.toolkit);
-  await createAttentionRecord(event.userId, "attention_candidate", {
-    candidateType: "trigger_event", status: "pending", score: 1, sourceTriggerEventId: event.eventId,
-    providerSlug: event.triggerSlug,
-    reason: `A ${displayName} needs review. Chusky saved the event, but could not confirm owner delivery.`,
-    proposedAction: `Review the saved ${displayName} result in Chat. Chusky will explain what arrived, what it did, and what still needs your decision without replaying the external action.`,
-    suggestedActions: triggerRecoveryActions(displayName),
-  });
 }
 
 function meetingRoomToolPolicy(meeting: { roomAllowedComposioTools?: string[]; roomAllowedNativeTools?: string[] }) {
@@ -734,6 +723,25 @@ async function main(): Promise<void> {
       return c.body(await twilioStreamTwiML(callId, userId), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
     });
 
+    // Private bridge-only call context. The voice transport must not invent a
+    // greeting: direction and purpose come from the owner-scoped call record,
+    // while the bridge receives only the bounded spoken opening it needs.
+    app.get("/internal/twilio/context", async (c) => {
+      if (!hasBridgeAuthorization(c.req.header("Authorization"), config.twilioMediaBridgeSecret)) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const callId = String(c.req.query("callId") ?? "").trim();
+      const userId = Number(c.req.query("userId"));
+      if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0) return c.json({ ok: false, error: "invalid Twilio call context" }, 400);
+      const call = await getPhoneCall(userId, callId);
+      if (!call || call.provider !== "twilio" || call.status === "failed") return c.json({ ok: false, error: "unknown or inactive call" }, 404);
+      return c.json({
+        ok: true,
+        direction: call.direction ?? "outbound",
+        callProfile: call.callProfile ?? "personal",
+        purpose: call.purpose.slice(0, 1_000),
+        greeting: twilioVoiceOpening(call),
+      }, 200, { "Cache-Control": "no-store" });
+    });
+
     // Configure this URL as the incoming Voice webhook on the Twilio number.
     // Signature verification happens before the caller's number is considered;
     // then an explicit E.164 allowlist prevents unknown callers from entering
@@ -807,7 +815,7 @@ async function main(): Promise<void> {
       try {
         const result = await withCliLock(userId, c.req.raw.signal, async () => {
           const session = await getSession(userId);
-          return runAgent(userId, transcript, session.history, config.voiceModel, undefined, c.req.raw.signal, undefined, undefined,
+          return runAgent(userId, twilioVoiceTranscript(call, transcript), session.history, config.voiceModel, undefined, c.req.raw.signal, undefined, undefined,
             { accountId: `account_${userId}`, provider: "voice", conversationId: callId, scope: "private" }, {
             instructions: twilioVoiceInstructions(call),
             ...(speculative ? { toolAllow: [] } : { ownerPrivateRun: true }),
@@ -918,7 +926,7 @@ async function main(): Promise<void> {
           try {
             const result = await withCliLock(userId, c.req.raw.signal, async () => {
               send({ type: "start", model: config.voiceModel, speculative });
-              return runAgent(userId, transcript, (await getSession(userId)).history, config.voiceModel, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined,
+              return runAgent(userId, twilioVoiceTranscript(call, transcript), (await getSession(userId)).history, config.voiceModel, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined,
                 { accountId: `account_${userId}`, provider: "voice", conversationId: callId, scope: "private" }, {
                 instructions: twilioVoiceInstructions(call),
                 ...(speculative ? { toolAllow: [] } : { ownerPrivateRun: true }),
@@ -2985,17 +2993,14 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             await channelGateway.send({ accountId: `account_${event.userId}`, userId: event.userId, target: { provider: "telegram", conversationId: String(chatId) }, text: notice, idempotencyKey: `trigger:${event.eventId}:calendar-autojoin:${chatId}`, correlationId: event.eventId, kind: "notification" });
           });
           await updateTriggerEvent(event.eventId, { status: "completed", notificationStatus: chatId ? "delivered" : "unavailable" });
-          if (!chatId) await createTriggerRecoveryCandidate(event);
           return;
         } catch (error) {
           if (isWorkflowControlFlow(error)) throw error;
           const saved = await getTriggerEvent(event.eventId);
           if (saved?.result) {
             await updateTriggerEvent(event.eventId, { status: "completed", notificationStatus: "failed", error: "Calendar action was reconciled, but the owner notification failed. Review the saved result in the dashboard." });
-            await createTriggerRecoveryCandidate(event);
           } else {
             await updateTriggerEvent(event.eventId, { status: "failed", notificationStatus: "failed", error: "Calendar automatic join could not be reconciled" });
-            await createTriggerRecoveryCandidate(event);
           }
           throw error;
         }
@@ -3045,7 +3050,6 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
         const chatId = await getTelegramChatId(event.userId);
         if (!chatId) {
           await updateTriggerEvent(event.eventId, { status: closeout.reportMissing ? "failed" : "completed", notificationStatus: "unavailable", error: "No private Telegram destination is linked; the result remains available in the dashboard." });
-          await createTriggerRecoveryCandidate(event);
           return;
         }
         await workflow.run("deliver-trigger-result", async () => {
@@ -3054,7 +3058,6 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           }
         });
         await updateTriggerEvent(event.eventId, { status: closeout.reportMissing ? "failed" : "completed", notificationStatus: "delivered", result: safeResult.slice(0, 12000), error: closeout.reportMissing ? "Agent returned no owner-facing closeout; transparent fallback notice delivered." : undefined });
-        if (closeout.reportMissing) await createTriggerRecoveryCandidate(event);
       } catch (error) {
         // `workflow.run`, `sleep`, and `waitForEvent` deliberately throw this
         // after persisting a step. Do not mark the trigger failed; the Upstash
@@ -3076,7 +3079,6 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           const chatId = await getTelegramChatId(event.userId);
           if (!chatId) {
             await updateTriggerEvent(event.eventId, { notificationStatus: "unavailable" });
-            await createTriggerRecoveryCandidate(event);
           }
           if (chatId && approval) await workflow.run("request-trigger-approval", async () => bot.api.sendMessage(chatId, `⚠️ <b>Approval needed</b>\n\nI need your approval to run <code>${error.toolSlug}</code>.\nApproval ID: <code>${error.approvalId}</code>`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Approve", `appr:approve:${error.approvalId}`).text("🛑 Deny", `appr:deny:${error.approvalId}`) }));
           const decision = await workflow.waitForEvent<{ approved: boolean }>("trigger-approval", workflowEventId("trigger-approval", error.approvalId), { timeout: "24h" });
@@ -3104,7 +3106,6 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           const resumedChatId = await getTelegramChatId(event.userId);
           if (!resumedChatId) {
             await updateTriggerEvent(event.eventId, { status: resumedCloseout.reportMissing ? "failed" : "completed", notificationStatus: "unavailable", error: "No private Telegram destination is linked; the result remains available in the dashboard." });
-            await createTriggerRecoveryCandidate(event);
             return;
           }
           await workflow.run("deliver-resumed-trigger-result", async () => {
@@ -3113,7 +3114,6 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             }
           });
           await updateTriggerEvent(event.eventId, { status: resumedCloseout.reportMissing ? "failed" : "completed", notificationStatus: "delivered", result: safeResumed.slice(0, 12000), error: resumedCloseout.reportMissing ? "Agent returned no owner-facing closeout; transparent fallback notice delivered." : undefined });
-          if (resumedCloseout.reportMissing) await createTriggerRecoveryCandidate(event);
           return;
         }
         const saved = await getTriggerEvent(event.eventId);
@@ -3123,10 +3123,8 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             notificationStatus: "failed",
             error: "A trigger result was saved, but owner notification failed. Review the saved result in the dashboard before retrying anything.",
           });
-          await createTriggerRecoveryCandidate(event);
         } else {
           await updateTriggerEvent(event.eventId, { status: "failed", notificationStatus: "failed", error: String(error).slice(0, 2000) });
-          await createTriggerRecoveryCandidate(event);
         }
         throw error;
       }

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { addRecallMeeting, claimAgentUpgrade, completeMissionStep, createMission, createWebTelegramLinkCode, finalizeMissionIfReady, getApproval, getMission, getSession, initStore, listAgentRuns, listMissions, listTasks, redeemWebTelegramLinkCode, saveSession, setApprovalStatus, startMission, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { stableSdkUserId } from "../src/sdkIdentity.js";
-import { appendPreviewLinks, cleanModelText, getReconnectUrl, getToolkitStatesPage, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, searchTools, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
+import { appendPreviewLinks, cleanModelText, getReconnectUrl, getToolkitStatesPage, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, searchTools, voiceComposioToolSlugs, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { formatAgentUpgradeNotice, loadAgentUpgrade } from "../src/upgradeNotice.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -22,6 +22,15 @@ function chatResponse(message: any) {
 function toolResponse(name: string, args: string, id = "call-1", finishReason = "tool_calls") {
   return new Response(JSON.stringify({ choices: [{ finish_reason: finishReason, message: { role: "assistant", content: null, tool_calls: [{ id, type: "function", function: { name, arguments: args } }] } }] }), { status: 200, headers: { "content-type": "application/json" } });
 }
+
+test("routes voice call objectives to bounded exact Composio capability bundles", () => {
+  const slugs = voiceComposioToolSlugs("Follow up with the customer about their unpaid invoice and email the receipt");
+  assert.ok(slugs.includes("STRIPE_SEARCH_INVOICES"));
+  assert.ok(slugs.includes("STRIPE_SEND_INVOICE"));
+  assert.ok(slugs.includes("GMAIL_SEND_EMAIL"));
+  assert.ok(!slugs.includes("SHOPIFY_CANCEL_ORDER"), "unrelated order mutations must not enter the call");
+  assert.ok(slugs.length <= 24);
+});
 
 test("preview links are included exactly once even when the model omits them", () => {
   const url = "https://preview.test/app";
@@ -1538,6 +1547,63 @@ test("owner-private calendar voice turns preload exact calendar tools from large
     assert.match(result.text, /checked the calendar/i);
     assert.equal(requests[0]?.tools.some((tool: any) => tool.function.name === calendarTool.function.name), true);
     assert.deepEqual(executed, [calendarTool.function.name]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+test("owner-private billing voice turns preload the exact purpose bundle from Composio", async () => {
+  const userId = 830055;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const requests: Array<Record<string, any>> = [];
+  const executed: string[] = [];
+  const invoiceTool = {
+    slug: "STRIPE_SEARCH_INVOICES",
+    description: "Search invoices",
+    toolkit: { slug: "stripe" },
+    inputParameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+  };
+  const session = {
+    sessionId: "owner-private-billing-voice-session",
+    tools: async () => Array.from({ length: 90 }, (_, index) => ({
+      type: "function",
+      function: { name: `GMAIL_ACTION_${index}`, description: "Unrelated connected action", parameters: { type: "object", properties: {} } },
+    })),
+    execute: async (slug: string) => { executed.push(slug); return { successful: true, data: { invoices: [] } }; },
+  };
+  const originalFetch = globalThis.fetch;
+  setAgentDependenciesForTests({ composio: {
+    create: async () => session,
+    tools: { getRawComposioTools: async () => [invoiceTool] },
+  } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/chat/completions")) {
+      const body = JSON.parse(String(init?.body));
+      requests.push(body);
+      return requests.length === 1
+        ? toolResponse(invoiceTool.slug, JSON.stringify({ query: "customer unpaid" }))
+        : chatResponse({ role: "assistant", content: "I checked the invoice status." });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(
+      userId,
+      "Check the customer's unpaid invoice.",
+      [],
+      "test/model",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { accountId: `account_${userId}`, provider: "voice", conversationId: "twc_billing_test", scope: "private" },
+      { ownerPrivateRun: true, voiceTurn: true, voiceSessionId: "twilio:billing-test", voiceRoutingHint: "Check the customer's unpaid invoice." },
+    );
+    assert.match((await result).text, /checked the invoice/i);
+    assert.equal(requests[0]?.tools.some((tool: any) => tool.function.name === invoiceTool.slug), true);
+    assert.deepEqual(executed, [invoiceTool.slug]);
   } finally {
     globalThis.fetch = originalFetch;
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
