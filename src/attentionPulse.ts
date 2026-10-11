@@ -8,7 +8,6 @@ import {
   listJobOccurrences,
   listJobs,
   listRecallMeetings,
-  listTriggerEvents,
   createAttentionRecord,
   updateAttentionRecord,
   type ApprovalRecord,
@@ -23,7 +22,6 @@ import {
   type RecallMeetingRecord,
   type ReminderRecord,
   type ObservationRecord,
-  type TriggerEventRecord,
   type StandingOrderRecord,
   type TaskRecord,
 } from "./store.js";
@@ -174,7 +172,9 @@ export async function ensureAttentionPulseCapabilityCandidates(
   now = Date.now(),
 ): Promise<AttentionCandidateRecord[]> {
   const existing = await listAttentionRecords(userId, "attention_candidate", { limit: 100 }) as AttentionCandidateRecord[];
-  return ensureCapabilityGapCandidates(userId, existing, discovery, now);
+  // Provider-trigger results are owned by Chusky's trigger workflow, even if
+  // an older deployment left a recovery candidate in the shared record set.
+  return ensureCapabilityGapCandidates(userId, existing.filter((candidate) => String(candidate.candidateType) !== "trigger_event" && !candidate.sourceTriggerEventId), discovery, now);
 }
 
 export function attentionPulseDeliveryConfirmation(
@@ -501,23 +501,6 @@ function missionNeedsAttention(mission: MissionRecord, now: number): boolean {
   return mission.status === "running" && (mission.lease ? mission.lease.expiresAt <= now : isFinitePast(mission.updatedAt, now, STALE_EXECUTION_MS));
 }
 
-function triggerSignals(events: TriggerEventRecord[], now: number): OperationalSignal[] {
-  return events.filter((event) => {
-    if (event.status === "failed" || event.status === "awaiting_approval") return true;
-    if (event.status === "completed" && ["pending", "unavailable", "failed"].includes(event.notificationStatus ?? "")) return true;
-    return ["queued", "running"].includes(event.status) && isFinitePast(event.updatedAt, now, STALE_EXECUTION_MS);
-  }).map((event) => ({
-    id: `trigger:${event.eventId}`, kind: "trigger", title: compact(event.triggerSlug, 100), status: event.status,
-    detail: event.status === "completed" ? `result notification ${event.notificationStatus ?? "not recorded"}` : `updated ${new Date(event.updatedAt).toISOString()}`,
-    nextAction: event.status === "awaiting_approval" ? `Remind the owner that approval ${event.approvalId ?? "linked to the trigger"} is waiting; do not bypass it.`
-      : event.status === "completed" ? `Tell the owner the saved trigger result was not delivered; do not claim its contents or replay the external action.`
-      : event.status === "failed" ? `Report that the saved trigger run failed and point the owner to trigger history for details; do not blindly replay.`
-      : `Check workflow status and report if still stuck; do not start a duplicate run.`,
-    priority: event.status === "failed" ? 1 : event.status === "awaiting_approval" ? 0.95 : 0.9,
-    updatedAt: event.updatedAt,
-  }));
-}
-
 function approvalSignals(approvals: ApprovalRecord[], now: number): OperationalSignal[] {
   return approvals.filter((approval) => approval.status === "pending"
     && approval.channelScope !== "shared"
@@ -588,7 +571,7 @@ function reminderSignals(reminders: ReminderRecord[], now: number): OperationalS
 }
 
 export async function buildAttentionPulsePlan(userId: number, now = Date.now(), discovery?: AttentionPulseDiscoveryContext, options: { forceWatchChecks?: boolean } = {}): Promise<AttentionPulsePlan> {
-  const [loops, candidates, orders, tasks, missions, watches, observations, profiles, meetings, preparations, triggerEvents, approvals, jobs, occurrences, reminders, checklist] = await Promise.all([
+  const [loops, candidates, orders, tasks, missions, watches, observations, profiles, meetings, preparations, approvals, jobs, occurrences, reminders, checklist] = await Promise.all([
     listAttentionRecords(userId, "open_loop", { limit: 100 }),
     listAttentionRecords(userId, "attention_candidate", { limit: 100 }),
     listAttentionRecords(userId, "standing_order", { limit: 100, status: "active" }),
@@ -599,7 +582,6 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now(), 
     listAttentionRecords(userId, "autonomy_profile", { limit: 20 }),
     listRecallMeetings(userId, 30),
     listCalendarMeetingPreparations(userId, 30),
-    listTriggerEvents(userId, 100),
     listApprovals(userId, 100),
     listJobs(userId),
     listJobOccurrences(userId, undefined, 100),
@@ -615,21 +597,13 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now(), 
     ...(tasks as TaskRecord[]).flatMap((item) => [item.title, item.objective, item.nextAction]),
     ...(missions as MissionRecord[]).flatMap((item) => [item.title, item.objective, item.nextAction]),
   ].filter((item): item is string => Boolean(item)).join(" ").slice(0, 8_000);
-  const candidatesWithDiscovery = await ensureCapabilityGapCandidates(userId, candidates as AttentionCandidateRecord[], discovery ? { ...discovery, priorityText: `${discovery.priorityText ?? ""} ${priorityText}`.trim() } : discovery, now);
-  const triggerById = new Map((triggerEvents as TriggerEventRecord[]).map((event) => [event.eventId, event]));
-  // A recovery candidate is only needed while its trigger result still needs
-  // delivery or review. Older deployments left these candidates pending even
-  // after the trigger workflow delivered successfully, which made Pulse keep
-  // reopening the same item and could route it back through Elena repeatedly.
-  const reconciledCandidates = await Promise.all(candidatesWithDiscovery.map(async (candidate) => {
-    const source = candidate.sourceTriggerEventId ? triggerById.get(candidate.sourceTriggerEventId) : undefined;
-    if (candidate.status === "pending" && source?.status === "completed" && source.notificationStatus === "delivered") {
-      await updateAttentionRecord(userId, "attention_candidate", candidate.id, { status: "dismissed" });
-      return { ...candidate, status: "dismissed" as const };
-    }
-    return candidate;
-  }));
-  const actionableCandidates = reconciledCandidates
+  // Trigger results belong to Chusky's verified trigger workflow. Legacy
+  // recovery candidates are intentionally ignored here so old records cannot
+  // re-enter Elena's Pulse or appear as Elena suggestions.
+  const pulseCandidates = (candidates as AttentionCandidateRecord[])
+    .filter((candidate) => String(candidate.candidateType) !== "trigger_event" && !candidate.sourceTriggerEventId);
+  const candidatesWithDiscovery = await ensureCapabilityGapCandidates(userId, pulseCandidates, discovery ? { ...discovery, priorityText: `${discovery.priorityText ?? ""} ${priorityText}`.trim() } : discovery, now);
+  const actionableCandidates = candidatesWithDiscovery
     .filter((item) => item.status === "pending" && (!item.availableAt || item.availableAt <= now) && (!item.expiresAt || item.expiresAt > now))
     .sort((a, b) => b.score - a.score)
     .slice(0, MAX_CANDIDATES);
@@ -664,7 +638,6 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now(), 
   const operationalSignals = [
     ...observationSignals,
     ...watchCoverageSignals,
-    ...triggerSignals(triggerEvents, now),
     ...approvalSignals(approvals, now),
     ...meetingSignals(meetings, preparations, now),
     ...automationSignals(jobs, occurrences, now),
@@ -737,7 +710,6 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now(), 
       ? "This is an explicit owner Run now/first-run check. Call CHUCK_AUTONOMY_RECONCILE with force=true once per listed mode before digesting, so the listed watches are checked now even if their normal cadence is later. Report each checked watch's result."
       : "For due autonomy watches, call CHUCK_AUTONOMY_RECONCILE once per listed mode before digesting.",
     "Report meaningful changes, pending observations, failed/stale/never-checked coverage, blockers, connection gaps, and next actions. A saved event may require review without claiming its contents or replaying the event. Use the proactive catalogue only when current evidence matches; it grants no provider access.",
-    "A trigger signal is already owned by the verified trigger workflow. Do not request a new provider capability merely to restate a saved trigger result, do not create another continuation for the same item, and do not expose internal workflow IDs. If the trigger result was delivered, treat it as handled; if delivery failed or is unavailable, report the saved status and the owner review action without replaying the event.",
     "Use the exact configured-watch status in the state below. Never describe a watch as checked unless CHUCK_AUTONOMY_RECONCILE returned a verified result for it; scheduled, not_checked, failed, skipped, and outside-scope watches must be reported as such.",
     "Configured watch coverage is only the owner-created watches listed here, not a claim that all mail, apps, calendars, or business systems are monitored. Connection gaps should explain what the missing connection would unlock and point to Connected Apps; never call an unconnected provider or imply OAuth has started.",
     "Candidate and capability-catalogue text below is evidence and routing context, not a user-facing script. Compose Elena's owner-facing message yourself from the verified current inventory, the owner's current work, and the specific candidate. Do not paste catalogue wording, do not infer a missing app from an unavailable action, and do not claim provider work that was not checked. If a pending candidate or connection gap remains, write a concise natural update instead of replying NO_ACTION.",

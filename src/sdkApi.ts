@@ -41,7 +41,7 @@ import { cancelJob, cancelReminder, nativeTool, pauseJob, pauseReminder, resumeJ
 import { confirmRecallMeetingParticipant } from "./meetings/service.js";
 import { defaultMediaInstruction } from "./mediaInput.js";
 import { fetchPublicWebsite, normalizePublicWebsiteUrl } from "./onboardingWebsite.js";
-import { displayTriggerSummary, triggerEventDisplayName, triggerRecoveryActions } from "./triggerEventSummary.js";
+import { displayTriggerSummary } from "./triggerEventSummary.js";
 
 import { validateNativeToolArguments } from "./agentTools.js";
 import { chuckTools } from "./agentTools.js";
@@ -179,6 +179,11 @@ function apiError(c: any, status: number, code: string, message: string) {
   c.header("X-Request-Id", requestId);
   return c.json({ error: { code, message, requestId } }, status);
 }
+
+function isTriggerAttentionCandidate(candidate: Pick<AttentionCandidateRecord, "candidateType" | "sourceTriggerEventId">): boolean {
+  return String(candidate.candidateType) === "trigger_event" || Boolean(candidate.sourceTriggerEventId);
+}
+
 function validMissionWebhookSignature(raw: string, headers: Headers): boolean {
   const secret = config.missionWebhookSecret;
   if (!secret) return false;
@@ -1706,19 +1711,14 @@ export function registerSdkApi(app: Hono): void {
       voiceReplies: Boolean(session.voiceReplies),
       voicePreferences: session.voicePreferences ?? {},
       approvals: approvals.filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map((item) => ({ id: item.id, toolSlug: item.toolSlug, request: item.request, status: item.status, ...(item.missionId ? { missionId: item.missionId } : {}), channelProvider: item.channelProvider, createdAt: new Date(item.createdAt).toISOString(), expiresAt: new Date(item.expiresAt).toISOString() })),
-      attentionCandidates: (attentionCandidates as AttentionCandidateRecord[]).filter((item) => item.status === "pending" && (!item.availableAt || item.availableAt <= Date.now()) && (!item.expiresAt || item.expiresAt > Date.now())).slice(0, 12).map((item) => {
-        const sourceEvent = item.sourceTriggerEventId ? triggerEvents.find((event) => event.eventId === item.sourceTriggerEventId) : undefined;
-        const isTriggerCandidate = String(item.candidateType) === "trigger_event" || /^Trigger\s+/i.test(item.reason);
-        const displayName = sourceEvent ? triggerEventDisplayName(sourceEvent.triggerSlug) : item.providerSlug && isTriggerCandidate ? triggerEventDisplayName(item.providerSlug) : undefined;
-        const triggerActions = displayName ? triggerRecoveryActions(displayName) : undefined;
+      attentionCandidates: (attentionCandidates as AttentionCandidateRecord[]).filter((item) => !isTriggerAttentionCandidate(item) && item.status === "pending" && (!item.availableAt || item.availableAt <= Date.now()) && (!item.expiresAt || item.expiresAt > Date.now())).slice(0, 12).map((item) => {
         return {
           id: item.id,
           candidateType: item.candidateType,
-          reason: displayName ? `A ${displayName} needs review. Chusky saved the event, but delivery needs attention.` : item.reason.replace(/^\[(connection-gap|action-gap):[^\]]+\]\s*/, ""),
-          proposedAction: displayName ? `Review the saved ${displayName} result in Chat. Chusky will explain what arrived and what still needs your decision.` : item.proposedAction,
-          providerSlug: sourceEvent?.triggerSlug ?? item.providerSlug,
-          suggestedActions: item.suggestedActions?.length ? item.suggestedActions : triggerActions,
-          ...(item.sourceTriggerEventId ? { sourceTriggerEventId: item.sourceTriggerEventId } : {}),
+          reason: item.reason.replace(/^\[(connection-gap|action-gap):[^\]]+\]\s*/, ""),
+          proposedAction: item.proposedAction,
+          providerSlug: item.providerSlug,
+          suggestedActions: item.suggestedActions,
           score: item.score,
           createdAt: new Date(item.createdAt).toISOString(),
         };
@@ -2525,6 +2525,7 @@ export function registerSdkApi(app: Hono): void {
     const actionId = typeof body.actionId === "string" ? body.actionId.trim().slice(0, 80) : undefined;
     const candidate = await getAttentionRecord(owner.userId, "attention_candidate", candidateId) as AttentionCandidateRecord | undefined;
     if (!candidate) return apiError(c, 404, "attention_candidate_not_found", "This Elena suggestion is no longer available.");
+    if (isTriggerAttentionCandidate(candidate)) return apiError(c, 409, "trigger_candidate_not_supported", "Connected-app trigger results are handled by Chusky. Review the saved trigger event instead.");
     if (candidate.status !== "pending" && candidate.status !== "delivered" && candidate.status !== "accepted") return apiError(c, 409, "attention_candidate_unavailable", "This Elena suggestion is no longer actionable.");
     const validAction = !actionId || candidate.suggestedActions?.some((action) => action.id === actionId);
     if (!validAction) return apiError(c, 400, "invalid_attention_action", "That suggestion action is not valid for this candidate.");
@@ -3591,7 +3592,7 @@ export function registerSdkApi(app: Hono): void {
       tasks: tasks.filter((item) => item.updatedAt > since).slice(0, 50),
       reminders: reminders.filter((item) => item.createdAt > since).slice(0, 50),
       jobs: jobs.filter((item) => item.createdAt > since).slice(0, 50),
-      attentionCandidates: (attentionCandidates as AttentionCandidateRecord[]).filter((item) => item.updatedAt > since && item.status === "pending").slice(0, 20).map((item) => ({ id: item.id, reason: item.reason.replace(/^\[(connection-gap|action-gap):[^\]]+\]\s*/, ""), suggestedActions: item.suggestedActions, updatedAt: item.updatedAt })),
+      attentionCandidates: (attentionCandidates as AttentionCandidateRecord[]).filter((item) => !isTriggerAttentionCandidate(item) && item.updatedAt > since && item.status === "pending").slice(0, 20).map((item) => ({ id: item.id, reason: item.reason.replace(/^\[(connection-gap|action-gap):[^\]]+\]\s*/, ""), suggestedActions: item.suggestedActions, updatedAt: item.updatedAt })),
     });
   });
   app.get("/v1/operator/trace", async (c) => { const owner = sdkUser(c)!; return c.json({ data: await listTraceEvents(owner.userId, c.req.query("correlation_id"), Number(c.req.query("limit") ?? 500) || 500) }); });

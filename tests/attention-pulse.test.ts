@@ -353,7 +353,7 @@ test("a recent quiet pulse does not spend a model turn only because a checklist 
   assert.equal(discovery.hasWork, true);
 });
 
-test("attention pulse preserves a durable trigger recovery without creating duplicate follow-up work", async () => {
+test("attention pulse does not surface legacy trigger recovery candidates", async () => {
   await initStore({ memoryOnly: true });
   const userId = 910016;
   const recovery = {
@@ -366,12 +366,13 @@ test("attention pulse preserves a durable trigger recovery without creating dupl
   const replay = await createAttentionRecord(userId, "attention_candidate", recovery);
   assert.equal(first.id, replay.id);
   const plan = await buildAttentionPulsePlan(userId);
-  assert.equal(plan.hasWork, true);
-  assert.match(plan.prompt, /Review the saved trigger result and notify the owner/);
-  assert.match(plan.prompt, /never replay its external action/);
+  assert.equal(plan.hasWork, false);
+  assert.equal(plan.candidateIds.length, 0);
+  assert.doesNotMatch(plan.prompt, /saved trigger result/);
+  assert.equal((await listAttentionRecords(userId, "attention_candidate") as Array<{ status: string }>)[0]?.status, "pending");
 });
 
-test("attention pulse closes a legacy trigger recovery after delivery is confirmed", async () => {
+test("attention pulse leaves legacy trigger recovery records out of Elena's plan", async () => {
   await initStore({ memoryOnly: true });
   const userId = 910017;
   const now = Date.now();
@@ -384,7 +385,7 @@ test("attention pulse closes a legacy trigger recovery after delivery is confirm
 
   const plan = await buildAttentionPulsePlan(userId, now);
   const candidates = await listAttentionRecords(userId, "attention_candidate") as Array<{ status: string }>;
-  assert.equal(candidates[0]?.status, "dismissed");
+  assert.equal(candidates[0]?.status, "pending");
   assert.equal(plan.candidateIds.length, 0);
 });
 
@@ -446,7 +447,7 @@ test("attention pulse reopens dedupe when a due watch's autonomy profile changes
   assert.notEqual(nextUtcDay.dedupeKey, after.dedupeKey);
 });
 
-test("attention pulse covers overdue work, trigger delivery, approvals, meetings, and failed automations safely", async () => {
+test("attention pulse covers overdue work without ingesting Chusky trigger events", async () => {
   await initStore({ memoryOnly: true });
   const userId = 910019;
   const now = Date.now();
@@ -472,13 +473,13 @@ test("attention pulse covers overdue work, trigger delivery, approvals, meetings
 
   assert.equal(plan.hasWork, true);
   assert.match(plan.prompt, /Overdue report/);
-  assert.match(plan.prompt, /GMAIL_NEW_GMAIL_MESSAGE/);
-  assert.match(plan.prompt, /without claiming its contents or replaying the event/);
+  assert.doesNotMatch(plan.prompt, /GMAIL_NEW_GMAIL_MESSAGE/);
+  assert.doesNotMatch(plan.prompt, /private provider response/);
   assert.match(plan.prompt, new RegExp(approval.id));
   assert.match(plan.prompt, /Quarterly planning/);
   assert.match(plan.prompt, /Customer review/);
   assert.match(plan.prompt, /Review shipment exceptions/);
   assert.match(plan.prompt, /Send the launch follow-up/);
   assert.doesNotMatch(plan.prompt, /private message contents|private provider response|private approval text|shared approval|do not include/);
-  assert.ok(plan.decisionContext.items.some((item) => item.kind === "operational_signal" && item.id === `trigger:pulse-trigger-undelivered`));
+  assert.equal(plan.decisionContext.items.some((item) => item.kind === "operational_signal" && item.id === `trigger:pulse-trigger-undelivered`), false);
 });
