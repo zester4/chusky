@@ -74,6 +74,7 @@ class Settings:
     bridge_secret: str
     deepgram_api_key: str
     chusky_turn_url: str
+    chusky_context_url: str
     chusky_status_url: str
     max_call_seconds: int
     max_active_calls: int
@@ -90,7 +91,6 @@ class Settings:
     elevenlabs_model_id: str
     twilio_native_mulaw: bool
     barge_in_min_chars: int
-    greeting: str
     turn_start_budget_ms: int
     turn_fallback_enabled: bool
     tool_progress_delay_ms: int
@@ -101,9 +101,12 @@ class Settings:
         secret = os.getenv("TWILIO_MEDIA_BRIDGE_SECRET", "").strip()
         deepgram = os.getenv("DEEPGRAM_API_KEY", "").strip()
         turn_url = os.getenv("CHUSKY_VOICE_TURN_URL", "http://127.0.0.1:3003/internal/twilio/turn").strip()
+        context_url = os.getenv("CHUSKY_VOICE_CONTEXT_URL", "").strip()
+        if not context_url and turn_url.endswith("/turn"):
+            context_url = f"{turn_url[:-len('/turn')]}/context"
         status_url = os.getenv("CHUSKY_VOICE_STATUS_URL", "http://127.0.0.1:3003/internal/twilio/status").strip()
-        if not secret or not deepgram or not turn_url.startswith(("http://", "https://")) or not turn_url.endswith("/turn") or not status_url.startswith(("http://", "https://")):
-            raise RuntimeError("TWILIO_MEDIA_BRIDGE_SECRET, DEEPGRAM_API_KEY, CHUSKY_VOICE_TURN_URL ending in /turn, and CHUSKY_VOICE_STATUS_URL are required")
+        if not secret or not deepgram or not turn_url.startswith(("http://", "https://")) or not turn_url.endswith("/turn") or not context_url.startswith(("http://", "https://")) or not status_url.startswith(("http://", "https://")):
+            raise RuntimeError("TWILIO_MEDIA_BRIDGE_SECRET, DEEPGRAM_API_KEY, CHUSKY_VOICE_TURN_URL ending in /turn, CHUSKY_VOICE_CONTEXT_URL, and CHUSKY_VOICE_STATUS_URL are required")
         elevenlabs_enabled = os.getenv("VOICE_ELEVENLABS_ENABLED", "false").strip().lower() == "true"
         elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "").strip()
         elevenlabs_voice_id = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
@@ -114,7 +117,7 @@ class Settings:
             except ElevenLabsConfigurationError as error:
                 raise RuntimeError(str(error)) from error
         return cls(
-            secret, deepgram, turn_url, status_url,
+            secret, deepgram, turn_url, context_url, status_url,
             max(60, min(int(os.getenv("VOICE_BRIDGE_MAX_CALL_SECONDS", "7200")), 14_400)),
             max(1, min(int(os.getenv("VOICE_BRIDGE_MAX_ACTIVE_CALLS", "4")), 20)),
             os.getenv("TWILIO_AUTH_TOKEN", "").strip(),
@@ -132,7 +135,6 @@ class Settings:
             elevenlabs_model_id,
             os.getenv("VOICE_TWILIO_NATIVE_MULAW", "true").strip().lower() != "false",
             max(1, min(int(os.getenv("VOICE_BARGE_IN_MIN_CHARS", "2")), 100)),
-            os.getenv("VOICE_GREETING", "Hi, this is Chusky. How can I help?").strip()[:500],
             # This is a recovery guard only. It must be long enough for the
             # owner-scoped Chusky stream to produce its first audio; it is not
             # a maximum answer duration.
@@ -270,6 +272,8 @@ class TwilioVoiceCall:
         # never retained; these turns are sent once to the owner-scoped API.
         self.outcome_turns: deque[dict[str, str]] = deque(maxlen=12)
         self.outcome_committed = False
+        self.call_greeting: str | None = None
+        self.greeting_sent = False
         self.eager_end_times: dict[int, float] = {}
         self.response_started_at = 0.0
         self.eager_response_started_at = 0.0
@@ -354,12 +358,15 @@ class TwilioVoiceCall:
             inbound = asyncio.create_task(self._receive_twilio(), name=f"twilio-in-{self.call_id}")
             sender = asyncio.create_task(self._send_audio(socket), name=f"twilio-stt-{self.call_id}")
             transcripts = asyncio.create_task(self._receive_transcripts(socket), name=f"twilio-out-{self.call_id}")
-            if self.settings.greeting:
+            if self.call_greeting is None and hasattr(self.settings, "chusky_context_url"):
+                self.call_greeting = await self._load_call_greeting()
+            if self.call_greeting and not self.greeting_sent:
+                self.greeting_sent = True
                 self.interrupted = False
                 self.response_started_at = time.monotonic()
                 # Open and keep the per-call TTS socket warm during the greeting
                 # so the first actual answer doesn't pay for a new handshake.
-                self.response_task = asyncio.create_task(self._speak_persistent_text(self.settings.greeting), name=f"twilio-greeting-{self.call_id}")
+                self.response_task = asyncio.create_task(self._speak_persistent_text(self.call_greeting), name=f"twilio-greeting-{self.call_id}")
                 self.response_task.add_done_callback(self._observe_response_task)
             try:
                 done, pending = await asyncio.wait({inbound, sender, transcripts}, return_when=asyncio.FIRST_COMPLETED)
@@ -377,6 +384,32 @@ class TwilioVoiceCall:
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(*workers, return_exceptions=True)
+
+    async def _load_call_greeting(self) -> str:
+        """Fetch the owner-scoped direction and objective before speaking.
+
+        A generic transport greeting is unsafe for outbound calls because it
+        makes the recipient sound like the owner. If the context endpoint is
+        temporarily unavailable, use a neutral identity-only opening rather
+        than claiming the wrong purpose or pretending this is an inbound chat.
+        """
+        context_url = str(getattr(self.settings, "chusky_context_url", "")).strip()
+        try:
+            response = await self.http.get(
+                context_url,
+                headers={"Authorization": f"Bearer {self.settings.bridge_secret}"},
+                params={"callId": self.call_id, "userId": str(self.user_id)},
+                timeout=httpx.Timeout(3.0, connect=1.5),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            greeting = normalize_voice_text(str(payload.get("greeting") or "")).strip()
+            if greeting:
+                return greeting[:1_000]
+            raise RuntimeError("call context did not include a greeting")
+        except Exception as error:
+            LOG.warning("Call context unavailable; using neutral opening: %s", type(error).__name__, extra={"call_id": self.call_id})
+            return "Hello, this is Chusky, an AI voice assistant. May I ask who I’m speaking with?"
 
     async def _receive_twilio(self) -> None:
         while not self.stop.is_set():
