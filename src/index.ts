@@ -813,6 +813,7 @@ async function main(): Promise<void> {
             ...(speculative ? { toolAllow: [] } : { ownerPrivateRun: true }),
             voiceTurn: true,
             voiceSessionId: `twilio:${callId}`,
+            voiceRoutingHint: call.purpose,
           });
         });
         // Flux can signal an eager end-of-turn before the caller is fully
@@ -923,6 +924,7 @@ async function main(): Promise<void> {
                 ...(speculative ? { toolAllow: [] } : { ownerPrivateRun: true }),
                 voiceTurn: true,
                 voiceSessionId: `twilio:${callId}`,
+                voiceRoutingHint: call.purpose,
                 onVoiceActivity: (activity) => send({ type: activity.type, toolSlug: activity.toolSlug, text: normalizeVoiceText(activity.message).slice(0, 4000) }),
               });
             });

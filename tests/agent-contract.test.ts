@@ -1484,6 +1484,66 @@ test("voice empty completions are bounded and return a spoken recovery instead o
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test("owner-private calendar voice turns preload exact calendar tools from large Composio sessions", async () => {
+  const userId = 830054;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const calendarTool = {
+    type: "function",
+    function: {
+      name: "googlecalendar:GOOGLECALENDAR_EVENTS_LIST",
+      description: "List Google Calendar events",
+      parameters: { type: "object", properties: { timeMin: { type: "string" }, timeMax: { type: "string" } } },
+    },
+  };
+  const executed: string[] = [];
+  const requests: Array<Record<string, any>> = [];
+  const session = {
+    sessionId: "owner-private-calendar-voice-session",
+    tools: async () => [
+      ...Array.from({ length: 90 }, (_, index) => ({
+        type: "function",
+        function: { name: `GMAIL_ACTION_${index}`, description: "Unrelated connected action", parameters: { type: "object", properties: {} } },
+      })),
+      calendarTool,
+    ],
+    execute: async (slug: string) => { executed.push(slug); return { successful: true, data: { items: [] } }; },
+  };
+  const originalFetch = globalThis.fetch;
+  let responseCount = 0;
+  setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/chat/completions")) {
+      const body = JSON.parse(String(init?.body));
+      requests.push(body);
+      return responseCount++ === 0
+        ? toolResponse(calendarTool.function.name, JSON.stringify({ timeMin: "2026-10-11T09:00:00Z", timeMax: "2026-10-11T17:00:00Z" }))
+        : chatResponse({ role: "assistant", content: "I checked the calendar and found no events in that window." });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(
+      userId,
+      "Check my calendar availability for tomorrow.",
+      [],
+      "test/model",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { accountId: `account_${userId}`, provider: "voice", conversationId: "twc_calendar_test", scope: "private" },
+      { ownerPrivateRun: true, voiceTurn: true, voiceSessionId: "twilio:calendar-test", voiceRoutingHint: "Check availability and schedule the appointment if needed." },
+    );
+    assert.match(result.text, /checked the calendar/i);
+    assert.equal(requests[0]?.tools.some((tool: any) => tool.function.name === calendarTool.function.name), true);
+    assert.deepEqual(executed, [calendarTool.function.name]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
 test("owner-private voice and meeting turns execute routine writes directly and retain high-impact approval", async () => {
   const userId = 830058;
   await initStore({ memoryOnly: true });
