@@ -5902,10 +5902,10 @@ export async function isAgentRunCancellationRequested(userId: number, id: string
 }
 
 export async function addPhoneCall(uid: number, record: PhoneCallRecord): Promise<PhoneCallRecord> {
-  const s = await getSession(uid);
-  s.phoneCalls = [record, ...(s.phoneCalls ?? [])].slice(0, 50);
-  await saveSession(uid, s);
-  return record;
+  return mutateSession(uid, (session) => {
+    session.phoneCalls = [record, ...(session.phoneCalls ?? [])].slice(0, 50);
+    return record;
+  });
 }
 
 type PhoneCallPatch = Partial<Pick<PhoneCallRecord, "status" | "runtimeState" | "bridgeSessionId" | "lastCommittedTurnId" | "continuity" | "providerCallId" | "error" | "summary" | "callLengthSeconds" | "postCallProcessedAt" | "outcome" | "outcomeStatus" | "outcomeErrorCode">>;
@@ -6257,15 +6257,15 @@ export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId
 }
 
 export async function updatePhoneCall(uid: number, id: string, patch: PhoneCallPatch): Promise<PhoneCallRecord | undefined> {
-  const s = await getSession(uid);
-  const current = (s.phoneCalls ?? []).find((item) => item.id === id && item.userId === uid);
-  if (!current) return undefined;
-  applyPhoneCallPatch(current, patch);
-  if (current.provider === "bland" && current.providerCallId && !(await backend.linkBlandProviderCall(current.providerCallId, uid, id))) {
-    throw new Error("Bland provider call ID is already linked to another Chusky call");
-  }
-  await saveSession(uid, s);
-  return current;
+  return mutateSession(uid, async (session) => {
+    const current = (session.phoneCalls ?? []).find((item) => item.id === id && item.userId === uid);
+    if (!current) return undefined;
+    applyPhoneCallPatch(current, patch);
+    if (current.provider === "bland" && current.providerCallId && !(await backend.linkBlandProviderCall(current.providerCallId, uid, id))) {
+      throw new Error("Bland provider call ID is already linked to another Chusky call");
+    }
+    return current;
+  });
 }
 
 /** Atomically commit Bland's final result, transcript roles, and replay marker in the owner session. */
@@ -6275,20 +6275,20 @@ export async function finalizeBlandPhoneCall(
   patch: PhoneCallPatch,
   transcriptMessages: Message[],
 ): Promise<"processed" | "already_processed" | "not_found"> {
-  const session = await getSession(uid);
-  const current = (session.phoneCalls ?? []).find((item) => item.id === id && item.userId === uid && item.provider === "bland");
-  if (!current) return "not_found";
-  const alreadyProcessed = typeof current.postCallProcessedAt === "number";
-  applyPhoneCallPatch(current, patch);
-  if (current.providerCallId && !(await backend.linkBlandProviderCall(current.providerCallId, uid, id))) {
-    throw new Error("Bland provider call ID is already linked to another Chusky call");
-  }
-  if (!alreadyProcessed) {
-    current.postCallProcessedAt = Date.now();
-    if (transcriptMessages.length) appendSessionHistory(session, transcriptMessages);
-  }
-  await saveSession(uid, session);
-  return alreadyProcessed ? "already_processed" : "processed";
+  return mutateSession(uid, async (session) => {
+    const current = (session.phoneCalls ?? []).find((item) => item.id === id && item.userId === uid && item.provider === "bland");
+    if (!current) return "not_found";
+    const alreadyProcessed = typeof current.postCallProcessedAt === "number";
+    applyPhoneCallPatch(current, patch);
+    if (current.providerCallId && !(await backend.linkBlandProviderCall(current.providerCallId, uid, id))) {
+      throw new Error("Bland provider call ID is already linked to another Chusky call");
+    }
+    if (!alreadyProcessed) {
+      current.postCallProcessedAt = Date.now();
+      if (transcriptMessages.length) appendSessionHistory(session, transcriptMessages);
+    }
+    return alreadyProcessed ? "already_processed" : "processed";
+  });
 }
 
 export async function listPhoneCalls(uid: number): Promise<PhoneCallRecord[]> {

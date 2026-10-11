@@ -4,14 +4,14 @@ import { config } from "../src/config.js";
 import {
   addHistorySummary, appendMessages, acquireUserLock, addReminder, addJob, addPhoneCall, clearHistory, clearSession, createTriggerEventIfAbsent,
   createApproval, createCliDevice, createCliPairing, getApproval, getDaytonaWorkspace, getSession, initStore,
-  listReminders, releaseUserLock, saveDaytonaWorkspace, saveSession, setApprovalStatus, setComposioSessionId, setModel,
+  listReminders, listPhoneCalls, releaseUserLock, saveDaytonaWorkspace, saveSession, setApprovalStatus, setComposioSessionId, setModel,
   upsertMemory, updateMemory, searchMemories, forgetMemory, writeScratchpad, readScratchpad, clearScratchpad,
   claimTelegramUpdate,
   claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease,
   type DaytonaWorkspaceRecord, type SdkRunRecord, type TriggerEventRecord,
   createTriggerEvent, getTriggerEvent, listTriggerEvents, updateTriggerEvent,
   backfillSdkPrivateRunHistory, createWebTelegramLinkCode, ensureTriggerWebProjection, getTelegramUserIdForWebAuth, mergeLinkedWebSession, mutateSession, redeemWebTelegramLinkCode,
-  createVideoJob, getVideoJob, listVideoJobs, updateVideoJob,
+  createVideoJob, getVideoJob, listVideoJobs, updatePhoneCall, updateVideoJob,
   addRecallMeeting, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, updateRecallMeeting, claimRecallCopilotEvaluation,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
   claimRecallMeetingCreation, releaseRecallMeetingCreation,
@@ -38,6 +38,30 @@ test("in-memory sessions return detached snapshots like the Redis backend", asyn
   await saveSession(userId, detached);
   detached.history[0]!.content = "post-save mutation";
   assert.equal((await getSession(userId)).history[0]?.content, "unsaved mutation");
+});
+
+test("concurrent phone-call writes retain records for Twilio callbacks", async () => {
+  const userId = 810204;
+  const calls = Array.from({ length: 20 }, (_, index) => ({
+    id: `twc_concurrent_${index}`,
+    userId,
+    provider: "twilio" as const,
+    direction: "outbound" as const,
+    callProfile: "personal" as const,
+    phoneNumber: "+15550001",
+    purpose: `Concurrent call ${index}`,
+    status: "starting" as const,
+    createdAt: index + 1,
+    updatedAt: index + 1,
+  }));
+
+  await Promise.all(calls.map((call) => addPhoneCall(userId, call)));
+  await Promise.all(calls.map((call, index) => updatePhoneCall(userId, call.id, { status: "active", providerCallId: `CA_concurrent_${index}` })));
+
+  const saved = await listPhoneCalls(userId);
+  assert.equal(saved.length, calls.length);
+  assert.deepEqual(new Set(saved.map((call) => call.id)), new Set(calls.map((call) => call.id)));
+  assert.ok(saved.every((call) => call.status === "active" && call.providerCallId?.startsWith("CA_concurrent_")));
 });
 
 test("trigger handling instructions persist only for triggers owned by the session", async () => {
