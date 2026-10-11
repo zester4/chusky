@@ -1,11 +1,11 @@
 {
-  "id": "release-4.51.0",
-  "version": "4.51.0",
+  "id": "release-4.52.0",
+  "version": "4.52.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Twilio calls now support owner-scoped hangup, DTMF, cold transfer, bounded continuity from an ended call, and optional voicemail delivery after DetectMessageEnd.",
-    "Completed phone conversations produce a bounded, structured owner-private outcome with decisions, action items, and open questions across Twilio and provider summaries.",
-    "Inbound numbers can route to explicit owners, provider configuration can fall back safely, and voice operations expose reconnecting state plus durable bridge checkpoints."
+    "Manage provider-backed triggers from the authenticated dashboard or typed SDK using the same live Composio catalogue as Chusky's chat interfaces.",
+    "Signed events are saved to a durable inbox before acknowledgment; retries reuse a stable workflow ID, and owner-scoped results remain available in Telegram and the authenticated dashboard Chat.",
+    "Connected-account expiry and automatically disabled-trigger events now reach the same owner-scoped handling flow, while approval policy remains in force and Chusky never reconnects, recreates, or blindly replays an external action."
   ],
-  "createdAt": "2026-10-10T01:10:12.297Z"
+  "createdAt": "2026-10-11T00:51:56.614Z"
 }

@@ -2,7 +2,7 @@ import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import {
-  addHistorySummary, appendMessages, acquireUserLock, addReminder, addJob, addPhoneCall, claimTriggerEvent, clearHistory, clearSession,
+  addHistorySummary, appendMessages, acquireUserLock, addReminder, addJob, addPhoneCall, clearHistory, clearSession, createTriggerEventIfAbsent,
   createApproval, createCliDevice, createCliPairing, getApproval, getDaytonaWorkspace, getSession, initStore,
   listReminders, releaseUserLock, saveDaytonaWorkspace, saveSession, setApprovalStatus, setComposioSessionId, setModel,
   upsertMemory, updateMemory, searchMemories, forgetMemory, writeScratchpad, readScratchpad, clearScratchpad,
@@ -558,12 +558,6 @@ test("locks are exclusive and safely releasable", async () => {
   assert.equal(await acquireUserLock(userId, "token-b", 5), true);
 });
 
-test("trigger events are idempotent", async () => {
-  const eventId = `event-${Date.now()}-${Math.random()}`;
-  assert.equal(await claimTriggerEvent(eventId), true);
-  assert.equal(await claimTriggerEvent(eventId), false);
-});
-
 test("trigger event records are durable, owner-scoped, and listed newest first", async () => {
   const record: TriggerEventRecord = { eventId: "evt-record-1", userId: 810099, triggerId: "trig-1", triggerSlug: "GITHUB_COMMIT_EVENT", summary: "Trigger: GITHUB_COMMIT_EVENT", status: "queued", createdAt: Date.now(), updatedAt: Date.now() };
   assert.deepEqual(await createTriggerEvent(record), record);
@@ -574,6 +568,16 @@ test("trigger event records are durable, owner-scoped, and listed newest first",
   const otherOwner = { ...record, eventId: "evt-record-other-owner", userId: 810100, createdAt: record.createdAt + 1 };
   await createTriggerEvent(otherOwner);
   assert.deepEqual((await listTriggerEvents(810099)).map((item) => item.eventId), [record.eventId]);
+});
+
+test("durable trigger intake atomically creates once and returns the existing owner record on retry", async () => {
+  const record: TriggerEventRecord = { eventId: "evt-intake-once", userId: 810102, triggerId: "trig-1", triggerSlug: "GITHUB_COMMIT_EVENT", summary: "Commit event", status: "queued", createdAt: Date.now(), updatedAt: Date.now() };
+  const first = await createTriggerEventIfAbsent(record);
+  const retry = await createTriggerEventIfAbsent({ ...record, summary: "different retry payload", createdAt: record.createdAt + 1 });
+
+  assert.equal(first.created, true);
+  assert.equal(retry.created, false);
+  assert.deepEqual(retry.record, first.record);
 });
 
 test("trigger web projections are owner-private and idempotent", async () => {

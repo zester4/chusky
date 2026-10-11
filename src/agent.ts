@@ -30,7 +30,7 @@ import { assertAgentExecutionEnabled } from "./builderControl.js";
 import { getTriggerTypeBySlug, getTriggerTypeByToken, listTriggerToolkits as listCatalogueToolkits, listTriggerTypesForToolkit, requiredTriggerConfigFields, triggerTypeForAgent, type TriggerCatalogueItem, type TriggerToolkit } from "./triggerCatalog.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { logger } from "./logger.js";
-import { createApproval, createVideoJob, getAgentRun, getApproval, getImageAsset, getSession, isAgentRunCancellationRequested, recordTrustedMissionEvidence, saveAgentRun, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
+import { createApproval, createVideoJob, getAgentRun, getApproval, getImageAsset, getSession, isAgentRunCancellationRequested, listLinkedWebSessionSourceUserIds, recordTrustedMissionEvidence, saveAgentRun, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
 import type { AgentRunRecord, Message } from "./store.js";
 import { nativeTool, type MissionWaitRequest, type NativeToolRuntime } from "./nativeTools.js";
 import { MissionDurationApprovalRequiredError } from "./missionApproval.js";
@@ -610,6 +610,8 @@ export interface ConnectedComposioAccount {
   status: string;
   createdAt?: string;
   updatedAt?: string;
+  /** Present only when the account was resolved from an explicitly linked web owner. */
+  composioOwnerUserId?: number;
 }
 
 function composioUserId(userId: number): string {
@@ -4067,19 +4069,42 @@ export async function listComposioToolkitActions(toolkit: string, signal?: Abort
 }
 
 export async function listConnectedAccounts(userId: number, toolkit?: string): Promise<ConnectedComposioAccount[]> {
-  const result = await composio.connectedAccounts.list({
-    userIds: [composioUserId(userId)],
-    ...(toolkit ? { toolkitSlugs: [toolkit.toLowerCase()] } : {}),
-  });
-  const items = Array.isArray(result) ? result : (result?.items ?? []);
-  return items.map((item: any) => ({
-    id: String(item.id ?? ""),
-    alias: item.alias ? String(item.alias) : undefined,
-    toolkit: String(item.toolkit?.slug ?? item.toolkit?.name ?? item.toolkitSlug ?? "unknown"),
-    status: String(item.status ?? (item.isDisabled ? "DISABLED" : "ACTIVE")),
-    createdAt: item.createdAt ? String(item.createdAt) : undefined,
-    updatedAt: item.updatedAt ? String(item.updatedAt) : undefined,
-  })).filter((item: ConnectedComposioAccount) => item.id);
+  const linkedOwnerUserIds = await listLinkedWebSessionSourceUserIds(userId).catch(() => []);
+  const ownerUserIds = [userId, ...linkedOwnerUserIds];
+  const accounts: ConnectedComposioAccount[] = [];
+  const seen = new Set<string>();
+
+  for (const ownerUserId of ownerUserIds) {
+    const result = await composio.connectedAccounts.list({
+      userIds: [composioUserId(ownerUserId)],
+      ...(toolkit ? { toolkitSlugs: [toolkit.toLowerCase()] } : {}),
+    });
+    const items = Array.isArray(result) ? result : (result?.items ?? []);
+    for (const item of items) {
+      const id = String(item.id ?? "");
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const account: ConnectedComposioAccount = {
+        id,
+        alias: item.alias ? String(item.alias) : undefined,
+        toolkit: String(item.toolkit?.slug ?? item.toolkit?.name ?? item.toolkitSlug ?? "unknown"),
+        status: String(item.status ?? (item.isDisabled ? "DISABLED" : "ACTIVE")),
+        createdAt: item.createdAt ? String(item.createdAt) : undefined,
+        updatedAt: item.updatedAt ? String(item.updatedAt) : undefined,
+      };
+      if (ownerUserId !== userId) {
+        // Keep the provenance available to trusted server code without adding
+        // the linked owner's identity to model-facing or serialized metadata.
+        Object.defineProperty(account, "composioOwnerUserId", {
+          value: ownerUserId,
+          enumerable: false,
+          writable: false,
+        });
+      }
+      accounts.push(account);
+    }
+  }
+  return accounts;
 }
 
 type MeetingMissionToolDiscovery = { tools: any[]; accountAliases: Record<string, string> };
@@ -4248,8 +4273,8 @@ export async function getToolkitStatesPage(
       triggersCount: typeof meta.triggersCount === "number" ? meta.triggersCount : undefined,
       authSchemes: Array.isArray(detail?.composioManagedAuthSchemes) ? detail.composioManagedAuthSchemes.map((scheme: unknown) => String(scheme)) : undefined,
       noAuth: Boolean(t.isNoAuth),
-      connected: Boolean(t.connection?.isActive) || matching.length > 0,
-      accountCount: matching.length || (t.connection?.isActive ? 1 : 0),
+      connected: matching.length > 0,
+      accountCount: matching.length,
       aliases: matching.map((account) => account.alias ?? account.id),
     };
   }));

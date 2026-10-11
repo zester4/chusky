@@ -62,3 +62,18 @@ await chusky.account.setTriggerState(
 ```
 
 Each mutation is authenticated and owner-scoped. Use a new stable idempotency key for each distinct requested change, and reuse that key only when retrying the same request. Keep approval boundaries in place for external, sensitive, destructive, financial, or permission-changing actions.
+
+## Event delivery and Chat follow-up
+
+Composio trigger deliveries are at-least-once. Chusky verifies the signed raw
+request, persists the provider event as the durable inbox record, and only then
+acknowledges it after the QStash workflow is accepted. A retry before workflow
+acceptance resumes the same event and uses the same workflow ID; it does not
+create a second trigger run. Trigger results and suggested follow-up actions
+are projected into the authenticated dashboard, where Chat revalidates event
+ownership and the selected action before starting a run.
+
+Chusky also subscribes to the `composio.connected_account.expired` and
+`composio.trigger.disabled` lifecycle events. Those events notify the owner
+that monitoring needs attention; they do not reconnect or recreate anything
+automatically.
