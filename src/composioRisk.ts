@@ -36,3 +36,11 @@ export function composioMetadataPolicy(slug: string): ToolApprovalPolicy | undef
   // payments, deletions, permissions, and pushes.
   return undefined;
 }
+
+/** Provider annotations that explicitly identify a destructive or critical action. */
+export function composioMetadataRequiresCriticalApproval(slug: string): boolean {
+  const metadata = metadataBySlug.get(slug.trim().toUpperCase());
+  return metadata?.requiresApproval === true
+    || metadata?.destructive === true
+    || ["critical", "high"].includes(metadata?.risk ?? "");
+}

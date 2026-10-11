@@ -134,6 +134,56 @@ export function safeTriggerSummary(event: {
   return [`Event: ${triggerEventDisplayName(event.triggerSlug || "event", event.toolkit)}`, ...fields].join("\n").slice(0, 3_500);
 }
 
+/**
+ * Preserve enough bounded provider context for the background agent to act
+ * on the actual event (including source message/application identifiers).
+ * This is private workflow input, never a dashboard projection. Credentials,
+ * binary data, and connection/account/trigger ownership metadata stay out.
+ */
+export function safeTriggerAgentContext(event: {
+  triggerSlug: string;
+  payload: Record<string, unknown>;
+  toolkit?: string;
+}): string {
+  const fields: string[] = [];
+  let characters = 0;
+  const maxCharacters = 24_000;
+  const append = (value: string): void => {
+    if (fields.length >= 160 || characters >= maxCharacters) return;
+    const bounded = value.slice(0, Math.min(4_000, maxCharacters - characters));
+    if (!bounded) return;
+    fields.push(bounded);
+    characters += bounded.length;
+  };
+  const visit = (value: unknown, path: string, depth: number): void => {
+    if (fields.length >= 160 || characters >= maxCharacters || depth > 8) return;
+    const leaf = path.split(/[.\[\]]/).at(-1) ?? "";
+    if (SENSITIVE_KEY.test(leaf) || BINARY_KEY.test(leaf) || /(^|_)(account|connection|trigger|user|auth_config)(_|$)/i.test(leaf)) return;
+    if (value === null || ["string", "number", "boolean"].includes(typeof value)) {
+      const text = cleanText(String(value), 4_000);
+      if (text) append(`${path}: ${text}`);
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.slice(0, 20).forEach((item, index) => visit(item, `${path}[${index}]`, depth + 1));
+      return;
+    }
+    if (typeof value === "object") {
+      for (const [key, nested] of Object.entries(value as Record<string, unknown>).slice(0, 80)) {
+        if (SENSITIVE_KEY.test(key) || BINARY_KEY.test(key) || /(^|_)(account|connection|trigger|user|auth_config)(_|$)/i.test(key)) continue;
+        visit(nested, `${path}.${key}`.slice(0, 240), depth + 1);
+        if (fields.length >= 160 || characters >= maxCharacters) break;
+      }
+    }
+  };
+  for (const [key, value] of Object.entries(event.payload ?? {}).slice(0, 80)) {
+    if (SENSITIVE_KEY.test(key) || BINARY_KEY.test(key) || /(^|_)(account|connection|trigger|user|auth_config)(_|$)/i.test(key)) continue;
+    visit(value, key.slice(0, 120), 0);
+    if (fields.length >= 160 || characters >= maxCharacters) break;
+  }
+  return [`Event: ${triggerEventDisplayName(event.triggerSlug || "event", event.toolkit)}`, ...fields].join("\n").slice(0, maxCharacters);
+}
+
 export function triggerRecoveryActions(displayName: string): Array<{ id: string; label: string; prompt: string }> {
   return [
     { id: "review", label: "Review", prompt: `Review the saved ${displayName} event, summarize what arrived, tell me what Chusky already did, and recommend the safest next step. Do not replay an external action automatically.` },

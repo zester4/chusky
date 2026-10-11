@@ -10,7 +10,7 @@ import {
   claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease,
   type DaytonaWorkspaceRecord, type SdkRunRecord, type TriggerEventRecord,
   createTriggerEvent, getTriggerEvent, listTriggerEvents, updateTriggerEvent,
-  backfillSdkPrivateRunHistory, createWebTelegramLinkCode, ensureTriggerWebProjection, getTelegramUserIdForWebAuth, mergeLinkedWebSession, mutateSession, redeemWebTelegramLinkCode,
+  backfillSdkPrivateRunHistory, createWebTelegramLinkCode, ensureTriggerWebProjection, getTelegramUserIdForWebAuth, markTriggerWebApprovalResuming, mergeLinkedWebSession, mutateSession, redeemWebTelegramLinkCode,
   createVideoJob, getVideoJob, listVideoJobs, updatePhoneCall, updateVideoJob,
   addRecallMeeting, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, updateRecallMeeting, claimRecallCopilotEvaluation,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
@@ -618,6 +618,33 @@ test("trigger web projections are owner-private and idempotent", async () => {
   assert.equal(thread?.runs[0]?.metadata?.triggerEventId, input.eventId);
   const other = await getSession(810102);
   assert.equal(other.sdkThreads?.some((item) => item.id === first.threadId), false);
+});
+
+test("trigger approvals stay paused in web chat and resume the same projected run", async () => {
+  const userId = 810104;
+  const eventId = "evt-web-trigger-approval";
+  const approvalId = "appr-web-trigger-approval";
+  const projection = await ensureTriggerWebProjection({ userId, eventId, triggerSlug: "STRIPE_PAYMENT_EVENT", summary: "Payment requires review.", result: "Approval needed before continuing.", status: "requires_approval", approvalId });
+  let session = await getSession(userId);
+  let run = session.sdkThreads?.find((thread) => thread.id === projection.threadId)?.runs.find((item) => item.id === projection.runId);
+  assert.equal(run?.status, "requires_approval");
+  assert.equal(run?.approvalId, approvalId);
+  assert.equal(run?.events.some((item) => item.type === "run.approval_required"), true);
+
+  assert.equal(await markTriggerWebApprovalResuming(userId, eventId, approvalId), true);
+  session = await getSession(userId);
+  run = session.sdkThreads?.find((thread) => thread.id === projection.threadId)?.runs.find((item) => item.id === projection.runId);
+  assert.equal(run?.status, "running");
+  assert.equal(run?.approvalId, undefined);
+  assert.match(run?.output ?? "", /resuming the triggered workflow/i);
+
+  await ensureTriggerWebProjection({ userId, eventId, triggerSlug: "STRIPE_PAYMENT_EVENT", summary: "Payment requires review.", result: "The approved workflow completed and was verified.", status: "completed" });
+  session = await getSession(userId);
+  run = session.sdkThreads?.find((thread) => thread.id === projection.threadId)?.runs.find((item) => item.id === projection.runId);
+  assert.equal(run?.status, "completed");
+  assert.equal(run?.approvalId, undefined);
+  assert.equal(run?.output, "The approved workflow completed and was verified.");
+  assert.equal(run?.events.some((item) => item.type === "run.completed"), true);
 });
 
 test("Telegram update claims deduplicate retries", async () => {

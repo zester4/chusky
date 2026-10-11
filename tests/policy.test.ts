@@ -246,6 +246,28 @@ test("provider metadata classifies dynamic Composio tools before heuristic fallb
   clearComposioToolMetadata();
 });
 
+test("verified triggers autonomously execute routine writes across toolkits and pause only for critical actions", () => {
+  for (const slug of ["ASHBY_CREATE_APPLICATION_NOTE", "MYSTERY_UPDATE_RECORD", "GMAIL_SEND_EMAIL", "SLACK_POST_MESSAGE", "GOOGLECALENDAR_CREATE_EVENT", "SLACK_INVITE_USER", "NEWSLETTER_UNSUBSCRIBE"]) {
+    assert.equal(requiresToolApproval(slug, {}, false, false, true), false, `${slug} is routine trigger work`);
+  }
+  for (const [slug, args] of [
+    ["GMAIL_DELETE_MESSAGE", {}],
+    ["STRIPE_CREATE_REFUND", {}],
+    ["AWS_UPDATE_PERMISSION", {}],
+    ["VERCEL_DEPLOY_PROJECT", {}],
+    ["COMPOSIO_EXECUTE_TOOL", { tool_slug: "ASHBY_DELETE_APPLICATION", arguments: { application_id: "app_1" } }],
+    ["COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "SLACK_POST_MESSAGE", arguments: {} }, { tool_slug: "STRIPE_CREATE_REFUND", arguments: {} }] }],
+  ] as Array<[string, Record<string, unknown>]>) {
+    assert.equal(requiresToolApproval(slug, args, false, false, true), true, `${slug} must pause in trigger execution`);
+  }
+  assert.equal(requiresToolApproval("MYSTERY_UPDATE_RECORD", {}, true, false, true), true, "explicit approval requirements still apply");
+  assert.equal(requiresToolApproval("MYSTERY_UPDATE_RECORD", {}, false, false, false), true, "routine autonomy is scoped to trigger runs");
+  clearComposioToolMetadata();
+  registerComposioToolMetadata({ name: "ASHBY_UPDATE_APPLICATION", metadata: { risk: "high" } });
+  assert.equal(requiresToolApproval("ASHBY_UPDATE_APPLICATION", {}, false, false, true), true, "provider-declared high-impact actions remain gated");
+  clearComposioToolMetadata();
+});
+
 test("renders human tool progress", () => {
   assert.match(humanToolStatus("COMPOSIO_SEARCH_TOOLS"), /I’m finding/);
   assert.match(humanToolStatus("GITHUB_CREATE_ISSUE"), /I’m using Github to create issue/);

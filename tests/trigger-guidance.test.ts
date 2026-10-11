@@ -3,18 +3,16 @@ import test from "node:test";
 import { mdToTelegramHtml } from "../src/markdown.js";
 import { ensureTriggerCloseout, parseTriggerSuggestedActions, TRIGGER_DEFAULT_HANDLING } from "../src/triggerGuidance.js";
 
-test("default trigger policy authorizes clear routine email handling but protects sensitive decisions", () => {
-  assert.match(TRIGGER_DEFAULT_HANDLING, /No custom per-trigger instructions are required/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /Reply in that same thread when it asks a clear, routine question/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /acknowledge the triggering sender in the original thread before beginning that work/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /Never substitute a separate prospect\/customer outreach for this acknowledgement/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /not that the task is finished/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /pricing or financial decisions, legal\/HR\/medical\/security matters/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /create a provider draft when supported, otherwise prepare a concise recommended reply/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /Do not ask the owner to authorize each routine event or reply individually/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /availability checks .*“Anyone here\?”/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /exact conversation/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /always return a useful private owner-facing closeout/i);
+test("default trigger policy requires end-to-end execution and provider-specific handling", () => {
+  assert.match(TRIGGER_DEFAULT_HANDLING, /standing instruction to handle every matching event/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /Do not substitute a summary for execution/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /complete routine, in-scope work now/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /verify each provider write with a provider receipt or a read-back/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /Email: read the full triggering message and relevant thread/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /Slack and other messaging: read the originating conversation and thread/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /Ashby applications: inspect the complete application, answers, resume/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /Pause only before a refund, deletion, or a critical decision/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /Never return NO_ACTION/i);
 });
 
 test("trigger Telegram heading uses Markdown that renders as bold HTML", () => {

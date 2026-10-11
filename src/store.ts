@@ -1561,8 +1561,11 @@ export interface TriggerEventRecord {
   eventType?: "composio.trigger.message" | "composio.connected_account.expired" | "composio.trigger.disabled";
   triggerId?: string;
   connectionId?: string;
+  toolkit?: string;
   triggerSlug: string;
   summary: string;
+  /** Bounded private event context for the agent; never returned by account projections. */
+  agentContext?: string;
   status: "queued" | "running" | "awaiting_approval" | "completed" | "failed";
   workflowRunId?: string;
   approvalId?: string;
@@ -5982,7 +5985,8 @@ export async function ensureTriggerWebProjection(input: {
   triggerSlug: string;
   summary: string;
   result: string;
-  status: "completed" | "failed";
+  status: "requires_approval" | "completed" | "failed";
+  approvalId?: string;
 }): Promise<{ threadId: string; runId: string }> {
   const now = Date.now();
   return mutateSession(input.userId, (session) => {
@@ -6010,20 +6014,38 @@ export async function ensureTriggerWebProjection(input: {
       input: `[Trigger ${input.triggerSlug}] ${input.summary}`.slice(0, 12_000),
       model: session.model,
       metadata: { source: "trigger", triggerEventId: input.eventId, triggerSlug: input.triggerSlug },
-      events: [
-        { id: `evt_trigger_${input.eventId}_started`, type: "run.started", at: now },
-        { id: `evt_trigger_${input.eventId}_completed`, type: input.status === "failed" ? "run.failed" : "run.completed", at: now },
-      ],
+      events: [{ id: `evt_trigger_${input.eventId}_started`, type: "run.started", at: now }],
       createdAt: now,
       updatedAt: now,
     } satisfies SdkRunRecord;
     run.status = input.status;
+    run.approvalId = input.status === "requires_approval" ? input.approvalId : undefined;
     run.output = input.result.slice(0, 12_000);
     run.updatedAt = now;
+    const settlementType = input.status === "requires_approval" ? "run.approval_required" : input.status === "failed" ? "run.failed" : "run.completed";
+    const settlementId = `evt_trigger_${input.eventId}_${input.status === "requires_approval" ? "approval" : input.status}`;
+    if (!run.events.some((item) => item.id === settlementId)) run.events.push({ id: settlementId, type: settlementType, at: now, ...(input.status === "requires_approval" ? { text: "This trigger is paused until the owner decides whether to continue." } : {}) });
     if (!existing) thread.runs.push(run);
     thread.updatedAt = now;
     return { threadId: thread.id, runId: run.id };
   }) as Promise<{ threadId: string; runId: string }>;
+}
+
+/** Move the dashboard's trigger run into its resume state after an owner approves. */
+export async function markTriggerWebApprovalResuming(userId: number, eventId: string, approvalId: string): Promise<boolean> {
+  const now = Date.now();
+  return mutateSession(userId, (session) => {
+    const run = session.sdkThreads?.flatMap((thread) => thread.runs)
+      .find((item) => item.metadata?.triggerEventId === eventId && item.approvalId === approvalId && item.status === "requires_approval");
+    if (!run) return false;
+    run.status = "running";
+    run.approvalId = undefined;
+    run.output = "Approval accepted. Chusky is resuming the triggered workflow.";
+    run.updatedAt = now;
+    const eventIdForRun = `evt_trigger_${eventId}_approval_accepted`;
+    if (!run.events.some((item) => item.id === eventIdForRun)) run.events.push({ id: eventIdForRun, type: "run.started", at: now, text: "Approval accepted; resuming the triggered workflow." });
+    return true;
+  }) as Promise<boolean>;
 }
 
 /** One-time import of completed first-party dashboard runs written before account history was canonical. */

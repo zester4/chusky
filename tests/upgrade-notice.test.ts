@@ -137,15 +137,16 @@ test("MCP authentication upgrade preset describes refresh, fail-closed behavior,
   assert.match(bullets[2], /excluded from catalog output, model tools, and logs/);
 });
 
-test("trigger preset documents durable outcomes, recovery, and safe event policy", () => {
+test("trigger preset documents end-to-end autonomous handling and critical pauses", () => {
   const bullets = getAgentUpgradePreset("triggers");
   assert.equal(bullets.length, 3);
   assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.triggers]);
   assert.match(bullets[0], /authenticated dashboard or typed SDK/);
-  assert.match(bullets[1], /durable inbox before acknowledgment/);
-  assert.match(bullets[1], /authenticated dashboard Chat/);
-  assert.match(bullets[2], /connected-account expiry and automatically disabled-trigger events/i);
-  assert.match(bullets[2], /never reconnects, recreates, or blindly replays/);
+  assert.match(bullets[1], /bounded private provider context and source references/);
+  assert.match(bullets[1], /originating record/);
+  assert.match(bullets[2], /autonomously handle routine writes across Composio toolkits/);
+  assert.match(bullets[2], /pause for refunds, deletion, and critical actions/);
+  assert.match(bullets[2], /verified completion, drafts, decisions, or blockers/);
 });
 
 test("Web Bot Auth upgrade preset describes identity without claiming access bypass", () => {
@@ -223,13 +224,12 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces durable trigger delivery across dashboard surfaces", async () => {
+test("current upgrade manifest announces autonomous trigger execution across dashboard surfaces", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.52.0");
-  assert.equal(notice?.version, "4.52.0");
-  assert.match(notice?.bullets[1] ?? "", /durable inbox before acknowledgment/);
-  assert.match(notice?.bullets[1] ?? "", /authenticated dashboard Chat/);
-  assert.match(notice?.bullets[2] ?? "", /automatically disabled-trigger events/);
+  assert.equal(notice?.id, "release-4.53.0");
+  assert.equal(notice?.version, "4.53.0");
+  assert.match(notice?.bullets[1] ?? "", /bounded private provider context and source references/);
+  assert.match(notice?.bullets[2] ?? "", /autonomously handle routine writes/);
 });
 
 test("lead campaign preset describes durable, discovery-first work and bounded enrichment", () => {
