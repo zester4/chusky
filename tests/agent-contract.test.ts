@@ -30,6 +30,11 @@ test("routes voice call objectives to bounded exact Composio capability bundles"
   assert.ok(slugs.includes("GMAIL_SEND_EMAIL"));
   assert.ok(!slugs.includes("SHOPIFY_CANCEL_ORDER"), "unrelated order mutations must not enter the call");
   assert.ok(slugs.length <= 24);
+  assert.deepEqual(voiceComposioToolSlugs("Book the appointment tomorrow at 9:00 AM"), [
+    "GOOGLECALENDAR_GET_CURRENT_DATE_TIME", "GOOGLECALENDAR_FIND_EVENT", "GOOGLECALENDAR_EVENTS_LIST",
+    "GOOGLECALENDAR_FIND_FREE_SLOTS", "GOOGLECALENDAR_FREE_BUSY_QUERY", "GOOGLECALENDAR_CREATE_EVENT",
+    "GOOGLECALENDAR_PATCH_EVENT", "GOOGLECALENDAR_DELETE_EVENT",
+  ]);
 });
 
 test("preview links are included exactly once even when the model omits them", () => {
@@ -1677,6 +1682,68 @@ test("owner-private billing voice turns preload the exact purpose bundle from Co
     assert.match((await result).text, /checked the invoice/i);
     assert.equal(requests[0]?.tools.some((tool: any) => tool.function.name === invoiceTool.slug), true);
     assert.deepEqual(executed, [invoiceTool.slug]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+test("owner-private voice turns keep routed Composio schemas when ToolRouter exposes only gateway tools", async () => {
+  const userId = 830056;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const requests: Array<Record<string, any>> = [];
+  const executed: string[] = [];
+  const session = {
+    sessionId: "owner-private-calendar-gateway-only-session",
+    tools: async () => [
+      { type: "function", function: { name: "COMPOSIO_SEARCH_TOOLS", description: "Search tools", parameters: { type: "object", properties: {} } } },
+      ...Array.from({ length: 90 }, (_, index) => ({
+        type: "function",
+        function: { name: `COMPOSIO_META_${index}`, description: "Gateway metadata", parameters: { type: "object", properties: {} } },
+      })),
+    ],
+    execute: async (slug: string) => { executed.push(slug); return { successful: true, data: { id: "event_123" } }; },
+  };
+  const originalFetch = globalThis.fetch;
+  setAgentDependenciesForTests({ composio: {
+    create: async () => session,
+    tools: {
+      getRawComposioTools: async ({ tools }: { tools: string[] }) => tools.map((slug) => ({
+        slug,
+        name: slug,
+        description: `Calendar action ${slug}`,
+        toolkit: { slug: "googlecalendar" },
+        inputParameters: { type: "object", properties: { summary: { type: "string" }, start: { type: "string" }, end: { type: "string" } } },
+      })),
+    },
+  } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/chat/completions")) {
+      const body = JSON.parse(String(init?.body));
+      requests.push(body);
+      return requests.length === 1
+        ? toolResponse("GOOGLECALENDAR_CREATE_EVENT", JSON.stringify({ summary: "United Cars appointment", start: "2026-10-12T09:00:00+01:00", end: "2026-10-12T09:30:00+01:00" }))
+        : chatResponse({ role: "assistant", content: "The appointment was booked and confirmed." });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(
+      userId,
+      "Book the appointment if Treffley agrees to tomorrow at 9:00 AM.",
+      [],
+      "test/model",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { accountId: `account_${userId}`, provider: "voice", conversationId: "twc_gateway_calendar_test", scope: "private" },
+      { ownerPrivateRun: true, voiceTurn: true, voiceSessionId: "twilio:gateway-calendar-test", voiceRoutingHint: "Call Treffley on behalf of United Cars and book the appointment after clear agreement." },
+    );
+    assert.match(result.text, /appointment was booked/i);
+    assert.ok((requests[0]?.tools ?? []).some((tool: any) => tool.function.name === "GOOGLECALENDAR_CREATE_EVENT"), "the exact calendar write must reach the voice model");
+    assert.deepEqual(executed, ["GOOGLECALENDAR_CREATE_EVENT"]);
   } finally {
     globalThis.fetch = originalFetch;
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });

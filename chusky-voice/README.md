@@ -15,15 +15,18 @@ tools. It does not receive private memory or arbitrary Composio tools. Neither
 transport persists raw audio in this bridge.
 
 Recall meetings use Deepgram **Flux** conversational STT and Flux TTS by
-default. Flux's confirmed end-of-turn event drives agent turns; the Recall path
-does not launch speculative agent runs, so an unfinished draft cannot block
-the final turn or perform an action twice. Set `RECALL_STT_MODEL=nova-3` as a
+default. Flux's `EagerEndOfTurn` starts a tool-free draft for proactive turns
+and directly addressed requests. The bridge keeps that draft silent and
+uncommitted until the matching confirmed `EndOfTurn`; `TurnResumed` cancels it,
+and a changed final transcript starts a fresh response. Set
+`RECALL_STT_MODEL=nova-3` as a
 temporary rollback; Nova-3 uses Listen v1 with VAD, 500 ms endpointing, and a
 1,000 ms utterance-end fallback. This meeting setting is independent of the
 Flux STT configuration used for Twilio telephone calls. The meeting defaults
-use a 0.55 Flux end-of-turn threshold and 500 ms silence timeout for faster
-turn handoff; raise `RECALL_STT_EOT_TIMEOUT_MS` if participants commonly pause
-mid-sentence.
+use a 0.45 eager threshold, 0.55 Flux end-of-turn threshold, and 500 ms
+silence timeout for faster turn handoff; tune
+`RECALL_STT_EAGER_EOT_THRESHOLD` and raise `RECALL_STT_EOT_TIMEOUT_MS` if
+participants commonly pause mid-sentence.
 
 It also accepts a separate **Twilio bidirectional Media Stream** at
 `/twilio/stream`. Twilio's wire format remains base64 `audio/x-mulaw` at 8 kHz.
@@ -315,8 +318,9 @@ standard request logs.
 
 For live diagnostics, `GET /recall/health` exposes content-free aggregate
 counters for ticket rejection, authorization wait/timeout, browser audio,
-Deepgram sessions and final turns, agent requests/failures, and TTS output. In
-addressed mode, say “Chusky” before the question; copilot and representative
+Deepgram sessions and final turns, agent requests/failures, TTS output, and
+speculative drafts started, reused, cancelled, or replaced by a final-turn
+request. In addressed mode, say “Chusky” before the question; copilot and representative
 modes evaluate ordinary turns within the configured limits.
 
 Configure Chusky's root service:
@@ -379,9 +383,13 @@ webhook pointing to `https://<chusky-host>/recall/webhook`, then configure its
 `whsec_` signing secret as `RECALL_WEBHOOK_SECRET`. Chusky explicitly disables
 Recall recording/transcript retention. A rolling window of up to 32 recent
 utterances/12,000 characters is held in the bridge process for at most 30
-minutes; ambient speech is never written to persistent storage. Only turns
-Chusky answers and its replies are retained in the owner's bounded meeting
-history. Tell participants Chusky, the digital assistant, is joining; the meeting-chat
+minutes. At session end, proactive meetings send this bounded window to the
+owner-scoped meeting record so the outcome workflow can summarize ambient
+discussion; the temporary working copy is removed after the outcome is saved
+and expires after 24 hours if outcome processing does not finish. This is not
+the searchable, opt-in transcript archive. Only turns Chusky answers and its
+replies are retained in the owner's bounded meeting history. Tell participants
+Chusky, the digital assistant, is joining; the meeting-chat
 notice and media page explain live processing and retention. Platform waiting
 rooms and host admission policies still apply. Webex may need workspace-side
 setup.

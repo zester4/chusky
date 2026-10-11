@@ -181,7 +181,7 @@ class RecallMeetingBargeInTests(unittest.IsolatedAsyncioTestCase):
             session.response_task.cancel()
             await asyncio.gather(session.response_task, return_exceptions=True)
 
-    async def test_flux_eager_event_does_not_start_a_speculative_agent_run(self):
+    async def test_flux_eager_event_prepares_a_draft_and_finalizes_only_on_end_of_turn(self):
         class WebSocket:
             async def send_text(self, _message):
                 pass
@@ -211,11 +211,16 @@ class RecallMeetingBargeInTests(unittest.IsolatedAsyncioTestCase):
         )
         session.stt_socket = Events()
         final_turn = AsyncMock()
-        with patch.object(session, "_handle_final_stt_turn", final_turn):
+        prepare_draft = AsyncMock(return_value={"text": "I can help.", "speaker": None, "speak": True, "cost": 0})
+        with patch.object(session, "_collect_speculative_response", prepare_draft), patch.object(session, "_handle_final_stt_turn", final_turn):
             await session._receive_stt()
+            await asyncio.sleep(0)
         self.assertEqual(final_turn.await_count, 1)
         self.assertEqual(final_turn.await_args.args[0], "Hey Chusky, check this.")
-        self.assertFalse(hasattr(session, "draft_task"))
+        self.assertEqual(prepare_draft.await_count, 1)
+        self.assertEqual(session.metrics.speculative_drafts_started, 1)
+        self.assertIsNotNone(session.draft_task)
+        await session._cancel_speculative_draft()
 
     async def test_recall_sends_first_tts_chunk_before_long_delta_stream_finishes(self):
         class WebSocket:

@@ -165,6 +165,7 @@ class RecallSettings:
     copilot_min_interval_seconds: int
     turn_start_budget_ms: int
     turn_fallback_enabled: bool
+    stt_eager_eot_threshold: float = 0.45
 
     @classmethod
     def from_env(cls) -> "RecallSettings":
@@ -211,6 +212,7 @@ class RecallSettings:
             max(1, min(int(os.getenv("RECALL_COPILOT_MIN_INTERVAL_SECONDS", "4")), 120)),
             max(4_000, min(int(os.getenv("RECALL_TURN_START_BUDGET_MS", "6000")), 20_000)),
             os.getenv("RECALL_TURN_FALLBACK_ENABLED", "true").strip().lower() != "false",
+            max(0.3, min(float(os.getenv("RECALL_STT_EAGER_EOT_THRESHOLD", "0.45")), 0.9)),
         )
 
 
@@ -1184,6 +1186,10 @@ class RecallVoiceSession:
         self.tts_first_audio_recorded = False
         self.turn_first_audio_at: float | None = None
         self.response_task: asyncio.Task[None] | None = None
+        self.draft_task: asyncio.Task[dict[str, Any]] | None = None
+        self.draft_transcript = ""
+        self.draft_turn_index: int | None = None
+        self.draft_evaluation_claimed = False
         self.finalized_turn_indexes: set[int] = set()
         self.response_started_at = 0.0
         self.interrupted = False
@@ -1214,7 +1220,7 @@ class RecallVoiceSession:
         else:
             stt_url = deepgram_flux_listen_url(
                 self.stt_model,
-                None,
+                self.settings.stt_eager_eot_threshold,
                 self.settings.stt_eot_threshold,
                 self.settings.stt_eot_timeout_ms,
                 language_hints=self.language_hints,
@@ -1251,6 +1257,7 @@ class RecallVoiceSession:
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+                await self._cancel_speculative_draft()
                 if self.response_task and not self.response_task.done():
                     self.response_task.cancel()
                 await asyncio.gather(*(task for task in (self.response_task,) if task), return_exceptions=True)
@@ -1490,6 +1497,7 @@ class RecallVoiceSession:
                 # Ignore provisional transcripts matching recently streamed
                 # TTS. Proactive modes yield as soon as a real participant
                 # starts speaking; addressed mode waits for its wake word.
+                await self._cancel_speculative_draft()
                 if self.echo_guard.is_echo(transcript):
                     self.metrics.turns_suppressed += 1
                 elif transcript:
@@ -1498,24 +1506,102 @@ class RecallVoiceSession:
                         if self.interaction_mode == "addressed" and turn_event == "StartOfTurn":
                             asyncio.create_task(self._report_runtime("healthy", {}, "A participant started an addressed turn", "speech_detected"))
                         await self._interrupt()
+            elif turn_event == "EagerEndOfTurn" and transcript:
+                if self._should_prepare_speculative_response(transcript):
+                    await self._start_speculative_draft(transcript, provider_turn_index, *(flux_turn_time_bounds_ms(self.stt_audio_started_at, event) or (None, None)))
             elif turn_event == "EndOfTurn" and transcript:
                 await self._send_caption(transcript, final=True)
                 timing = flux_turn_time_bounds_ms(self.stt_audio_started_at, event)
-                if provider_turn_index:
-                    if provider_turn_index in self.finalized_turn_indexes:
-                        continue
-                    self.finalized_turn_indexes.add(provider_turn_index)
-                    if len(self.finalized_turn_indexes) > 64:
-                        self.finalized_turn_indexes = set(sorted(self.finalized_turn_indexes)[-32:])
-                await self._handle_flux_end_turn(transcript, *(timing or (None, None)))
-    async def _handle_flux_end_turn(self, transcript: str, turn_started_at_ms: int | None = None, turn_ended_at_ms: int | None = None) -> None:
-        await self._handle_final_stt_turn(transcript, turn_started_at_ms, turn_ended_at_ms)
+                if provider_turn_index in self.finalized_turn_indexes:
+                    continue
+                self.finalized_turn_indexes.add(provider_turn_index)
+                if len(self.finalized_turn_indexes) > 64:
+                    self.finalized_turn_indexes = set(sorted(self.finalized_turn_indexes)[-32:])
+                await self._handle_flux_end_turn(transcript, *(timing or (None, None)), provider_turn_index)
 
-    async def _handle_final_stt_turn(self, transcript: str, turn_started_at_ms: int | None = None, turn_ended_at_ms: int | None = None) -> None:
+    def _should_prepare_speculative_response(self, transcript: str) -> bool:
+        if self.echo_guard.is_echo(transcript):
+            return False
+        return self.interaction_mode in ("copilot", "representative") or is_recall_invocation(transcript)
+
+    async def _cancel_speculative_draft(self) -> None:
+        task = self.draft_task
+        self.draft_task = None
+        self.draft_transcript = ""
+        self.draft_turn_index = None
+        self.draft_evaluation_claimed = False
+        if task and not task.done():
+            self.metrics.speculative_drafts_cancelled += 1
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _start_speculative_draft(self, transcript: str, turn_index: int, turn_started_at_ms: int | None, turn_ended_at_ms: int | None) -> None:
+        if self.draft_task and self.draft_turn_index == turn_index and self.draft_transcript == transcript:
+            return
+        await self._cancel_speculative_draft()
+        self.draft_transcript = transcript
+        self.draft_turn_index = turn_index
+        self.draft_evaluation_claimed = False
+        self.metrics.speculative_drafts_started += 1
+        self.draft_task = asyncio.create_task(
+            self._collect_speculative_response(transcript, self.context.snapshot(), turn_started_at_ms, turn_ended_at_ms),
+            name=f"recall-draft-{self.meeting_id}-{turn_index}",
+        )
+
+    async def _collect_speculative_response(self, transcript: str, context: list[dict[str, str]], turn_started_at_ms: int | None, turn_ended_at_ms: int | None) -> dict[str, Any]:
+        """Prepare a tool-free response without speaking or committing before Flux confirms the turn."""
+        text = ""
+        speaker: str | None = None
+        speak = self.interaction_mode == "addressed"
+        cost = 0.0
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+            async with client.stream(
+                "POST",
+                self.settings.turn_stream_url,
+                headers={"Authorization": f"Bearer {self.settings.bridge_secret}"},
+                json={
+                    "meetingId": self.meeting_id,
+                    "userId": self.user_id,
+                    "transcript": transcript,
+                    "context": context,
+                    "interactionMode": self.interaction_mode,
+                    "speculative": True,
+                    **({"turnStartedAtMs": turn_started_at_ms, "turnEndedAtMs": turn_ended_at_ms} if turn_started_at_ms is not None and turn_ended_at_ms is not None else {}),
+                },
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    event = json.loads(line)
+                    if event.get("type") == "evaluation_claimed":
+                        self.draft_evaluation_claimed = True
+                    elif event.get("type") == "speaker":
+                        speaker = event.get("name") if isinstance(event.get("name"), str) else None
+                    elif event.get("type") == "delta":
+                        text += normalize_voice_delta(str(event.get("text") or ""))
+                    elif event.get("type") == "speak":
+                        speak = True
+                    elif event.get("type") == "silent":
+                        speak = False
+                        text = ""
+                    elif event.get("type") == "done":
+                        cost = max(0.0, min(float(event.get("cost") or 0), 10.0))
+                        speak = event.get("speak") is not False
+                        if speak and not text:
+                            text = normalize_voice_text(str(event.get("text") or ""))[:5000]
+                    elif event.get("type") == "error":
+                        raise RecallMeetingAgentError("agent_run_failed")
+        return {"text": normalize_voice_text(text)[:5000], "speaker": speaker, "speak": speak, "cost": cost}
+    async def _handle_flux_end_turn(self, transcript: str, turn_started_at_ms: int | None = None, turn_ended_at_ms: int | None = None, provider_turn_index: int | None = None) -> None:
+        await self._handle_final_stt_turn(transcript, turn_started_at_ms, turn_ended_at_ms, provider_turn_index)
+
+    async def _handle_final_stt_turn(self, transcript: str, turn_started_at_ms: int | None = None, turn_ended_at_ms: int | None = None, provider_turn_index: int | None = None) -> None:
         """Send one completed Flux or Nova utterance through the same policy."""
         self.metrics.stt_final_turns += 1
         if self.echo_guard.is_echo(transcript):
             self.metrics.turns_suppressed += 1
+            await self._cancel_speculative_draft()
             return
         invoked = is_recall_invocation(transcript)
         context = self.context.snapshot()
@@ -1527,6 +1613,7 @@ class RecallVoiceSession:
             should_evaluate = False
         if not should_evaluate:
             self.metrics.turns_suppressed += 1
+            await self._cancel_speculative_draft()
             return
         asyncio.create_task(self._report_runtime("healthy", {}, "A final speech turn was received", "final_transcript"))
         self.turn_index += 1
@@ -1535,8 +1622,61 @@ class RecallVoiceSession:
             await self._interrupt()
         self.interrupted = False
         self.response_started_at = time.monotonic()
-        self.response_task = asyncio.create_task(self._respond(transcript, self.turn_index, context, context_turn_id, turn_started_at_ms, turn_ended_at_ms), name=f"recall-response-{self.meeting_id}-{self.turn_index}")
+        prepared_draft: dict[str, Any] | None = None
+        matching_draft = bool(self.draft_task and provider_turn_index is not None and self.draft_turn_index == provider_turn_index and self.draft_transcript == transcript)
+        evaluation_claimed = False
+        if matching_draft:
+            prepared_draft = await resolve_speculative_draft(self.draft_task, transcript_matches=True, grace_ms=120)
+            evaluation_claimed = self.draft_evaluation_claimed
+            if prepared_draft is None:
+                self.metrics.speculative_draft_fallbacks += 1
+            else:
+                self.metrics.speculative_drafts_reused += 1
+        else:
+            await self._cancel_speculative_draft()
+        self.draft_task = None
+        self.draft_transcript = ""
+        self.draft_turn_index = None
+        self.draft_evaluation_claimed = False
+        response = self._respond_prepared(transcript, self.turn_index, context_turn_id, prepared_draft) if prepared_draft is not None else self._respond(transcript, self.turn_index, context, context_turn_id, turn_started_at_ms, turn_ended_at_ms, evaluation_claimed)
+        self.response_task = asyncio.create_task(response, name=f"recall-response-{self.meeting_id}-{self.turn_index}")
         self.response_task.add_done_callback(self._observe_response)
+
+    async def _respond_prepared(self, transcript: str, turn_id: int, context_turn_id: int | None, draft: dict[str, Any]) -> None:
+        """Speak and commit a matching EagerEndOfTurn result exactly once."""
+        speaker = draft.get("speaker")
+        if isinstance(speaker, str):
+            self.context.set_speaker(context_turn_id, speaker)
+        text = normalize_voice_text(str(draft.get("text") or ""))[:5000]
+        cost = max(0.0, min(float(draft.get("cost") or 0), 10.0))
+        if draft.get("speak") is not True or not text:
+            if self.interaction_mode in ("copilot", "representative"):
+                async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+                    response = await client.post(
+                        self.settings.commit_turn_url,
+                        headers={"Authorization": f"Bearer {self.settings.bridge_secret}"},
+                        json={"meetingId": self.meeting_id, "userId": self.user_id, "cost": cost, "turnId": f"flux-{turn_id}", "speak": False, "runtimeState": "healthy", "turn": {"completed": True}},
+                    )
+                    response.raise_for_status()
+            return
+        started = time.monotonic()
+        self.turn_first_audio_event = asyncio.Event()
+        self.tts_first_audio_recorded = False
+        self.turn_first_audio_at = None
+        try:
+            await self._speak(text)
+        finally:
+            self.turn_first_audio_event = None
+        response_ms = max(0, round((time.monotonic() - started) * 1000))
+        first_audio_ms = max(0, round((self.turn_first_audio_at - started) * 1000)) if self.turn_first_audio_at else None
+        async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+            response = await client.post(
+                self.settings.commit_turn_url,
+                headers={"Authorization": f"Bearer {self.settings.bridge_secret}"},
+                json={"meetingId": self.meeting_id, "userId": self.user_id, "transcript": transcript, "text": text, "cost": cost, "turnId": f"flux-{turn_id}", "speak": True, "runtimeState": "healthy", "turn": {"completed": True, **({"firstAudioMs": first_audio_ms} if first_audio_ms is not None else {}), "finalResponseMs": response_ms}},
+            )
+            response.raise_for_status()
+        self.context.add("chusky", text)
 
     def _observe_response(self, task: asyncio.Task[None]) -> None:
         try:
@@ -1676,6 +1816,7 @@ class RecallVoiceSession:
         context_turn_id: int | None,
         turn_started_at_ms: int | None,
         turn_ended_at_ms: int | None,
+        evaluation_claimed: bool = False,
     ) -> None:
         if self.tts_socket is None:
             LOG.warning("Recall meeting response skipped: TTS socket unavailable", extra={"meeting_id": self.meeting_id})
@@ -1705,6 +1846,7 @@ class RecallVoiceSession:
                         "transcript": transcript,
                         "context": context,
                         "interactionMode": self.interaction_mode,
+                        **({"evaluationClaimed": True} if evaluation_claimed else {}),
                         **({"turnStartedAtMs": turn_started_at_ms, "turnEndedAtMs": turn_ended_at_ms} if turn_started_at_ms is not None and turn_ended_at_ms is not None else {}),
                     },
                 ) as response:
@@ -1893,6 +2035,10 @@ class RecallMetrics:
     agent_speaking: int = 0
     agent_silent: int = 0
     agent_failures: int = 0
+    speculative_drafts_started: int = 0
+    speculative_drafts_reused: int = 0
+    speculative_drafts_cancelled: int = 0
+    speculative_draft_fallbacks: int = 0
     turn_start_budget_exceeded: int = 0
     turn_fallbacks: int = 0
     tts_audio_frames: int = 0
@@ -1921,6 +2067,10 @@ class RecallMetrics:
             "agentSpeaking": self.agent_speaking,
             "agentSilent": self.agent_silent,
             "agentFailures": self.agent_failures,
+            "speculativeDraftsStarted": self.speculative_drafts_started,
+            "speculativeDraftsReused": self.speculative_drafts_reused,
+            "speculativeDraftsCancelled": self.speculative_drafts_cancelled,
+            "speculativeDraftFallbacks": self.speculative_draft_fallbacks,
             "turnStartBudgetExceeded": self.turn_start_budget_exceeded,
             "turnFallbacks": self.turn_fallbacks,
             "ttsAudioFrames": self.tts_audio_frames,

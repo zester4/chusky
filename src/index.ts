@@ -1070,11 +1070,12 @@ async function main(): Promise<void> {
     // Agent context remains per-meeting; private owner chat is never passed.
     app.post("/internal/recall/turn-stream", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.recallMediaBridgeSecret) || !config.recallMeetingsEnabled) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { meetingId?: string; userId?: number; transcript?: string; context?: unknown; interactionMode?: string; speculative?: boolean; turnStartedAtMs?: number; turnEndedAtMs?: number };
+      const body = await c.req.json().catch(() => ({})) as { meetingId?: string; userId?: number; transcript?: string; context?: unknown; interactionMode?: string; speculative?: boolean; evaluationClaimed?: boolean; turnStartedAtMs?: number; turnEndedAtMs?: number };
       const meetingId = String(body.meetingId ?? "").trim();
       const userId = Number(body.userId);
       const transcript = String(body.transcript ?? "").trim();
       const speculative = body.speculative === true;
+      const speculativeEvaluationClaimed = body.evaluationClaimed === true;
       if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000) return c.json({ ok: false, error: "invalid meeting voice turn" }, 400);
       let context: ReturnType<typeof validateMeetingContext>;
       try { context = validateMeetingContext(body.context); } catch { return c.json({ ok: false, error: "invalid meeting context" }, 400); }
@@ -1110,7 +1111,7 @@ async function main(): Promise<void> {
           headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache, no-store", "X-Content-Type-Options": "nosniff" },
         });
       }
-      if (proactive && !isDirectMeetingAddress(transcript)) {
+      if (!speculativeEvaluationClaimed && proactive && !isDirectMeetingAddress(transcript)) {
         const gate = await claimRecallCopilotEvaluation(userId, meetingId);
         if (gate !== "allowed") {
           const events = [{ type: "speaker", name: currentSpeaker?.name ?? null }, { type: "silent" }, { type: "done", text: "", speak: false, cost: 0 }];
@@ -1127,6 +1128,7 @@ async function main(): Promise<void> {
           const send = (event: unknown) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
           // Send the server-resolved speaker cue before text deltas so the
           // bridge can tag this turn in its short-lived context window.
+          if (speculative) send({ type: "evaluation_claimed" });
           send({ type: "speaker", name: currentSpeaker?.name ?? null });
           const speechGate = proactive ? new MeetingSpeechGate() : undefined;
           const streamDelta = (delta: string) => {
@@ -1168,28 +1170,30 @@ async function main(): Promise<void> {
                   : representativeActive
                     ? meetingRepresentativeInstructions(profile!, meetingId, proactive, meeting.mission)
                     : meetingRepresentativeCopilotInstructions(meetingId, interactionMode === "copilot" ? "copilot" : "addressed"),
-                  ...(trustedOwnerPrivateRun
-                    ? (speculative ? { toolAllow: [] } : { ownerPrivateRun: true })
-                    : { toolAllow: roomPolicy ? meetingRoomToolAllowlist(roomPolicy) : representativeActive ? meetingRepresentativeToolAllowlist(profile, meeting.mission) : [] }),
-                  meetingComposioAccountAliases: representativeActive ? profile!.composioAccountAliases : undefined,
-                  meetingCompanyLevelTools: trustedOwnerPrivateRun ? profile?.companyLevelTools : undefined,
-                  meetingAppAccess: !trustedOwnerPrivateRun && representativeActive && !roomPolicy,
-                  meetingCapabilityContext: !trustedOwnerPrivateRun && representativeActive ? {
+                  ...(speculative
+                    ? { toolAllow: [], speculativeMeetingTurn: true }
+                    : trustedOwnerPrivateRun
+                      ? { ownerPrivateRun: true }
+                      : { toolAllow: roomPolicy ? meetingRoomToolAllowlist(roomPolicy) : representativeActive ? meetingRepresentativeToolAllowlist(profile, meeting.mission) : [] }),
+                  meetingComposioAccountAliases: !speculative && representativeActive ? profile!.composioAccountAliases : undefined,
+                  meetingCompanyLevelTools: !speculative && trustedOwnerPrivateRun ? profile?.companyLevelTools : undefined,
+                  meetingAppAccess: !speculative && !trustedOwnerPrivateRun && representativeActive && !roomPolicy,
+                  meetingCapabilityContext: !speculative && !trustedOwnerPrivateRun && representativeActive ? {
                     role: profile!.role,
                     objective: meeting.mission?.objective ?? profile!.objective,
                     subject: meeting.mission?.clientName ?? meeting.title,
                   } : undefined,
-                  sharedMeetingRoomAccess: !trustedOwnerPrivateRun && Boolean(roomPolicy),
+                  sharedMeetingRoomAccess: !speculative && !trustedOwnerPrivateRun && Boolean(roomPolicy),
                   meetingId,
                   meetingHasExternalParticipants: hasExternalMeetingParticipant,
                   ...(currentSpeaker ? { meetingParticipantAssurance: currentSpeaker.assurance, meetingParticipantName: currentSpeaker.name, ...(currentSpeaker.email ? { meetingParticipantEmail: currentSpeaker.email } : {}) } : { meetingParticipantAssurance: "unverified" as const }),
                   // Private Recall runs are live spoken turns, just like the
                   // Twilio path. This enables voice-specific routing, model
                   // fallbacks, bounded spoken output, and cache affinity.
-                  voiceTurn: trustedOwnerPrivateRun,
-                ...(trustedOwnerPrivateRun ? { voiceSessionId: `recall:${meetingId}` } : {}),
-                maxToolCalls: trustedOwnerPrivateRun ? 20 : representativeActive ? 8 : 4,
-                maxCost: trustedOwnerPrivateRun ? 1 : representativeActive ? 0.5 : 0.25,
+                  voiceTurn: trustedOwnerPrivateRun && !speculative,
+                ...(!speculative && trustedOwnerPrivateRun ? { voiceSessionId: `recall:${meetingId}` } : {}),
+                maxToolCalls: speculative ? 1 : trustedOwnerPrivateRun ? 20 : representativeActive ? 8 : 4,
+                maxCost: speculative ? 0.15 : trustedOwnerPrivateRun ? 1 : representativeActive ? 0.5 : 0.25,
                 ephemeral: true,
               },
             ));
