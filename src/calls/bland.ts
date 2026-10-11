@@ -1,11 +1,12 @@
 import { config } from "../config.js";
 import { addPhoneCall, getSession, updatePhoneCall, type PhoneCallRecord } from "../store.js";
 import { createBlandCallToken, isValidBlandToolSecret } from "./blandSecurity.js";
+import { resolveVoiceContinuity, voiceContinuityInstructions } from "./continuity.js";
 import { normalizeVoiceCallProfile, voiceProfileInstructions, type CallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
-export interface BlandCallInput { phoneNumber: string; purpose: string; profile?: VoiceCallProfileInput; callProfile?: CallProfile; }
+export interface BlandCallInput { phoneNumber: string; purpose: string; profile?: VoiceCallProfileInput; callProfile?: CallProfile; continuityFromCallId?: string; }
 export interface BlandCallDependencies {
   enabled: boolean;
   apiKey: string;
@@ -64,7 +65,8 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
   const purpose = text(input.purpose, "purpose", 2000);
   const profile = normalizeVoiceCallProfile(input.profile);
   const callProfile = input.callProfile === "business" ? "business" : "personal";
-  const call: PhoneCallRecord = { id: `blc_${crypto.randomUUID()}`, userId, provider: "bland", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
+  const continuity = await resolveVoiceContinuity(userId, input.continuityFromCallId);
+  const call: PhoneCallRecord = { id: `blc_${crypto.randomUUID()}`, userId, provider: "bland", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, ...(continuity ? { continuity } : {}), status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
   await addPhoneCall(userId, call);
   try {
     const callbackToken = createBlandCallToken({ userId, callId: call.id }, options.webhookSecret);
@@ -76,7 +78,7 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
       signal: AbortSignal.timeout(15_000),
       body: JSON.stringify({
         phone_number: phoneNumber,
-        task: `${voiceProfileInstructions(profile, "outbound", purpose)} Use the Consult Chusky tool when a question needs the owner's private context, a connected app, or a requested action. Do not use it for ordinary pleasantries. Chusky can carry out routine requested work directly; deletions, financial actions, permission changes, deployment/push actions, and provider-declared high-risk actions retain their approval boundary. Never claim a connected-app action succeeded until Chusky confirms the provider result.`,
+        task: `${voiceProfileInstructions(profile, "outbound", purpose)}${voiceContinuityInstructions(continuity)} Use the Consult Chusky tool when a question needs the owner's private context, a connected app, or a requested action. Do not use it for ordinary pleasantries. Chusky can carry out routine requested work directly; deletions, financial actions, permission changes, deployment/push actions, and provider-declared high-risk actions retain their approval boundary. Never claim a connected-app action succeeded until Chusky confirms the provider result.`,
         voice: selectedVoice,
         webhook: callbackUrl.toString(),
         webhook_events: ["queue", "call", "latency", "tool"],

@@ -490,15 +490,16 @@ authenticated CLI with a deployed Chusky service; see [Terminal CLI](#terminal-c
 The CLI is a secure client of the running Chusky service. It does not create a second conversation or a second Composio session. CLI API routes are enabled in production webhook mode; configure a public `WEBHOOK_URL` and Redis before pairing. Local polling mode remains Telegram-only unless the service is deployed.
 
 1. Deploy Chusky with `WEBHOOK_URL` and `REDIS_URL` configured.
-2. In Telegram, run `/cli link`.
-3. In the terminal, run:
+2. For a direct connection, open the dashboard's Devices page, generate a token, and copy it. Or, for the Telegram fallback, run `/cli link` in Telegram.
+3. In the terminal, run one of these:
 
 ```bash
+npm run cli -- auth link --server https://your-chusky-host --token chusky_<paste-token> --name joe-laptop
 npm run cli -- auth link --server https://your-chusky-host --code 123456 --name joe-laptop
 npm run cli
 ```
 
-The pairing code is one-time and expires after 10 minutes. The terminal stores a revocable device token locally; conversation history, memories, approvals, reminders, jobs, and the Composio session remain server-side. Use `/cli devices` and `/cli revoke <terminal name>` in Telegram to manage access. When installed, the optional `keytar` dependency stores the token in Windows Credential Manager, macOS Keychain, or Linux Secret Service. If native storage is unavailable, set `CHUSKY_CLI_SECRET` to enable AES-256-GCM encrypted fallback storage; otherwise Chusky retains the legacy file behavior and reports it in diagnostics.
+The dashboard token is a bearer credential shown only when it is generated; treat it like a password and revoke the device if it is exposed. The Telegram pairing code is one-time and expires after 10 minutes. In both cases, the terminal stores a revocable device token locally; conversation history, memories, approvals, reminders, jobs, and the Composio session remain server-side. Use `/cli devices`, `/cli revoke <terminal name>`, or the dashboard Devices page to manage access. When installed, the optional `keytar` dependency stores the token in Windows Credential Manager, macOS Keychain, or Linux Secret Service. If native storage is unavailable, set `CHUSKY_CLI_SECRET` to enable AES-256-GCM encrypted fallback storage; otherwise Chusky retains the legacy file behavior and reports it in diagnostics.
 
 Use `npm run cli -- auth status` to inspect the linked server, device, owner, and local secret-storage backend without printing the token. Use `npm run cli -- auth logout` to revoke the current terminal remotely when reachable and always remove its local credential.
 
@@ -1287,6 +1288,15 @@ E.164 allowlist. Unknown callers are rejected before they can access private
 memory or the agent. Use `TWILIO_INBOUND_CALL_PROFILE=business` for a company
 line and configure `TWILIO_INBOUND_VERIFIED_CALLERS` for the higher identity
 verification tier before disclosing sensitive account details. An authenticated
+deployment can route multiple Twilio numbers with
+`TWILIO_INBOUND_ROUTES=+15550000001=123,+15550000002=456`; the legacy owner ID
+remains the fallback. Set `TWILIO_VOICEMAIL_ENABLED=true` and customize
+`TWILIO_VOICEMAIL_MESSAGE` to enable synchronous `DetectMessageEnd` voicemail
+delivery for outbound calls. Chusky speaks the bounded message after Twilio
+detects the greeting/beep and does not start the agent bridge for that call.
+Outbound calls can also continue a prior ended owner call by passing its exact
+call ID as `continuityFromCallId`; only the prior structured outcome is carried,
+never raw audio or unrestricted history. An authenticated
 private call gets relevant owner history, knowledge, memory, and connected
 Composio/MCP/native tools; the call profile supplies personal/business
 representation guidance, not a tool allowlist. Carry out in-scope requested
@@ -1296,8 +1306,14 @@ govern disclosure of sensitive information. Outbound calls likewise receive
 relevant owner context and connected tools, not just a short call brief.
 
 The private bridge routes are `/internal/twilio/turn`,
-`/internal/twilio/turn-stream`, `/internal/twilio/commit-turn`, and
-`/internal/twilio/status`. The voice bridge validates Twilio's WebSocket
+`/internal/twilio/turn-stream`, `/internal/twilio/commit-turn`,
+`/internal/twilio/commit-outcome`, and `/internal/twilio/status`. Completed
+Twilio calls submit at most 12 bounded text turns to the outcome route, which
+stores an owner-private structured summary, decisions, action items, and open
+questions exactly once. Bland post-call summaries use the same outcome shape.
+The bridge records an opaque session checkpoint and last committed turn ID;
+transient Deepgram disconnects get one bounded reconnect attempt. The voice
+bridge validates Twilio's WebSocket
 signature and a short-lived server-issued stream ticket. It uses Deepgram Flux
 conversational STT turn events plus streaming Flux TTS in Twilio-compatible
 8 kHz μ-law. `EagerEndOfTurn` starts the actual streamed reply early;
@@ -1425,9 +1441,10 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `WEBHOOK_SECRET` | — | — | Secures Telegram webhook |
 | `DEFAULT_MODEL` | — | `minimax/minimax-m3:free` | Any OpenRouter model ID |
 | `GROUP_DEFAULT_MODEL` | — | same as `DEFAULT_MODEL` | Model for shared group conversations; `/group-model default` restores this value |
-| `VOICE_MODEL` | — | `google/gemini-3.5-flash` | Dedicated low-latency model used for live voice turns |
-| `VOICE_FALLBACK_MODELS` | — | `google/gemini-2.5-flash` | Comma-separated tool-capable fallback candidates for live calls |
+| `VOICE_MODEL` | — | `google/gemini-3.1-flash-lite` | Dedicated low-latency model used for live voice turns |
+| `VOICE_FALLBACK_MODELS` | — | `google/gemini-3.5-flash` | Comma-separated tool-capable fallback candidates for live calls |
 | `VOICE_MAX_TOKENS` | — | `192` | Maximum model output tokens for one live voice turn |
+| `VOICE_CONTEXT_DEADLINE_MS` | — | `350` | Maximum optional memory/knowledge enrichment wait before voice continues |
 | `TRANSCRIPTION_MODEL` | — | `openai/gpt-transcribe` | OpenRouter speech-to-text model |
 | `TTS_MODEL` | voice replies | `deepgram/flux-tts:free` | OpenRouter text-to-speech model |
 | `TTS_VOICE` | — | `flux-kit-en` | Voice ID accepted by the selected TTS model |

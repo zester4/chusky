@@ -2121,6 +2121,25 @@ test("dashboard devices are revocable by opaque owner-scoped IDs, without exposi
   assert.equal(await authenticateCliToken(paired.token), undefined);
 });
 
+test("dashboard can mint a direct CLI token without exposing its stored hash", async () => {
+  (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
+  setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
+  const api = app();
+  const headers = { "X-Test-Web-User": "direct-cli-owner", "Content-Type": "application/json" };
+  const response = await api.fetch(new Request("http://local/v1/devices", { method: "POST", headers, body: JSON.stringify({ name: "Web terminal" }) }));
+  assert.equal(response.status, 201);
+  const body = await response.json() as { token: string; device: { id: string; name: string; createdAt: string; lastSeenAt: string; tokenHash?: string } };
+  assert.match(body.token, /^chusky_[A-Za-z0-9_-]{20,200}$/);
+  assert.equal(body.device.name, "Web terminal");
+  assert.equal("tokenHash" in body.device, false);
+  assert.match(body.device.id, /^[a-f0-9]{24}$/);
+  assert.ok(new Date(body.device.createdAt).getTime());
+  assert.ok(new Date(body.device.lastSeenAt).getTime());
+  const authenticated = await authenticateCliToken(body.token);
+  assert.equal(authenticated?.name, "Web terminal");
+  assert.equal(JSON.stringify(body).includes(authenticated?.tokenHash ?? "__missing__"), false);
+});
+
 test("connected-app disconnect is scoped to an account-owned Composio connection", async () => {
   let ownerId = "";
   const deleted: string[] = [];

@@ -6,12 +6,20 @@ The CLI is a thin authenticated client of the deployed Chusky service. It is not
 
 ## Pairing contract
 
+Direct dashboard token flow:
+
+1. The authenticated dashboard owner generates a token on the Devices page.
+2. The service stores only the token hash and returns the bearer token in that creation response.
+3. The terminal validates the token through `/cli/session` with `chusky auth link --token <token>` before saving it locally.
+
+Telegram fallback flow:
+
 1. The user runs `/cli link` in Telegram.
 2. The service stores a short-lived, one-time pairing record owned by that Telegram user.
 3. The terminal posts the code to `/cli/pair` with a device name.
 4. The service consumes the code atomically and returns a bearer token once.
-5. The CLI stores the token in the platform config directory; the server stores only its hash.
-6. `/cli devices` lists active devices and `/cli revoke <name>` revokes a device.
+
+Both flows then use the same local token storage and `/cli devices` / `/cli revoke <name>` lifecycle. The server stores only the token hash.
 
 Treat the token like a password. Never print it in logs, shell output, tests, or error messages. Reject unknown and revoked hashes before loading session data.
 

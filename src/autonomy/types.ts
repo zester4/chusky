@@ -70,6 +70,7 @@ export interface AttentionPulseRunEvidence {
   watchReports?: AttentionPulseWatchEvidence[];
   nextCheckAt?: number;
   deliveryReason?: string;
+  setupError?: string;
 }
 
 export interface AutonomousRunRecord {

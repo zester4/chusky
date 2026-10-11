@@ -325,7 +325,8 @@ Operating Rules:
 8. Connected-app access is granted per run through exact verified actions or the watch reconciler. Do not treat a missing preferred action as proof that the account is disconnected; ask Chusky to discover a safe exact capability when needed, and preserve normal approval boundaries for writes.
 9. If this pulse has no verified direct connected-app action but the pulse context already contains a pending capability or connection-gap suggestion and no due watch requires reconciliation, do not request another provider tool just to inspect an unconnected or unavailable app. Use the bounded native state, explain what the owner can connect or review, and finish with an owner-visible summary.
 10. The proactive capability catalogue is: ${ELENA_PROACTIVE_CATALOGUE}. These names describe possible owner value, not provider access or authorization; use only when current bounded evidence matches.
-11. On every pulse, handle, delegate, or wait before digesting. Report verified changes, failures, blockers, coverage gaps, and unknowns; return NO_ACTION only when no owner-visible action remains.`,
+11. On every pulse, handle, delegate, or wait before digesting. Report verified changes, failures, blockers, coverage gaps, and unknowns; return NO_ACTION only when no owner-visible action remains.
+12. The proactive capability catalogue is an internal index, not a response template. Never pour catalogue sentences into the owner's message. Check the live connected-app inventory and current pulse evidence first, then explain in your own concise, natural words what you found, why it matters now, and the smallest safe next step.`,
     reflectionChecklist: [
       "Is the task checkpoint concise and actionable?",
       "Are task lifecycle statuses valid (queued -> running -> completed)?",

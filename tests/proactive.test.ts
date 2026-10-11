@@ -128,6 +128,31 @@ test("starter watches pause while disconnected and resume after the account retu
   assert.equal(watches[0]?.nextCheckAt, now + 2);
 });
 
+test("connected Sheets and Notion accounts become bounded watches during the shared sync", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 920006;
+  const now = Date.UTC(2026, 9, 8, 12);
+  await createAttentionRecord(userId, "autonomy_profile", {
+    mode: "personal", enabled: true, defaultAuthority: "observe", maxChecksPerDay: 24,
+    maxAutonomousActionsPerDay: 4, notifyOn: "important", allowedDomains: ["gmail", "calendar", "sheets", "notion"], deniedDomains: [],
+  });
+  await syncDefaultProactiveWatchesForConnectedAccounts(userId, [
+    { id: "gmail-1", toolkit: "gmail", status: "ACTIVE" },
+    { id: "calendar-1", toolkit: "googlecalendar", status: "ACTIVE" },
+    { id: "sheets-1", toolkit: "GOOGLE_SHEETS", status: "CONNECTED" },
+    { id: "notion-1", toolkit: "notion", status: "ENABLED" },
+  ], now);
+
+  const watches = await listAttentionRecords(userId, "autonomy_watch") as any[];
+  assert.deepEqual(watches.map((watch) => [watch.domain, watch.connectedAccountId]).sort(([left], [right]) => left.localeCompare(right)), [
+    ["gmail", undefined],
+    ["calendar", undefined],
+    ["sheets", "sheets-1"],
+    ["notion", "notion-1"],
+  ].sort(([left], [right]) => left.localeCompare(right)));
+  assert.equal(watches.every((watch) => watch.authority === "observe" && watch.nextCheckAt === now), true);
+});
+
 test("daily operating briefing is bounded and reports verified run state", () => {
   const finding = { key: "k", capabilityId: "invoice_detection", title: "Invoice needs review", reason: "Overdue", nextAction: "Verify details", actionClass: "approval" as const, score: 0.9, evidence: { source: "billing" }, detectedAt: 1 };
   const brief = buildDailyOperatingBriefing({ findings: [finding], handled: 1, delegated: 2, approvals: 1, failures: 0, nextRunAt: 1_000 });

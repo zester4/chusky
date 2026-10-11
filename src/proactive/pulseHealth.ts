@@ -44,6 +44,9 @@ export interface PulseHealthInput {
   neverCheckedWatches: number;
   pendingSuggestions: number;
   connectedAccountsVerified: boolean;
+  connectedAccountCount?: number;
+  connectedToolkits?: string[];
+  connectionError?: string;
 }
 
 export interface PulseHealth {
@@ -60,6 +63,9 @@ export interface PulseHealth {
   neverCheckedWatches: number;
   pendingSuggestions: number;
   connectedAccountsVerified: boolean;
+  connectedAccountCount?: number;
+  connectedToolkits?: string[];
+  connectionError?: string;
   lastRunAt?: number;
   lastRunStatus?: string;
   lastError?: string;
@@ -110,6 +116,9 @@ export function classifyPulseHealth(input: PulseHealthInput): PulseHealth {
     neverCheckedWatches,
     pendingSuggestions,
     connectedAccountsVerified: input.connectedAccountsVerified,
+    ...(input.connectedAccountCount === undefined ? {} : { connectedAccountCount: boundedCount(input.connectedAccountCount) }),
+    ...(input.connectedToolkits?.length ? { connectedToolkits: input.connectedToolkits.slice(0, 20) } : {}),
+    ...(input.connectionError ? { connectionError: input.connectionError.slice(0, 500) } : {}),
     ...(lastRunAt ? { lastRunAt } : {}),
     ...(lastRunStatus ? { lastRunStatus } : {}),
     ...(lastError ? { lastError } : {}),
@@ -129,6 +138,15 @@ export function classifyPulseHealth(input: PulseHealthInput): PulseHealth {
 
   if (input.latestOccurrence && ["failed", "blocked", "cancelled"].includes(input.latestOccurrence.status)) {
     return { ...base, status: "failed", title: "Pulse needs recovery", summary: lastError ? `The latest Pulse run did not finish: ${lastError}` : "The latest Pulse run did not finish. Inspect the run before retrying so work is not duplicated.", recoveryAction: "inspect" };
+  }
+
+  if (input.connectionError) {
+    return { ...base, status: "failed", title: "Pulse could not reconcile connected apps", summary: input.connectionError.slice(0, 300), recoveryAction: "inspect" };
+  }
+
+  if (activeWatches === 0 && (input.connectedAccountCount ?? 0) > 0) {
+    const connected = input.connectedToolkits?.length ? input.connectedToolkits.join(", ") : "your connected apps";
+    return { ...base, status: "waiting_for_setup", title: "Connected apps are not monitored yet", summary: `Pulse sees ${connected}, but no read-only watch is active for the current Pulse scope. Review the monitored app scope, then run Pulse again.`, recoveryAction: "inspect" };
   }
 
   if (activeWatches === 0 && pendingSuggestions > 0) {
