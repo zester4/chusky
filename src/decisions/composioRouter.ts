@@ -36,6 +36,8 @@ export type ComposioToolkitLister = (signal?: AbortSignal) => Promise<ComposioTo
 
 export type ComposioDecision = {
   source: "jev" | "keyword";
+  /** Jev confidently determined that this request needs no connected app. */
+  noAppNeeded?: boolean;
   route?: ComposioRoute;
   toolkits: Array<RankedOption & { connected?: boolean }>;
   /** Routed toolkits the user has not connected yet (connect before executing). */
@@ -50,6 +52,7 @@ export type ComposioDecision = {
 
 const ACTION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const ACTION_CACHE_MAX = 64;
+const APP_NEEDED_THRESHOLD = 0.35;
 const actionCache = new Map<string, { at: number; actions: ComposioAction[] }>();
 const inflight = new Map<string, Promise<ComposioAction[]>>();
 
@@ -186,10 +189,28 @@ export async function computeJevComposioDecision(objective: string, input: {
       criteria: { true: "A third-party app read or action is required.", false: "It can be answered or produced without touching any app." },
     },
   };
-  // Candidate toolkits: everything the user connected plus Composio's public
-  // catalogue, so a request can route to an app that is not connected yet and
-  // the agent can offer the connection instead of substituting another app.
   const connectedSet = new Set(connected.map(toolkitKey));
+  // First ask whether an external app is needed. The public catalogue can
+  // contain hundreds of toolkits, so do not fetch or rank it for an ordinary
+  // answer. Scores at or above the threshold continue into discovery.
+  const triage = await client.evaluate(state, questions, { signal: input.signal, sessionId: input.sessionId });
+  const domainAnswer = triage.answers.domain as JevChoiceAnswer;
+  const needsAppAnswer = (triage.answers.needs_app as JevNoulAnswer).noul;
+  if (needsAppAnswer < APP_NEEDED_THRESHOLD) {
+    return {
+      source: "jev",
+      noAppNeeded: true,
+      toolkits: [],
+      unconnectedToolkits: [],
+      actions: [],
+      directTools: [],
+      needsAppAction: needsAppAnswer,
+      telemetry: { latencyMs: triage.latencyMs, costUsd: triage.costUsd ?? 0, calls: 1 },
+    };
+  }
+
+  // Only now broaden discovery beyond the owner's connected apps. This keeps
+  // unknown/unconnected app suggestions available for requests that need them.
   let catalogue: ComposioToolkitInfo[] = [];
   if (config.jevComposioRouteUnconnected && input.listToolkits) {
     try { catalogue = await cachedToolkitCatalogue(input.listToolkits, input.signal); }
@@ -197,24 +218,19 @@ export async function computeJevComposioDecision(objective: string, input: {
   }
   const infoByKey = new Map(catalogue.map((toolkit) => [toolkitKey(toolkit.slug), toolkit]));
   const candidateSlugs = [...new Map([...connected, ...catalogue.map((toolkit) => toolkit.slug)].map((slug) => [toolkitKey(slug), slug.toLowerCase()])).values()];
-  const [triage, toolkitRanking] = await Promise.all([
-    client.evaluate(state, questions, { signal: input.signal, sessionId: input.sessionId }),
-    candidateSlugs.length
-      ? rankOptions(client, {
-        state,
-        instructions: "Which app should Chusky use to complete `request`? Prefer a CONNECTED app that can do the job. Choose a not-connected app when the user names it or when no connected app can do the job.",
-        options: candidateSlugs.map((slug) => ({ id: slug, description: toolkitDescription(slug, connectedSet.has(toolkitKey(slug)), infoByKey.get(toolkitKey(slug))) })),
-        noneDescription: "No app is needed for this request.",
-        signal: input.signal,
-        sessionId: input.sessionId,
-      })
-      : Promise.resolve(undefined),
-  ]);
+  const toolkitRanking = candidateSlugs.length
+    ? await rankOptions(client, {
+      state,
+      instructions: "Which app should Chusky use to complete `request`? Prefer a CONNECTED app that can do the job. Choose a not-connected app when the user names it or when no connected app can do the job.",
+      options: candidateSlugs.map((slug) => ({ id: slug, description: toolkitDescription(slug, connectedSet.has(toolkitKey(slug)), infoByKey.get(toolkitKey(slug))) })),
+      noneDescription: "No app is needed for this request.",
+      signal: input.signal,
+      sessionId: input.sessionId,
+    })
+    : undefined;
   let latencyMs = Math.max(triage.latencyMs, toolkitRanking?.latencyMs ?? 0);
   let costUsd = (triage.costUsd ?? 0) + (toolkitRanking?.costUsd ?? 0);
   let calls = 1 + (toolkitRanking?.calls ?? 0);
-  const domainAnswer = triage.answers.domain as JevChoiceAnswer;
-  const needsAppAnswer = (triage.answers.needs_app as JevNoulAnswer).noul;
   const toolkits = (toolkitRanking?.ranked ?? []).map((item) => ({ ...item, connected: connectedSet.has(toolkitKey(item.id)) }));
   const domain = domainAnswer.choice !== NONE_OPTION && domainAnswer.confidence >= config.jevMinConfidence ? domainAnswer.choice as ComposioDomain : undefined;
   const selectedRanked = toolkits.filter((item, index) => item.probability >= config.jevToolkitMinProbability && index < 2);
@@ -225,7 +241,7 @@ export async function computeJevComposioDecision(objective: string, input: {
   const needsApp = Math.max(needsAppAnswer, selectedRanked.length ? 1 - (toolkitRanking?.none ?? 1) : 0);
   const selected = selectedRanked.map((item) => item.id);
   const selectedConnected = selectedRanked.filter((item) => item.connected).map((item) => item.id);
-  const unconnected = needsApp >= 0.35 ? selectedRanked.filter((item) => !item.connected).map((item) => item.id) : [];
+  const unconnected = needsApp >= APP_NEEDED_THRESHOLD ? selectedRanked.filter((item) => !item.connected).map((item) => item.id) : [];
 
   let route: ComposioRoute | undefined;
   if (domain || selected.length) {
@@ -245,9 +261,9 @@ export async function computeJevComposioDecision(objective: string, input: {
     }
   }
   const decision: ComposioDecision = { source: "jev", ...(route ? { route } : {}), toolkits: toolkits.slice(0, 5), unconnectedToolkits: unconnected, actions: [], directTools: [], needsAppAction: needsApp };
-  if (needsApp < 0.35 || !selected.length) {
+  if (needsApp < APP_NEEDED_THRESHOLD || !selected.length) {
     decision.telemetry = { latencyMs, costUsd, calls };
-    if (!domain && domainAnswer.confidence < config.jevMinConfidence && needsApp >= 0.35) decision.fallbackReason = "low_confidence";
+    if (!domain && domainAnswer.confidence < config.jevMinConfidence && needsApp >= APP_NEEDED_THRESHOLD) decision.fallbackReason = "low_confidence";
     return decision;
   }
 
@@ -302,6 +318,7 @@ export async function computeJevComposioDecision(objective: string, input: {
 
 /** Model-facing routing context. Contains no private account aliases. */
 export function composioDecisionContext(decision: ComposioDecision): string {
+  if (decision.noAppNeeded) return "";
   const lines: string[] = [];
   const route = decision.route;
   const connectHint = (toolkits: string[]) => `${toolkits.join(" or ")} ${toolkits.length > 1 ? "are" : "is"} not connected yet. Call COMPOSIO_MANAGE_CONNECTIONS for ${toolkits[0]} to give the user a connection link, tell them what it unlocks, and continue once it is connected. Do not substitute an unrelated app.`;
@@ -309,7 +326,7 @@ export function composioDecisionContext(decision: ComposioDecision): string {
     lines.push(route.needsConnection
       ? `Composio route: ${route.domain}; best app(s): ${route.preferredToolkits.slice(0, 4).join(", ")}.${route.connectedToolkits.length ? ` Connected alternative(s): ${route.connectedToolkits.join(", ")}.` : ""}`
       : `Composio route: ${route.domain}; use connected toolkit(s): ${route.connectedToolkits.join(", ") || "none selected"}. Inspect the exact action schema before executing; broad search is last resort.`);
-  } else if (decision.source === "jev" && decision.toolkits.length && (decision.needsAppAction ?? 0) >= 0.35) {
+  } else if (decision.source === "jev" && decision.toolkits.length && (decision.needsAppAction ?? 0) >= APP_NEEDED_THRESHOLD) {
     const picks = decision.toolkits.filter((item) => item.probability >= config.jevToolkitMinProbability).slice(0, 2);
     const connected = picks.filter((item) => item.connected).map((item) => item.id);
     if (connected.length) lines.push(`Composio route: use connected toolkit(s) ${connected.join(", ")}. Inspect the exact action schema before executing; broad search is last resort.`);
@@ -372,7 +389,7 @@ export async function routeComposioForTurn(objective: string, input: {
   }
   // Jev is additive: a keyword domain route (including the deterministic
   // "not connected" guard) is kept when Jev produced no route of its own.
-  if (!decision.route && baseline.route) decision.route = baseline.route;
+  if (!decision.noAppNeeded && !decision.route && baseline.route) decision.route = baseline.route;
   log(decision, true);
   return decision;
 }

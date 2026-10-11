@@ -6,6 +6,13 @@ const MAX_SKILLS = 200;
 const MAX_SKILL_FILE_BYTES = 256 * 1024;
 const MAX_CONTEXT_CHARS = 24_000;
 const STOP_WORDS = new Set(["a", "an", "and", "are", "can", "create", "for", "how", "i", "in", "is", "it", "make", "of", "on", "the", "to", "use", "with"]);
+const FALLBACK_GENERIC_TERMS = new Set([
+  ...STOP_WORDS,
+  "what", "which", "who", "when", "where", "why", "my", "your", "our", "their", "me", "you", "this", "that", "these", "those",
+  "please", "tell", "show", "help", "could", "would", "should", "will", "get", "make", "thing", "things", "information", "data",
+  "project", "task", "tasks", "tool", "tools", "agent", "assistant", "chusky", "current", "previous", "latest", "about", "answer",
+  "respond", "response", "conversation", "chat", "message", "request", "user", "product", "work", "business",
+]);
 
 /** Skill source is trusted code, but its text is model-facing context. Keep
  * infrastructure names and internal workspace slugs out of the agent's mental
@@ -367,8 +374,22 @@ export async function skillContextForBinding(binding: SkillBinding, query = "", 
   const primary = [...new Set(binding.primary.map((name) => name.trim()).filter(Boolean))];
   const supporting = [...new Set(binding.supporting.map((name) => name.trim()).filter((name) => name && !primary.includes(name)))];
   const explicit = [...primary, ...supporting];
+  const queryTerms = [...new Set((query.toLowerCase().match(/[a-z0-9][a-z0-9._+#-]*/g) ?? [])
+    .filter((term) => term.length >= 3 && !FALLBACK_GENERIC_TERMS.has(term)))];
   const fallback = query
-    ? (await searchSkills(query, 3, root)).map((match) => match.name).filter((name) => !explicit.includes(name))
+    ? (await searchSkills(query, 3, root))
+      .filter((match) => {
+        const name = match.name.toLowerCase().replace(/[-_.]+/g, " ");
+        const description = match.description.toLowerCase();
+        const nameMatches = queryTerms.filter((term) => name.includes(term));
+        const descriptionMatches = queryTerms.filter((term) => description.includes(term));
+        const normalizedQuery = query.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        return nameMatches.length > 0
+          || descriptionMatches.length >= 2
+          || (normalizedQuery.split(" ").length >= 2 && description.includes(normalizedQuery));
+      })
+      .map((match) => match.name)
+      .filter((name) => !explicit.includes(name))
     : [];
   const selected = [...explicit, ...fallback];
   if (!selected.length) return "";

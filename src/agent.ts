@@ -2379,7 +2379,7 @@ export async function runAgent(
   let meetingCalendarAvailabilityChecked = false;
   let imageComposioDirectActionGuidanceAdded = false;
 
-  if (!options?.ephemeral && !voiceTurn) {
+  if (!options?.ephemeral && !voiceTurn && requiredModality(userMessage)) {
     const capabilityModel = model.replace(/^~/, "");
     try {
       const modelRes = await fetch(`https://openrouter.ai/api/v1/models/${encodeURIComponent(capabilityModel)}`, {
@@ -2497,6 +2497,19 @@ export async function runAgent(
   }
   let relevantMemories: Awaited<ReturnType<typeof searchMemories>> = [];
   const canReadOwnerContext = (!options?.ephemeral || ownerPrivateRun) && !sharedScope && typeof userMessage === "string" && userMessage.trim();
+  // Start independent owner-context reads together without dropping any
+  // context or imposing the voice turn's lossy deadline on ordinary chat.
+  const textMemoryRead = !voiceTurn && canReadOwnerContext
+    ? searchMemories(userId, userMessage as string, { limit: 8, ...(options?.organizationId ? { organizationId: options.organizationId } : {}) })
+    : undefined;
+  const textKnowledgeRead = !voiceTurn && canReadOwnerContext && vectorConfigured()
+    ? new UpstashKnowledgeStore().query(String(userId), userMessage as string, { topK: 5, filter: "sourceType != 'memory'" }).catch((error) => {
+      logger.warn({ err: error, userId }, "Knowledge search unavailable; continuing without semantic context");
+      return [];
+    })
+    : undefined;
+  // Attach rejection handling immediately while the graph read is in flight.
+  const textMemoryOutcome = textMemoryRead?.then((value) => ({ value }), (error: unknown) => ({ error }));
   let graphContext = "";
   if (!voiceTurn && canReadOwnerContext) {
     try {
@@ -2513,7 +2526,7 @@ export async function runAgent(
   // the channel conversation record.
   if (!voiceTurn && canReadOwnerContext && vectorConfigured()) {
     try {
-      const matches = await new UpstashKnowledgeStore().query(String(userId), userMessage, { topK: 5, filter: "sourceType != 'memory'" });
+      const matches = await textKnowledgeRead!;
       knowledgeContext = matches.filter((match) => match.data).map((match) => `[Knowledge source ${match.metadata?.documentId ?? match.id}${match.metadata?.filename ? ` (${match.metadata.filename})` : ""}]\n${match.data}`).join("\n\n");
     } catch (error) {
       logger.warn({ err: error, userId }, "Knowledge search unavailable; continuing without semantic context");
@@ -2533,7 +2546,9 @@ export async function runAgent(
       withLatencyBudget(knowledgeRead.then((matches) => matches.filter((match) => match.data).map((match) => `[Knowledge source ${match.metadata?.documentId ?? match.id}${match.metadata?.filename ? ` (${match.metadata.filename})` : ""}]\n${match.data}`).join("\n\n")), "", config.voiceContextDeadlineMs),
     ]);
   } else if (canReadOwnerContext) {
-    relevantMemories = await searchMemories(userId, userMessage as string, { limit: 8, ...(options?.organizationId ? { organizationId: options.organizationId } : {}) });
+    const outcome = await textMemoryOutcome!;
+    if ("error" in outcome) throw outcome.error;
+    relevantMemories = outcome.value;
   }
   const memoryContext = [
     !sharedScope && durable.summaries.length ? `Conversation summaries:\n${durable.summaries.slice(-3).join("\n")}` : "",

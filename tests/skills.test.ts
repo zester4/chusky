@@ -134,6 +134,12 @@ test("searches skill metadata and loads matching guidance", async () => {
     assert.match(matches[0]?.description ?? "", /Keep tables readable/);
     const context = await relevantSkillContext("create a workbook", root);
     assert.match(context, /wrapped cells/);
+    const weakFallback = await skillContextForBinding({ primary: [], supporting: [] }, "verify every", root);
+    assert.equal(weakFallback, "", "one or two incidental excerpt-word matches are not enough to load a skill");
+    const genericFallback = await skillContextForBinding({ primary: [], supporting: [] }, "What is my latency probe project codename?", root);
+    assert.equal(genericFallback, "", "generic conversational/project terms must not load unrelated guidance");
+    const meaningfulFallback = await skillContextForBinding({ primary: [], supporting: [] }, "professional Excel workbook", root);
+    assert.match(meaningfulFallback, /wrapped cells/, "a strong metadata match remains available to fallback discovery");
   } finally {
     clearSkillCatalogCache();
     await rm(root, { recursive: true, force: true });
