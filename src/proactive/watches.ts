@@ -84,8 +84,11 @@ const DEFAULT_WATCH_TOOLKIT_ALIASES: Record<string, readonly string[]> = {
 };
 
 const WATCH_DOMAIN_ALIASES: Record<string, readonly string[]> = {
-  gmail: ["gmail", "googlemail", "email", "mail", "outlook", "microsoftoutlook"],
-  calendar: ["calendar", "googlecalendar", "outlookcalendar", "microsoftoutlookcalendar"],
+  // `google` and `googleworkspace` are retained for Pulse profiles created
+  // before the dashboard started storing Gmail and Calendar as separate
+  // canonical domains. They are scope aliases, not provider access grants.
+  gmail: ["gmail", "googlemail", "email", "mail", "outlook", "microsoftoutlook", "google", "googleworkspace"],
+  calendar: ["calendar", "googlecalendar", "outlookcalendar", "microsoftoutlookcalendar", "google", "googleworkspace"],
   drive: ["drive", "googledrive"],
   sheets: ["sheets", "googlesheets"],
   teams: ["teams", "microsoftteams"],

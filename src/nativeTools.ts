@@ -1064,7 +1064,16 @@ export async function syncDefaultProactiveWatchesForConnectedAccounts(
     if (existingConnectedAppKeys.has(key)) continue;
     await createAttentionRecord(userId, "autonomy_watch", connectedWatchInput(spec, now));
   }
-  return await listAttentionRecords(userId, "autonomy_watch", { limit: 200 }) as AutonomyWatchRecord[];
+  const watches = await listAttentionRecords(userId, "autonomy_watch", { limit: 200 }) as AutonomyWatchRecord[];
+  logger.info({
+    userId,
+    connectedToolkits: accounts.map((account) => account.toolkit).filter(Boolean).slice(0, 20),
+    connectedStatuses: accounts.map((account) => account.status ?? "unknown").slice(0, 20),
+    allowedDomains,
+    activeWatchCount: watches.filter((watch) => watch.status === "active").length,
+    activeWatchDomains: watches.filter((watch) => watch.status === "active").map((watch) => watch.domain).slice(0, 20),
+  }, "Attention Pulse watch projection reconciled");
+  return watches;
 }
 
 export async function syncAttentionPulseProactiveState(userId: number, now = Date.now()): Promise<{

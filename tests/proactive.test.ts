@@ -61,6 +61,8 @@ test("connected app starter watches are bounded, account-scoped, and read-only",
 test("Pulse app scope filters connected watches without losing provider aliases", () => {
   assert.equal(watchDomainAllowed("gmail", ["mail"]), true);
   assert.equal(watchDomainAllowed("calendar", ["googlecalendar"]), true);
+  assert.equal(watchDomainAllowed("gmail", ["google"]), true);
+  assert.equal(watchDomainAllowed("calendar", ["googleworkspace"]), true);
   assert.equal(watchDomainAllowed("github", ["gmail", "calendar"]), false);
   const specs = connectedWatchSpecs([
     { id: "slack-1", toolkit: "slack", status: "ACTIVE" },
