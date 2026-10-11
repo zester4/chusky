@@ -294,6 +294,34 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self.call.http.aclose)
         self.addAsyncCleanup(self.call._close_persistent_tts)
 
+    async def test_call_context_controls_the_initial_greeting(self):
+        class ContextResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"ok": True, "direction": "outbound", "greeting": "Hello, this is Amina calling on behalf of Chusky Labs about your appointment. Is now a good time?"}
+
+        class ContextHttp:
+            async def get(self, _url, **_kwargs):
+                return ContextResponse()
+
+        self.call.settings.chusky_context_url = "http://chusky.example/internal/twilio/context"
+        self.call.http = ContextHttp()
+        greeting = await self.call._load_call_greeting()
+        self.assertIn("calling on behalf of Chusky Labs", greeting)
+        self.assertIn("appointment", greeting)
+
+    async def test_context_failure_uses_neutral_identity_opening(self):
+        class ContextHttp:
+            async def get(self, _url, **_kwargs):
+                raise RuntimeError("context unavailable")
+
+        self.call.settings.chusky_context_url = "http://chusky.example/internal/twilio/context"
+        self.call.http = ContextHttp()
+        greeting = await self.call._load_call_greeting()
+        self.assertEqual(greeting, "Hello, this is Chusky, an AI voice assistant. May I ask who I’m speaking with?")
+
     async def test_twilio_ingress_is_sent_to_flux_without_transcoding(self):
         sent_audio = []
         sent_once = asyncio.Event()

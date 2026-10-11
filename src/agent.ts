@@ -202,8 +202,89 @@ const COMPOSIO_GATEWAY_TOOLS = new Set([
   "COMPOSIO_MANAGE_CONNECTIONS",
 ]);
 const VOICE_CALENDAR_TOOL_LIMIT = 32;
+const VOICE_COMPOSIO_TOOL_LIMIT = 24;
 const GOOGLE_CALENDAR_TOOL_PATTERN = /^(?:googlecalendar:)?GOOGLECALENDAR_[A-Z0-9_]+$/i;
 const SHARED_PUBLIC_COMPOSIO_TOOLS = new Set(["COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT"]);
+
+/**
+ * Exact Composio actions that may be preloaded for an owner-private voice
+ * turn. The list is intentionally bounded: voice should receive a small,
+ * purpose-specific tool surface, while the normal Composio session remains
+ * available for private chat and explicit recovery paths.
+ */
+const VOICE_COMPOSIO_BUNDLES: Record<string, readonly string[]> = {
+  calendar: [
+    "GOOGLECALENDAR_GET_CURRENT_DATE_TIME", "GOOGLECALENDAR_FIND_EVENT", "GOOGLECALENDAR_EVENTS_LIST",
+    "GOOGLECALENDAR_FIND_FREE_SLOTS", "GOOGLECALENDAR_FREE_BUSY_QUERY", "GOOGLECALENDAR_CREATE_EVENT",
+    "GOOGLECALENDAR_PATCH_EVENT", "GOOGLECALENDAR_DELETE_EVENT",
+  ],
+  crm: [
+    "HUBSPOT_SEARCH_CONTACTS_BY_CRITERIA", "HUBSPOT_READ_CONTACT", "HUBSPOT_UPDATE_CONTACT",
+    "HUBSPOT_CREATE_ENGAGEMENT", "HUBSPOT_CREATE_TASK", "HUBSPOT_SEARCH_DEALS", "HUBSPOT_GET_DEAL",
+    "HUBSPOT_CREATE_DEAL", "HUBSPOT_UPDATE_DEAL", "HUBSPOT_CREATE_NOTE",
+  ],
+  email: [
+    "GMAIL_FETCH_EMAILS", "GMAIL_LIST_THREADS", "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID",
+    "GMAIL_FETCH_MESSAGE_BY_THREAD_ID", "GMAIL_CREATE_EMAIL_DRAFT", "GMAIL_SEND_EMAIL",
+    "GMAIL_SEND_DRAFT", "GMAIL_REPLY_TO_THREAD",
+  ],
+  support: [
+    "ZENDESK_SEARCH_ZENDESK", "ZENDESK_LIST_ZENDESK_TICKETS", "ZENDESK_GET_ZENDESK_TICKET_BY_ID",
+    "ZENDESK_GET_TICKET_COMMENTS", "ZENDESK_UPDATE_ZENDESK_TICKET", "ZENDESK_REPLY_ZENDESK_TICKET",
+    "ZENDESK_MAKE_COMMENT_PRIVATE",
+  ],
+  billing: [
+    "STRIPE_SEARCH_CUSTOMERS", "STRIPE_LIST_INVOICES", "STRIPE_SEARCH_INVOICES", "STRIPE_RETRIEVE_CHARGE",
+    "STRIPE_CREATE_INVOICE", "STRIPE_SEND_INVOICE", "STRIPE_GET_INVOICES_INVOICE",
+    "STRIPE_GET_PAYMENT_RECORD", "STRIPE_POST_PAYMENT_RECORDS_REPORT_PAYMENT", "STRIPE_CREATE_REFUND",
+    "STRIPE_PAY_INVOICE", "STRIPE_LIST_REFUNDS",
+  ],
+  orders: [
+    "SHOPIFY_GET_ORDERS_WITH_FILTERS", "SHOPIFY_GET_ORDER", "SHOPIFY_GET_ORDER_FULFILLMENTS",
+    "SHOPIFY_UPDATE_FULFILLMENT_TRACKING", "SHOPIFY_GET_ORDER_REFUNDS", "SHOPIFY_CREATE_REFUND",
+    "SHOPIFY_CANCEL_ORDER", "SHOPIFY_UPDATE_ORDER", "SHOPIFY_LIST_TRANSACTIONS", "SHOPIFY_GET_TRANSACTION",
+    "SHOPIFY_GET_PRODUCTS_PAGINATED", "SHOPIFY_GET_PRODUCT",
+  ],
+  sheets: [
+    "GOOGLESHEETS_SEARCH_SPREADSHEETS", "GOOGLESHEETS_GET_SPREADSHEET_INFO", "GOOGLESHEETS_VALUES_GET",
+    "GOOGLESHEETS_LOOKUP_SPREADSHEET_ROW", "GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND",
+    "GOOGLESHEETS_VALUES_UPDATE", "GOOGLESHEETS_UPSERT_ROWS",
+  ],
+  documents: [
+    "GOOGLEDOCS_SEARCH_DOCUMENTS", "GOOGLEDOCS_GET_DOCUMENT_BY_ID", "GOOGLEDOCS_GET_DOCUMENT_PLAINTEXT",
+    "GOOGLEDOCS_CREATE_DOCUMENT", "GOOGLEDOCS_UPDATE_EXISTING_DOCUMENT", "GOOGLEDOCS_UPDATE_DOCUMENT_MARKDOWN",
+  ],
+  meetings: [
+    "GOOGLEMEET_LIST_CONFERENCE_RECORDS", "GOOGLEMEET_GET_CONFERENCE_RECORD_BY_NAME", "GOOGLEMEET_GET_TRANSCRIPT",
+    "GOOGLEMEET_GET_TRANSCRIPTS_BY_CONFERENCE_RECORD_ID", "GOOGLEMEET_LIST_RECORDINGS",
+    "GOOGLEMEET_GET_RECORDINGS_BY_CONFERENCE_RECORD_ID", "ZOOM_LIST_MEETINGS", "ZOOM_GET_A_MEETING",
+    "ZOOM_LIST_ALL_RECORDINGS", "ZOOM_GET_MEETING_RECORDINGS", "FIREFLIES_SEARCH_TRANSCRIPTS",
+    "FIREFLIES_GET_TRANSCRIPT_BY_ID", "RECALLAI_LIST_TRANSCRIPT", "RECALLAI_LIST_RECORDING",
+  ],
+};
+
+function composioActionSlug(value: string): string {
+  const trimmed = value.trim();
+  const separator = trimmed.lastIndexOf(":");
+  return (separator >= 0 ? trimmed.slice(separator + 1) : trimmed).toUpperCase();
+}
+
+/** Pure routing helper kept exportable so every voice capability has a contract test. */
+export function voiceComposioToolSlugs(value: string): string[] {
+  const text = value.toLowerCase();
+  const selected: string[] = [];
+  const add = (bundle: string) => selected.push(...(VOICE_COMPOSIO_BUNDLES[bundle] ?? []));
+  if (/calendar|schedule|appointment|availability|available|book(?:ing)?|reschedul|meeting time/.test(text)) add("calendar");
+  if (/crm|contact|client|customer|lead|sales|deal|opportunit|quote|pricing|product|follow[- ]?up/.test(text)) add("crm");
+  if (/email|e-mail|gmail|inbox|send (?:a |an )?(?:message|email)|reply to/.test(text)) add("email");
+  if (/support|ticket|issue|complaint|escalat|helpdesk|zendesk/.test(text)) add("support");
+  if (/billing|invoice|payment|refund|charge|stripe|subscription|unpaid|balance/.test(text)) add("billing");
+  if (/order|delivery|shipment|shipping|fulfillment|tracking|return|shopify|inventory/.test(text)) add("orders");
+  if (/sheet|spreadsheet|row|cell|table|google sheets/.test(text)) add("sheets");
+  if (/document|google docs|contract|proposal|file|report/.test(text)) add("documents");
+  if (/meeting|transcript|recording|fireflies|zoom|google meet|recall/.test(text)) add("meetings");
+  return [...new Set(selected)].slice(0, VOICE_COMPOSIO_TOOL_LIMIT);
+}
 export const VOICE_TURN_NATIVE_TOOLS = [
   "CHUCK_SEARCH_MEMORY",
   "CHUCK_SCRATCHPAD_READ",
@@ -2325,12 +2406,26 @@ export async function runAgent(
     ? await discoverVoiceCalendarTools(sessionObj, fullComposioTools, signal)
     : [];
   if (voiceCalendarRequest) logger.info({ count: voiceCalendarTools.length }, "Voice calendar tools preloaded");
+  const voiceCapabilitySlugs = voiceTurn && ownerPrivateRun
+    ? voiceComposioToolSlugs(`${voiceRoutingText}\n${options?.voiceRoutingHint ?? ""}`)
+    : [];
+  const voiceCalendarNames = new Set(voiceCalendarTools.map((tool) => composioActionSlug(toolName(tool))));
+  const voiceCapabilityTools = voiceCapabilitySlugs.length
+    ? await discoverVoiceComposioTools(fullComposioTools, voiceCapabilitySlugs, signal)
+    : [];
+  const uniqueVoiceCapabilityTools = voiceCapabilityTools.filter((tool) => !voiceCalendarNames.has(composioActionSlug(toolName(tool))));
+  const voiceCapabilityNames = new Set([
+    ...voiceCapabilitySlugs.map(composioActionSlug),
+    ...uniqueVoiceCapabilityTools.map((tool) => composioActionSlug(toolName(tool))),
+  ]);
+  if (uniqueVoiceCapabilityTools.length) logger.info({ count: uniqueVoiceCapabilityTools.length, requested: voiceCapabilitySlugs.length }, "Voice Composio capability tools preloaded");
   const composioTools = [
     ...(fullComposioTools.length > 80
       ? fullComposioTools.filter((tool) => toolName(tool).startsWith("COMPOSIO_") || Boolean(allow?.has(toolName(tool))))
       : fullComposioTools),
     ...discoveredMeetingTools,
     ...voiceCalendarTools,
+    ...uniqueVoiceCapabilityTools,
   ]
     .filter((tool) => !HIDDEN_COMPOSIO_MODEL_TOOLS.has(toolName(tool)))
     .filter((tool) => !sharedScope
@@ -2346,7 +2441,7 @@ export async function runAgent(
   const availableTools = [...composioTools, ...mcpTools].filter((tool) => {
     const name = toolName(tool);
     if (sharedScope && isSharedChannelToolDenied(name)) return false;
-    return (!allow || allow.has(name)) && !deny.has(name);
+    return (!allow || allow.has(name) || ownerPrivateRun && voiceCapabilityNames.has(composioActionSlug(name))) && !deny.has(name);
   });
   const preloadedVoiceCalendarTools = voiceCalendarRequest
     ? availableTools.filter((tool) => voiceCalendarTools.some((candidate) => toolName(candidate) === toolName(tool)))
@@ -4407,6 +4502,76 @@ async function discoverVoiceCalendarTools(sessionObj: any, sessionTools: any[], 
     logger.debug({ err: error }, "Voice calendar tool discovery unavailable; continuing without calendar actions");
   }
   return [...discovered.values()];
+}
+
+function voiceModelToolFromComposioRecord(value: any, allowed: ReadonlySet<string>): any | undefined {
+  const rawName = String(value?.function?.name ?? value?.name ?? value?.slug ?? value?.toolSlug ?? value?.tool_slug ?? "").trim();
+  const slug = composioActionSlug(rawName);
+  if (!allowed.has(slug)) return undefined;
+  const parameters = value?.function?.parameters
+    ?? value?.inputParameters
+    ?? value?.input_parameters
+    ?? value?.inputSchema
+    ?? value?.input_schema;
+  if (!rawName || !parameters || typeof parameters !== "object" || Array.isArray(parameters)) return undefined;
+  if (value?.function?.name === rawName && value?.function?.parameters) return value;
+  return {
+    type: "function",
+    function: {
+      // Preserve a session's provider-qualified name when one is returned.
+      // Composio accepts that name on execute, while the router compares the
+      // unqualified slug for capability selection.
+      name: rawName,
+      description: String(value?.function?.description ?? value?.description ?? value?.name ?? rawName).slice(0, 1_000),
+      parameters,
+    },
+  };
+}
+
+/**
+ * Resolve only the exact actions selected by the voice-purpose router. The
+ * batch catalogue call keeps setup to one Composio round trip; the current
+ * session remains the preferred source because it preserves provider-qualified
+ * names and connected-account routing.
+ */
+async function discoverVoiceComposioTools(sessionTools: any[], slugs: readonly string[], signal?: AbortSignal): Promise<any[]> {
+  if (!slugs.length) return [];
+  const allowed = new Set(slugs.map(composioActionSlug));
+  const discovered = new Map<string, any>();
+  const add = (value: unknown) => {
+    const tool = voiceModelToolFromComposioRecord(value, allowed);
+    if (tool) discovered.set(composioActionSlug(tool.function.name), tool);
+  };
+  for (const tool of sessionTools) add(tool);
+
+  const missing = slugs.filter((slug) => !discovered.has(composioActionSlug(slug)));
+  if (!missing.length) return slugs.map(composioActionSlug).map((slug) => discovered.get(slug)).filter(Boolean);
+
+  const getRawTools = composio?.tools?.getRawComposioTools;
+  if (typeof getRawTools === "function") {
+    try {
+      const raw = await abortable(getRawTools.call(composio.tools, { tools: missing, important: false }), signal);
+      for (const tool of normalizeComposioSearchResults(raw)) add(tool);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      logger.debug({ err: error, count: missing.length }, "Voice Composio capability preload unavailable");
+    }
+  }
+
+  // Older SDK responses may not support the batch catalogue shape. Fall back
+  // to exact lookups only for actions still missing, and never fail the spoken
+  // turn because an optional capability schema could not be loaded.
+  const getRawTool = composio?.tools?.getRawComposioToolBySlug;
+  if (typeof getRawTool === "function") {
+    await Promise.all(missing.filter((slug) => !discovered.has(composioActionSlug(slug))).map(async (slug) => {
+      try { add(await abortable(getRawTool.call(composio.tools, slug), signal)); }
+      catch (error) {
+        if (signal?.aborted) throw error;
+        logger.debug({ err: error, tool: slug }, "Voice Composio action schema unavailable");
+      }
+    }));
+  }
+  return slugs.map(composioActionSlug).map((slug) => discovered.get(slug)).filter(Boolean);
 }
 
 export async function searchTools(userId: number, query: string): Promise<unknown[]> {

@@ -64,6 +64,7 @@ Add these variables to the bridge service:
 TWILIO_MEDIA_BRIDGE_SECRET=<same random secret configured in Chusky>
 DEEPGRAM_API_KEY=<Deepgram server API key>
 CHUSKY_VOICE_TURN_URL=https://chusky.up.railway.app/internal/twilio/turn
+CHUSKY_VOICE_CONTEXT_URL=https://chusky.up.railway.app/internal/twilio/context
 CHUSKY_VOICE_STATUS_URL=https://chusky.up.railway.app/internal/twilio/status
 VOICE_BRIDGE_HOST=0.0.0.0
 ```
@@ -165,6 +166,7 @@ Add these to `chusky-voice/.env`:
 ```ini
 TWILIO_AUTH_TOKEN=<same root Twilio auth token>
 TWILIO_MEDIA_STREAM_URL=wss://voice.selithub.shop/twilio/stream
+CHUSKY_VOICE_CONTEXT_URL=https://chusky.up.railway.app/internal/twilio/context
 VOICE_STT_MODEL=flux-general-en
 VOICE_STT_EAGER_EOT_THRESHOLD=0.45
 VOICE_STT_EOT_THRESHOLD=0.65
@@ -176,7 +178,8 @@ VOICE_ELEVENLABS_ENABLED=false
 # ELEVENLABS_VOICE_ID=<approved ElevenLabs voice ID>
 # ELEVENLABS_MODEL_ID=eleven_flash_v2_5
 VOICE_BARGE_IN_MIN_CHARS=2
-VOICE_GREETING=Hi, this is Chusky. How can I help?
+# The Chusky context endpoint supplies the direction-aware opening for each call.
+# Do not configure a generic greeting here; it makes outbound calls sound like inbound support.
 # Dead-air recovery guard; normal streamed turns continue beyond this once
 # their first audio has started.
 VOICE_TURN_START_BUDGET_MS=10000
