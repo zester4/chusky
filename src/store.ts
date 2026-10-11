@@ -14,6 +14,7 @@ import { HOT_CONVERSATION_MESSAGES, joinSessionDomains, mergeDurableSessionDomai
 import { repairIncompleteDurableSession } from "./durableSessionBackfill.js";
 import { normalizeVoiceCallProfile, type VoiceCallProfile } from "./calls/voiceProfile.js";
 import { logger } from "./logger.js";
+import { publishWebNotification } from "./webNotificationBus.js";
 import { instrumentRedisClient, RedisCommandMetrics } from "./redisMetrics.js";
 import { flattenStorageMetricTotals, RedisMetricsPublisher } from "./redisMetricsPublisher.js";
 import { recordFailure, recordVectorFailure } from "./monitoring.js";
@@ -5901,11 +5902,17 @@ export async function isAgentRunCancellationRequested(userId: number, id: string
   return backend.isAgentRunCancellationRequested(userId, id);
 }
 
+function publishPhoneCallNotification(call: PhoneCallRecord): void {
+  publishWebNotification({ userId: call.userId, eventId: `phone-call:${call.id}:${call.updatedAt}:${randomUUID()}`, kind: "call", callId: call.id });
+}
+
 export async function addPhoneCall(uid: number, record: PhoneCallRecord): Promise<PhoneCallRecord> {
-  return mutateSession(uid, (session) => {
+  const added = await mutateSession(uid, (session) => {
     session.phoneCalls = [record, ...(session.phoneCalls ?? [])].slice(0, 50);
     return record;
   });
+  publishPhoneCallNotification(added);
+  return added;
 }
 
 type PhoneCallPatch = Partial<Pick<PhoneCallRecord, "status" | "runtimeState" | "bridgeSessionId" | "lastCommittedTurnId" | "continuity" | "providerCallId" | "error" | "summary" | "callLengthSeconds" | "postCallProcessedAt" | "outcome" | "outcomeStatus" | "outcomeErrorCode">>;
@@ -6257,7 +6264,7 @@ export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId
 }
 
 export async function updatePhoneCall(uid: number, id: string, patch: PhoneCallPatch): Promise<PhoneCallRecord | undefined> {
-  return mutateSession(uid, async (session) => {
+  const updated = await mutateSession(uid, async (session) => {
     const current = (session.phoneCalls ?? []).find((item) => item.id === id && item.userId === uid);
     if (!current) return undefined;
     applyPhoneCallPatch(current, patch);
@@ -6266,6 +6273,8 @@ export async function updatePhoneCall(uid: number, id: string, patch: PhoneCallP
     }
     return current;
   });
+  if (updated) publishPhoneCallNotification(updated);
+  return updated;
 }
 
 /** Atomically commit Bland's final result, transcript roles, and replay marker in the owner session. */
@@ -6275,7 +6284,7 @@ export async function finalizeBlandPhoneCall(
   patch: PhoneCallPatch,
   transcriptMessages: Message[],
 ): Promise<"processed" | "already_processed" | "not_found"> {
-  return mutateSession(uid, async (session) => {
+  const result = await mutateSession(uid, async (session) => {
     const current = (session.phoneCalls ?? []).find((item) => item.id === id && item.userId === uid && item.provider === "bland");
     if (!current) return "not_found";
     const alreadyProcessed = typeof current.postCallProcessedAt === "number";
@@ -6289,6 +6298,11 @@ export async function finalizeBlandPhoneCall(
     }
     return alreadyProcessed ? "already_processed" : "processed";
   });
+  if (result !== "not_found") {
+    const updated = await getPhoneCall(uid, id);
+    if (updated) publishPhoneCallNotification(updated);
+  }
+  return result;
 }
 
 export async function listPhoneCalls(uid: number): Promise<PhoneCallRecord[]> {

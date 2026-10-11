@@ -1,8 +1,10 @@
 export interface WebNotificationEvent {
   userId: number;
   eventId: string;
-  threadId: string;
-  runId: string;
+  kind?: "run" | "call";
+  callId?: string;
+  threadId?: string;
+  runId?: string;
 }
 
 type Listener = (event: WebNotificationEvent) => void;

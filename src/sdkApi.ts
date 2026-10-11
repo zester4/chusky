@@ -1760,9 +1760,9 @@ export function registerSdkApi(app: Hono): void {
     return streamSSE(c, async (stream) => {
       let closed = false;
       let wake: (() => void) | undefined;
-      const queue: Array<{ eventId: string; threadId: string; runId: string }> = [];
+      const queue: Array<{ eventId: string; kind?: "run" | "call"; callId?: string; threadId?: string; runId?: string }> = [];
       const unsubscribe = subscribeWebNotifications(userId, (event) => {
-        queue.push({ eventId: event.eventId, threadId: event.threadId, runId: event.runId });
+        queue.push({ eventId: event.eventId, ...(event.kind ? { kind: event.kind } : {}), ...(event.callId ? { callId: event.callId } : {}), ...(event.threadId ? { threadId: event.threadId } : {}), ...(event.runId ? { runId: event.runId } : {}) });
         wake?.();
       });
       const abort = () => { closed = true; wake?.(); };
@@ -2311,8 +2311,9 @@ export function registerSdkApi(app: Hono): void {
     const owner = await callOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before using calls.");
     if (!phoneCallingProvider()) return apiError(c, 503, "phone_calling_unavailable", "The selected phone provider is not configured on this Chusky deployment.");
-    const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; purpose?: unknown; profile?: unknown; continuityFromCallId?: unknown };
+    const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; purpose?: unknown; callProfile?: unknown; profile?: unknown; continuityFromCallId?: unknown };
     if (body.profile !== undefined && (!body.profile || typeof body.profile !== "object" || Array.isArray(body.profile))) return apiError(c, 400, "invalid_call_profile", "profile must be an object.");
+    if (body.callProfile !== undefined && body.callProfile !== "personal" && body.callProfile !== "business") return apiError(c, 400, "invalid_call_profile", "callProfile must be personal or business.");
     const session = await getSession(owner.userId);
     const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
     const prior = idempotency(c, session, fingerprint);
@@ -2322,8 +2323,9 @@ export function registerSdkApi(app: Hono): void {
     try {
       const phoneNumber = String(body.phoneNumber ?? "").replace(/[\s().-]/g, "").trim();
       const purpose = String(body.purpose ?? "").trim();
+      const callProfile = body.callProfile === "business" ? "business" : "personal";
       const continuityFromCallId = body.continuityFromCallId === undefined ? undefined : String(body.continuityFromCallId).trim();
-      const call = await nativeTool(owner.userId, "CHUCK_START_PHONE_CALL", { phoneNumber, purpose, callProfile: "personal", ...(body.profile ? { profile: body.profile as VoiceCallProfileInput } : {}), ...(continuityFromCallId ? { continuityFromCallId } : {}) });
+      const call = await nativeTool(owner.userId, "CHUCK_START_PHONE_CALL", { phoneNumber, purpose, callProfile, ...(body.profile ? { profile: body.profile as VoiceCallProfileInput } : {}), ...(continuityFromCallId ? { continuityFromCallId } : {}) });
       if (!call || typeof call !== "object") throw new Error("Phone call did not return a call record");
       const record = call as { id?: unknown; provider?: unknown; direction?: unknown; phoneNumber?: unknown; purpose?: unknown; status?: unknown; runtimeState?: unknown; error?: unknown; summary?: unknown; outcome?: unknown; outcomeStatus?: unknown; createdAt?: unknown; updatedAt?: unknown };
       if (typeof record.id !== "string" || typeof record.phoneNumber !== "string" || typeof record.purpose !== "string" || typeof record.status !== "string" || typeof record.createdAt !== "number" || typeof record.updatedAt !== "number") throw new Error("Phone call returned an invalid record");

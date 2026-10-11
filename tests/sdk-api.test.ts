@@ -1802,13 +1802,21 @@ test("linked verified dashboard users can request and list phone calls without e
   setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
   const link = await createWebTelegramLinkCode("alice");
   assert.equal(await redeemWebTelegramLinkCode(link.code, 810099), "linked");
+  let launchedProfile: string | undefined;
+  setPhoneCallLauncherForTests(async (userId, input) => {
+    launchedProfile = input.callProfile;
+    return { id: `twc_dashboard_${userId}`, userId, provider: "twilio", direction: "outbound", callProfile: input.callProfile, phoneNumber: input.phoneNumber, purpose: input.purpose, status: "bridging", createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_000 };
+  });
   const api = app();
   const headers = { "X-Test-Web-User": "alice", "Content-Type": "application/json" };
-  const create = await api.fetch(new Request("http://local/v1/account/calls", { method: "POST", headers, body: JSON.stringify({ phoneNumber: "+15550001", purpose: "Confirm appointment", profile: { identity: "Harvey's assistant", organization: "Harvey Motors", mode: "sales", tone: "warm", facts: ["Test drives are available by appointment."], capabilities: ["schedule_lookup"] } }) }));
+  const create = await api.fetch(new Request("http://local/v1/account/calls", { method: "POST", headers, body: JSON.stringify({ phoneNumber: "+15550001", purpose: "Confirm appointment", callProfile: "business", profile: { identity: "Harvey's assistant", organization: "Harvey Motors", mode: "sales", tone: "warm", facts: ["Test drives are available by appointment."], capabilities: ["schedule_lookup"] } }) }));
   assert.equal(create.status, 201);
+  assert.equal(launchedProfile, "business");
   const call = await create.json() as { id: string; phoneNumber: string; status: string };
   assert.equal(call.phoneNumber, "+••••0001");
   assert.equal(call.status, "bridging");
+  const invalidProfile = await api.fetch(new Request("http://local/v1/account/calls", { method: "POST", headers, body: JSON.stringify({ phoneNumber: "+15550001", purpose: "Confirm appointment", callProfile: "unknown" }) }));
+  assert.equal(invalidProfile.status, 400);
   const listed = await api.fetch(new Request("http://local/v1/account/calls", { headers }));
   assert.equal(listed.status, 200);
   const body = await listed.json() as { available: boolean; provider: string | null; data: unknown[] };
