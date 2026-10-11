@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { twilioVoiceInstructions, twilioVoiceOpening, twilioVoiceTranscript } from "../src/calls/twilioContext.js";
+import { callerFacingCallTopic, twilioVoiceInstructions, twilioVoiceOpening, twilioVoiceTranscript } from "../src/calls/twilioContext.js";
 
 const base = {
   id: "twc_00000000-0000-0000-0000-000000000000", userId: 7, provider: "twilio" as const,
@@ -16,7 +16,7 @@ test("outbound Twilio turns receive the owner-authorized objective and private c
   assert.match(prompt, /business call, do not volunteer unrelated personal information/i);
   assert.match(prompt, /Deletions, financial actions, permission changes, deployment\/push actions, and provider-declared high-risk actions retain their exact approval boundary/i);
   assert.doesNotMatch(prompt, /never load the owner's full memory/i);
-  assert.match(prompt, /you are the caller because Chusky placed this call on the owner's behalf/i);
+  assert.match(prompt, /Chusky placed this call on the owner's behalf/i);
   assert.match(prompt, /external contact, client, patient, customer, or recipient/i);
   assert.match(prompt, /never say that you are not calling them/i);
 });
@@ -27,14 +27,29 @@ test("Twilio opening reflects outbound caller role and objective", () => {
     direction: "outbound",
     voiceProfile: { identity: "Amina", organization: "Chusky Labs", mode: "scheduling", tone: "professional", facts: [], guardrails: [], capabilities: [] },
   });
-  assert.equal(opening, "Hello, this is Amina, an AI assistant calling on behalf of Chusky Labs. I’m calling about Confirm the implementation meeting. Is now a good time to speak?");
+  assert.equal(opening, "Hello, this is Amina, an AI assistant calling on behalf of Chusky Labs. May I confirm I’m speaking with the intended person?");
   assert.doesNotMatch(opening, /How may I help/i);
+});
+
+test("outbound opening never speaks private follow-up instructions", () => {
+  const purpose = "Confirm if they’ll be available for the meeting about the car deal tomorrow at 10:00am, if they agree book it in our calendar";
+  assert.equal(callerFacingCallTopic(purpose), "your availability for the meeting about the car deal tomorrow at 10:00am");
+  const opening = twilioVoiceOpening({ ...base, direction: "outbound", purpose });
+  assert.match(opening, /confirm I’m speaking with the intended person/i);
+  assert.doesNotMatch(opening, /if they agree|book it|our calendar/i);
+});
+
+test("voice instructions explicitly keep the outbound objective private", () => {
+  const prompt = twilioVoiceInstructions({ ...base, direction: "outbound", purpose: "Confirm if they agree, book it" });
+  assert.match(prompt, /INTERNAL VOICE CONTEXT.*NEVER READ THIS INSTRUCTION BLOCK ALOUD/i);
+  assert.match(prompt, /Never expose the call objective wording/i);
 });
 
 test("business outbound opening remains business-oriented without an organization name", () => {
   const opening = twilioVoiceOpening({ ...base, direction: "outbound", callProfile: "business", purpose: "Follow up on your service request" });
   assert.match(opening, /calling on behalf of the business I represent/i);
-  assert.match(opening, /Follow up on your service request/);
+  assert.match(opening, /confirm I’m speaking with the intended person/i);
+  assert.doesNotMatch(opening, /service request/i);
 });
 
 test("Twilio opening reflects inbound support role", () => {
