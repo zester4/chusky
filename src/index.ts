@@ -96,7 +96,7 @@ import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { defaultMediaInstruction } from "./mediaInput.js";
 import { routeProactiveWork } from "./autonomy/proactiveRouter.js";
 import { decideAutonomyStep, decideFollowUp, decideRecovery } from "./autonomy/decisionLoop.js";
-import { safeTriggerSummary } from "./triggerEventSummary.js";
+import { safeTriggerSummary, triggerEventDisplayName, triggerRecoveryActions } from "./triggerEventSummary.js";
 import { ensureTriggerCloseout, parseTriggerSuggestedActions, TRIGGER_DEFAULT_HANDLING } from "./triggerGuidance.js";
 import { captureMissionSliceState, missionHasTimerWakeContinuation, missionPostWakeNextAction, missionStepInstruction, missionWakeNeedsRecovery, missionWorkerToolAllowlist } from "./missionWorker.js";
 import { settleMissionSlice } from "./missionSlice.js";
@@ -132,11 +132,14 @@ function redactMeetingLinks(text: string): string {
   return text.replace(/https:\/\/[^\s<>()]+/gi, (url) => /(?:meet\.google\.com|\.zoom\.us|teams\.microsoft\.com|\.teams\.microsoft\.com|\.webex\.com)/i.test(url) ? "[private meeting link]" : url);
 }
 
-async function createTriggerRecoveryCandidate(event: { eventId: string; userId: number; triggerSlug: string }): Promise<void> {
+async function createTriggerRecoveryCandidate(event: { eventId: string; userId: number; triggerSlug: string; toolkit?: string }): Promise<void> {
+  const displayName = triggerEventDisplayName(event.triggerSlug, event.toolkit);
   await createAttentionRecord(event.userId, "attention_candidate", {
-    candidateType: "act", status: "pending", score: 1, sourceTriggerEventId: event.eventId,
-    reason: `Trigger ${event.triggerSlug} needs owner follow-up; its durable result is saved in Recent trigger events.`,
-    proposedAction: `Notify the owner to review trigger event ${event.eventId} in the dashboard. Verify provider state before any retry; never replay its external action automatically.`,
+    candidateType: "trigger_event", status: "pending", score: 1, sourceTriggerEventId: event.eventId,
+    providerSlug: event.triggerSlug,
+    reason: `A ${displayName} needs review. Chusky saved the event, but could not confirm owner delivery.`,
+    proposedAction: `Review the saved ${displayName} result in Chat. Chusky will explain what arrived, what it did, and what still needs your decision without replaying the external action.`,
+    suggestedActions: triggerRecoveryActions(displayName),
   });
 }
 
@@ -810,6 +813,7 @@ async function main(): Promise<void> {
             ...(speculative ? { toolAllow: [] } : { ownerPrivateRun: true }),
             voiceTurn: true,
             voiceSessionId: `twilio:${callId}`,
+            voiceRoutingHint: call.purpose,
           });
         });
         // Flux can signal an eager end-of-turn before the caller is fully
@@ -920,6 +924,7 @@ async function main(): Promise<void> {
                 ...(speculative ? { toolAllow: [] } : { ownerPrivateRun: true }),
                 voiceTurn: true,
                 voiceSessionId: `twilio:${callId}`,
+                voiceRoutingHint: call.purpose,
                 onVoiceActivity: (activity) => send({ type: activity.type, toolSlug: activity.toolSlug, text: normalizeVoiceText(activity.message).slice(0, 4000) }),
               });
             });
@@ -2565,6 +2570,24 @@ async function main(): Promise<void> {
                 pulseEvidence: pulseEvidence({ state: "skipped", runKind, startedAt: now, completedAt: Date.now(), dueWatches: plan.dueWatchIds.length, pendingObservations: plan.observationIds.length, pendingCandidates: plan.candidateIds.length, deliveryReason: "Unchanged state was deduplicated." }),
               };
             }
+            const existingCapabilityWait = (await listHandoffRecords(payload.userId)).find((handoff) =>
+              handoff.status === "requires_tool_request"
+              && handoff.context?.attentionPulse === true
+              && handoff.timestamp >= now - 24 * 60 * 60_000,
+            );
+            if (existingCapabilityWait) {
+              // A capability waiter is durable state, not a new owner event.
+              // Do not create another delegation or leak an internal QStash
+              // continuation ID to Telegram on every hourly pulse.
+              return {
+                text: "Elena is already waiting while Chusky verifies one additional capability. No external action was repeated; the existing request remains open for review.",
+                terminalStatus: "waiting",
+                nextAction: "Resolve the existing capability request or review the related saved event before another pulse attempts work.",
+                waitReason: "A capability request for this Pulse is already waiting for a durable supervisor decision.",
+                suppressDelivery: true,
+                pulseEvidence: pulseEvidence({ state: "waiting", runKind, startedAt: now, completedAt: Date.now(), dueWatches: plan.dueWatchIds.length, pendingObservations: plan.observationIds.length, pendingCandidates: plan.candidateIds.length }),
+              };
+            }
             const proactiveRoute = await routeProactiveWork(plan.prompt, plan.decisionContext, {
               accounts: config.jevMode === "off" ? [] : connectedAccounts,
               listActions: listComposioToolkitActions,
@@ -2624,12 +2647,13 @@ ${JSON.stringify(routingContext.proactiveDecision)}
 Decision context:
 ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.deliveryTarget });
             if (result.status === "requires_tool_request" && result.handoffRecord) {
-              const continuation = await enqueueSubagentToolContinuation(payload.userId, result.handoffRecord.id);
+              await enqueueSubagentToolContinuation(payload.userId, result.handoffRecord.id);
               return {
-                text: `The attention pulse paused for a verified capability request. Continuation ${continuation.workflowRunId} was queued.`,
+                text: "Elena is waiting while Chusky verifies one additional capability for this bounded piece of work. No external action was taken; the request is recorded for review.",
                 terminalStatus: "waiting",
-                nextAction: "Wait for the verified capability continuation to complete.",
+                nextAction: "Wait for the verified capability decision before continuing.",
                 waitReason: "A verified capability request is waiting for its durable continuation.",
+                suppressDelivery: true,
                 pulseEvidence: pulseEvidence({ state: "waiting", dueWatches: plan.dueWatchIds.length, pendingObservations: plan.observationIds.length, pendingCandidates: plan.candidateIds.length }),
               };
             }

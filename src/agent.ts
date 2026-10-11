@@ -201,6 +201,8 @@ const COMPOSIO_GATEWAY_TOOLS = new Set([
   "COMPOSIO_MULTI_EXECUTE_TOOL",
   "COMPOSIO_MANAGE_CONNECTIONS",
 ]);
+const VOICE_CALENDAR_TOOL_LIMIT = 32;
+const GOOGLE_CALENDAR_TOOL_PATTERN = /^(?:googlecalendar:)?GOOGLECALENDAR_[A-Z0-9_]+$/i;
 const SHARED_PUBLIC_COMPOSIO_TOOLS = new Set(["COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT"]);
 export const VOICE_TURN_NATIVE_TOOLS = [
   "CHUCK_SEARCH_MEMORY",
@@ -2015,6 +2017,8 @@ export interface AgentRunOptions {
   sharedMeetingRoomAccess?: boolean;
   /** Opaque provider affinity for one live voice call; never stored in prompt content. */
   voiceSessionId?: string;
+  /** Trusted call objective used only to route connected-app tools before the first voice model turn. */
+  voiceRoutingHint?: string;
   /** Tools in this list always create an approval request, even if normally low-risk. */
   toolRequireApproval?: string[];
   /** Persisted per-step routing result used to avoid repeating Jev on mission slices. */
@@ -2251,6 +2255,7 @@ export async function runAgent(
 
   const durableRunId = options?.runId ?? channelContext?.runId ?? `run_${randomUUID()}`;
   const voiceTurn = options?.voiceTurn === true;
+  const voiceRoutingText = userRequestText(userMessage);
   const sharedScope = channelContext?.scope === "shared";
   const ownerPrivateRun = options?.ownerPrivateRun === true && !sharedScope;
   const sharedMeetingRoomAccess = sharedScope && options?.sharedMeetingRoomAccess === true && Boolean(options?.meetingId);
@@ -2314,11 +2319,18 @@ export async function runAgent(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fullComposioTools: any[] = sessionObj ? await sessionObj.tools() : [];
   fullComposioTools.forEach((tool: unknown) => registerComposioToolMetadata(tool));
+  const voiceCalendarRequest = voiceTurn && ownerPrivateRun
+    && /\b(?:calendar|calendars|schedule|scheduling|appointment|appointments|availability|available|book|booking|reschedule)\b/i.test(`${voiceRoutingText}\n${options?.voiceRoutingHint ?? ""}`);
+  const voiceCalendarTools = voiceCalendarRequest
+    ? await discoverVoiceCalendarTools(sessionObj, fullComposioTools, signal)
+    : [];
+  if (voiceCalendarRequest) logger.info({ count: voiceCalendarTools.length }, "Voice calendar tools preloaded");
   const composioTools = [
     ...(fullComposioTools.length > 80
       ? fullComposioTools.filter((tool) => toolName(tool).startsWith("COMPOSIO_") || Boolean(allow?.has(toolName(tool))))
       : fullComposioTools),
     ...discoveredMeetingTools,
+    ...voiceCalendarTools,
   ]
     .filter((tool) => !HIDDEN_COMPOSIO_MODEL_TOOLS.has(toolName(tool)))
     .filter((tool) => !sharedScope
@@ -2336,6 +2348,9 @@ export async function runAgent(
     if (sharedScope && isSharedChannelToolDenied(name)) return false;
     return (!allow || allow.has(name)) && !deny.has(name);
   });
+  const preloadedVoiceCalendarTools = voiceCalendarRequest
+    ? availableTools.filter((tool) => voiceCalendarTools.some((candidate) => toolName(candidate) === toolName(tool)))
+    : [];
   // ToolRouter sessions can expose a large meta-tool surface without
   // including every exact provider action in session.tools(). A durable worker
   // with an explicit provider fence must still receive the exact callable
@@ -2566,11 +2581,13 @@ export async function runAgent(
   // at most JEV_TURN_BUDGET_MS to the critical path. Jev only proposes
   // routes; every tool call still passes allowlists, account scope, and
   // approval policy.
-  const routingQuery = imageRetryRequest || savedImageRetry
+  const baseRoutingQuery = imageRetryRequest || savedImageRetry
     ? mediaActionRequestText
     : typeof userMessage === "string"
       ? userMessage
       : userMessage.filter((part): part is Extract<ContentPart, { type: "text" }> => part.type === "text").map((part) => part.text).join(" ");
+  const voiceRoutingHint = options?.voiceRoutingHint?.trim();
+  const routingQuery = [baseRoutingQuery, voiceTurn && voiceRoutingHint ? `Trusted call objective: ${voiceRoutingHint}` : ""].filter(Boolean).join("\n");
   const mediaRequest = isMediaGenerationRequest(routingQuery);
   const routingRecentContext = sharedScope ? undefined : history.slice(-4)
     .map((message) => `${message.role}: ${typeof message.content === "string" ? message.content.slice(0, 400) : ""}`)
@@ -2943,10 +2960,10 @@ export async function runAgent(
       ? availableTools.filter((tool) => MISSION_WORKER_CONTROL_TOOLS.includes(toolSchemaName(tool) as typeof MISSION_WORKER_CONTROL_TOOLS[number]))
       : [];
     const routedTools = (noToolTurn
-      ? availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS" || revealedNativeTools.has(toolSchemaName(tool)))
+      ? [...availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS" || revealedNativeTools.has(toolSchemaName(tool))), ...preloadedVoiceCalendarTools]
       : missionHintPreload
-        ? [...missionRoutedNativeTools, ...preloadedMissionTools, ...missionDiscoveryTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed]
-        : [...nativeToolRoute.tools, ...preloadedMissionTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed])
+        ? [...missionRoutedNativeTools, ...preloadedMissionTools, ...missionDiscoveryTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCalendarTools]
+        : [...nativeToolRoute.tools, ...preloadedMissionTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCalendarTools])
       .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index);
     const approvalResumeTool = forcedApproval
       ? availableTools.find((tool) => toolSchemaName(tool) === forcedApproval.toolSlug)
@@ -4336,6 +4353,60 @@ function normalizeComposioSearchResults(result: unknown): unknown[] {
     }
   }
   return [];
+}
+
+function isGoogleCalendarToolName(value: string): boolean {
+  return GOOGLE_CALENDAR_TOOL_PATTERN.test(value.trim());
+}
+
+function modelToolFromComposioRecord(value: any): any | undefined {
+  const name = String(value?.function?.name ?? value?.name ?? value?.slug ?? value?.toolSlug ?? value?.tool_slug ?? "").trim();
+  if (!isGoogleCalendarToolName(name)) return undefined;
+  const parameters = value?.function?.parameters
+    ?? value?.inputParameters
+    ?? value?.input_parameters
+    ?? value?.inputSchema
+    ?? value?.input_schema;
+  if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) return undefined;
+  if (value?.function?.name === name && value?.function?.parameters) return value;
+  return {
+    type: "function",
+    function: {
+      name,
+      description: String(value?.function?.description ?? value?.description ?? value?.name ?? name).slice(0, 1_000),
+      parameters,
+    },
+  };
+}
+
+/**
+ * Voice calls need a small deterministic connected-app preload. The normal
+ * catalogue can be reduced to gateway tools when it is large, and the voice
+ * model must not be asked to guess a provider action that was not included in
+ * its request. Calendar work is common in calls and has a bounded, exact
+ * schema family, so preload it from the current session or a read-only search.
+ */
+async function discoverVoiceCalendarTools(sessionObj: any, sessionTools: any[], signal?: AbortSignal): Promise<any[]> {
+  const discovered = new Map<string, any>();
+  const add = (value: unknown) => {
+    const tool = modelToolFromComposioRecord(value);
+    if (tool) discovered.set(tool.function.name, tool);
+  };
+  for (const tool of sessionTools) {
+    add(tool);
+    if (discovered.size >= VOICE_CALENDAR_TOOL_LIMIT) return [...discovered.values()];
+  }
+  if (discovered.size >= VOICE_CALENDAR_TOOL_LIMIT || typeof sessionObj?.search !== "function") return [...discovered.values()];
+  try {
+    const result = await abortable(sessionObj.search({ query: "Google Calendar availability events appointments create update reschedule" }), signal);
+    for (const tool of normalizeComposioSearchResults(result)) {
+      add(tool);
+      if (discovered.size >= VOICE_CALENDAR_TOOL_LIMIT) break;
+    }
+  } catch (error) {
+    logger.debug({ err: error }, "Voice calendar tool discovery unavailable; continuing without calendar actions");
+  }
+  return [...discovered.values()];
 }
 
 export async function searchTools(userId: number, query: string): Promise<unknown[]> {

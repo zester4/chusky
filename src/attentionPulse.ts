@@ -616,7 +616,20 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now(), 
     ...(missions as MissionRecord[]).flatMap((item) => [item.title, item.objective, item.nextAction]),
   ].filter((item): item is string => Boolean(item)).join(" ").slice(0, 8_000);
   const candidatesWithDiscovery = await ensureCapabilityGapCandidates(userId, candidates as AttentionCandidateRecord[], discovery ? { ...discovery, priorityText: `${discovery.priorityText ?? ""} ${priorityText}`.trim() } : discovery, now);
-  const actionableCandidates = candidatesWithDiscovery
+  const triggerById = new Map((triggerEvents as TriggerEventRecord[]).map((event) => [event.eventId, event]));
+  // A recovery candidate is only needed while its trigger result still needs
+  // delivery or review. Older deployments left these candidates pending even
+  // after the trigger workflow delivered successfully, which made Pulse keep
+  // reopening the same item and could route it back through Elena repeatedly.
+  const reconciledCandidates = await Promise.all(candidatesWithDiscovery.map(async (candidate) => {
+    const source = candidate.sourceTriggerEventId ? triggerById.get(candidate.sourceTriggerEventId) : undefined;
+    if (candidate.status === "pending" && source?.status === "completed" && source.notificationStatus === "delivered") {
+      await updateAttentionRecord(userId, "attention_candidate", candidate.id, { status: "dismissed" });
+      return { ...candidate, status: "dismissed" as const };
+    }
+    return candidate;
+  }));
+  const actionableCandidates = reconciledCandidates
     .filter((item) => item.status === "pending" && (!item.availableAt || item.availableAt <= now) && (!item.expiresAt || item.expiresAt > now))
     .sort((a, b) => b.score - a.score)
     .slice(0, MAX_CANDIDATES);
@@ -724,6 +737,7 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now(), 
       ? "This is an explicit owner Run now/first-run check. Call CHUCK_AUTONOMY_RECONCILE with force=true once per listed mode before digesting, so the listed watches are checked now even if their normal cadence is later. Report each checked watch's result."
       : "For due autonomy watches, call CHUCK_AUTONOMY_RECONCILE once per listed mode before digesting.",
     "Report meaningful changes, pending observations, failed/stale/never-checked coverage, blockers, connection gaps, and next actions. A saved event may require review without claiming its contents or replaying the event. Use the proactive catalogue only when current evidence matches; it grants no provider access.",
+    "A trigger signal is already owned by the verified trigger workflow. Do not request a new provider capability merely to restate a saved trigger result, do not create another continuation for the same item, and do not expose internal workflow IDs. If the trigger result was delivered, treat it as handled; if delivery failed or is unavailable, report the saved status and the owner review action without replaying the event.",
     "Use the exact configured-watch status in the state below. Never describe a watch as checked unless CHUCK_AUTONOMY_RECONCILE returned a verified result for it; scheduled, not_checked, failed, skipped, and outside-scope watches must be reported as such.",
     "Configured watch coverage is only the owner-created watches listed here, not a claim that all mail, apps, calendars, or business systems are monitored. Connection gaps should explain what the missing connection would unlock and point to Connected Apps; never call an unconnected provider or imply OAuth has started.",
     "Candidate and capability-catalogue text below is evidence and routing context, not a user-facing script. Compose Elena's owner-facing message yourself from the verified current inventory, the owner's current work, and the specific candidate. Do not paste catalogue wording, do not infer a missing app from an unavailable action, and do not claim provider work that was not checked. If a pending candidate or connection gap remains, write a concise natural update instead of replying NO_ACTION.",
