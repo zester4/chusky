@@ -91,7 +91,7 @@ import { diagnoseMission } from "./reliability/missionDoctor.js";
 import { checkExecutionQuota, reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
 import { assertSafeBrowserUrl } from "./lib/e2b/urlSafety.js";
 import { durableStorageMetrics } from "./store.js";
-import { elenaDisabledMessage } from "./proactive/featureFlag.js";
+import { elenaDisabledMessage, isElenaApproval } from "./proactive/featureFlag.js";
 
 let sdkTaskWorkflowEnqueuer = enqueueTaskWorkflow;
 /** Test-only seam for durable task submission; production uses the configured QStash workflow client. */
@@ -119,6 +119,13 @@ const memoryPersistenceStages = new Set([
   "save_memory",
   "session_projection",
 ]);
+
+async function visibleApprovalsForDashboard(userId: number, approvals: Awaited<ReturnType<typeof listApprovals>>) {
+  if (config.elenaEnabled) return approvals;
+  const handoffs = await listHandoffRecords(userId);
+  const elenaHandoffIds = new Set(handoffs.filter((handoff) => handoff.to === "elena").map((handoff) => handoff.id));
+  return approvals.filter((approval) => !isElenaApproval(approval, elenaHandoffIds));
+}
 
 function memoryPersistenceDiagnostic(error: unknown, fallbackStage: string, startedAt: number): {
   failureStage: string;
@@ -1705,6 +1712,7 @@ export function registerSdkApi(app: Hono): void {
       listApprovals(owner.userId, 100),
       listAttentionRecords(owner.userId, "attention_candidate", { limit: 50 }),
     ]);
+    const visibleApprovals = await visibleApprovalsForDashboard(owner.userId, approvals);
     const visibleJobs = config.elenaEnabled ? jobs : jobs.filter((item) => item.kind !== "attention_pulse");
     const pulseJob = config.elenaEnabled ? jobs.find((item) => item.kind === "attention_pulse") : undefined;
     const pulseOccurrence = pulseJob ? (await listJobOccurrences(owner.userId, pulseJob.id, 1))[0] : undefined;
@@ -1713,7 +1721,7 @@ export function registerSdkApi(app: Hono): void {
       model: session.model,
       voiceReplies: Boolean(session.voiceReplies),
       voicePreferences: session.voicePreferences ?? {},
-      approvals: approvals.filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map((item) => ({ id: item.id, toolSlug: item.toolSlug, request: item.request, status: item.status, ...(item.missionId ? { missionId: item.missionId } : {}), channelProvider: item.channelProvider, createdAt: new Date(item.createdAt).toISOString(), expiresAt: new Date(item.expiresAt).toISOString() })),
+      approvals: visibleApprovals.filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map((item) => ({ id: item.id, toolSlug: item.toolSlug, request: item.request, status: item.status, ...(item.missionId ? { missionId: item.missionId } : {}), channelProvider: item.channelProvider, createdAt: new Date(item.createdAt).toISOString(), expiresAt: new Date(item.expiresAt).toISOString() })),
       attentionCandidates: config.elenaEnabled ? (attentionCandidates as AttentionCandidateRecord[]).filter((item) => !isTriggerAttentionCandidate(item) && item.status === "pending" && (!item.availableAt || item.availableAt <= Date.now()) && (!item.expiresAt || item.expiresAt > Date.now())).slice(0, 12).map((item) => {
         return {
           id: item.id,
@@ -3172,7 +3180,7 @@ export function registerSdkApi(app: Hono): void {
     await persistSdkCompanyRun(cancelled.run);
     return c.json(runView(cancelled.threadId, cancelled.run));
   });
-  app.get("/v1/approvals", async (c) => { const data = (await listApprovals(sdkUser(c)!.userId, 100)).filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map(approvalView); return c.json({ data }); });
+  app.get("/v1/approvals", async (c) => { const userId = sdkUser(c)!.userId; const data = (await visibleApprovalsForDashboard(userId, await listApprovals(userId, 100))).filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map(approvalView); return c.json({ data }); });
   app.get("/v1/tools", async (c) => {
     const query = (c.req.query("query") ?? "").trim(); const source = c.req.query("source"); const toolkit = (c.req.query("toolkit") ?? "").toLowerCase();
     const native = chuckTools.map((item) => ({ slug: item.function.name, description: item.function.description, source: "native" as const, parameters: item.function.parameters as Record<string, unknown>, execution: "durable_run" as const })).filter((item) => (!query || `${item.slug} ${item.description}`.toLowerCase().includes(query.toLowerCase())) && source !== "composio");
@@ -3596,9 +3604,10 @@ export function registerSdkApi(app: Hono): void {
       listJobs(userId),
       listAttentionRecords(userId, "attention_candidate", { limit: 50 }),
     ]);
+    const visibleApprovals = await visibleApprovalsForDashboard(userId, approvals);
     return c.json({
       now,
-      approvals: approvals.filter((item) => item.status === "pending" && item.expiresAt > now),
+      approvals: visibleApprovals.filter((item) => item.status === "pending" && item.expiresAt > now),
       tasks: tasks.filter((item) => item.updatedAt > since).slice(0, 50),
       reminders: reminders.filter((item) => item.createdAt > since).slice(0, 50),
       jobs: jobs.filter((item) => item.createdAt > since).slice(0, 50),

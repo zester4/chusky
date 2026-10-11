@@ -18,6 +18,16 @@ export function isElenaToolSlug(slug: string): boolean {
   return ELENA_TOOL_SLUGS.has(slug.trim().toUpperCase());
 }
 
+/**
+ * Existing worker approvals can outlive the deployment flag that created
+ * them. Hide only Elena-owned handoffs (plus direct Pulse tools) while the
+ * feature is disabled; ordinary Chusky task and scratchpad approvals remain
+ * visible and actionable.
+ */
+export function isElenaApproval(approval: { toolSlug: string; handoffId?: string }, elenaHandoffIds: ReadonlySet<string>): boolean {
+  return isElenaToolSlug(approval.toolSlug) || Boolean(approval.handoffId && elenaHandoffIds.has(approval.handoffId));
+}
+
 export function elenaDisabledMessage(): string {
   return "Elena and Attention Pulse are disabled by CHUSKY_ELENA_ENABLED=false.";
 }
