@@ -5,6 +5,7 @@
 import Redis from "ioredis";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { config } from "./config.js";
+import { stableSdkUserId } from "./sdkIdentity.js";
 import { withDistributedLease } from "./distributedLease.js";
 import { createNeonDurableState, durableSdkRunHash, DURABLE_SESSION_DOMAINS, type DurableConversationMessage, type DurableMissionEvent, type DurableMissionRecord, type DurableObjectMetadata, type DurableSessionDocument, type DurableSessionDomain, type DurableStateStatus, type NeonDurableState } from "./neonDurableState.js";
 import { archiveRecallTranscriptSegment, deleteRecallTranscriptArchive, getArchivedRecallTranscriptSegment, listArchivedRecallTranscriptSegments, recallTranscriptMeetingHash, updateRecallTranscriptArchiveExpiry as updateArchivedRecallExpiry, type RecallTranscriptArchiveDependencies } from "./recallTranscriptArchive.js";
@@ -1899,6 +1900,7 @@ interface Backend {
   createWebTelegramLinkCode(record: WebTelegramLinkCodeRecord): Promise<void>;
   redeemWebTelegramLinkCode(codeHash: string, telegramUserId: number): Promise<WebTelegramLinkRedemption>;
   getTelegramUserIdForWebAuth(webAuthUserId: string): Promise<number | undefined>;
+  getWebAuthUserIdForTelegram(telegramUserId: number): Promise<string | undefined>;
   claimChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number): Promise<boolean>;
   completeChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number): Promise<void>;
   releaseChannelEvent(provider: ChannelProvider, eventId: string): Promise<void>;
@@ -3713,6 +3715,10 @@ class RedisBackend implements Backend {
     const userId = Number(raw);
     return Number.isSafeInteger(userId) && userId > 0 ? userId : undefined;
   }
+  async getWebAuthUserIdForTelegram(telegramUserId: number): Promise<string | undefined> {
+    const raw = await this.r.get(this.telegramWebUserKey(telegramUserId));
+    return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? raw : undefined;
+  }
   async claimChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number): Promise<boolean> {
     if (await this.r.exists(this.channelEventDoneKey(provider, eventId))) return false;
     return (await this.r.set(this.channelEventKey(provider, eventId), "1", "EX", Math.max(30, Math.min(15 * 60, ttlSeconds)), "NX")) === "OK";
@@ -4701,6 +4707,7 @@ class MemoryBackend implements Backend {
     return { status: "linked", ...source };
   }
   async getTelegramUserIdForWebAuth(webAuthUserId: string) { return this.telegramUserByWebAuth.get(webAuthUserId); }
+  async getWebAuthUserIdForTelegram(telegramUserId: number) { return this.webAuthByTelegramUser.get(telegramUserId); }
   async claimChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number) {
     const key = `${provider}:${eventId}`;
     const completed = this.completedChannelEvents.get(key);
@@ -10214,6 +10221,12 @@ export async function getTelegramUserIdForWebAuth(webAuthUserId: string): Promis
   return owner && owner.length <= 200 ? backend.getTelegramUserIdForWebAuth(owner) : undefined;
 }
 
+export async function getWebAuthUserIdForTelegram(telegramUserId: number): Promise<string | undefined> {
+  return Number.isSafeInteger(telegramUserId) && telegramUserId > 0
+    ? backend.getWebAuthUserIdForTelegram(telegramUserId)
+    : undefined;
+}
+
 /**
  * Return the exact legacy web-session owners explicitly imported into this
  * Telegram owner.  This is used only to reconcile provider state created
@@ -10223,9 +10236,19 @@ export async function getTelegramUserIdForWebAuth(webAuthUserId: string): Promis
 export async function listLinkedWebSessionSourceUserIds(userId: number): Promise<number[]> {
   if (!Number.isSafeInteger(userId) || userId <= 0) return [];
   const session = await getSession(userId);
-  return [...new Set((session.linkedWebSessionImports ?? [])
+  const importedSourceUserIds = (session.linkedWebSessionImports ?? [])
     .map((item) => item.sourceUserId)
-    .filter((sourceUserId): sourceUserId is number => Number.isSafeInteger(sourceUserId) && sourceUserId > 0 && sourceUserId !== userId))];
+    .filter((sourceUserId): sourceUserId is number => Number.isSafeInteger(sourceUserId) && sourceUserId > 0 && sourceUserId !== userId);
+  // The link mapping is durable before the session-history import completes.
+  // Provider account discovery must use that mapping immediately; otherwise a
+  // dashboard request can see a valid connection while Pulse still reports 0/0
+  // until a later reconciliation worker happens to finish.
+  const webAuthUserId = await getWebAuthUserIdForTelegram(userId);
+  const linkedWebUserId = webAuthUserId ? stableSdkUserId(webAuthUserId, "web") : undefined;
+  return [...new Set([
+    ...importedSourceUserIds,
+    ...(linkedWebUserId && linkedWebUserId !== userId ? [linkedWebUserId] : []),
+  ])];
 }
 
 export async function claimChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds = 24 * 60 * 60): Promise<boolean> {

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { addRecallMeeting, claimAgentUpgrade, completeMissionStep, createMission, finalizeMissionIfReady, getApproval, getMission, getSession, initStore, listAgentRuns, listMissions, listTasks, saveSession, setApprovalStatus, startMission, updateMeetingRepresentativeProfile } from "../src/store.js";
+import { addRecallMeeting, claimAgentUpgrade, completeMissionStep, createMission, createWebTelegramLinkCode, finalizeMissionIfReady, getApproval, getMission, getSession, initStore, listAgentRuns, listMissions, listTasks, redeemWebTelegramLinkCode, saveSession, setApprovalStatus, startMission, updateMeetingRepresentativeProfile } from "../src/store.js";
+import { stableSdkUserId } from "../src/sdkIdentity.js";
 import { appendPreviewLinks, cleanModelText, getReconnectUrl, getToolkitStatesPage, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, searchTools, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { formatAgentUpgradeNotice, loadAgentUpgrade } from "../src/upgradeNotice.js";
 import { config } from "../src/config.js";
@@ -1920,6 +1921,35 @@ test("resolves provider accounts from the exact linked web owner without exposin
   assert.deepEqual(requestedUsers, [`user_${linkedUserId}`, `user_${sourceUserId}`]);
   assert.deepEqual(Object.keys(accounts[0] ?? {}).sort(), ["alias", "createdAt", "id", "status", "toolkit", "updatedAt"].sort());
   assert.equal((accounts[0] as { composioOwnerUserId?: number }).composioOwnerUserId, sourceUserId);
+});
+
+test("resolves linked web accounts before the history-import marker is written", async () => {
+  await initStore({ memoryOnly: true });
+  const webAuthUserId = "web-pulse-race@example.test";
+  const sourceUserId = stableSdkUserId(webAuthUserId, "web");
+  const telegramUserId = 830021;
+  const link = await createWebTelegramLinkCode(webAuthUserId, { sourceUserId });
+  assert.equal(await redeemWebTelegramLinkCode(link.code, telegramUserId), "linked");
+
+  const linkedSession = await getSession(telegramUserId);
+  linkedSession.linkedWebSessionImports = [];
+  await saveSession(telegramUserId, linkedSession);
+
+  const requestedUsers: string[] = [];
+  setAgentDependenciesForTests({ composio: {
+    connectedAccounts: {
+      list: async ({ userIds }: { userIds: string[] }) => {
+        requestedUsers.push(...userIds);
+        return userIds[0] === `user_${sourceUserId}`
+          ? { items: [{ id: "ca_linked_before_import", toolkit: { slug: "gmail" }, status: "ACTIVE" }] }
+          : { items: [] };
+      },
+    },
+  } });
+
+  const accounts = await listConnectedAccounts(telegramUserId);
+  assert.deepEqual(requestedUsers, [`user_${telegramUserId}`, `user_${sourceUserId}`]);
+  assert.equal(accounts[0]?.id, "ca_linked_before_import");
 });
 
 test("reconnects one expired connected account by its existing Composio ID", async () => {

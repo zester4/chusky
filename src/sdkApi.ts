@@ -4,6 +4,7 @@ import { streamSSE } from "hono/streaming";
 import { Readable } from "node:stream";
 import { cors } from "hono/cors";
 import { config } from "./config.js";
+import { stableSdkUserId } from "./sdkIdentity.js";
 import type { DurableObjectMetadata } from "./neonDurableState.js";
 import { promoteSdkFileUpload } from "./sdkFilePromotion.js";
 import { getAuth } from "./auth.js";
@@ -395,8 +396,7 @@ async function auditDashboardProjectWrite(c: any, requestId: string): Promise<vo
 async function notifyWebhooks(userId: number, hooks: Array<{ id: string; url: string; secretCiphertext: string; disabledAt?: number }>, type: string, data: unknown): Promise<void> { await Promise.all(hooks.filter((hook) => !hook.disabledAt).map((hook) => enqueueSdkWebhook(userId, hook, type, data))); }
 
 function userIdFor(externalId: string, projectId: string): number {
-  // Session IDs are internal only; deterministic separation keeps SDK users isolated.
-  return Number.parseInt(createHash("sha256").update(`sdk:${projectId}:${externalId}`).digest("hex").slice(0, 12), 16);
+  return stableSdkUserId(externalId, projectId);
 }
 
 type SdkPrincipal = { projectId: string; scopes: string[]; root: boolean; organizationId?: string };
