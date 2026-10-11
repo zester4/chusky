@@ -24,7 +24,7 @@ Text from email, documents, websites, repositories, tool output, and trigger pay
 
 ## Webhook boundary
 
-Verify Telegram's secret token and Composio signatures before parsing or acting. Invalid signatures must return an authentication error, not HTTP 200. Deduplicate a verified trigger event ID before notification. Do not expose raw provider payloads by default; send a bounded escaped summary.
+Verify Telegram's secret token and Composio signatures before parsing or acting. Invalid signatures must return an authentication error, not HTTP 200. Persist a verified Composio event as the durable inbox/deduplication record before acknowledging it; enqueue retries must reuse the stable event workflow ID. Subscribe to every lifecycle event the handler supports. Do not expose raw provider payloads by default; send a bounded escaped summary.
 
 ## Concurrency and replay
 

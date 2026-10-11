@@ -1831,6 +1831,7 @@ interface Backend {
   listMeetingContacts(userId: number, limit: number): Promise<MeetingContactRecord[]>;
   deleteMeetingContact(userId: number, id: string): Promise<boolean>;
   createTriggerEvent(record: TriggerEventRecord): Promise<TriggerEventRecord>;
+  createTriggerEventIfAbsent(record: TriggerEventRecord): Promise<{ record: TriggerEventRecord; created: boolean }>;
   getTriggerEvent(eventId: string): Promise<TriggerEventRecord | undefined>;
   updateTriggerEvent(eventId: string, patch: Partial<TriggerEventRecord>): Promise<TriggerEventRecord | undefined>;
   listTriggerEvents(userId: number, limit?: number): Promise<TriggerEventRecord[]>;
@@ -2845,6 +2846,21 @@ class RedisBackend implements Backend {
     transaction.expire(index, 30 * 24 * 60 * 60);
     await transaction.exec();
     return (await this.getTriggerEvent(record.eventId)) ?? record;
+  }
+  async createTriggerEventIfAbsent(record: TriggerEventRecord): Promise<{ record: TriggerEventRecord; created: boolean }> {
+    const key = this.triggerEventKey(record.eventId);
+    const index = this.triggerEventsIndexKey(record.userId);
+    const created = Number(await this.r.eval(`
+      local inserted = redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2], 'NX')
+      if not inserted then return 0 end
+      redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', ARGV[3])
+      redis.call('ZADD', KEYS[2], ARGV[4], ARGV[5])
+      redis.call('EXPIRE', KEYS[2], ARGV[2])
+      return 1
+    `, 2, key, index, JSON.stringify(record), 30 * 24 * 60 * 60, Date.now() - 30 * 24 * 60 * 60 * 1000, record.createdAt, record.eventId)) === 1;
+    const stored = await this.getTriggerEvent(record.eventId);
+    if (!stored) throw new Error("Trigger event persistence did not return the saved record");
+    return { record: stored, created };
   }
   async getTriggerEvent(eventId: string): Promise<TriggerEventRecord | undefined> {
     const raw = await this.r.get(this.triggerEventKey(eventId));
@@ -4213,6 +4229,12 @@ class MemoryBackend implements Backend {
     this.jobs.set(userId, [...jobs.filter((item) => item.id !== job.id), job].slice(-100));
   }
   async createTriggerEvent(record: TriggerEventRecord) { return this.triggerEvents.get(record.eventId) ?? (this.triggerEvents.set(record.eventId, record), record); }
+  async createTriggerEventIfAbsent(record: TriggerEventRecord) {
+    const existing = this.triggerEvents.get(record.eventId);
+    if (existing) return { record: existing, created: false };
+    this.triggerEvents.set(record.eventId, record);
+    return { record, created: true };
+  }
   async getTriggerEvent(eventId: string) { return this.triggerEvents.get(eventId); }
   async updateTriggerEvent(eventId: string, patch: Partial<TriggerEventRecord>) {
     const current = this.triggerEvents.get(eventId);
@@ -8740,30 +8762,11 @@ export async function revokeCliDeviceByName(userId: number, name: string): Promi
   return device ? backend.revokeCliDevice(userId, device.tokenHash) : false;
 }
 
-const seenTriggerEvents = new Map<string, number>();
-export async function claimTriggerEvent(eventId: string, ttlSeconds = 86400): Promise<boolean> {
-  const key = `chuck:event:${eventId}`;
-  if (config.redisUrl && backend instanceof RedisBackend) {
-    const redis = (backend as any).r as Redis;
-    return (await redis.set(key, "1", "EX", ttlSeconds, "NX")) === "OK";
-  }
-  const now = Date.now();
-  for (const [id, exp] of seenTriggerEvents) if (exp <= now) seenTriggerEvents.delete(id);
-  if (seenTriggerEvents.has(eventId)) return false;
-  seenTriggerEvents.set(eventId, now + ttlSeconds * 1000);
-  return true;
-}
-export async function releaseTriggerEvent(eventId: string): Promise<void> {
-  const key = `chuck:event:${eventId}`;
-  if (config.redisUrl && backend instanceof RedisBackend) {
-    await (backend as any).r.del(key);
-    return;
-  }
-  seenTriggerEvents.delete(eventId);
-}
-
 export async function createTriggerEvent(record: TriggerEventRecord): Promise<TriggerEventRecord> {
   return backend.createTriggerEvent(record);
+}
+export async function createTriggerEventIfAbsent(record: TriggerEventRecord): Promise<{ record: TriggerEventRecord; created: boolean }> {
+  return backend.createTriggerEventIfAbsent(record);
 }
 export async function getTriggerEvent(eventId: string): Promise<TriggerEventRecord | undefined> {
   return backend.getTriggerEvent(eventId);

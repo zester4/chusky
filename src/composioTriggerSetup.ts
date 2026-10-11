@@ -1,4 +1,9 @@
 export const COMPOSIO_TRIGGER_EVENT = "composio.trigger.message";
+export const COMPOSIO_LIFECYCLE_EVENTS = [
+  "composio.connected_account.expired",
+  "composio.trigger.disabled",
+] as const;
+export const COMPOSIO_WEBHOOK_EVENTS = [COMPOSIO_TRIGGER_EVENT, ...COMPOSIO_LIFECYCLE_EVENTS] as const;
 export const COMPOSIO_TRIGGER_WEBHOOK_VERSION = "V3";
 
 type TriggerSubscriptionClient = {
@@ -38,7 +43,7 @@ export async function reconcileComposioTriggerSubscription(
 
   const subscription = await triggers.setWebhookSubscription({
     webhookUrl: parsed.toString(),
-    enabledEvents: [COMPOSIO_TRIGGER_EVENT],
+    enabledEvents: [...COMPOSIO_WEBHOOK_EVENTS],
     version: COMPOSIO_TRIGGER_WEBHOOK_VERSION,
   });
   if (subscription.version !== COMPOSIO_TRIGGER_WEBHOOK_VERSION) {
@@ -50,13 +55,14 @@ export async function reconcileComposioTriggerSubscription(
       error: `Composio returned webhook payload version ${subscription.version}, expected V3`,
     };
   }
-  if (!subscription.enabledEvents.includes(COMPOSIO_TRIGGER_EVENT)) {
+  const missingEvents = COMPOSIO_WEBHOOK_EVENTS.filter((event) => !subscription.enabledEvents.includes(event));
+  if (missingEvents.length) {
     return {
       status: "misconfigured",
       webhookUrl: subscription.webhookUrl,
       subscriptionId: subscription.id,
       version: subscription.version,
-      error: "Composio trigger-message delivery is not enabled",
+      error: `Composio webhook events are not enabled: ${missingEvents.join(", ")}`,
     };
   }
   return {

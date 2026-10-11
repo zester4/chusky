@@ -14,7 +14,7 @@ import { listAttentionRecords } from "./store.js";
 import { updateAttentionRecord } from "./store.js";
 import type { AttentionCandidateRecord, AutonomyProfileRecord, DeliveryPreferenceRecord, ObservationRecord, AutonomyWatchRecord } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
-import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
+import { initStore, getTelegramChatId, createTriggerEventIfAbsent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -3632,17 +3632,43 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           // their signed owner identity is still required, but they must not
           // be mistaken for an instruction to execute an external action.
           if (event.eventType === "composio.trigger.message" && (!triggerId || !session.triggerIds.includes(triggerId))) return c.json({ ok: false, error: "trigger owner is not verified" }, 403);
-          if (!(await claimTriggerEvent(event.eventId))) return c.json({ ok: true, duplicate: true });
-          const preparation = await persistCalendarMeetingPreparation(numericUserId, event.eventId, event.triggerSlug, event.payload);
           const summary = safeTriggerSummary(event);
+          const intake = await createTriggerEventIfAbsent({
+            eventId: event.eventId,
+            userId: numericUserId,
+            eventType: event.eventType,
+            ...(triggerId ? { triggerId } : {}),
+            ...(event.connectionId ? { connectionId: event.connectionId } : {}),
+            triggerSlug: event.triggerSlug,
+            summary,
+            status: "queued",
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          });
+          const record = intake.record;
+          if (record.userId !== numericUserId || record.triggerSlug !== event.triggerSlug
+            || (record.eventType && record.eventType !== event.eventType)
+            || (record.triggerId && record.triggerId !== triggerId)) {
+            return c.json({ ok: false, error: "trigger owner or event identity is not verified" }, 403);
+          }
+          // The event record itself is the durable inbox/deduplication claim.
+          // An event without a workflow ID is safe to resume after a process
+          // crash: QStash receives the same deterministic workflowRunId.
+          if (!intake.created && (record.workflowRunId || record.status !== "queued")) return c.json({ ok: true, duplicate: true });
+          const preparation = await persistCalendarMeetingPreparation(numericUserId, event.eventId, event.triggerSlug, event.payload);
           const operating = await recordOperatingSignal(numericUserId, {
             eventId: event.eventId,
             triggerSlug: event.triggerSlug,
             summary,
             ...(preparation ? { calendarMeeting: { id: preparation.id, title: preparation.title, lifecycle: preparation.lifecycle, startAt: preparation.startAt } } : {}),
           });
-          const record = await createTriggerEvent({ eventId: event.eventId, userId: numericUserId, eventType: event.eventType, ...(triggerId ? { triggerId } : {}), ...(event.connectionId ? { connectionId: event.connectionId } : {}), triggerSlug: event.triggerSlug, summary, status: "queued", operatingAction: operating.action, operatingReason: operating.reason, operatingObservationId: operating.observationId, ...(operating.commitmentId ? { operatingCommitmentId: operating.commitmentId } : {}), createdAt: Date.now(), updatedAt: Date.now() });
-          if (record.status !== "queued") return c.json({ ok: true, duplicate: true });
+          await updateTriggerEvent(event.eventId, {
+            operatingAction: operating.action,
+            operatingReason: operating.reason,
+            operatingObservationId: operating.observationId,
+            ...(operating.commitmentId ? { operatingCommitmentId: operating.commitmentId } : {}),
+            error: undefined,
+          });
           try {
             const resumedMissions = await resumeMissionsFromComposioEvent(numericUserId, event.eventId);
             const queued = await workflowClient().trigger({ url: triggerWorkflowUrl(), body: { eventId: event.eventId, userId: numericUserId }, workflowRunId: `trigger-${event.eventId}`, retries: 3 });
@@ -3650,23 +3676,31 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             logger.info({ triggerSlug: event.triggerSlug, userId: numericUserId, workflowRunId: queued.workflowRunId, resumedMissions }, "Trigger queued");
             return c.json({ ok: true, queued: true, eventId: event.eventId, workflowRunId: queued.workflowRunId, ...(resumedMissions ? { resumedMissions } : {}) }, 202);
           } catch (error) {
-            await releaseTriggerEvent(event.eventId);
-            await updateTriggerEvent(event.eventId, { status: "failed", error: String(error).slice(0, 2000) });
-            throw error;
+            await updateTriggerEvent(event.eventId, { status: "queued", error: "Trigger workflow could not be queued; Composio may safely retry this event." });
+            logger.error({ errorName: error instanceof Error ? error.name : "UnknownError", userId: numericUserId, eventId: event.eventId }, "Trigger workflow enqueue failed");
+            c.header("Retry-After", "30");
+            return c.json({ ok: false, error: "temporary trigger queue failure", retryable: true }, 503);
           }
         } else if (config.composioWebhookSecret) return c.json({ ok: false, error: "unsupported trigger webhook" }, 400);
         return c.json({ ok: true });
       } catch (e) {
         const sessionFailure = classifyTriggerWebhookSessionFailure(e);
         if (sessionFailure) {
-          logger.error({ err: e }, "Trigger deferred because durable session documents are incomplete");
+          logger.error({ errorName: e instanceof Error ? e.name : "UnknownError" }, "Trigger deferred because durable session documents are incomplete");
           c.header("Retry-After", String(sessionFailure.retryAfterSeconds));
           return c.json(sessionFailure.body, sessionFailure.status);
         }
-        logger.error({ err: e }, "Trigger webhook error");
         const message = String(e);
-        const status = e instanceof TriggerWebhookVerificationError || Boolean(config.composioWebhookSecret && /signature|verify|secret|webhook/i.test(message)) ? 401 : 400;
-        return c.json({ ok: false, error: "invalid trigger webhook" }, status);
+        const status = e instanceof TriggerWebhookVerificationError || Boolean(config.composioWebhookSecret && /signature|verify|secret/i.test(message))
+          ? 401
+          : /invalid JSON|no event ID|unsupported trigger webhook/i.test(message)
+            ? 400
+            : /trigger owner is not verified/i.test(message)
+              ? 403
+              : 503;
+        if (status === 503) c.header("Retry-After", "30");
+        logger.error({ errorName: e instanceof Error ? e.name : "UnknownError", status }, "Trigger webhook processing failed");
+        return c.json({ ok: false, error: status === 503 ? "temporary trigger processing failure" : "invalid trigger webhook", retryable: status === 503 }, status);
       }
     });
 
