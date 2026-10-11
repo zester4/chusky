@@ -1798,7 +1798,7 @@ test("company telemetry is visible across project callers but isolated by worksp
 
 test("linked verified dashboard users can request and list phone calls without exposing destinations", async () => {
   (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
-  Object.assign(config as unknown as Record<string, unknown>, { twilioVoiceEnabled: true, twilioAccountSid: "AC123", twilioAuthToken: "token", twilioCallerId: "+16452437121", twilioWebhookBaseUrl: "https://chusky.example", twilioMediaStreamUrl: "wss://voice.example/twilio/stream" });
+  Object.assign(config as unknown as Record<string, unknown>, { twilioVoiceEnabled: true, twilioAccountSid: "AC123", twilioAuthToken: "token", twilioCallerId: "+16452437121", twilioWebhookBaseUrl: "https://chusky.example", twilioMediaStreamUrl: "wss://voice.example/twilio/stream", twilioMediaBridgeSecret: "bridge-secret" });
   setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
   const link = await createWebTelegramLinkCode("alice");
   assert.equal(await redeemWebTelegramLinkCode(link.code, 810099), "linked");
@@ -1845,10 +1845,10 @@ test("Bland readiness controls dashboard call availability and the selected prov
 });
 
 test("SDK callers can use scoped voice and call resources with idempotent requests", async () => {
-  const keys = ["twilioVoiceEnabled", "twilioAccountSid", "twilioAuthToken", "twilioCallerId", "twilioWebhookBaseUrl", "twilioMediaStreamUrl"] as const;
+  const keys = ["twilioVoiceEnabled", "twilioAccountSid", "twilioAuthToken", "twilioCallerId", "twilioWebhookBaseUrl", "twilioMediaStreamUrl", "twilioMediaBridgeSecret"] as const;
   const original = Object.fromEntries(keys.map((key) => [key, config[key]]));
   try {
-    Object.assign(config, { twilioVoiceEnabled: true, twilioAccountSid: "AC123", twilioAuthToken: "token", twilioCallerId: "+16452437121", twilioWebhookBaseUrl: "https://chusky.example", twilioMediaStreamUrl: "wss://voice.example/twilio/stream" });
+    Object.assign(config, { twilioVoiceEnabled: true, twilioAccountSid: "AC123", twilioAuthToken: "token", twilioCallerId: "+16452437121", twilioWebhookBaseUrl: "https://chusky.example", twilioMediaStreamUrl: "wss://voice.example/twilio/stream", twilioMediaBridgeSecret: "bridge-secret" });
     const api = app();
     const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "sdk-caller", "Content-Type": "application/json" };
     const voices = await api.fetch(new Request("http://local/v1/account/voice-options", { headers }));

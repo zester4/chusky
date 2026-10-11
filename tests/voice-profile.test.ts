@@ -48,7 +48,7 @@ test("Twilio persists the approved normalized profile with the call", async () =
     profile: { identity: "Maya", tone: "warm", capabilities: ["scratchpad_lookup"] },
   }, {
     enabled: true, accountSid: "AC123", authToken: "auth", callerId: "+16452437121",
-    webhookBaseUrl: "https://chusky.example", mediaStreamUrl: "wss://voice.example/twilio/stream",
+    webhookBaseUrl: "https://chusky.example", mediaStreamUrl: "wss://voice.example/twilio/stream", mediaBridgeSecret: "bridge-secret",
     createCall: async () => ({ sid: "CAprofile" }),
   });
   assert.deepEqual((await getPhoneCall(502, call.id))?.voiceProfile, {
@@ -60,7 +60,7 @@ test("business calls carry a separate call profile", async () => {
   await initStore({ memoryOnly: true });
   const call = await startTwilioCallForUser(503, { phoneNumber: "+15550001", purpose: "Collections", callProfile: "business" }, {
     enabled: true, accountSid: "AC123", authToken: "auth", callerId: "+16452437121",
-    webhookBaseUrl: "https://chusky.example", mediaStreamUrl: "wss://voice.example/twilio/stream", createCall: async () => ({ sid: "CA-business" }),
+    webhookBaseUrl: "https://chusky.example", mediaStreamUrl: "wss://voice.example/twilio/stream", mediaBridgeSecret: "bridge-secret", createCall: async () => ({ sid: "CA-business" }),
   });
   assert.equal(call.callProfile, "business");
 });

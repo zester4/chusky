@@ -8,6 +8,8 @@ import { normalizeVoiceCallProfile, type CallProfile, type VoiceCallProfile, typ
 export interface TwilioCallInput { phoneNumber: string; purpose: string; profile?: VoiceCallProfileInput; callProfile?: CallProfile; continuityFromCallId?: string; }
 export interface TwilioCallDependencies {
   enabled: boolean; accountSid: string; authToken: string; callerId: string; webhookBaseUrl: string; mediaStreamUrl: string;
+  /** Required for outbound calls because the public TwiML route signs the bridge ticket with it. */
+  mediaBridgeSecret?: string;
   machineDetection?: "Enable" | "DetectMessageEnd";
   voicemailMessage?: string;
   createCall?: (input: { to: string; from: string; url: string; statusCallback: string; machineDetection?: "Enable" | "DetectMessageEnd" }) => Promise<{ sid: string }>;
@@ -53,6 +55,7 @@ export function twilioVoicemailTwiML(message: string): string {
 export async function controlTwilioCallForUser(userId: number, callId: string, input: TwilioCallControlInput, options: TwilioCallDependencies = {
   enabled: config.twilioVoiceEnabled, accountSid: config.twilioAccountSid, authToken: config.twilioAuthToken,
   callerId: config.twilioCallerId, webhookBaseUrl: config.twilioWebhookBaseUrl, mediaStreamUrl: config.twilioMediaStreamUrl,
+  mediaBridgeSecret: config.twilioMediaBridgeSecret,
 }): Promise<PhoneCallRecord> {
   validate(options);
   if (!/^twc_[0-9a-f-]{36}$/i.test(callId)) throw new Error("Invalid Twilio call ID");
@@ -81,19 +84,21 @@ function httpsUrl(value: string, label: string): string {
   if (!/^https:\/\//i.test(result)) throw new Error(`${label} must be an HTTPS URL`);
   return result;
 }
-function validate(options: TwilioCallDependencies): void {
+function validate(options: TwilioCallDependencies, requireBridgeSecret = false): void {
   if (!options.enabled) throw new Error("Phone calling is disabled. Set TWILIO_VOICE_ENABLED=true after completing Twilio verification and media-bridge setup.");
   if (!options.accountSid || !options.authToken || !options.callerId) throw new Error("TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_CALLER_ID are required");
   if (!/^\+[1-9]\d{7,14}$/.test(options.callerId)) throw new Error("TWILIO_CALLER_ID must be an E.164 phone number");
   httpsUrl(options.webhookBaseUrl, "TWILIO_WEBHOOK_BASE_URL");
   if (!/^wss:\/\//i.test(options.mediaStreamUrl)) throw new Error("TWILIO_MEDIA_STREAM_URL must be a WSS URL");
+  if (requireBridgeSecret && !options.mediaBridgeSecret?.trim()) throw new Error("TWILIO_MEDIA_BRIDGE_SECRET is required for outbound phone calls");
 }
 
 export function isTwilioVoiceConfigured(options: Omit<TwilioCallDependencies, "createCall"> = {
   enabled: config.twilioVoiceEnabled, accountSid: config.twilioAccountSid, authToken: config.twilioAuthToken,
   callerId: config.twilioCallerId, webhookBaseUrl: config.twilioWebhookBaseUrl, mediaStreamUrl: config.twilioMediaStreamUrl,
+  mediaBridgeSecret: config.twilioMediaBridgeSecret,
 }): boolean {
-  try { validate(options); return true; } catch { return false; }
+  try { validate(options, true); return true; } catch { return false; }
 }
 
 /** Validates the exact user-reviewed arguments before an approval is created. */
@@ -108,9 +113,10 @@ export function validateTwilioCallInput(input: TwilioCallInput): { phoneNumber: 
 export async function startTwilioCallForUser(userId: number, input: TwilioCallInput, options: TwilioCallDependencies = {
   enabled: config.twilioVoiceEnabled, accountSid: config.twilioAccountSid, authToken: config.twilioAuthToken,
   callerId: config.twilioCallerId, webhookBaseUrl: config.twilioWebhookBaseUrl, mediaStreamUrl: config.twilioMediaStreamUrl,
+  mediaBridgeSecret: config.twilioMediaBridgeSecret,
   ...(config.twilioVoicemailEnabled ? { machineDetection: "DetectMessageEnd" as const, voicemailMessage: config.twilioVoicemailMessage } : {}),
 }): Promise<PhoneCallRecord> {
-  validate(options);
+  validate(options, true);
   if (options.voicemailMessage !== undefined && (!options.voicemailMessage.trim() || options.voicemailMessage.length > 500)) throw new Error("voicemailMessage must be 1-500 characters");
   const { phoneNumber, purpose, profile, callProfile } = validateTwilioCallInput(input);
   const continuity = await resolveVoiceContinuity(userId, input.continuityFromCallId);

@@ -13,6 +13,7 @@ const options = {
   callerId: "+16452437121",
   webhookBaseUrl: "https://chusky.example",
   mediaStreamUrl: "wss://voice.example/twilio/stream",
+  mediaBridgeSecret: "bridge-secret",
 };
 
 test("Twilio call uses signed-callback URLs and retains no credentials", async () => {
@@ -40,6 +41,15 @@ test("Twilio refuses provider work before required config is present", async () 
     ...options, mediaStreamUrl: "", createCall: async () => { called = true; return { sid: "CA123" }; },
   }), /TWILIO_MEDIA_STREAM_URL/);
   assert.equal(called, false);
+});
+
+test("Twilio refuses to dial when the bridge callback cannot authenticate", async () => {
+  let called = false;
+  await assert.rejects(() => startTwilioCallForUser(68, { phoneNumber: "+15550001", purpose: "Test" }, {
+    ...options, mediaBridgeSecret: "", createCall: async () => { called = true; return { sid: "CA123" }; },
+  }), /TWILIO_MEDIA_BRIDGE_SECRET/);
+  assert.equal(called, false);
+  assert.deepEqual(await listPhoneCalls(68), []);
 });
 
 test("Twilio call controls validate and render safe DTMF and transfer TwiML", () => {
