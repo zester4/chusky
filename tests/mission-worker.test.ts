@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { boundedMissionHistory, captureMissionSliceState, deriveMissionToolHints, missionHasTimerWakeContinuation, missionNeedsLifecycleCloseoutNudge, missionNoProgressNextAction, missionPostWakeNextAction, missionSliceHasPersistedProgress, missionStepInstruction, missionWakeNeedsRecovery, missionWorkerToolAllowlist, MISSION_WORKER_CONTROL_TOOLS } from "../src/missionWorker.js";
+import { boundedMissionHistory, captureMissionSliceState, deriveMissionToolHints, missionHasTimerWakeContinuation, missionNeedsLifecycleCloseoutNudge, missionNoProgressNextAction, missionPostWakeNextAction, missionSliceHasPersistedProgress, missionStepInstruction, missionTimerResumeStep, missionWakeNeedsRecovery, missionWorkerToolAllowlist, MISSION_WORKER_CONTROL_TOOLS } from "../src/missionWorker.js";
 
 test("bounded mission history keeps only a recent bounded text frontier", () => {
   const history = Array.from({ length: 12 }, (_, index) => ({ role: index % 2 ? "assistant" as const : "user" as const, content: `message-${index}-${"x".repeat(900)}` }));
@@ -98,15 +98,44 @@ test("a supervisor-resumed timer remains a post-wake continuation for the same s
   assert.equal(missionHasTimerWakeContinuation(mission, "second_readback"), false);
 });
 
+test("a timer wake follows the updated active frontier when its durable task still names the completed step", () => {
+  const mission = {
+    status: "running" as const,
+    currentStepId: "resume-check",
+    activeStepIds: ["resume-check"],
+    steps: [
+      { id: "initialize", status: "completed" as const },
+      { id: "resume-check", status: "running" as const },
+    ],
+    events: [{ id: "wake", type: "resumed" as const, message: "Timer wait reached 2026-10-01T19:14:04.000Z.", at: 1, stepId: "resume-check" }],
+  };
+  assert.equal(missionHasTimerWakeContinuation(mission, "initialize"), true);
+});
+
 test("post-wake actions are step-specific even when the model supplied plan-level prose", () => {
   const action = missionPostWakeNextAction(
     { title: "Second readback", objective: "Read Sheet1!A1:C3 and compare it with the first readback." },
-    "Continue the remaining mission plan.",
+    "After the durable wait wakes, execute the completed initialization step again.",
   );
   assert.match(action, /Second readback/);
   assert.match(action, /Read Sheet1!A1:C3/);
   assert.match(action, /Do not call CHUCK_TASK_WAIT again/);
-  assert.match(action, /Continue the remaining mission plan/);
+  assert.doesNotMatch(action, /completed initialization step/);
+  assert.match(action, /Do not repeat completed steps/);
+});
+
+test("timer resume targets the latest active step after the original task step completed", () => {
+  const mission = {
+    currentStepId: "wait-and-readback",
+    activeStepIds: ["wait-and-readback"],
+    steps: [
+      { id: "initialize", title: "Initialize", objective: "Create initial checkpoint", status: "completed" as const },
+      { id: "wait-and-readback", title: "Wait and verify", objective: "Resume after timer and read state", status: "running" as const },
+    ],
+  };
+  assert.equal(missionTimerResumeStep(mission, "initialize")?.id, "wait-and-readback");
+  assert.equal(missionTimerResumeStep(mission, "wait-and-readback")?.id, "wait-and-readback");
+  assert.equal(missionTimerResumeStep({ ...mission, activeStepIds: [], currentStepId: undefined }), undefined);
 });
 
 test("only a zero-tool timer wake receives an automatic recovery turn", () => {

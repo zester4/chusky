@@ -76,6 +76,8 @@ export function diagnoseMission(input: { mission: MissionRecord; tasks: TaskReco
   const mission = input.mission;
   const missionTasks = input.tasks.filter((task) => task.missionId === mission.id);
   const ready = readySteps(mission);
+  const waitingStep = mission.waiting?.stepId ? mission.steps.find((step) => step.id === mission.waiting?.stepId) : undefined;
+  const waitingStepMismatch = Boolean(mission.waiting?.stepId && (!waitingStep || waitingStep.status !== "running" || !(mission.activeStepIds ?? []).includes(waitingStep.id)));
   const reasons: string[] = [];
   const nextActions: string[] = [];
   const pendingCompensations = (input.compensations ?? []).filter((item) => item.missionId === mission.id && item.status === "pending").length;
@@ -140,6 +142,10 @@ export function diagnoseMission(input: { mission: MissionRecord; tasks: TaskReco
   if (waiting) {
     reasons.push(waiting.overdue ? "wait_is_due_or_expired" : `waiting_for_${waiting.kind}`);
     nextActions.push(waiting.kind === "provider_event" ? "Deliver the exact signed provider event, or inspect the provider state if the event is lost." : waiting.kind === "approval" ? "Approve or deny the pending mission action." : waiting.kind === "timer" ? "Resume the mission after the durable timer wake." : "Provide the requested human input, then resume the mission.");
+    if (waitingStepMismatch) {
+      reasons.push("mission_wait_step_mismatch");
+      nextActions.push("Repair the saved wait continuation: its step is missing, completed, or no longer active.");
+    }
   } else if (mission.status === "running" && !queuedOrRunning.length && ready.length) {
     reasons.push("running_without_a_live_task");
     nextActions.push("Run mission recovery to schedule the dependency-ready step.");
@@ -148,7 +154,7 @@ export function diagnoseMission(input: { mission: MissionRecord; tasks: TaskReco
     reasons.push("mission_budget_exhausted");
     nextActions.push("Reduce the remaining plan or request an approved budget extension before resuming.");
   }
-  const health: MissionDoctorReport["health"] = mission.status === "blocked" || mission.status === "failed" || blockedCompensations ? "blocked" : waiting ? "waiting" : reasons.length ? "stalled" : "healthy";
-  const summary = health === "healthy" ? "Mission has a live executable path." : health === "waiting" ? `Mission is waiting for ${waiting?.kind ?? "an external condition"}.` : health === "stalled" ? "Mission is active but has no healthy forward execution path." : "Mission requires intervention before it can safely continue.";
+  const health: MissionDoctorReport["health"] = mission.status === "blocked" || mission.status === "failed" || blockedCompensations ? "blocked" : waitingStepMismatch ? "stalled" : waiting ? "waiting" : reasons.length ? "stalled" : "healthy";
+  const summary = waitingStepMismatch ? "Mission wait points to a step that is no longer active; repair the saved continuation." : health === "healthy" ? "Mission has a live executable path." : health === "waiting" ? `Mission is waiting for ${waiting?.kind ?? "an external condition"}.` : health === "stalled" ? "Mission is active but has no healthy forward execution path." : "Mission requires intervention before it can safely continue.";
   return { missionId: mission.id, status: mission.status, generatedAt: now, health, summary, reasons: [...new Set(reasons)].slice(0, 20), nextActions: [...new Set(nextActions)].slice(0, 10), readyStepIds: ready.slice(0, 200), activeStepIds: (mission.activeStepIds ?? []).slice(0, 200), ...(waiting ? { waiting } : {}), tasks, compensation: { pending: pendingCompensations, blocked: blockedCompensations }, budget: reportBudget, ...(mission.workSchedule ? { workSchedule: mission.workSchedule } : {}) };
 }

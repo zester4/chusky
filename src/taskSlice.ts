@@ -10,7 +10,7 @@ import { requestMissionDurationApproval } from "./missionApproval.js";
 import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
 import { executeScheduledMeetingFollowUp } from "./meetings/outcome.js";
 import { decideAutonomyStep } from "./autonomy/decisionLoop.js";
-import { boundedMissionHistory, captureMissionSliceState, missionHasTimerWakeContinuation, missionNeedsLifecycleCloseoutNudge, missionPostWakeNextAction, missionStepInstruction, missionWakeNeedsRecovery, missionWorkerToolAllowlist } from "./missionWorker.js";
+import { boundedMissionHistory, captureMissionSliceState, missionHasTimerWakeContinuation, missionNeedsLifecycleCloseoutNudge, missionPostWakeNextAction, missionStepInstruction, missionTimerResumeStep, missionWakeNeedsRecovery, missionWorkerToolAllowlist } from "./missionWorker.js";
 import { missionToolCallCount, settleMissionSlice } from "./missionSlice.js";
 import { persistSdkCompanyRun, sdkRunArtifacts } from "./sdkApi.js";
 import type { TaskRecord } from "./store.js";
@@ -355,17 +355,46 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
     if (result.missionRoutingCache && task.missionStepId) await updateTask(task.userId, task.id, { missionRoutingCache: result.missionRoutingCache });
     if (task.approvedApprovalId) await updateTask(task.userId, task.id, { approvedApprovalId: undefined });
     if (result.taskWait) {
-      const postWakeNextAction = mission
-        ? missionPostWakeNextAction(currentMissionStep, result.taskWait.nextAction)
-        : result.taskWait.nextAction;
+      let postWakeNextAction = result.taskWait.nextAction;
       if (mission) {
         const currentMission = await getMission(task.userId, mission.id);
         const accounted = currentMission && ["running", "waiting"].includes(currentMission.status)
           ? await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMission.checkpoint ?? result.taskWait.checkpoint, nextAction: postWakeNextAction, toolCalls: missionToolCallCount(result), cost: result.cost })
           : currentMission;
         if (!accounted || accounted.status === "blocked") return { status: "blocked" as const, message: accounted?.error ?? "Autonomous mission could not record its progress before waiting.", checkpoint: accounted?.checkpoint, nextAction: accounted?.nextAction };
+        if (accounted.status !== "running") {
+          return {
+            status: accounted.status === "completed" ? "completed" as const : accounted.status === "cancelled" ? "cancelled" as const : "blocked" as const,
+            message: accounted.result ?? accounted.error ?? `Mission is ${accounted.status}; the timer wait was not scheduled.`,
+            result: accounted.result,
+            checkpoint: accounted.checkpoint,
+            nextAction: accounted.nextAction,
+          };
+        }
+        const resumeStep = missionTimerResumeStep(accounted, task.missionStepId);
+        if (!resumeStep) {
+          const blocked = await updateMission(task.userId, mission.id, (latest) => latest.status !== "running" ? undefined : {
+            status: "blocked",
+            error: "Timer wait was requested after the mission had no active executable step.",
+            nextAction: "Repair or replan the mission so the timer resumes an active step.",
+            events: [...latest.events, { id: `misevt_${randomUUID()}`, type: "blocked", message: "Timer wait rejected because no active mission step could own its continuation.", at: Date.now() }],
+          });
+          return { status: "blocked" as const, message: blocked?.error ?? "Mission has no active step for the timer continuation.", checkpoint: blocked?.checkpoint, nextAction: blocked?.nextAction };
+        }
+        postWakeNextAction = missionPostWakeNextAction(resumeStep);
+        const waited = await waitMission(task.userId, mission.id, { kind: "timer", runAt: result.taskWait.runAt, stepId: resumeStep.id }, result.taskWait.checkpoint, postWakeNextAction);
+        if (!waited) {
+          const latest = await getMission(task.userId, mission.id);
+          if (latest?.status === "waiting" && latest.waiting?.kind === "timer" && latest.waiting.runAt === result.taskWait.runAt && latest.waiting.stepId === resumeStep.id) {
+            postWakeNextAction = latest.nextAction ?? postWakeNextAction;
+          } else {
+            throw new Error("Mission timer continuation was not persisted; retry from the latest mission state.");
+          }
+        }
+        if (waited?.status !== "waiting" && waited !== undefined) {
+          return { status: "blocked" as const, message: `Mission timer transition returned ${waited.status}; no wait was reported to the task runner.`, checkpoint: waited.checkpoint, nextAction: waited.nextAction };
+        }
       }
-      if (mission) await waitMission(task.userId, mission.id, { kind: "timer", runAt: result.taskWait.runAt, stepId: task.missionStepId }, result.taskWait.checkpoint, postWakeNextAction);
       if (task.sdkRunId && task.sdkThreadId) {
         const current = await getSessionWithSdkRuns(task.userId, task.sdkThreadId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
         if (sdkRun) { sdkRun.status = "queued"; sdkRun.output = undefined; sdkRun.error = undefined; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.waiting_for_task", at: Date.now(), text: new Date(result.taskWait.runAt).toISOString() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); }

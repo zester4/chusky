@@ -79,6 +79,40 @@ test("full production slice parks an early timer wake without invoking the model
   assert.equal((await getMission(userId, mission.id))?.status, "waiting");
 });
 
+test("timer wait targets the next active step when the model completes its current step first", async () => {
+  const userId = 982020;
+  const queue = new MissionFakeQStash();
+  const mission = await createMission(userId, {
+    title: "Step transition before wait",
+    objective: "Complete initialization, wait, then verify recovery",
+    definitionOfDone: "The post-wake step is completed",
+    steps: [
+      { id: "initialize", title: "Initialize", objective: "Persist the initial checkpoint" },
+      { id: "resume-check", title: "Resume check", objective: "Verify state after the timer", dependsOn: ["initialize"] },
+    ],
+  });
+  await startMission(userId, mission.id);
+  await reconcileMissionExecution(userId, mission.id, queue.enqueue);
+  const task = (await listTasks(userId)).find((candidate) => candidate.missionId === mission.id && candidate.missionStepId === "initialize")!;
+  const runAt = Date.now() + 120_000;
+  const dependencies = context(queue, async () => {
+    const runtime = { taskId: task.id, missionId: mission.id, enqueueMissionTask: queue.enqueue };
+    await nativeTool(userId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId: "initialize", result: "Initial checkpoint persisted" }, runtime);
+    let request: TaskWaitRequest | undefined;
+    await nativeTool(userId, "CHUCK_TASK_WAIT", { runAt: new Date(runAt).toISOString(), checkpoint: "Initialization verified", nextAction: "Continue the plan after the timer" }, { ...runtime, requestTaskWait: (value) => { request = value; } });
+    assert.ok(request);
+    return { text: "Waiting", toolsUsed: ["CHUCK_MISSION_STEP_COMPLETE", "CHUCK_TASK_WAIT"], toolsSucceeded: ["CHUCK_MISSION_STEP_COMPLETE", "CHUCK_TASK_WAIT"], taskWait: request };
+  });
+  const run = await executeDurableTask({ userId, taskId: task.id }, { workerId: "step-transition-wait-worker", execute: (claimed, signal) => executeTaskSlice(claimed, signal, dependencies) });
+  const persisted = await getMission(userId, mission.id);
+  assert.equal(run.task?.status, "queued");
+  assert.equal(persisted?.status, "waiting", JSON.stringify({ task: run.task, mission: persisted }));
+  assert.equal(persisted?.waiting?.stepId, "resume-check");
+  assert.match(persisted?.nextAction ?? "", /Resume check/);
+  assert.match(persisted?.nextAction ?? "", /Verify state after the timer/);
+  assert.doesNotMatch(persisted?.nextAction ?? "", /Initialize/);
+});
+
 test("full production slice does not run a model during a human-input wait", async () => {
   const userId = 982003;
   const queue = new MissionFakeQStash();

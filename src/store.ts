@@ -8180,7 +8180,7 @@ export async function finalizeMissionIfReady(userId: number, id: string, options
 }
 
 export async function repairMission(userId: number, id: string, input: { reason: string; nextAction?: string; replan?: boolean }): Promise<MissionRecord | undefined> {
-  return mutateMission(userId, id, (mission) => ["completed", "cancelled"].includes(mission.status) ? undefined : { status: "blocked", error: input.reason.slice(0, 2000), nextAction: (input.nextAction ?? "Review the failed step and repair or replan before resuming.").slice(0, 2000), events: [...mission.events, missionEvent("repaired", `Repair required: ${input.reason}`)] });
+  return mutateMission(userId, id, (mission) => ["completed", "cancelled"].includes(mission.status) ? undefined : { status: "blocked", waiting: undefined, error: input.reason.slice(0, 2000), nextAction: (input.nextAction ?? "Review the failed step and repair or replan before resuming.").slice(0, 2000), events: [...mission.events, missionEvent("repaired", `Repair required: ${input.reason}`)] });
 }
 
 export async function listMissions(userId: number, statuses?: MissionStatus[]): Promise<MissionRecord[]> {
