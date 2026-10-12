@@ -20,8 +20,17 @@ jobs:
       COMPOSIO_API_KEY: ci-test-composio-key
       OPENROUTER_API_KEY: ci-test-openrouter-key
     steps:
+      - name: Require private submodule read token
+        env:
+          CHUSKY_SUBMODULES_READ_TOKEN: ${{ secrets.CHUSKY_SUBMODULES_READ_TOKEN }}
+        run: |
+          if [ -z "$CHUSKY_SUBMODULES_READ_TOKEN" ]; then
+            echo "::error::Set CHUSKY_SUBMODULES_READ_TOKEN with read access to the private chusky-web repository."
+            exit 1
+          fi
       - uses: actions/checkout@v4
         with:
+          token: ${{ secrets.CHUSKY_SUBMODULES_READ_TOKEN }}
           submodules: recursive
       - uses: actions/setup-node@v4
         with:
