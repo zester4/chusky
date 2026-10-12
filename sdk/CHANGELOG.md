@@ -2,6 +2,14 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.15.0 - 2026-10-12
+
+- Add typed `RunProgress` data to run snapshots and append-only `run.progress`
+  stream/replay events for planning, research, action, approval, and completion
+  states.
+- Keep progress and evidence bounded and provider-neutral; raw tool arguments,
+  connected-app payloads, credentials, and results are never included.
+
 ## 1.14.0 - 2026-10-12
 
 - Expose owner-private bounded meeting mission state in typed meeting records,

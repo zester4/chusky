@@ -47,6 +47,7 @@ import { normalizeProviderSmokeChecks, PROVIDER_SMOKE_CAPABILITIES } from "./rel
 import type { ApprovalEscalationRecord } from "./approvals/escalation.js";
 import type { TregCallReceipt, TregSpendSnapshot } from "./treg/types.js";
 import type { LinkOAuthStateRecord, LinkSpendRequestRecord, LinkWalletRecord } from "./link/types.js";
+import { normalizeSdkRunProgress, type SdkRunProgress } from "./sdkRunProgress.js";
 
 export interface Message {
   /** Stable per-message identity used for idempotent durable history writes. */
@@ -134,6 +135,7 @@ function addHistoryCompactionSummary(session: UserSession, dropped: Message[]): 
 function compactSdkRun(run: SdkRunRecord): SdkRunRecord {
   return {
     ...run,
+    ...(run.progress ? { progress: normalizeSdkRunProgress(run.progress) } : {}),
     input: boundPersistedText(typeof run.input === "string" ? run.input : "", PERSISTED_RUN_INPUT_MAX_CHARS),
     ...(typeof run.output === "string" ? { output: boundPersistedText(run.output, PERSISTED_RUN_OUTPUT_MAX_CHARS) } : {}),
     ...(typeof run.agentInstructions === "string" ? { agentInstructions: boundPersistedText(run.agentInstructions, PERSISTED_RUN_INPUT_MAX_CHARS) } : {}),
@@ -145,6 +147,7 @@ function compactSdkRun(run: SdkRunRecord): SdkRunRecord {
       ...(typeof event.summary === "string" ? { summary: boundPersistedText(event.summary, PERSISTED_EVENT_TEXT_MAX_CHARS) } : {}),
       ...(typeof event.actionLabel === "string" ? { actionLabel: boundPersistedText(event.actionLabel, 240) } : {}),
       ...(typeof event.objective === "string" ? { objective: boundPersistedText(event.objective, 2_000) } : {}),
+      ...(event.progress ? { progress: normalizeSdkRunProgress(event.progress) } : {}),
       ...(Array.isArray(event.batchActions) ? { batchActions: event.batchActions.slice(0, 50).map((action) => ({
         ...action,
         ...(typeof action.actionLabel === "string" ? { actionLabel: boundPersistedText(action.actionLabel, 240) } : {}),
@@ -793,8 +796,10 @@ export interface SdkRunRecord {
   budget?: { duration?: string; maxToolCalls?: number; maxCost?: number };
   tools?: { allow?: string[]; deny?: string[]; requireApproval?: string[] };
   skills?: string[];
+  /** Last safe user-facing progress projection for live and replayed dashboard runs. */
+  progress?: SdkRunProgress;
   error?: { code: string; message: string };
-  events: Array<{ id: string; type: string; at: number; text?: string; toolSlug?: string; callId?: string; status?: "started" | "completed" | "failed" | "approval_required" | "cancelled" | "waiting" | "unknown"; message?: string; actionLabel?: string; summary?: string; durationMs?: number; activityId?: string; handoffId?: string; parentToolCallId?: string; worker?: string; objective?: string; kind?: "worker" | "tool"; toolkitSlug?: string; toolkitName?: string; toolkitLogo?: string; toolCallId?: string; batchActions?: Array<{ id: string; toolSlug: string; actionLabel?: string; toolkitSlug?: string; toolkitName?: string; toolkitLogo?: string; status: "started" | "completed" | "failed" | "unknown" | "approval_required" | "cancelled"; summary?: string }> }>;
+  events: Array<{ id: string; type: string; at: number; text?: string; progress?: SdkRunProgress; toolSlug?: string; callId?: string; status?: "started" | "completed" | "failed" | "approval_required" | "cancelled" | "waiting" | "unknown"; message?: string; actionLabel?: string; summary?: string; durationMs?: number; activityId?: string; handoffId?: string; parentToolCallId?: string; worker?: string; objective?: string; kind?: "worker" | "tool"; toolkitSlug?: string; toolkitName?: string; toolkitLogo?: string; toolCallId?: string; batchActions?: Array<{ id: string; toolSlug: string; actionLabel?: string; toolkitSlug?: string; toolkitName?: string; toolkitLogo?: string; status: "started" | "completed" | "failed" | "unknown" | "approval_required" | "cancelled"; summary?: string }> }>;
   createdAt: number;
   updatedAt: number;
 }

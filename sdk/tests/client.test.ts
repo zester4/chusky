@@ -216,11 +216,13 @@ test("SDK exposes authenticated A2A discovery and task lifecycle", async () => {
 });
 
 test("SDK parses NDJSON run events in order", async () => {
-  const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode('{"type":"run.started","run":{"id":"run_1"}}\n{"type":"run.delta","runId":"run_1","text":"Hello"}\n')); controller.close(); } });
+  const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode('{"type":"run.started","run":{"id":"run_1","progress":{"phase":"planning","title":"Preparing your request"}}}\n{"type":"run.progress","runId":"run_1","progress":{"phase":"researching","title":"Researching the request","provider":"gmail"}}\n{"type":"run.delta","runId":"run_1","text":"Hello"}\n')); controller.close(); } });
   const sdk = new Chusky({ apiKey: "key", userId: "customer_1", baseUrl: "https://example.test", fetch: mockFetch(() => new Response(stream, { status: 200 })) });
-  const events = [] as Array<{ type: string }>;
+  const events = [] as Array<{ type: string; progress?: { phase: string; provider?: string } }>;
   for await (const event of sdk.threads.runs("thr_1").stream({ input: "hi" })) events.push(event);
-  assert.deepEqual(events.map((event) => event.type), ["run.started", "run.delta"]);
+  assert.deepEqual(events.map((event) => event.type), ["run.started", "run.progress", "run.delta"]);
+  assert.equal(events[1]?.progress?.phase, "researching");
+  assert.equal(events[1]?.progress?.provider, "gmail");
 });
 
 test("SDK parses owner-scoped meeting SSE snapshots in order", async () => {

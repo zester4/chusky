@@ -325,6 +325,59 @@ export interface RunArtifact {
 export interface RunImage { id: string; name: string; contentType: "image/jpeg" | "image/png" | "image/webp"; size: number; }
 export interface ImageDownload extends RunImage { downloadUrl: string; expiresAt: string; }
 
+export type RunProgressPhase = "planning" | "researching" | "acting" | "waiting" | "completed";
+export type RunEvidenceKind = "source" | "artifact" | "step" | "note";
+export interface RunEvidence { id?: string; label: string; detail?: string; kind?: RunEvidenceKind; href?: string; }
+export interface RunProgress {
+  phase: RunProgressPhase;
+  title: string;
+  detail?: string;
+  provider?: string;
+  progress?: number;
+  requiresApproval?: boolean;
+  evidence?: RunEvidence[];
+}
+
+export type RunActivityStatus = "started" | "completed" | "failed" | "approval_required" | "cancelled" | "waiting" | "unknown";
+export interface RunBatchAction { id: string; toolSlug: string; actionLabel?: string; toolkitSlug?: string; toolkitName?: string; toolkitLogo?: string; status: RunActivityStatus; summary?: string; }
+export interface RunToolActivity {
+  id: string;
+  type: "run.tool_activity";
+  at: number;
+  toolSlug: string;
+  callId?: string;
+  status: Exclude<RunActivityStatus, "unknown" | "waiting">;
+  message: string;
+  actionLabel?: string;
+  toolkitSlug?: string;
+  toolkitName?: string;
+  toolkitLogo?: string;
+  batchActions?: RunBatchAction[];
+  summary?: string;
+  durationMs?: number;
+}
+export interface RunSubagentActivity {
+  id: string;
+  type: "run.subagent_activity";
+  at: number;
+  activityId: string;
+  parentToolCallId: string;
+  handoffId: string;
+  worker: string;
+  objective: string;
+  kind: "worker" | "tool";
+  status: RunActivityStatus;
+  message: string;
+  toolCallId?: string;
+  toolSlug?: string;
+  actionLabel?: string;
+  toolkitSlug?: string;
+  toolkitName?: string;
+  toolkitLogo?: string;
+  summary?: string;
+  durationMs?: number;
+}
+
 export interface Run {
   id: string;
   threadId: string;
@@ -346,6 +399,8 @@ export interface Run {
   budget?: RunBudget;
   tools?: RunToolPolicy;
   skills?: string[];
+  /** Safe, human-readable lifecycle projection for the dashboard and other run UIs. */
+  progress?: RunProgress;
   events?: RunEvent[];
   error?: { code: string; message: string };
   createdAt: string;
@@ -471,16 +526,43 @@ export type RunStreamEvent =
   | { type: "run.started"; run: Run }
   /** Policy-owned human progress text shared with Telegram and the dashboard. */
   | { type: "run.status"; runId: string; text: string }
+  /** Structured, bounded progress; arguments and provider results are never included. */
+  | { type: "run.progress"; runId: string; progress: RunProgress }
   | { type: "run.delta"; runId: string; text: string }
   | { type: "run.tool_started"; runId: string; toolSlug: string }
   /** Safe tool lifecycle metadata; raw arguments and provider results are never included. */
-  | { type: "run.tool_activity"; runId: string; id: string; at: number; toolSlug: string; status: "started" | "completed" | "failed" | "approval_required" | "cancelled"; message: string; summary?: string; durationMs?: number }
+  | ({ type: "run.tool_activity"; runId: string } & Omit<RunToolActivity, "type">)
+  | ({ type: "run.subagent_activity"; runId: string } & Omit<RunSubagentActivity, "type">)
   | { type: "run.approval_required"; run: Run; approval: Approval }
   | { type: "run.completed"; run: Run }
   | { type: "run.failed"; run: Run; error: { code: string; message: string } }
   | { type: "run.cancelled"; run: Run };
 
-export interface RunEvent { id: string; type: string; at: number; text?: string; toolSlug?: string; status?: "started" | "completed" | "failed" | "approval_required" | "cancelled"; message?: string; summary?: string; durationMs?: number; }
+export interface RunEvent {
+  id: string;
+  type: string;
+  at: number;
+  text?: string;
+  progress?: RunProgress;
+  toolSlug?: string;
+  callId?: string;
+  status?: RunActivityStatus;
+  message?: string;
+  actionLabel?: string;
+  summary?: string;
+  durationMs?: number;
+  activityId?: string;
+  parentToolCallId?: string;
+  handoffId?: string;
+  worker?: string;
+  objective?: string;
+  kind?: "worker" | "tool";
+  toolCallId?: string;
+  toolkitSlug?: string;
+  toolkitName?: string;
+  toolkitLogo?: string;
+  batchActions?: RunBatchAction[];
+}
 
 export interface ChuskyClientOptions {
   apiKey: string;
