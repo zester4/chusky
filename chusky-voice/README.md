@@ -185,7 +185,7 @@ VOICE_BARGE_IN_MIN_CHARS=2
 # Do not configure a generic greeting here; it makes outbound calls sound like inbound support.
 # Dead-air recovery guard; normal streamed turns continue beyond this once
 # their first audio has started.
-VOICE_TURN_START_BUDGET_MS=10000
+VOICE_TURN_START_BUDGET_MS=2500
 VOICE_TURN_FALLBACK_ENABLED=true
 VOICE_TOOL_PROGRESS_DELAY_MS=2500
 VOICE_TOOL_PROGRESS_MESSAGE=I’m still working on that, thanks for your patience.

@@ -143,6 +143,17 @@ class ToolWaitAgentStreamResponse:
         yield json.dumps({"type": "done", "text": "", "cost": 0.01})
 
 
+class TerminalOnlyAgentStreamResponse:
+    def __init__(self, text):
+        self.text = text
+
+    def raise_for_status(self):
+        return None
+
+    async def aiter_lines(self):
+        yield json.dumps({"type": "done", "text": self.text, "cost": 0.01})
+
+
 class HangingAgentStreamResponse:
     def raise_for_status(self):
         return None
@@ -233,7 +244,7 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings.chusky_turn_url, "https://chusky.example/internal/twilio/turn")
         self.assertEqual(settings.chusky_status_url, "https://chusky.example/internal/twilio/status")
         self.assertFalse(settings.elevenlabs_enabled)
-        self.assertEqual(settings.turn_start_budget_ms, 10000)
+        self.assertEqual(settings.turn_start_budget_ms, 2500)
 
         with patch.dict(voice_app.os.environ, {
             "TWILIO_MEDIA_BRIDGE_SECRET": "twilio-bridge-test-secret",
@@ -243,7 +254,7 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
             "VOICE_TURN_START_BUDGET_MS": "2500",
         }, clear=True):
             guarded_settings = voice_app.Settings.from_env()
-        self.assertEqual(guarded_settings.turn_start_budget_ms, 4000)
+        self.assertEqual(guarded_settings.turn_start_budget_ms, 2500)
 
     def test_elevenlabs_requires_credentials_only_when_enabled(self):
         base = {
@@ -551,6 +562,40 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         fallback.assert_awaited_once()
         self.assertEqual(self.call.metrics.turn_start_budget_exceeded, 1)
+
+    async def test_terminal_done_text_is_spoken_when_no_deltas_arrive(self):
+        class TerminalOnlyAgentHttp(FakeAgentHttp):
+            def stream(self, method, url, **kwargs):
+                self.stream_requests.append({"method": method, "url": url, **kwargs})
+                return FakeAgentStreamContext(TerminalOnlyAgentStreamResponse("The answer arrived in the terminal event."))
+
+        self.call.http = TerminalOnlyAgentHttp()
+        tts_socket = StreamingFakeTtsSocket()
+
+        async def fake_connect(_url, **_kwargs):
+            return tts_socket
+
+        with patch.object(voice_app, "connect", fake_connect):
+            result = await self.call._request_agent_stream("Can you answer that?")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.text, "The answer arrived in the terminal event.")
+        self.assertEqual([event["text"] for event in tts_socket.sent if event.get("type") == "Speak"], ["The answer arrived in the terminal event."])
+
+    async def test_empty_agent_response_uses_audible_recovery_line(self):
+        class EmptyAgentHttp(FakeAgentHttp):
+            def stream(self, method, url, **kwargs):
+                self.stream_requests.append({"method": method, "url": url, **kwargs})
+                return FakeAgentStreamContext(TerminalOnlyAgentStreamResponse(""))
+
+        self.call.http = EmptyAgentHttp()
+        self.call.settings.turn_fallback_enabled = False
+        fallback = AsyncMock()
+        with patch.object(self.call, "_speak_slow_turn_fallback", fallback):
+            await self.call._respond_final("Please answer me.", 3)
+
+        fallback.assert_awaited_once()
+        self.assertEqual(self.call.metrics.empty_agent_responses, 1)
 
     async def test_tool_activity_speaks_immediately_and_emits_one_bounded_waiting_update(self):
         class ToolWaitAgentHttp(FakeAgentHttp):

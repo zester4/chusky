@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { addRecallMeeting, claimAgentUpgrade, completeMissionStep, createMission, createWebTelegramLinkCode, finalizeMissionIfReady, getApproval, getMission, getSession, initStore, listAgentRuns, listMissions, listTasks, redeemWebTelegramLinkCode, saveSession, setApprovalStatus, startMission, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { stableSdkUserId } from "../src/sdkIdentity.js";
-import { appendPreviewLinks, cleanModelText, getReconnectUrl, getToolkitStatesPage, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, searchTools, voiceComposioToolSlugs, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
+import { appendPreviewLinks, cleanModelText, getReconnectUrl, getToolkitStatesPage, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, searchTools, voiceComposioToolSlugs, voiceFastLaneEligible, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { formatAgentUpgradeNotice, loadAgentUpgrade } from "../src/upgradeNotice.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -35,6 +35,14 @@ test("routes voice call objectives to bounded exact Composio capability bundles"
     "GOOGLECALENDAR_FIND_FREE_SLOTS", "GOOGLECALENDAR_FREE_BUSY_QUERY", "GOOGLECALENDAR_CREATE_EVENT",
     "GOOGLECALENDAR_PATCH_EVENT", "GOOGLECALENDAR_DELETE_EVENT",
   ]);
+});
+
+test("voice fast lane only applies to ordinary conversation", () => {
+  assert.equal(voiceFastLaneEligible("How are you doing today?"), true);
+  assert.equal(voiceFastLaneEligible("Why are you calling me?"), true);
+  assert.equal(voiceFastLaneEligible("Please book an appointment for tomorrow."), false);
+  assert.equal(voiceFastLaneEligible("Can you check my calendar?"), false);
+  assert.equal(voiceFastLaneEligible("Follow up with the client about tomorrow's meeting."), false);
 });
 
 test("preview links are included exactly once even when the model omits them", () => {
@@ -1541,6 +1549,79 @@ test("private voice turns keep the Chusky context but skip Composio setup and du
       /explicit allowlist of read-only Chusky tools/,
     );
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test("owner-private conversational voice turns skip external tool setup", async () => {
+  const userId = 830054;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  let composioCreated = 0;
+  let requestBody: Record<string, any> | undefined;
+  const originalFetch = globalThis.fetch;
+  setAgentDependenciesForTests({ composio: { create: async () => { composioCreated++; throw new Error("ordinary voice must not initialize Composio"); } } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/chat/completions")) requestBody = JSON.parse(String(init?.body));
+    return chatResponse({ role: "assistant", content: "I am here and ready to help." });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(
+      userId,
+      "How are you doing today?",
+      [],
+      "test/model",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { accountId: `account_${userId}`, provider: "voice", conversationId: "twc_fast_lane_test", scope: "private" },
+      { ownerPrivateRun: true, voiceTurn: true, voiceSessionId: "twilio:fast-lane-test" },
+    );
+    assert.match(result.text, /ready to help/i);
+    assert.equal(composioCreated, 0);
+    assert.deepEqual(requestBody?.tools ?? [], []);
+  } finally {
+    globalThis.fetch = originalFetch;
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+test("speculative voice turns skip Jev routing when tools are explicitly disabled", async () => {
+  const userId = 830055;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  let jevCalls = 0;
+  let requestBody: Record<string, any> | undefined;
+  const originalFetch = globalThis.fetch;
+  setJevClientForTests(new JevClient({ apiKey: "voice-test-key", fetchImpl: (async () => {
+    jevCalls += 1;
+    throw new Error("speculative voice must not invoke Jev");
+  }) as typeof fetch }));
+  setAgentDependenciesForTests({ composio: { create: async () => { throw new Error("speculative voice must not initialize Composio"); } } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/chat/completions")) requestBody = JSON.parse(String(init?.body));
+    return chatResponse({ role: "assistant", content: "I am ready." });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(
+      userId,
+      "Can you help me?",
+      [],
+      "test/model",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { accountId: `account_${userId}`, provider: "voice", conversationId: "twc_speculative_test", scope: "private" },
+      { voiceTurn: true, toolAllow: [], voiceSessionId: "twilio:speculative-test" },
+    );
+    assert.match(result.text, /ready/i);
+    assert.equal(jevCalls, 0);
+    assert.deepEqual(requestBody?.tools ?? [], []);
+  } finally {
+    globalThis.fetch = originalFetch;
+    setJevClientForTests(undefined);
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
 });
 
 test("voice empty completions are bounded and return a spoken recovery instead of a blank turn", async () => {

@@ -62,7 +62,7 @@ from latency import (
 )
 from recall_auth import valid_recall_ticket, wait_for_media_authorization
 from recall_video import RecallScreenShareSampler, parse_screenshare_frame, valid_visual_handoff_url, verify_recall_websocket_signature, visual_configuration_issue, visual_configuration_status
-from recall_turns import CopilotTurnGate, MeetingContextWindow, MeetingEchoGuard, MeetingMode, build_meeting_outcome_payload, default_meeting_greeting, flux_turn_time_bounds_ms, is_recall_invocation, parse_meeting_language_authorization, parse_meeting_live_captions, parse_meeting_media_authorization, parse_meeting_tts_model
+from recall_turns import CopilotTurnGate, MeetingContextWindow, MeetingEchoGuard, MeetingMode, build_meeting_outcome_payload, default_meeting_greeting, flux_turn_time_bounds_ms, is_recall_invocation, parse_meeting_language_authorization, parse_meeting_live_captions, parse_meeting_media_authorization, parse_meeting_tts_model, should_checkpoint_mission_state
 from speech_text import normalize_voice_delta, normalize_voice_text
 from twilio_auth import valid_twilio_ticket, valid_twilio_websocket
 
@@ -137,8 +137,10 @@ class Settings:
             max(1, min(int(os.getenv("VOICE_BARGE_IN_MIN_CHARS", "2")), 100)),
             # This is a recovery guard only. It must be long enough for the
             # owner-scoped Chusky stream to produce its first audio; it is not
-            # a maximum answer duration.
-            max(4_000, min(int(os.getenv("VOICE_TURN_START_BUDGET_MS", "10000")), 20_000)),
+            # a maximum answer duration. Keep the lower bound aligned with
+            # the production 2.5-second latency target so Railway cannot
+            # silently clamp the configured value back to four seconds.
+            max(2_500, min(int(os.getenv("VOICE_TURN_START_BUDGET_MS", "2500")), 20_000)),
             os.getenv("VOICE_TURN_FALLBACK_ENABLED", "true").strip().lower() != "false",
             max(500, min(int(os.getenv("VOICE_TOOL_PROGRESS_DELAY_MS", "2500")), 10_000)),
             os.getenv("VOICE_TOOL_PROGRESS_MESSAGE", "I’m still working on that, thanks for your patience.").strip()[:500],
@@ -889,6 +891,15 @@ class TwilioVoiceCall:
                     elif event.get("type") == "done":
                         await self._cancel_tool_progress()
                         cost = max(0, min(float(event.get("cost") or 0), 10))
+                        # A provider or proxy may coalesce the final answer
+                        # into the terminal event instead of emitting deltas.
+                        # Preserve that answer so a valid response cannot turn
+                        # into a silent phone turn.
+                        if not full_text:
+                            done_text = normalize_voice_text(str(event.get("text") or ""))
+                            if done_text:
+                                full_text = done_text
+                                buffer = done_text
                     elif event.get("type") == "error":
                         await self._cancel_tool_progress()
                         raise RuntimeError("streaming voice turn failed")
@@ -1009,7 +1020,11 @@ class TwilioVoiceCall:
                 result = None
             if result is None:
                 result = await self._request_agent_stream(transcript, speculative=False)
-            if result is None or not result.text or self.interrupted:
+            if result is None or self.interrupted:
+                return
+            if not result.text:
+                self.metrics.empty_agent_responses += 1
+                await self._speak_slow_turn_fallback()
                 return
             await self._commit_turn(transcript, result, turn_index)
             self.outcome_turns.append({"transcript": transcript[:900], "response": result.text[:900]})
@@ -1031,6 +1046,9 @@ class TwilioVoiceCall:
                         await self._commit_turn(transcript, result, turn_index)
                         self.outcome_turns.append({"transcript": transcript[:900], "response": result.text[:900]})
                         await self._speak(result.text)
+                    elif not self.interrupted:
+                        self.metrics.empty_agent_responses += 1
+                        await self._speak_slow_turn_fallback()
                 except Exception:
                     self.metrics.agent_failures += 1
                     LOG.warning("Twilio streamed response failed", extra={"call_id": self.call_id})
@@ -1194,6 +1212,9 @@ class RecallVoiceSession:
         self.response_started_at = 0.0
         self.interrupted = False
         self.turn_index = 0
+        self.last_mission_checkpoint_turn = 0
+        self.last_mission_checkpoint_at = time.monotonic()
+        self.mission_checkpoint_task: asyncio.Task[None] | None = None
         self.nova_final_segments: list[str] = []
         self.nova_final_words: list[dict[str, float]] = []
         self.nova_final_audio_start: float | None = None
@@ -1658,6 +1679,7 @@ class RecallVoiceSession:
                         json={"meetingId": self.meeting_id, "userId": self.user_id, "cost": cost, "turnId": f"flux-{turn_id}", "speak": False, "runtimeState": "healthy", "turn": {"completed": True}},
                     )
                     response.raise_for_status()
+                self._queue_mission_checkpoint()
             return
         started = time.monotonic()
         self.turn_first_audio_event = asyncio.Event()
@@ -1677,6 +1699,7 @@ class RecallVoiceSession:
             )
             response.raise_for_status()
         self.context.add("chusky", text)
+        self._queue_mission_checkpoint()
 
     def _observe_response(self, task: asyncio.Task[None]) -> None:
         try:
@@ -1784,6 +1807,37 @@ class RecallVoiceSession:
         self.echo_guard.remember_output(text)
         await self._send_tts(text, flush=True)
         await asyncio.wait_for(self.tts_done_event.wait(), timeout=45.0)
+
+    def _queue_mission_checkpoint(self) -> None:
+        now = time.monotonic()
+        if not should_checkpoint_mission_state(self.turn_index, self.last_mission_checkpoint_turn, now, self.last_mission_checkpoint_at):
+            return
+        if self.mission_checkpoint_task and not self.mission_checkpoint_task.done():
+            return
+        context = self.context.snapshot()
+        if not context:
+            return
+        self.last_mission_checkpoint_turn = self.turn_index
+        self.last_mission_checkpoint_at = now
+        checkpoint_at = int(time.time() * 1000)
+        self.mission_checkpoint_task = asyncio.create_task(self._send_mission_checkpoint(context, checkpoint_at), name=f"recall-checkpoint-{self.meeting_id}-{self.turn_index}")
+
+    async def _send_mission_checkpoint(self, context: list[dict[str, str]], checkpoint_at: int) -> None:
+        endpoint = self.settings.commit_turn_url.rstrip("/").removesuffix("/commit-turn") + "/checkpoint"
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(35.0, connect=3.0)) as client:
+                response = await client.post(
+                    endpoint,
+                    headers={"Authorization": f"Bearer {self.settings.bridge_secret}"},
+                    json={"meetingId": self.meeting_id, "userId": self.user_id, "checkpointId": uuid.uuid4().hex, "checkpointAt": checkpoint_at, "context": context},
+                )
+                response.raise_for_status()
+        except Exception as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            LOG.info(
+                "Recall meeting continuity checkpoint was unavailable",
+                extra={"meeting_id": self.meeting_id, "error_type": type(exc).__name__, **({"http_status": status} if status else {})},
+            )
 
     async def _speak_slow_turn_fallback(self) -> None:
         """Keep a meeting conversational when a response has not started."""
@@ -1972,6 +2026,7 @@ class RecallVoiceSession:
                         json={"meetingId": self.meeting_id, "userId": self.user_id, "cost": cost, "turnId": f"flux-{turn_id}", "speak": False, "runtimeState": "healthy", "turn": {"completed": True}},
                     )
                     response.raise_for_status()
+                self._queue_mission_checkpoint()
             return
         if buffer.strip():
             self.echo_guard.remember_output(buffer)
@@ -1987,6 +2042,7 @@ class RecallVoiceSession:
             )
             response.raise_for_status()
         self.context.add("chusky", full_text)
+        self._queue_mission_checkpoint()
         _elapsed_ms = int((time.monotonic() - started) * 1000)
 
     async def _speak_agent_failure_fallback(self) -> None:
@@ -2097,6 +2153,7 @@ class BridgeMetrics:
     agent_turns: int = 0
     agent_turn_ms_total: int = 0
     agent_failures: int = 0
+    empty_agent_responses: int = 0
     turn_start_budget_exceeded: int = 0
     turn_fallbacks: int = 0
     tts_first_audio_count: int = 0
@@ -2124,6 +2181,7 @@ class BridgeMetrics:
                 "bargeIns": self.barge_ins,
                 "droppedInboundFrames": self.dropped_inbound_frames,
                 "agentFailures": self.agent_failures,
+                "emptyAgentResponses": self.empty_agent_responses,
                 "turnStartBudgetExceeded": self.turn_start_budget_exceeded,
                 "turnFallbacks": self.turn_fallbacks,
                 "ttsAudioFrames": self.tts_audio_frames,

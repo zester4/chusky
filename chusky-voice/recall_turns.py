@@ -97,6 +97,18 @@ class CopilotTurnGate:
         return True
 
 
+def should_checkpoint_mission_state(
+    turn_index: int,
+    last_checkpoint_turn: int,
+    now_monotonic: float,
+    last_checkpoint_at: float,
+    turn_interval: int = 4,
+    seconds_interval: float = 60.0,
+) -> bool:
+    """Checkpoint semantic continuity periodically without blocking speech."""
+    return turn_index - last_checkpoint_turn >= max(1, turn_interval) or now_monotonic - last_checkpoint_at >= max(1.0, seconds_interval)
+
+
 class MeetingContextWindow:
     """Small in-process transcript window; never writes ambient speech to storage."""
 

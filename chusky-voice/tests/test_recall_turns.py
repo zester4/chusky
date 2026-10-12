@@ -12,6 +12,7 @@ from recall_turns import (
     parse_meeting_live_captions,
     parse_meeting_media_authorization,
     parse_meeting_tts_model,
+    should_checkpoint_mission_state,
 )
 
 
@@ -116,6 +117,11 @@ class CopilotTurnGateTests(unittest.TestCase):
         self.assertFalse(gate.should_evaluate(False, now=100.5))
         for turn in range(1, 401):
             self.assertTrue(gate.should_evaluate(False, now=100 + turn))
+
+    def test_mission_checkpoint_uses_turn_or_time_interval(self):
+        self.assertFalse(should_checkpoint_mission_state(3, 0, 159.0, 100.0))
+        self.assertTrue(should_checkpoint_mission_state(4, 0, 159.0, 100.0))
+        self.assertTrue(should_checkpoint_mission_state(2, 0, 160.0, 100.0))
 
 
 class MeetingEchoGuardTests(unittest.TestCase):

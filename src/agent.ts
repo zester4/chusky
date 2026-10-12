@@ -286,6 +286,19 @@ export function voiceComposioToolSlugs(value: string): string[] {
   if (/meeting|transcript|recording|fireflies|zoom|google meet|recall/.test(text)) add("meetings");
   return [...new Set(selected)].slice(0, VOICE_COMPOSIO_TOOL_LIMIT);
 }
+
+// Ordinary call turns should not pay the cost of initializing connected-app
+// sessions or broad capability routing. Keep this conservative: only an
+// explicit action-oriented term leaves the fast lane, so questions such as
+// "why are you calling me?" remain normal conversation.
+const VOICE_NATIVE_ACTION_REQUEST_PATTERN = /\b(?:remind(?:er)?|task|email|e-mail|gmail|message|text|sms|telegram|slack|imessage|send|reply|create|update|delete)\b/i;
+
+/** True when a private phone turn is safe to handle without external tools. */
+export function voiceFastLaneEligible(value: string): boolean {
+  const text = value.trim();
+  return voiceComposioToolSlugs(text).length === 0 && !VOICE_NATIVE_ACTION_REQUEST_PATTERN.test(text);
+}
+
 export const VOICE_TURN_NATIVE_TOOLS = [
   "CHUCK_SEARCH_MEMORY",
   "CHUCK_SCRATCHPAD_READ",
@@ -2399,6 +2412,8 @@ export async function runAgent(
   const voiceRoutingText = userRequestText(userMessage);
   const sharedScope = channelContext?.scope === "shared";
   const ownerPrivateRun = options?.ownerPrivateRun === true && !sharedScope;
+  const voiceFastLane = voiceTurn && ownerPrivateRun && !approvedApprovalId && !options?.meetingId && !options?.toolAllow?.length
+    && voiceFastLaneEligible(`${voiceRoutingText}\n${options?.voiceRoutingHint ?? ""}`);
   const sharedMeetingRoomAccess = sharedScope && options?.sharedMeetingRoomAccess === true && Boolean(options?.meetingId);
   const existingRun = options?.ephemeral || voiceTurn ? undefined : await getAgentRun(userId, durableRunId);
   let durableRunRecord = existingRun;
@@ -2417,6 +2432,7 @@ export async function runAgent(
   let allow = options?.toolAllow === undefined ? undefined : new Set(options.toolAllow);
   let meetingComposioAccountAliases = options?.meetingComposioAccountAliases;
   const toolsDisabled = allow?.size === 0;
+  const voiceToolFreeTurn = voiceTurn && toolsDisabled;
   const toolName = (tool: any): string => canonicalNativeToolSlug(String(tool?.function?.name ?? tool?.name ?? ""));
   if (voiceTurn && !ownerPrivateRun && (!allow || [...allow].some((name) => !VOICE_TURN_TOOL_NAMES.has(name)))) {
     throw new Error("Voice turns require an explicit allowlist of read-only Chusky tools");
@@ -2425,7 +2441,7 @@ export async function runAgent(
   // Shared volatile turns without exact grants stay disconnected from owner
   // apps. Authenticated owner-private calls and meetings use the same app
   // session as private chat, while speculative audio drafts remain tool-free.
-  const sessionObj = toolsDisabled || (voiceTurn && !ownerPrivateRun) ? undefined : (await getOrCreateComposioSession(userId)).sessionObj;
+  const sessionObj = toolsDisabled || voiceFastLane || (voiceTurn && !ownerPrivateRun) ? undefined : (await getOrCreateComposioSession(userId)).sessionObj;
 
   let discoveredMeetingTools: any[] = [];
   if (options?.meetingAppAccess && sessionObj && (allow || ownerPrivateRun)) {
@@ -2493,7 +2509,7 @@ export async function runAgent(
       || (sharedMeetingRoomAccess && !toolName(tool).startsWith("COMPOSIO_") && Boolean(allow?.has(toolName(tool)))))
     .map(addAccountSelector).map((tool) => meetingComposioAccountAliases ? hideMeetingAccountSelector(tool) : tool);
   composioTools.push(...LOCAL_TOOLS);
-  const mcpDiscovery = (!toolsDisabled && (!voiceTurn || ownerPrivateRun) && !sharedScope && (!options?.meetingId || ownerPrivateRun))
+  const mcpDiscovery = (!toolsDisabled && !voiceFastLane && (!voiceTurn || ownerPrivateRun) && !sharedScope && (!options?.meetingId || ownerPrivateRun))
     ? await mcpClient.discoverToolsForUser(userId, signal)
     : { tools: [], failures: [] };
   const mcpTools = mcpDiscovery.tools;
@@ -2804,12 +2820,14 @@ export async function runAgent(
   // Durable/trigger/shared/media/approved work bypasses this optimization.
   const hasNonTextContent = Array.isArray(userMessage) && userMessage.some((part) => part.type !== "text");
   const forceCapabilityRouting = Boolean(
-    voiceTurn || (sharedScope && !options?.speculativeMeetingTurn) || (options?.ephemeral && !options?.speculativeMeetingTurn) || hasNonTextContent || mediaRequest
+    (voiceTurn && !voiceFastLane && !voiceToolFreeTurn) || (sharedScope && !options?.speculativeMeetingTurn) || (options?.ephemeral && !options?.speculativeMeetingTurn) || hasNonTextContent || mediaRequest
     || pendingApproval || pendingContinuation || approvedApprovalId
     || options?.taskId || options?.missionId || options?.missionStepId || (options?.meetingId && !options?.speculativeMeetingTurn) || options?.meetingAppAccess
     || options?.toolAllow?.length || options?.missionRoutingCache || channelContext?.triggerEventId
   );
-  const turnActionDecision = toolsDisabled && !forceCapabilityRouting
+  const turnActionDecision = voiceFastLane || voiceToolFreeTurn
+    ? { noActionNeeded: true as const, reason: voiceFastLane ? "voice_fast_lane" as const : "voice_tool_free" as const, actionProbability: 0 }
+    : toolsDisabled && !forceCapabilityRouting
     ? { noActionNeeded: true, reason: "routing_disabled" as const }
     : await decideTurnAction(routingQuery, {
       recentContext: routingRecentContext,
@@ -2938,7 +2956,7 @@ export async function runAgent(
       composioRouteContext = `Cached connected-app route for this mission step: ${[...persistedMissionRouting.composioToolkits, ...persistedMissionRouting.composioActions].join(", ")}. Use the gateway and verify the exact schema before execution.`;
     }
   }
-  const noToolTurn = turnActionDecision.noActionNeeded;
+  const noToolTurn = voiceFastLane || voiceToolFreeTurn || turnActionDecision.noActionNeeded;
   recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: turnActionDecision.reason, noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision) });
   const revealedNativeTools = new Set<string>();
   routingDeadline.dispose();
@@ -3149,11 +3167,15 @@ export async function runAgent(
     const missionControlTools = options?.missionId
       ? availableTools.filter((tool) => MISSION_WORKER_CONTROL_TOOLS.includes(toolSchemaName(tool) as typeof MISSION_WORKER_CONTROL_TOOLS[number]))
       : [];
-    const routedTools = (noToolTurn
-      ? [...availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS" || revealedNativeTools.has(toolSchemaName(tool))), ...preloadedVoiceCapabilityTools]
-      : missionHintPreload
-        ? [...missionRoutedNativeTools, ...preloadedMissionTools, ...missionDiscoveryTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools]
-        : [...nativeToolRoute.tools, ...preloadedMissionTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools])
+    const routedTools = (
+      (voiceFastLane || voiceToolFreeTurn)
+        ? []
+        : noToolTurn
+          ? [...availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS" || revealedNativeTools.has(toolSchemaName(tool))), ...preloadedVoiceCapabilityTools]
+          : missionHintPreload
+            ? [...missionRoutedNativeTools, ...preloadedMissionTools, ...missionDiscoveryTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools]
+            : [...nativeToolRoute.tools, ...preloadedMissionTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools]
+    )
       .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index);
     const approvalResumeTool = forcedApproval
       ? availableTools.find((tool) => toolSchemaName(tool) === forcedApproval.toolSlug)
