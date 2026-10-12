@@ -2554,6 +2554,23 @@ export function registerSdkApi(app: Hono): void {
     });
   });
 
+  app.post("/v1/account/attention-candidates/:id/dismiss", async (c) => {
+    const owner = sdkUser(c);
+    if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before dismissing an Elena suggestion.");
+    if (!config.elenaEnabled) return apiError(c, 404, "elena_disabled", elenaDisabledMessage());
+    const candidateId = c.req.param("id");
+    const candidate = await getAttentionRecord(owner.userId, "attention_candidate", candidateId) as AttentionCandidateRecord | undefined;
+    if (!candidate) return apiError(c, 404, "attention_candidate_not_found", "This Elena suggestion is no longer available.");
+    if (isTriggerAttentionCandidate(candidate)) return apiError(c, 409, "trigger_candidate_not_supported", "Connected-app trigger results are cleared from their saved trigger event.");
+    if (candidate.status === "dismissed") return c.json({ data: { candidate } });
+    if (candidate.status !== "pending" && candidate.status !== "delivered") return apiError(c, 409, "attention_candidate_unavailable", "This Elena suggestion can no longer be dismissed.");
+    const fingerprint = createHash("sha256").update(`POST:${c.req.path}:dismiss`).digest("hex");
+    return sdkAutonomyMutation(c, owner.userId, fingerprint, async () => {
+      const updated = await updateAttentionRecord(owner.userId, "attention_candidate", candidateId, { status: "dismissed" }) as AttentionCandidateRecord | undefined;
+      return { data: { candidate: updated ?? { ...candidate, status: "dismissed" as const } } };
+    });
+  });
+
   app.put("/v1/account/attention-pulse", async (c) => {
     const owner = sdkUser(c);
     if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before changing Attention Pulse settings.");
