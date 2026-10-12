@@ -9,7 +9,7 @@ import { browserFileDownloadResponse, persistSdkCompanyRun, registerSdkApi, sdkR
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
-import { addJob, addPhoneCall, addRecallMeeting, authenticateCliToken, completeMissionStep, createApproval, createCliDevice, createMission, createTask, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getMission, getOutbox, getSession, getTask, initStore, listAttentionRecords, listTasks, recordTrustedMissionEvidence, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, startMission, updateMission, updateOutbox, upsertMeetingContact, upsertMemory, waitMission } from "../src/store.js";
+import { addJob, addPhoneCall, addRecallMeeting, authenticateCliToken, completeMissionStep, createApproval, createAttentionRecord, createCliDevice, createMission, createTask, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getAttentionRecord, getMission, getOutbox, getSession, getTask, initStore, listAttentionRecords, listTasks, recordTrustedMissionEvidence, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, startMission, updateMission, updateOutbox, upsertMeetingContact, upsertMemory, waitMission } from "../src/store.js";
 import { redeemLinkCode } from "../src/channels/identity.js";
 import { appendTraceEvent, queueCompensation, saveOutcomeVerification } from "../src/reliability/persistence.js";
 import { resetTriggerCatalogueForTests } from "../src/triggerCatalog.js";
@@ -74,6 +74,30 @@ test("activity feed returns owner-scoped pending approvals", async () => {
   assert.equal(response.status, 200);
   const activity = await response.json() as { approvals: Array<{ id: string; status: string }> };
   assert.deepEqual(activity.approvals.map(({ id, status }) => ({ id, status })), [{ id: approval.id, status: "pending" }]);
+});
+
+test("attention notification dismissal is owner-scoped and persists on the suggestion", async () => {
+  const previousElenaEnabled = config.elenaEnabled;
+  (config as { elenaEnabled: boolean }).elenaEnabled = true;
+  try {
+    const externalUserId = "dismiss-attention-owner";
+    const ownerId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalUserId}`).digest("hex").slice(0, 12), 16);
+    const candidate = await createAttentionRecord(ownerId, "attention_candidate", {
+      candidateType: "nudge", status: "pending", score: 0.8, reason: "Review a routine follow-up.",
+    });
+    const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalUserId, "Idempotency-Key": "dismiss-attention-1" };
+    const response = await app().fetch(new Request(`http://local/v1/account/attention-candidates/${candidate.id}/dismiss`, { method: "POST", headers }));
+    assert.equal(response.status, 200);
+    assert.equal((await getAttentionRecord(ownerId, "attention_candidate", candidate.id) as { status?: string })?.status, "dismissed");
+
+    const otherOwner = await app().fetch(new Request(`http://local/v1/account/attention-candidates/${candidate.id}/dismiss`, {
+      method: "POST",
+      headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "different-dismiss-owner", "Idempotency-Key": "dismiss-attention-2" },
+    }));
+    assert.equal(otherOwner.status, 404);
+  } finally {
+    (config as { elenaEnabled: boolean }).elenaEnabled = previousElenaEnabled;
+  }
 });
 
 test("older account history requires a valid cursor and durable history backend", async () => {
