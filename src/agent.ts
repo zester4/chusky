@@ -4934,6 +4934,31 @@ export async function fetchModels(): Promise<ModelInfo[]> {
   return modelCache;
 }
 
+export type AudioTranscriptionFormat = "mp3" | "m4a" | "wav" | "webm" | "ogg" | "aac" | "flac";
+
+/**
+ * OpenRouter expects the audio container name, not the MIME subtype. Keep this
+ * mapping at the shared transcription boundary so browser, SDK, CLI, and
+ * channel uploads all describe the same bytes consistently.
+ */
+export function transcriptionFormatForMimeType(mimeType: string): AudioTranscriptionFormat {
+  const formats: Record<string, AudioTranscriptionFormat> = {
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/mp4": "m4a",
+    "audio/x-m4a": "m4a",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/webm": "webm",
+    "audio/ogg": "ogg",
+    "audio/aac": "aac",
+    "audio/flac": "flac",
+  };
+  const format = formats[mimeType.toLowerCase().split(";", 1)[0]];
+  if (!format) throw new Error("Unsupported audio format");
+  return format;
+}
+
 export async function transcribeAudio(data: Buffer, format: string): Promise<string> {
   const res = await fetch("https://openrouter.ai/api/v1/audio/transcriptions", {
     method: "POST",

@@ -8,7 +8,7 @@ import { stableSdkUserId } from "./sdkIdentity.js";
 import type { DurableObjectMetadata } from "./neonDurableState.js";
 import { promoteSdkFileUpload } from "./sdkFilePromotion.js";
 import { getAuth } from "./auth.js";
-import { ApprovalRequiredError, createTrigger, createUserOutcomeReadAdapter, deleteTrigger, disconnectConnectedAccount, executeExactComposioAction, fetchModels, getConnectionUrl, getReconnectUrl, getToolkitStatesPage, listConnectedAccounts, listMeetingComposioCapabilities, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, updateTriggerInstructions, transcribeAudio, queueVideoWorkflow, type AgentToolActivity } from "./agent.js";
+import { ApprovalRequiredError, createTrigger, createUserOutcomeReadAdapter, deleteTrigger, disconnectConnectedAccount, executeExactComposioAction, fetchModels, getConnectionUrl, getReconnectUrl, getToolkitStatesPage, listConnectedAccounts, listMeetingComposioCapabilities, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, transcriptionFormatForMimeType, updateTriggerInstructions, transcribeAudio, queueVideoWorkflow, type AgentToolActivity } from "./agent.js";
 import type { SubagentActivityUpdate } from "./subagents/contracts.js";
 import { deleteR2Object, inspectR2Object, r2Configured, readR2Object, readR2ObjectBounded, signR2Download, signR2Upload, putR2Object } from "./lib/storage/r2.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
@@ -1281,7 +1281,7 @@ async function resolveRunInput(session: Awaited<ReturnType<typeof getSession>>, 
     }
     const data = await readR2Object(file.key);
     if (file.contentType.startsWith("audio/")) {
-      const transcript = await transcribeAudio(data, file.contentType.split("/")[1] || "wav");
+      const transcript = await transcribeAudio(data, transcriptionFormatForMimeType(file.contentType));
       parts.push({ type: "text", text: `Transcript of ${file.name}:\n${transcript}` });
     } else if (file.contentType.startsWith("image/")) {
       parts.push({ type: "image_url", image_url: { url: `data:${file.contentType};base64,${data.toString("base64")}` } });
@@ -3839,7 +3839,7 @@ export function registerSdkApi(app: Hono): void {
     const name = String(body.name ?? "").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
     const contentType = String(body.contentType ?? "").toLowerCase();
     const size = Number(body.size);
-    const allowed = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf", "text/plain", "text/markdown", "application/zip", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "audio/mpeg", "audio/ogg", "audio/wav", "video/mp4", "video/webm"]);
+    const allowed = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf", "text/plain", "text/markdown", "application/zip", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "audio/mpeg", "audio/mp3", "audio/mp4", "audio/x-m4a", "audio/ogg", "audio/wav", "audio/x-wav", "audio/webm", "audio/aac", "audio/flac", "video/mp4", "video/webm"]);
     if (!name || !allowed.has(contentType) || !Number.isFinite(size) || size < 1 || size > config.sdkMaxFileBytes) return apiError(c, 400, "invalid_file", "File name, type, or size is invalid.");
     if (!r2Configured()) return apiError(c, 503, "storage_unavailable", "R2 storage is not configured.");
     const session = await getSession(owner.userId);

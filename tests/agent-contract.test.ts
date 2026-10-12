@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { addRecallMeeting, claimAgentUpgrade, completeMissionStep, createMission, createWebTelegramLinkCode, finalizeMissionIfReady, getApproval, getMission, getSession, initStore, listAgentRuns, listMissions, listTasks, redeemWebTelegramLinkCode, saveSession, setApprovalStatus, startMission, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { stableSdkUserId } from "../src/sdkIdentity.js";
-import { appendPreviewLinks, cleanModelText, getReconnectUrl, getToolkitStatesPage, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, searchTools, voiceComposioToolSlugs, voiceFastLaneEligible, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
+import { appendPreviewLinks, cleanModelText, getReconnectUrl, getToolkitStatesPage, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, searchTools, transcriptionFormatForMimeType, voiceComposioToolSlugs, voiceFastLaneEligible, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { formatAgentUpgradeNotice, loadAgentUpgrade } from "../src/upgradeNotice.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -45,6 +45,14 @@ test("voice fast lane only applies to ordinary conversation", () => {
   assert.equal(voiceFastLaneEligible("Please book an appointment for tomorrow."), false);
   assert.equal(voiceFastLaneEligible("Can you check my calendar?"), false);
   assert.equal(voiceFastLaneEligible("Follow up with the client about tomorrow's meeting."), false);
+});
+
+test("browser audio MIME types map to the transcription container formats", () => {
+  assert.equal(transcriptionFormatForMimeType("audio/webm;codecs=opus"), "webm");
+  assert.equal(transcriptionFormatForMimeType("audio/mp4"), "m4a");
+  assert.equal(transcriptionFormatForMimeType("audio/mpeg"), "mp3");
+  assert.equal(transcriptionFormatForMimeType("audio/x-m4a"), "m4a");
+  assert.throws(() => transcriptionFormatForMimeType("audio/unknown"), /Unsupported audio format/);
 });
 
 test("preview links are included exactly once even when the model omits them", () => {

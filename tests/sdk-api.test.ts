@@ -1372,6 +1372,22 @@ test("SDK file intents enforce the configured allowlist and maximum size before 
   assert.equal((await response.json() as { error: { code: string } }).error.code, "invalid_file");
 });
 
+test("SDK file intents accept browser voice recording MIME types before storage access", async () => {
+  const original = { account: config.r2AccountId, keyId: config.r2AccessKeyId, secret: config.r2SecretAccessKey, bucket: config.r2Bucket };
+  Object.assign(config, { r2AccountId: "", r2AccessKeyId: "", r2SecretAccessKey: "", r2Bucket: "" });
+  try {
+    const api = app();
+    const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "voice-owner", "Content-Type": "application/json" };
+      for (const [index, contentType] of ["audio/webm", "audio/mp4", "audio/ogg"].entries()) {
+      const response = await api.fetch(new Request("http://local/v1/files", { method: "POST", headers, body: JSON.stringify({ name: `voice-${index}.audio`, contentType, size: 10 }) }));
+      assert.equal(response.status, 503, `${contentType} should pass validation and fail only because test storage is disabled`);
+      assert.equal((await response.json() as { error: { code: string } }).error.code, "storage_unavailable");
+    }
+  } finally {
+    Object.assign(config, { r2AccountId: original.account, r2AccessKeyId: original.keyId, r2SecretAccessKey: original.secret, r2Bucket: original.bucket });
+  }
+});
+
 test("SDK trigger catalogue rejects malformed toolkit route parameters before provider access", async () => {
   const api = app();
   const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user" };

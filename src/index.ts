@@ -15,7 +15,7 @@ import { updateAttentionRecord } from "./store.js";
 import type { AttentionCandidateRecord, AutonomyProfileRecord, DeliveryPreferenceRecord, ObservationRecord, AutonomyWatchRecord } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
 import { initStore, getTelegramChatId, createTriggerEventIfAbsent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, saveRecallMeetingMissionState, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
-import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
+import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcriptionFormatForMimeType, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
 import { publishWebNotification } from "./webNotificationBus.js";
@@ -219,7 +219,7 @@ async function sdkTaskMessage(task: Awaited<ReturnType<typeof getTask>>, mission
     if (!file) continue;
     if (file.contentType.startsWith("video/")) { parts.push({ type: "video_url", video_url: { url: await signR2Download(file.key) } }); continue; }
     const bytes = await readR2Object(file.key);
-    if (file.contentType.startsWith("audio/")) { parts.push({ type: "text", text: `Transcript of ${file.name}:\n${await transcribeAudio(bytes, file.contentType.split("/")[1] || "wav")}` }); }
+    if (file.contentType.startsWith("audio/")) { parts.push({ type: "text", text: `Transcript of ${file.name}:\n${await transcribeAudio(bytes, transcriptionFormatForMimeType(file.contentType))}` }); }
     else if (file.contentType.startsWith("image/")) parts.push({ type: "image_url", image_url: { url: `data:${file.contentType};base64,${bytes.toString("base64")}` } });
     else parts.push({ type: "file", file: { filename: file.name, file_data: `data:${file.contentType};base64,${bytes.toString("base64")}` } });
   }
@@ -1483,7 +1483,7 @@ async function main(): Promise<void> {
       let historyLabel = `Attached ${filename}`;
       if (mime.startsWith("image/")) parts = [{ type: "text", text: message || defaultMediaInstruction("image") }, { type: "image_url", image_url: { url: dataUrl } }];
       else if (mime.startsWith("audio/")) {
-        const transcript = await transcribeAudio(bytes, mime.split("/")[1] === "mpeg" ? "mp3" : mime.split("/")[1]);
+        const transcript = await transcribeAudio(bytes, transcriptionFormatForMimeType(mime));
         parts = [{ type: "text", text: `${message}\n\nTranscript of ${filename}:\n${transcript}`.trim() }];
         historyLabel += `\nTranscript: ${transcript}`;
       } else if (mime.startsWith("video/")) parts = [{ type: "text", text: message || defaultMediaInstruction("video") }, { type: "video_url", video_url: { url: dataUrl } }];

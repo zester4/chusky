@@ -1,4 +1,4 @@
-import { runAgent, ApprovalRequiredError, transcribeAudio, type AgentRunOptions } from "../agent.js";
+import { runAgent, ApprovalRequiredError, transcriptionFormatForMimeType, transcribeAudio, type AgentRunOptions } from "../agent.js";
 import { config } from "../config.js";
 import {
   addUsage,
@@ -121,23 +121,6 @@ function mediaFailureText(error: ChannelMediaError, kind: InboundMessage["attach
   }
 }
 
-function transcriptionFormat(mimeType: string): "mp3" | "m4a" | "wav" | "webm" | "ogg" | "aac" | "flac" {
-  const formats: Record<string, "mp3" | "m4a" | "wav" | "webm" | "ogg" | "aac" | "flac"> = {
-    "audio/mpeg": "mp3",
-    "audio/mp4": "m4a",
-    "audio/x-m4a": "m4a",
-    "audio/wav": "wav",
-    "audio/x-wav": "wav",
-    "audio/webm": "webm",
-    "audio/ogg": "ogg",
-    "audio/aac": "aac",
-    "audio/flac": "flac",
-  };
-  const format = formats[mimeType.toLowerCase().split(";", 1)[0]];
-  if (!format) throw new Error("Unsupported audio format");
-  return format;
-}
-
 async function buildAgentInput(message: InboundMessage): Promise<{ input: string | ContentPart[]; historyLabel: string }> {
   const attachments = message.attachments.slice(0, 5);
   const rawMessageText = (message.text ?? "").trim();
@@ -162,7 +145,7 @@ async function buildAgentInput(message: InboundMessage): Promise<{ input: string
     else if (attachment.kind === "audio") {
       const caf = ["audio/caf", "audio/x-caf"].includes(decoded.mimeType.toLowerCase().split(";", 1)[0]);
       const audio = caf ? await transcodeSendblueCafToOgg(decoded.bytes) : decoded.bytes;
-      const transcript = await transcribeAudio(audio, caf ? "ogg" : transcriptionFormat(decoded.mimeType));
+      const transcript = await transcribeAudio(audio, caf ? "ogg" : transcriptionFormatForMimeType(decoded.mimeType));
       parts[0] = { type: "text", text: `${message.text ?? ""}\n\nTranscript of ${attachment.filename ?? "voice message"}:\n${transcript}`.trim() };
     }
   }
