@@ -1776,7 +1776,7 @@ export function registerSdkApi(app: Hono): void {
         notificationStatus: event.notificationStatus ?? (event.status === "completed" ? "delivered" : event.status === "failed" ? "failed" : "pending"),
         ...(event.result ? { result: event.result.slice(0, 4_000) } : {}),
         ...(event.suggestedActions?.length ? { actions: event.suggestedActions.slice(0, 3).map((action) => ({ id: action.id, label: action.label, prompt: action.prompt })) } : {}),
-        ...(event.status === "failed" || event.status === "awaiting_approval" || event.notificationStatus === "unavailable" || event.notificationStatus === "failed" || !event.webReadAt ? { needsAttention: true } : {}),
+        ...(event.status === "failed" || event.status === "awaiting_approval" || event.notificationStatus === "unavailable" || event.notificationStatus === "failed" || event.notificationStatus === "unknown" || !event.webReadAt ? { needsAttention: true } : {}),
         ...(event.webThreadId ? { webThreadId: event.webThreadId } : {}),
         ...(event.webRunId ? { webRunId: event.webRunId } : {}),
         ...(event.webReadAt ? { webReadAt: new Date(event.webReadAt).toISOString() } : {}),

@@ -1583,7 +1583,7 @@ export interface TriggerEventRecord {
   suggestedActions?: TriggerEventAction[];
   error?: string;
   /** Delivery is separate from processing: a missing channel must not erase a completed result. */
-  notificationStatus?: "pending" | "delivered" | "unavailable" | "failed";
+  notificationStatus?: "pending" | "delivered" | "unavailable" | "failed" | "unknown";
   /** First-party dashboard projection for the durable trigger notification. */
   webThreadId?: string;
   webRunId?: string;
