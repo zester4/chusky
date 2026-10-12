@@ -51,7 +51,7 @@ jobs:
           printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$ssh_dir/known_hosts"
           eval "$(ssh-agent -s)" >/dev/null
           ssh-add "$ssh_dir/deploy_key" >/dev/null
-          export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=$ssh_dir/known_hosts -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes"
+          export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=$ssh_dir/known_hosts -o StrictHostKeyChecking=yes"
           git config --global url."git@github.com:zester4/chusky-web.git".insteadOf "https://github.com/zester4/chusky-web.git"
           git submodule update --init --recursive
       - uses: actions/setup-node@v4
