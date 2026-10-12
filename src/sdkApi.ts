@@ -23,6 +23,7 @@ import { listJobOccurrences } from "./store.js";
 import { appendSdkRunHistoryToSession, mutateSession } from "./store.js";
 import { updateTriggerEvent } from "./store.js";
 import { markTriggerWebApprovalResuming } from "./store.js";
+import { ensureMissionWebProjection } from "./store.js";
 import { notifyTriggerApproval } from "./triggerWorkflow.js";
 import { logger } from "./logger.js";
 import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
@@ -330,6 +331,10 @@ async function attachA2APushConfig(owner: A2AOwner, taskId: string, input: unkno
   return updated.a2aPushNotifications?.find((item) => item.id === config.id) ?? config;
 }
 async function enqueueA2AMissionUpdate(mission: any): Promise<void> {
+  if (["completed", "failed", "cancelled"].includes(mission.status) && Number.isSafeInteger(mission.webNotificationEligibleAt)) {
+    try { await ensureMissionWebProjection(mission); }
+    catch (error) { logger.warn({ errorType: error instanceof Error ? error.name : "UnknownError", missionId: mission.id }, "Mission chat notification projection failed"); }
+  }
   if (!Array.isArray(mission.a2aPushNotifications) || mission.a2aPushNotifications.length === 0) return;
   const payload = {
     statusUpdate: {
@@ -1702,7 +1707,7 @@ export function registerSdkApi(app: Hono): void {
       logger.warn({ errorType: error instanceof Error ? error.name : "UnknownError", userId: owner.userId }, "Account overview memory projection unavailable");
       return { memory: [], status: "degraded" as const };
     });
-    const [channels, devices, reminders, jobs, workspace, deliveries, memoryProjectionResult, triggerEvents, approvals, attentionCandidates] = await Promise.all([
+    const [channels, devices, reminders, jobs, workspace, deliveries, memoryProjectionResult, triggerEvents, approvals, attentionCandidates, terminalMissions] = await Promise.all([
       listChannelIdentities(owner.userId),
       listCliDevices(owner.userId),
       listReminders(owner.userId),
@@ -1713,7 +1718,25 @@ export function registerSdkApi(app: Hono): void {
       listTriggerEvents(owner.userId, 50),
       listApprovals(owner.userId, 100),
       listAttentionRecords(owner.userId, "attention_candidate", { limit: 50 }),
+      listMissions(owner.userId).then((items) => items.filter((item) => ["completed", "failed", "cancelled"].includes(item.status) && Number.isSafeInteger(item.webNotificationEligibleAt)).slice(0, 50)),
     ]);
+    // Mission state is authoritative and durable. Reconcile terminal records
+    // into the chat projection on account refresh so a process crash between
+    // mission closeout and best-effort live fan-out cannot lose the notice.
+    const missionProjections = await Promise.allSettled(terminalMissions.map((mission) => ensureMissionWebProjection(mission)));
+    const missionNotifications = terminalMissions.map((mission, index) => {
+      const projection = missionProjections[index];
+      if (projection?.status === "rejected") logger.warn({ errorType: projection.reason instanceof Error ? projection.reason.name : "UnknownError", missionId: mission.id }, "Mission notification projection unavailable");
+      return {
+        id: mission.id,
+        title: mission.title,
+        status: mission.status,
+        summary: (mission.result || mission.error || mission.nextAction || "Review the saved mission state and evidence.").slice(0, 500),
+        updatedAt: new Date(mission.completedAt ?? mission.updatedAt).toISOString(),
+        unread: (mission.webNotificationReadVersion ?? -1) < mission.version,
+        ...(projection?.status === "fulfilled" ? { threadId: projection.value.threadId, runId: projection.value.runId } : {}),
+      };
+    });
     const visibleApprovals = await visibleApprovalsForDashboard(owner.userId, approvals);
     const visibleJobs = config.elenaEnabled ? jobs : jobs.filter((item) => item.kind !== "attention_pulse");
     const pulseJob = config.elenaEnabled ? jobs.find((item) => item.kind === "attention_pulse") : undefined;
@@ -1761,6 +1784,7 @@ export function registerSdkApi(app: Hono): void {
         updatedAt: new Date(event.updatedAt).toISOString(),
       })),
       devices: devices.filter((item) => !item.revokedAt).map(({ tokenHash, ...item }) => ({ ...item, id: createHash("sha256").update(tokenHash).digest("hex").slice(0, 24), createdAt: new Date(item.createdAt).toISOString(), lastSeenAt: new Date(item.lastSeenAt).toISOString() })),
+      missionNotifications,
       workspace: workspace ? { sandboxId: workspace.sandboxId, name: workspace.name, lastKnownState: workspace.lastKnownState, createdAt: new Date(workspace.createdAt).toISOString(), updatedAt: new Date(workspace.updatedAt).toISOString(), ptySessions: workspace.ptySessions?.length ?? 0, lastUrl: workspace.browser?.lastUrl } : null,
       webhooks: (session.sdkWebhooks ?? []).filter((item) => !item.disabledAt).map(({ secretCiphertext: _secret, ...item }) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
       telegramLink: { linked: Boolean(webAuthUserId && await getTelegramUserIdForWebAuth(webAuthUserId)) },
@@ -1773,9 +1797,9 @@ export function registerSdkApi(app: Hono): void {
     return streamSSE(c, async (stream) => {
       let closed = false;
       let wake: (() => void) | undefined;
-      const queue: Array<{ eventId: string; kind?: "run" | "call"; callId?: string; threadId?: string; runId?: string }> = [];
+      const queue: Array<{ eventId: string; kind?: "run" | "call" | "mission"; callId?: string; missionId?: string; threadId?: string; runId?: string }> = [];
       const unsubscribe = subscribeWebNotifications(userId, (event) => {
-        queue.push({ eventId: event.eventId, ...(event.kind ? { kind: event.kind } : {}), ...(event.callId ? { callId: event.callId } : {}), ...(event.threadId ? { threadId: event.threadId } : {}), ...(event.runId ? { runId: event.runId } : {}) });
+        queue.push({ eventId: event.eventId, ...(event.kind ? { kind: event.kind } : {}), ...(event.callId ? { callId: event.callId } : {}), ...(event.missionId ? { missionId: event.missionId } : {}), ...(event.threadId ? { threadId: event.threadId } : {}), ...(event.runId ? { runId: event.runId } : {}) });
         wake?.();
       });
       const abort = () => { closed = true; wake?.(); };
@@ -3432,6 +3456,15 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/tasks/:taskId/retry", async (c) => { const userId = sdkUser(c)!.userId; const task = await retryTask(userId, c.req.param("taskId")); if (!task) return apiError(c, 409, "task_not_retryable", "Only failed, blocked, or cancelled tasks can be retried."); try { const workflowRunId = await enqueueTaskWithClaim(userId, task.id, task.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer); if (!workflowRunId) return apiError(c, 409, "task_enqueue_in_progress", "This task is already being queued."); const updated = await getTask(userId, task.id); return c.json(updated ?? task); } catch (error) { return apiError(c, 503, "task_enqueue_failed", error instanceof Error ? error.message : "Task could not be queued."); } });
   app.post("/v1/tasks/:taskId/cancel", async (c) => { const task = await cancelTask(sdkUser(c)!.userId, c.req.param("taskId")); return task ? c.json(task) : apiError(c, 409, "task_not_cancellable", "This task is already completed or cancelled."); });
   app.get("/v1/missions", async (c) => c.json({ data: await listMissions(sdkUser(c)!.userId) }));
+  app.post("/v1/missions/:missionId/notification/read", async (c) => {
+    const userId = sdkUser(c)!.userId;
+    const current = await getMission(userId, c.req.param("missionId"));
+    if (!current) return apiError(c, 404, "not_found", "Mission not found.");
+    if (!["completed", "failed", "cancelled"].includes(current.status)) return apiError(c, 409, "mission_not_terminal", "Only a finished mission update can be marked as read.");
+    const updated = await updateMission(userId, current.id, (mission) => ({ webNotificationReadVersion: mission.version + 1 }));
+    if (!updated) return apiError(c, 409, "mission_changed", "The mission changed while its notification was being marked read. Refresh and try again.");
+    return c.json({ ok: true, missionId: updated.id, readVersion: updated.webNotificationReadVersion });
+  });
   app.post("/v1/missions", async (c) => {
     const owner = sdkUser(c)!;
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;

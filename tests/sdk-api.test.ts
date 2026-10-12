@@ -137,6 +137,48 @@ test("account overview exposes durable mission approvals without an active chat 
   assert.equal(visible.missionId, "mis_feed_owner");
 });
 
+test("terminal missions create one owner-scoped chat update and an unread badge that can be acknowledged", async () => {
+  const externalUserId = "mission-notification-owner";
+  const ownerId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalUserId}`).digest("hex").slice(0, 12), 16);
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalUserId };
+  const api = app();
+  const mission = await createMission(ownerId, {
+    title: "Prepare a verified prospect brief",
+    objective: "Research and qualify prospects.",
+    definitionOfDone: "The cited brief is ready for review.",
+    steps: [{ id: "research", title: "Research", objective: "Find and qualify prospects." }],
+  });
+  await updateMission(ownerId, mission.id, (current) => ({ status: "completed", completedAt: Date.now(), result: "Three cited prospects are ready for review.", events: [...current.events, { id: "misevt_mission_notice_completed", type: "completed", message: "Mission completed.", at: Date.now() }] }));
+
+  const overviewResponse = await api.fetch(new Request("http://local/v1/account/overview", { headers }));
+  assert.equal(overviewResponse.status, 200);
+  const overview = await overviewResponse.json() as { missionNotifications: Array<{ id: string; status: string; unread: boolean; threadId?: string; runId?: string; summary: string }> };
+  const notice = overview.missionNotifications.find((item) => item.id === mission.id);
+  assert.ok(notice);
+  assert.equal(notice.status, "completed");
+  assert.equal(notice.unread, true);
+  assert.equal(notice.threadId, "thr_mission_updates");
+  assert.ok(notice.runId);
+  assert.match(notice.summary, /Three cited prospects/);
+
+  const runsResponse = await api.fetch(new Request("http://local/v1/threads/thr_mission_updates/runs?limit=50", { headers }));
+  assert.equal(runsResponse.status, 200);
+  const runs = (await runsResponse.json() as { data: Array<{ id: string; output?: string; metadata?: Record<string, unknown> }> }).data;
+  assert.equal(runs.filter((run) => run.metadata?.missionId === mission.id).length, 1, "workflow and overview retries must converge on one chat entry");
+  assert.match(runs.find((run) => run.metadata?.missionId === mission.id)?.output ?? "", /Three cited prospects/);
+
+  const readResponse = await api.fetch(new Request(`http://local/v1/missions/${mission.id}/notification/read`, { method: "POST", headers }));
+  assert.equal(readResponse.status, 200);
+  const refreshed = await (await api.fetch(new Request("http://local/v1/account/overview", { headers }))).json() as typeof overview;
+  assert.equal(refreshed.missionNotifications.find((item) => item.id === mission.id)?.unread, false);
+
+  const otherOwner = await api.fetch(new Request(`http://local/v1/missions/${mission.id}/notification/read`, {
+    method: "POST",
+    headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "mission-notification-other" },
+  }));
+  assert.equal(otherOwner.status, 404);
+});
+
 test("native tool discovery returns executable JSON schemas for all reliability capabilities", async () => {
   const api = app();
   const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tool-catalog-owner" };

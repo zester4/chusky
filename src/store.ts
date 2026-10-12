@@ -1089,6 +1089,10 @@ export interface MissionRecord {
   idempotencyKey?: string;
   result?: string;
   error?: string;
+  /** Mission version the owner last acknowledged in the first-party web inbox. */
+  webNotificationReadVersion?: number;
+  /** Set atomically with a new terminal transition so crash recovery can find it without replaying old missions. */
+  webNotificationEligibleAt?: number;
   createdAt: number;
   updatedAt: number;
   startedAt?: number;
@@ -6031,6 +6035,64 @@ export async function ensureTriggerWebProjection(input: {
   }) as Promise<{ threadId: string; runId: string }>;
 }
 
+/**
+ * Materialize one terminal mission update as an owner-private dashboard chat
+ * run. The durable mission is the replay source; the terminal event ID makes
+ * projection retries idempotent across worker and API restarts.
+ */
+export async function ensureMissionWebProjection(mission: MissionRecord): Promise<{ threadId: string; runId: string; eventId: string; created: boolean }> {
+  if (!Number.isSafeInteger(mission.userId) || mission.userId <= 0 || !/^mis_[A-Za-z0-9_-]{1,120}$/.test(mission.id)
+    || !["completed", "failed", "cancelled"].includes(mission.status)) {
+    throw new Error("A valid owner-scoped terminal mission is required for its web notification.");
+  }
+  const terminalEvent = [...mission.events].reverse().find((event) => event.type === mission.status);
+  const eventId = terminalEvent?.id ?? `mission:${mission.id}:${mission.status}:${mission.completedAt ?? mission.createdAt}`;
+  const threadId = "thr_mission_updates";
+  const runId = `run_mission_${createHash("sha256").update(eventId).digest("hex").slice(0, 32)}`;
+  const existingSession = await getSessionWithSdkRuns(mission.userId, threadId);
+  const existing = existingSession.sdkThreads?.flatMap((thread) => thread.runs).find((run) => run.metadata?.missionEventId === eventId);
+  if (existing) return { threadId, runId: existing.id, eventId, created: false };
+
+  const now = Date.now();
+  const projection = await mutateSession(mission.userId, (session) => {
+    session.sdkThreads = session.sdkThreads ?? [];
+    let thread = session.sdkThreads.find((item) => item.id === threadId && item.metadata.source === "mission-notifications");
+    if (!thread) {
+      thread = { id: threadId, externalId: "mission-updates", metadata: { source: "mission-notifications", title: "Mission updates" }, history: [], runs: [], createdAt: now, updatedAt: now };
+      session.sdkThreads.push(thread);
+    }
+    const prior = thread.runs.find((run) => run.metadata?.missionEventId === eventId);
+    if (prior) return { threadId: thread.id, runId: prior.id, eventId, created: false };
+
+    const statusLabel = mission.status === "completed" ? "completed" : mission.status === "failed" ? "needs attention" : "was cancelled";
+    const detail = mission.status === "completed"
+      ? mission.result?.trim() || "The mission completed. Review its evidence and activity on the Missions page."
+      : mission.error?.trim() || mission.nextAction?.trim() || (mission.status === "failed" ? "The mission stopped before completion. Review the saved checkpoint and next action." : "The mission was cancelled before completion.");
+    const statusText = mission.status === "completed" ? "Mission completed" : mission.status === "failed" ? "Mission needs attention" : "Mission cancelled";
+    const run: SdkRunRecord = {
+      id: runId,
+      ownerPrivateRun: true,
+      status: "completed",
+      input: `${statusText}: ${mission.title}`.slice(0, 1000),
+      output: `${statusText}: ${mission.title}\n\n${detail}`.slice(0, 12_000),
+      model: session.model,
+      metadata: { source: "mission", missionId: mission.id, missionStatus: mission.status, missionEventId: eventId },
+      events: [
+        { id: `evt_${runId}_started`, type: "run.started", at: now },
+        { id: `evt_${runId}_completed`, type: "run.completed", at: now },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    };
+    thread.runs.push(run);
+    thread.updatedAt = now;
+    return { threadId: thread.id, runId, eventId, created: true };
+  }, { sdkThreadId: threadId });
+  if (!projection) throw new Error("Mission notification could not be saved to the owner session.");
+  if (projection.created) publishWebNotification({ userId: mission.userId, eventId, kind: "mission", missionId: mission.id, threadId: projection.threadId, runId: projection.runId });
+  return projection;
+}
+
 /** Move the dashboard's trigger run into its resume state after an owner approves. */
 export async function markTriggerWebApprovalResuming(userId: number, eventId: string, approvalId: string): Promise<boolean> {
   const now = Date.now();
@@ -7391,6 +7453,8 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
     consumedSlices: Math.max(0, Number(mission.consumedSlices) || 0),
     toolCalls: Math.max(0, Number(mission.toolCalls) || 0),
     cost: Math.max(0, Number(mission.cost) || 0),
+    ...(Number.isSafeInteger(mission.webNotificationReadVersion) && Number(mission.webNotificationReadVersion) >= 0 ? { webNotificationReadVersion: Number(mission.webNotificationReadVersion) } : {}),
+    ...(Number.isSafeInteger(mission.webNotificationEligibleAt) && Number(mission.webNotificationEligibleAt) > 0 ? { webNotificationEligibleAt: Number(mission.webNotificationEligibleAt) } : {}),
     ...(Array.isArray(mission.checkpointHistory) ? {
       checkpointHistory: mission.checkpointHistory.filter((item): item is MissionCheckpointRecord => Boolean(item) && typeof item === "object" && typeof (item as MissionCheckpointRecord).id === "string" && typeof (item as MissionCheckpointRecord).checkpoint === "string" && Number.isFinite((item as MissionCheckpointRecord).at)).slice(-200).map((item) => ({
         id: item.id.slice(0, 160),
@@ -8089,7 +8153,9 @@ async function mutateMission(userId: number, id: string, mutate: MissionMutation
     const now = Date.now();
     const timing = current.budget.durationMode === "active" && patch.status !== undefined && patch.status !== "running"
       ? { ...current.timing, activeMs: missionActiveMs(current, now), extensionsUsed: current.timing?.extensionsUsed ?? 0, activeSince: undefined } : patch.timing ?? current.timing;
-    const next = normalizeMission({ ...current, ...patch, timing, id: current.id, userId: current.userId, createdAt: current.createdAt, updatedAt: now, version: current.version + 1 });
+    const nextStatus = patch.status ?? current.status;
+    const terminalTransition = ["completed", "failed", "cancelled"].includes(nextStatus) && nextStatus !== current.status;
+    const next = normalizeMission({ ...current, ...patch, ...(terminalTransition ? { webNotificationEligibleAt: now } : {}), timing, id: current.id, userId: current.userId, createdAt: current.createdAt, updatedAt: now, version: current.version + 1 });
     const saved = await backend.compareAndUpdateMission(userId, id, current.version, next);
     if (saved) {
       void missionUpdateNotifier?.(saved).catch((error) => logger.warn({ err: error, missionId: saved.id }, "Mission update notification enqueue failed"));
