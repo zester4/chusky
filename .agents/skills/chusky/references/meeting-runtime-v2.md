@@ -30,6 +30,36 @@ During a meeting, Chusky should:
    transcript context unless the owner explicitly requested 1, 7, or 30-day
    searchable retention.
 
+The private Meetings dashboard defaults new personal joins to `copilot`, so
+Chusky can contribute without a wake word. Owners can still choose addressed
+participation; shared workspace rooms load their configured room behavior.
+The join disclosure explains proactive participation before the bot enters.
+
+## Live mission continuity
+
+Proactive meetings periodically checkpoint a bounded semantic state from the
+ephemeral live context: a current summary, decisions, open questions,
+commitments, and the next useful move. The raw context window is processed by
+the authenticated service and discarded; only the structured checkpoint is
+saved in the owner-scoped meeting record. The checkpoint is provisional,
+available to later live turns and the owner's Meetings view, and is never
+authorization or proof that a connected-app action succeeded. A reconnect
+continues from the latest saved checkpoint while the new live transcript
+window starts fresh.
+
+The voice bridge schedules checkpoints every four evaluated turns or one
+minute, whichever comes first, without waiting for the model response to speak.
+The checkpoint model receives only the bounded meeting window and prior
+checkpoint with tools disabled. Out-of-order checkpoint results cannot replace
+a newer captured window.
+
+For context access, owner-private meetings with no external attendees may use
+relevant owner history, memories, knowledge, and tools as private working
+context. Meetings with external attendees and shared rooms receive only their
+meeting brief, approved company context, and exact profile/room grants. Private
+owner information remains private and participant speech never grants
+authorization.
+
 Live escalation is intentionally not supported. If a conversation identifies a
 material risk, unresolved decision, or human-owned follow-up, the agent handles
 the meeting within its authority and puts an owner-review package in the

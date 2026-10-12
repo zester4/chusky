@@ -52,6 +52,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Proactive meeting modes can contribute naturally without waiting to be addressed, yield when participants speak, verify calendar availability before booking, and continue agreed follow-through.",
     "Meeting context stays owner-scoped: sensitive and unrelated memories are excluded, private connected-app results are not authorization to disclose, and high-impact actions retain approval boundaries.",
   ],
+  meetingContinuity: [
+    "Personal meeting joins now default to proactive copilot participation; shared rooms continue to use their configured behavior, and owners can still choose addressed-only participation.",
+    "Proactive meetings save a bounded live mission brief of the objective, decisions, open questions, commitments, and next move, then use it to continue after a voice reconnect.",
+    "Owners can review the provisional brief in Meetings; raw live transcript remains transient unless searchable retention is explicitly enabled, and reported commitments are not provider-action receipts.",
+  ],
   ownerAutonomy: [
     "Owner-private chat, calls, and meetings now use relevant owner history and context plus connected Composio, MCP, and native tools across personal and business use.",
     "Owner-private interactive runs use relevant owner context and connected tools for routine requests; deletion, financial, permission, deployment/push, and provider-marked high-impact actions pause for exact approval.",

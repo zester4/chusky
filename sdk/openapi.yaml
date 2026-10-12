@@ -133,7 +133,7 @@ paths:
     get: { summary: List account voice calls with redacted destinations, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
     post: { summary: Validate and start an outbound voice call, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Started call record } } }
   /meetings:
-    get: { summary: List owner-scoped Recall meeting rooms, preparations, meetings, participants, and contacts, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    get: { summary: List owner-scoped Recall meeting rooms, preparations, meetings, participants, and contacts, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Owner-private meeting records may include bounded missionState; shared projections omit it } } }
     post: { summary: Join or schedule a Recall meeting, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Meeting lifecycle record } } }
   /meetings/prepare:
     post: { summary: Generate a private client-bound meeting brief without joining, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Prepared meeting mission } } }
@@ -604,6 +604,27 @@ components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer }
   schemas:
+    MeetingMissionState:
+      type: object
+      additionalProperties: false
+      required: [summary, decisions, openQuestions, commitments, nextMove, checkpointAt]
+      properties:
+        summary: { type: string }
+        decisions: { type: array, items: { type: string } }
+        openQuestions: { type: array, items: { type: string } }
+        commitments:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [task, owner, status]
+            properties:
+              task: { type: string }
+              owner: { type: string }
+              status: { type: string, enum: [proposed, agreed, in_progress, reported_done, blocked] }
+              dueDate: { type: string }
+        nextMove: { type: string }
+        checkpointAt: { type: string, format: date-time }
     MissionBudgetCeiling:
       type: object
       additionalProperties: false

@@ -6,12 +6,12 @@ export type TaskWorkflowEnqueuer = (userId: number, taskId: string, runAt: numbe
 export type TaskWorkflowFinalizer = (userId: number, taskId: string, workflowRunId: string, expectedWorkflowRunId: string) => Promise<unknown>;
 
 /**
- * Publish a durable task exactly once per enqueue attempt.
+ * Publish one durable task workflow per persisted enqueue claim.
  *
  * The claim is persisted before contacting QStash. If the process dies after
  * QStash accepts the request but before the workflow id is written, the
- * expired pending claim can be recovered and the stable provider idempotency
- * key prevents a second workflow from being created.
+ * expired pending claim can be recovered and the persisted runAt keeps the
+ * provider idempotency key stable for that publication attempt.
  */
 export async function enqueueTaskWithClaim(
   userId: number,
@@ -24,7 +24,7 @@ export async function enqueueTaskWithClaim(
   const claimed = await claimTaskEnqueue(userId, taskId, token);
   if (!claimed) return undefined;
   try {
-    const workflowRunId = await enqueuer(userId, taskId, runAt);
+    const workflowRunId = await enqueuer(userId, taskId, claimed.runAt ?? runAt);
     const recorded = await finalizer(userId, taskId, workflowRunId, `pending:${token}`);
     if (!recorded) {
       throw new Error("Task workflow was published but its provider run ID could not be recorded; enqueue recovery will reconcile it.");

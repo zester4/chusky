@@ -9,7 +9,7 @@ import { browserFileDownloadResponse, persistSdkCompanyRun, registerSdkApi, sdkR
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
-import { addJob, addPhoneCall, addRecallMeeting, authenticateCliToken, completeMissionStep, createApproval, createAttentionRecord, createCliDevice, createMission, createTask, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getAttentionRecord, getMission, getOutbox, getSession, getTask, initStore, listAttentionRecords, listTasks, recordTrustedMissionEvidence, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, startMission, updateMission, updateOutbox, upsertMeetingContact, upsertMemory, waitMission } from "../src/store.js";
+import { addJob, addPhoneCall, addRecallMeeting, attachMeetingToRoom, authenticateCliToken, completeMissionStep, createApproval, createAttentionRecord, createCliDevice, createMission, createTask, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getAttentionRecord, getMission, getOutbox, getSession, getTask, initStore, listAttentionRecords, listTasks, recordTrustedMissionEvidence, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, startMission, updateMission, updateOutbox, upsertMeetingContact, upsertMemory, waitMission } from "../src/store.js";
 import { redeemLinkCode } from "../src/channels/identity.js";
 import { appendTraceEvent, queueCompensation, saveOutcomeVerification } from "../src/reliability/persistence.js";
 import { resetTriggerCatalogueForTests } from "../src/triggerCatalog.js";
@@ -399,12 +399,14 @@ test("SDK run images expose only persisted owner-asset metadata", () => {
 test("SDK generated image downloads are fresh, private, and owner-scoped", async () => {
   const externalId = "generated-image-owner";
   const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
-  const session = await getSession(userId);
-  session.imageAssets.push({ id: "img_saved_1", userId, name: "generated-image.png", purpose: "generated", description: "", tags: [], r2Key: `images/${userId}/private-image.png`, contentType: "image/png", size: 11, createdAt: Date.now(), updatedAt: Date.now() });
-  await saveSession(userId, session);
+  const originalObjectCatalogEnabled = config.durableObjectCatalogEnabled;
   const original = { account: config.r2AccountId, keyId: config.r2AccessKeyId, secret: config.r2SecretAccessKey, bucket: config.r2Bucket };
-  Object.assign(config, { r2AccountId: "0123456789abcdef0123456789abcdef", r2AccessKeyId: "test-access-key", r2SecretAccessKey: "test-secret-key", r2Bucket: "test-private-bucket" });
+  (config as { durableObjectCatalogEnabled: boolean }).durableObjectCatalogEnabled = false;
   try {
+    const session = await getSession(userId);
+    session.imageAssets.push({ id: "img_saved_1", userId, name: "generated-image.png", purpose: "generated", description: "", tags: [], r2Key: `images/${userId}/private-image.png`, contentType: "image/png", size: 11, createdAt: Date.now(), updatedAt: Date.now() });
+    await saveSession(userId, session);
+    Object.assign(config, { r2AccountId: "0123456789abcdef0123456789abcdef", r2AccessKeyId: "test-access-key", r2SecretAccessKey: "test-secret-key", r2Bucket: "test-private-bucket" });
     const api = app();
     const response = await api.fetch(new Request("http://local/v1/images/img_saved_1", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId } }));
     assert.equal(response.status, 200);
@@ -417,6 +419,7 @@ test("SDK generated image downloads are fresh, private, and owner-scoped", async
     assert.equal(foreign.status, 404);
   } finally {
     Object.assign(config, { r2AccountId: original.account, r2AccessKeyId: original.keyId, r2SecretAccessKey: original.secret, r2Bucket: original.bucket });
+    (config as { durableObjectCatalogEnabled: boolean }).durableObjectCatalogEnabled = originalObjectCatalogEnabled;
   }
 });
 
@@ -1975,7 +1978,7 @@ test("linked dashboard can read owner-scoped meeting preparation, outcomes, rost
   const now = Date.now();
   await createTriggerEvent({ eventId: "cal-trigger-820001", userId: 820001, triggerSlug: "GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CREATED_TRIGGER", summary: "Calendar meeting created", status: "completed", result: "Recommendation: review the last pricing discussion and ask about their launch date.", createdAt: now, updatedAt: now });
   await saveCalendarMeetingPreparation(820001, { id: "cmp_owner_meeting_1", userId: 820001, sourceTriggerEventId: "cal-trigger-820001", calendarEventId: "event-820001", lifecycle: "created", status: "prepared", title: "Acme discovery", startAt: new Date(now + 60_000).toISOString(), participants: ["Avery", "client@example.com"], attendees: [{ name: "Avery", email: "avery@example.com", responseStatus: "accepted" }], createdAt: now, updatedAt: now });
-  await addRecallMeeting(820001, { id: "mtg_owner_meeting_1", userId: 820001, platform: "google_meet", status: "in_call", interactionMode: "representative", meetingUrlHash: "a".repeat(64), title: "Acme discovery", participantRoster: [{ id: "p1", name: "Avery", isHost: true, email: "avery@example.com", emailSource: "recall_match", assurance: "calendar_matched", status: "present", updatedAt: now }], history: [{ role: "user", content: "Can we schedule a test drive?", createdAt: now }, { role: "assistant", content: "I can check a time that works.", createdAt: now }], createdAt: now, updatedAt: now });
+  await addRecallMeeting(820001, { id: "mtg_owner_meeting_1", userId: 820001, platform: "google_meet", status: "in_call", interactionMode: "representative", meetingUrlHash: "a".repeat(64), title: "Acme discovery", missionState: { summary: "The client wants to agree on a test-drive time.", decisions: [], openQuestions: ["Which day works?"], commitments: [], nextMove: "Check calendar availability.", checkpointAt: now }, participantRoster: [{ id: "p1", name: "Avery", isHost: true, email: "avery@example.com", emailSource: "recall_match", assurance: "calendar_matched", status: "present", updatedAt: now }], history: [{ role: "user", content: "Can we schedule a test drive?", createdAt: now }, { role: "assistant", content: "I can check a time that works.", createdAt: now }], createdAt: now, updatedAt: now });
   await upsertMeetingContact(820001, "mtg_owner_meeting_1", { participantName: "Avery", email: "avery@example.com", contactPreference: "email", interest: "Test drive", nextStep: "Confirm a time" });
 
   const api = app();
@@ -1988,6 +1991,7 @@ test("linked dashboard can read owner-scoped meeting preparation, outcomes, rost
   assert.deepEqual(payload.preparations[0]?.attendees, [{ name: "Avery", email: "avery@example.com", responseStatus: "accepted" }]);
   assert.deepEqual(payload.meetings[0]?.participantRoster, [{ id: "p1", name: "Avery", isHost: true, email: "avery@example.com", emailSource: "recall_match", assurance: "calendar_matched", status: "present", updatedAt: new Date(now).toISOString() }]);
   assert.equal((payload.meetings[0]?.history as Array<{ content: string }>)[0]?.content, "Can we schedule a test drive?");
+  assert.equal((payload.meetings[0]?.missionState as { summary: string }).summary, "The client wants to agree on a test-drive time.");
   assert.equal(payload.contacts[0]?.email, "avery@example.com");
   assert.equal(JSON.stringify(payload).includes("sealedMeetingUrl"), false);
   assert.equal(JSON.stringify(payload).includes("meetingUrlHash"), false);
@@ -2378,9 +2382,15 @@ test("workspace meeting rooms are organization-scoped and do not expose private 
   const room = await created.json() as { id: string; organizationId: string; policy: { visibility: string } };
   assert.equal(room.organizationId, "better-auth-org");
   assert.equal(room.policy.visibility, "organization");
+  const meetingId = "mtg_shared_projection_1";
+  const ownerUserId = 820006;
+  const now = Date.now();
+  await addRecallMeeting(ownerUserId, { id: meetingId, userId: ownerUserId, roomId: room.id, organizationId: room.organizationId, visibility: "organization", platform: "google_meet", status: "in_call", interactionMode: "copilot", meetingUrlHash: "c".repeat(64), missionState: { summary: "Owner-private continuity detail", decisions: [], openQuestions: [], commitments: [], nextMove: "", checkpointAt: now }, history: [], createdAt: now, updatedAt: now });
+  await attachMeetingToRoom(room.id, meetingId, ownerUserId);
   const listed = await api.fetch(new Request("http://local/v1/meetings?organizationId=better-auth-org", { headers }));
   assert.equal(listed.status, 200);
-  const body = await listed.json() as { rooms: Array<{ id: string }>; meetings: unknown[] };
+  const body = await listed.json() as { rooms: Array<{ id: string }>; meetings: Array<Record<string, unknown>> };
   assert.deepEqual(body.rooms.map((item) => item.id), [room.id]);
-  assert.deepEqual(body.meetings, []);
+  assert.equal(body.meetings[0]?.id, meetingId);
+  assert.equal("missionState" in body.meetings[0]!, false);
 });

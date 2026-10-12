@@ -751,6 +751,7 @@ function meetingView(meeting: any, includeParticipantIdentity = false) {
     ...(meeting.transcriptErrorCode && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? { transcriptErrorCode: meeting.transcriptErrorCode } : {}),
     ...(meeting.transcriptRetentionDays && meeting.transcriptExpiresAt ? { transcriptExpiresAt: new Date(meeting.transcriptExpiresAt).toISOString() } : {}),
     ...(meeting.mission ? { mission: { clientName: meeting.mission.clientName, objective: meeting.mission.objective, preparedAt: new Date(meeting.mission.preparedAt).toISOString() } } : {}),
+    ...(includeParticipantIdentity && meeting.missionState ? { missionState: { ...meeting.missionState, checkpointAt: new Date(meeting.missionState.checkpointAt).toISOString() } } : {}),
     participantRoster: (meeting.participantRoster ?? []).map((person: any) => ({
       id: person.id,
       name: person.name,
@@ -1783,8 +1784,8 @@ export function registerSdkApi(app: Hono): void {
         createdAt: new Date(event.createdAt).toISOString(),
         updatedAt: new Date(event.updatedAt).toISOString(),
       })),
-      devices: devices.filter((item) => !item.revokedAt).map(({ tokenHash, ...item }) => ({ ...item, id: createHash("sha256").update(tokenHash).digest("hex").slice(0, 24), createdAt: new Date(item.createdAt).toISOString(), lastSeenAt: new Date(item.lastSeenAt).toISOString() })),
       missionNotifications,
+      devices: devices.filter((item) => !item.revokedAt).map(({ tokenHash, ...item }) => ({ ...item, id: createHash("sha256").update(tokenHash).digest("hex").slice(0, 24), createdAt: new Date(item.createdAt).toISOString(), lastSeenAt: new Date(item.lastSeenAt).toISOString() })),
       workspace: workspace ? { sandboxId: workspace.sandboxId, name: workspace.name, lastKnownState: workspace.lastKnownState, createdAt: new Date(workspace.createdAt).toISOString(), updatedAt: new Date(workspace.updatedAt).toISOString(), ptySessions: workspace.ptySessions?.length ?? 0, lastUrl: workspace.browser?.lastUrl } : null,
       webhooks: (session.sdkWebhooks ?? []).filter((item) => !item.disabledAt).map(({ secretCiphertext: _secret, ...item }) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
       telegramLink: { linked: Boolean(webAuthUserId && await getTelegramUserIdForWebAuth(webAuthUserId)) },

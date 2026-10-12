@@ -8,6 +8,7 @@ import {
   quarantineExpiredTask,
 } from "./store.js";
 import { reconcileMissionExecution, resumeMissionAndSchedule, type MissionTaskEnqueuer } from "./missionScheduler.js";
+import { logger } from "./logger.js";
 
 export interface MissionRecoveryReport {
   ownersScanned: number;
@@ -24,10 +25,6 @@ export interface MissionRecoveryOptions {
   maxOwners?: number;
   maxMissionsPerOwner?: number;
   now?: number;
-}
-
-function missionTasks(tasks: Awaited<ReturnType<typeof listTasks>>, missionId: string) {
-  return tasks.filter((task) => task.missionId === missionId);
 }
 
 function expiredLeaseRecoveryText(task: Awaited<ReturnType<typeof listTasks>>[number]): { reason: string; nextAction: string } {
@@ -59,10 +56,22 @@ export async function recoverMissionsForOwner(
   const report: MissionRecoveryReport = { ownersScanned: 1, missionsScanned: 0, repaired: 0, republished: 0, timerWakes: 0, quarantined: 0, blocked: 0, errors: 0 };
   const now = options.now ?? Date.now();
   const missions = (await listMissions(userId)).filter((mission) => ["running", "waiting", "failed"].includes(mission.status)).slice(0, options.maxMissionsPerOwner ?? 100);
+  // Read the owner's task collection once per sweep. Loading it for every
+  // mission makes recovery O(missions × tasks), which grows sharply for active
+  // accounts with many long-running objectives.
+  const tasksByMission = new Map<string, Awaited<ReturnType<typeof listTasks>>>();
+  for (const task of await listTasks(userId)) {
+    if (!task.missionId) continue;
+    const tasks = tasksByMission.get(task.missionId) ?? [];
+    tasks.push(task);
+    tasksByMission.set(task.missionId, tasks);
+  }
   report.missionsScanned = missions.length;
+  const reconciledMissionIds = new Set<string>();
+  const versionChangedMissionIds = new Set<string>();
   for (const mission of missions) {
     try {
-      const tasks = missionTasks(await listTasks(userId), mission.id);
+      const tasks = tasksByMission.get(mission.id) ?? [];
       if (mission.status === "waiting") {
         if (mission.waiting?.kind !== "timer" || !mission.waiting.runAt || mission.waiting.runAt > now) continue;
         const resumed = await resumeMissionAndSchedule(userId, mission.id, enqueue);
@@ -109,12 +118,19 @@ export async function recoverMissionsForOwner(
       const before = await getMission(userId, mission.id);
       const reconciled = await reconcileMissionExecution(userId, mission.id, enqueue);
       if (!reconciled) continue;
-      const afterTasks = missionTasks(await listTasks(userId), mission.id);
-      const published = afterTasks.some((task) => task.status === "queued" && typeof task.workflowRunId === "string" && !task.workflowRunId.startsWith("pending:"));
-      if (published) report.republished++;
-      if (!before || before.version !== reconciled.version || published) report.repaired++;
-    } catch {
+      reconciledMissionIds.add(mission.id);
+      if (!before || before.version !== reconciled.version) versionChangedMissionIds.add(mission.id);
+    } catch (error) {
       report.errors++;
+      logger.warn({ userId, missionId: mission.id, errorClass: error instanceof Error ? error.name : "unknown" }, "Mission recovery failed for mission");
+    }
+  }
+  if (reconciledMissionIds.size) {
+    const finalTasks = await listTasks(userId);
+    for (const missionId of reconciledMissionIds) {
+      const published = finalTasks.some((task) => task.missionId === missionId && task.status === "queued" && typeof task.workflowRunId === "string" && !task.workflowRunId.startsWith("pending:"));
+      if (published) report.republished++;
+      if (published || versionChangedMissionIds.has(missionId)) report.repaired++;
     }
   }
   return report;

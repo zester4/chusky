@@ -2,6 +2,12 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.14.0 - 2026-10-12
+
+- Expose owner-private bounded meeting mission state in typed meeting records,
+  including decisions, open questions, commitments, next move, and checkpoint.
+- Document that shared meeting projections omit this private working state.
+
 ## 1.13.1 - 2026-10-09
 
 - Align the standalone SDK repository with the published `@chusky/sdk@1.13.1`

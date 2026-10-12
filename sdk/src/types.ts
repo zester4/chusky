@@ -180,6 +180,14 @@ export interface MeetingMission {
   preparedAt: number;
 }
 export interface MeetingMissionSummary { clientName: string; objective: string; preparedAt: string; }
+export interface MeetingMissionState {
+  summary: string;
+  decisions: string[];
+  openQuestions: string[];
+  commitments: Array<{ task: string; owner: string; status: "proposed" | "agreed" | "in_progress" | "reported_done" | "blocked"; dueDate?: string }>;
+  nextMove: string;
+  checkpointAt: string;
+}
 export interface MeetingParticipant { id: string; name: string; identityStatus?: "named" | "unknown"; isHost?: boolean; email?: string; emailSource?: "recall_match"; assurance?: "unverified" | "calendar_matched" | "confirmed"; status: "present" | "left"; updatedAt: string; }
 export interface MeetingSpeakerEvent { type: "speech_on" | "speech_off"; participantId?: string; at: string; }
 export interface MeetingOutcomeActionItem { task: string; owner: string; dueDate?: string; }
@@ -203,6 +211,8 @@ export interface MeetingRecord {
   joinAt?: string;
   error?: string;
   mission?: MeetingMissionSummary;
+  /** Owner-private bounded working state; omitted from shared meeting projections. */
+  missionState?: MeetingMissionState;
   participantRoster?: MeetingParticipant[];
   speakerEvents?: MeetingSpeakerEvent[];
   history?: Array<{ role: "user" | "assistant"; content: string; createdAt?: string }>;

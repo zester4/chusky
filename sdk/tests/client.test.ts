@@ -224,7 +224,7 @@ test("SDK parses NDJSON run events in order", async () => {
 });
 
 test("SDK parses owner-scoped meeting SSE snapshots in order", async () => {
-  const workspace = { rooms: [], preparations: [], meetings: [{ id: "mtg_1", platform: "google_meet", status: "in_call", interactionMode: "representative", screenShareUnderstanding: false, searchableTranscript: false, createdAt: "2026-09-15T12:00:00.000Z", updatedAt: "2026-09-15T12:00:01.000Z" }], contacts: [] };
+  const workspace = { rooms: [], preparations: [], meetings: [{ id: "mtg_1", platform: "google_meet", status: "in_call", interactionMode: "representative", screenShareUnderstanding: false, searchableTranscript: false, missionState: { summary: "Qualification is in progress", decisions: [], openQuestions: ["Timeline"], commitments: [], nextMove: "Confirm rollout timing", checkpointAt: "2026-10-12T12:00:00.000Z" }, createdAt: "2026-09-15T12:00:00.000Z", updatedAt: "2026-09-15T12:00:01.000Z" }], contacts: [] };
   const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(`event: snapshot\ndata: ${JSON.stringify(workspace)}\n\nevent: keepalive\ndata: 123\n\n`)); controller.close(); } });
   let request: { url: string; headers: Headers } | undefined;
   const sdk = new Chusky({ apiKey: "key", userId: "customer_1", baseUrl: "https://example.test", fetch: mockFetch((url, init) => { request = { url, headers: new Headers(init?.headers) }; return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } }); }) });
@@ -234,6 +234,7 @@ test("SDK parses owner-scoped meeting SSE snapshots in order", async () => {
   assert.equal(request?.headers.get("accept"), "text/event-stream");
   assert.deepEqual(events.map((event) => event.type), ["snapshot", "keepalive"]);
   assert.equal(events[0]?.workspace?.meetings[0]?.id, "mtg_1");
+  assert.equal(events[0]?.workspace?.meetings[0]?.missionState?.nextMove, "Confirm rollout timing");
 });
 
 test("SDK exposes root project lifecycle endpoints", async () => {

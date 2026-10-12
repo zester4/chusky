@@ -80,7 +80,10 @@ await chusky.meetings.leave(meeting.id);
 ```
 
 The meeting snapshot includes the provider platform, lifecycle status, mission
-metadata, and safe retention state. Participant roster and outcomes are
+metadata, and safe retention state. Owner-private meeting records may also
+include bounded `missionState`: a summary, decisions, open questions,
+commitments, the next move, and its checkpoint time. Shared-room projections
+omit this owner-private working state. Participant roster and outcomes are
 available in `meetings.list()` for the authenticated owner. Meeting context is
 available only for an active representative meeting and contains relevant
 owner-stored facts, not arbitrary private history.

@@ -28,12 +28,14 @@ test("default trigger policy requires end-to-end execution and provider-specific
   assert.match(TRIGGER_DEFAULT_HANDLING, /complete routine, in-scope work now/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /verify each provider write with a provider receipt or a read-back/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /Email: read the full triggering message and relevant thread/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /send the answer; do not leave a draft solely because the message is personal/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /starts with "Action taken:"/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /Slack and other messaging: read the originating conversation and thread/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /Ashby applications: inspect the complete application, answers, resume/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /Pause only before a refund, deletion, or a critical decision/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /Never return NO_ACTION/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /at most six short bullets/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /how the result was verified/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /how completed work was verified/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /Do not paste the provider message/i);
 });
 

@@ -26,7 +26,7 @@ import {
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, getApproval, getAgentRun, setApprovalStatus, updateTask, getHandoffRecord,
   blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, createMission, finalizeMissionIfReady, getMission, listMissions, missionProof, pauseMission, startMission, updateMission, updateMissionControl, waitMission, recordTrustedMissionEvidence, verifyMission, repairMission, missionBudgetPreflight, missingMissionEvidenceRequirements, MissionReplanConflictError,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
-  countLeadCampaignCandidates, createLeadCampaign, finalizeLeadCampaign, getLeadCampaign, listLeadCampaigns, listLeadCampaignCandidates, reserveLeadCampaignTregSpend, settleLeadCampaignTregSpend, updateLeadCampaign, updateLeadCampaignCandidate, upsertLeadCampaignCandidates,
+  countLeadCampaignCandidates, createLeadCampaign, finalizeLeadCampaign, getLeadCampaign, getLeadCampaignCandidate, listLeadCampaigns, listLeadCampaignCandidates, reserveLeadCampaignTregSpend, settleLeadCampaignTregSpend, updateLeadCampaign, updateLeadCampaignCandidate, upsertLeadCampaignCandidates, withLeadCampaignTregLease,
   type AttentionEntityKind, type AutonomyProfileRecord, type AutonomyWatchRecord, type DeliveryPreferenceRecord, type ImageAsset, type TinyFishMonitorRecord, type TinyFishResearchRunRecord, type LeadCampaignCandidateRecord,
   type TaskStatus, type MissionStatus, type MissionBudget, type MissionWorkSchedule,
   type JobRecord, type ReminderRecord, type ScheduledWorkerBinding, type ReminderDeliveryTarget,
@@ -369,7 +369,7 @@ async function startLeadCampaign(userId: number, args: Record<string, unknown>, 
       { id: "campaign-intake", title: "Load lead research playbook and confirm campaign scope", objective: `Read lead-intel-pro skill and references needed for ${campaign.id}. Confirm ICP, geography, target, supplied seeds, and no-contact boundary. Use CHUCK_LEAD_CAMPAIGN get to inspect this campaign.`, allowedTools: ["CHUCK_LEAD_CAMPAIGN", "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE"] },
       { id: "candidate-discovery", title: "Discover and persist source-linked candidates", objective: `Find candidates for campaign ${campaign.id} using owner-provided seeds, eligible connected-app read sources, and low-cost public research first. Use TinyFish/Composio web search where available and exact read-only connected-app actions already present in this private run. Never use a generic write gateway. Deduplicate and persist batches of at most 50 using CHUCK_LEAD_CAMPAIGN record_candidates. Every candidate must have an HTTPS source URL and a concise observed-fact summary. Aim for ${targetCount}; do not invent contacts or intent.`, dependsOn: ["campaign-intake"], allowedTools: leadCampaignTools(runtime).filter((slug) => !slug.startsWith("CHUCK_TREG_") && !["CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"].includes(slug)) },
       { id: "candidate-qualification", title: "Qualify and deduplicate candidates", objective: `Review persisted candidates in campaign ${campaign.id} against the explicit ICP/geography. Update qualificationStatus and reason; distinguish observed evidence from inference. Keep uncertain rows in review and reject clear mismatches. Qualification means fit, never purchase intent.`, dependsOn: ["candidate-discovery"], allowedTools: ["CHUCK_LEAD_CAMPAIGN", "CHUCK_TINYFISH_FETCH", "COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT"] },
-      { id: "shortlist-enrichment", title: "Enrich only the qualified shortlist within budget", objective: `For qualified candidates only, use the narrow Treg person/company enrichment tools when Treg is configured and useful. Pass campaign mission ID and a maxSpendUsd no greater than the remaining campaign budget on each call; process one paid call at a time. Record returned fields, provider/source, and no-match state. Never enrich rejected/review rows or exceed the campaign cap. If the cap is zero/exhausted or Treg is unavailable, mark enrichment skipped and continue without asking the owner to reconnect unnecessarily.`, dependsOn: ["candidate-qualification"], allowedTools: ["CHUCK_LEAD_CAMPAIGN", "CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE"] },
+      { id: "shortlist-enrichment", title: "Enrich only the qualified shortlist within budget", objective: `For persisted qualified candidates only, call CHUCK_TREG_ENRICH_PERSON or CHUCK_TREG_ENRICH_COMPANY with that candidate's candidateId. The server binds enrichment to the saved candidate identity and rejects review/rejected candidates. Pass campaign mission ID and a maxSpendUsd no greater than the remaining campaign budget; paid calls are serialized and spend is reconciled from bounded receipts. Record returned fields, provider/source, and no-match state. Never enrich other people or companies or exceed the campaign cap. If the cap is zero/exhausted or Treg is unavailable, mark enrichment skipped and continue without asking the owner to reconnect unnecessarily.`, dependsOn: ["candidate-qualification"], allowedTools: ["CHUCK_LEAD_CAMPAIGN", "CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY"] },
       { id: "campaign-tracker", title: "Prepare the internal campaign tracker", objective: `Read campaign ${campaign.id} candidates in bounded pages and prepare a professional spreadsheet artifact with company, contact, qualification, source URLs, enrichment status, and next action. Keep the persisted campaign records as the source of truth. Do not create or modify an external CRM/Sheet/Notion database or send outreach in this run; offer the user an approval-gated connected-app sync as a next action.`, dependsOn: ["shortlist-enrichment"], allowedTools: ["CHUCK_LEAD_CAMPAIGN", "CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"] },
       { id: "campaign-finalize", title: "Verify and finalize the campaign snapshot", objective: `Call CHUCK_LEAD_CAMPAIGN finalize for campaign ${campaign.id}. The server computes persisted candidate counts, shortfall, and a hash and records trusted mission evidence. Report actual persisted counts, Treg campaign spend, and unresolved gaps; never claim more leads than the store contains.`, dependsOn: ["campaign-tracker"], allowedTools: ["CHUCK_LEAD_CAMPAIGN"] },
     ],
@@ -499,37 +499,72 @@ function effectiveTregMissionId(args: Record<string, unknown>, runtime: NativeTo
   return args.missionId ? text(args.missionId, 160) : undefined;
 }
 
+async function leadCampaignEnrichmentInput(
+  userId: number,
+  missionId: string | undefined,
+  missionStepId: string | undefined,
+  candidateIdValue: unknown,
+  kind: "person" | "company",
+): Promise<{ name?: string; domain?: string; company?: string; linkedinUrl?: string } | undefined> {
+  if (!missionId) return undefined;
+  const campaign = (await listLeadCampaigns(userId)).find((item) => item.missionId === missionId);
+  if (!campaign) {
+    if (candidateIdValue !== undefined) throw new Error("candidateId is valid only for a lead-campaign mission.");
+    return undefined;
+  }
+  if (missionStepId !== "shortlist-enrichment") throw new Error("Lead-campaign enrichment is allowed only in the qualified shortlist step.");
+  if (campaign.finalizedAt) throw new Error("This lead campaign is finalized; enrichment is closed.");
+  if (typeof candidateIdValue !== "string" || !candidateIdValue.trim()) throw new Error("candidateId is required for lead-campaign enrichment.");
+  const candidateId = missionText(candidateIdValue, "candidateId", 160);
+  const candidate = await getLeadCampaignCandidate(userId, campaign.id, candidateId);
+  if (!candidate) throw new Error("Lead candidate not found in this campaign.");
+  if (candidate.qualificationStatus !== "qualified") throw new Error("Only a persisted qualified lead may be enriched for this campaign.");
+  if (kind === "person") {
+    if (!candidate.personName && !candidate.linkedinUrl) throw new Error("This qualified lead has no saved person name or profile URL to enrich.");
+    return { name: candidate.personName, domain: candidate.domain, company: candidate.companyName, linkedinUrl: candidate.linkedinUrl };
+  }
+  if (!candidate.domain && !candidate.companyName) throw new Error("This qualified lead has no saved company identity to enrich.");
+  return { name: candidate.companyName, domain: candidate.domain };
+}
+
 async function withLeadCampaignTregBudget<T>(userId: number, missionId: string | undefined, requestedUsd: number | undefined, runtime: NativeToolRuntime, execute: (reservedUsd: number | undefined) => Promise<T>): Promise<T> {
   if (!missionId) return execute(undefined);
   const campaign = (await listLeadCampaigns(userId)).find((item) => item.missionId === missionId);
   if (!campaign) return execute(undefined);
-  const remainingUsd = Math.max(0, campaign.maxTregSpendUsd - campaign.tregSpentUsd - campaign.tregReservedUsd);
-  const runLimit = runtime.tregMaxSpendUsd === undefined ? remainingUsd : Math.min(remainingUsd, runtime.tregMaxSpendUsd);
-  const requested = requestedUsd === undefined ? runLimit : Math.min(runLimit, requestedUsd);
-  if (requested <= 0) throw new Error("This lead campaign has no remaining Treg enrichment budget; continue with the source data already collected.");
-  const reservation = await reserveLeadCampaignTregSpend(userId, missionId, requested);
-  if (!reservation) return execute(undefined);
-  const seenCallIds = new Set((await listTregReceipts(userId, 200, runtime.organizationId)).filter((receipt) => receipt.missionId === missionId).map((receipt) => receipt.callId));
-  let result: T | undefined;
-  let succeeded = false;
-  try {
-    result = await execute(reservation.reservedUsd);
-    succeeded = true;
-    return result;
-  } finally {
-    const receipts = await listTregReceipts(userId, 200, runtime.organizationId);
-    const receiptSpend = receipts.filter((receipt) => receipt.missionId === missionId && !seenCallIds.has(receipt.callId)).reduce((sum, receipt) => sum + receipt.costUsd, 0);
-    const resultSpend = result && typeof result === "object" && "totalCostUsd" in result && Number.isFinite(Number((result as Record<string, unknown>).totalCostUsd))
-      ? Number((result as Record<string, unknown>).totalCostUsd)
-      : result && typeof result === "object" && "receipt" in result && (result as any).receipt && Number.isFinite(Number((result as any).receipt.costUsd))
-        ? Number((result as any).receipt.costUsd)
-        : 0;
-    const actualSpend = Math.max(receiptSpend, resultSpend);
-    // The provider may have completed a paid request before its response was
-    // lost. Without a receipt, keep the reservation consumed rather than
-    // blindly retrying into an unknown billable effect.
-    await settleLeadCampaignTregSpend(userId, reservation.campaignId, reservation.reservedUsd, !succeeded && actualSpend === 0 ? reservation.reservedUsd : actualSpend);
-  }
+  return withLeadCampaignTregLease(userId, campaign.id, async () => {
+    const current = await getLeadCampaign(userId, campaign.id);
+    if (!current || current.missionId !== missionId) throw new Error("Lead campaign changed while enrichment was waiting; inspect campaign state before retrying.");
+    const remainingUsd = Math.max(0, current.maxTregSpendUsd - current.tregSpentUsd - current.tregReservedUsd);
+    const runLimit = runtime.tregMaxSpendUsd === undefined ? remainingUsd : Math.min(remainingUsd, runtime.tregMaxSpendUsd);
+    const requested = requestedUsd === undefined ? runLimit : Math.min(runLimit, requestedUsd);
+    if (requested <= 0) throw new Error("This lead campaign has no remaining Treg enrichment budget; continue with the source data already collected.");
+    const reservation = await reserveLeadCampaignTregSpend(userId, missionId, requested);
+    if (!reservation) throw new Error("Lead campaign spend reservation could not be confirmed; enrichment stopped before calling the provider.");
+    const seenCallIds = new Set((await listTregReceipts(userId, 200, runtime.organizationId)).filter((receipt) => receipt.missionId === missionId).map((receipt) => receipt.callId));
+    let result: T | undefined;
+    let succeeded = false;
+    try {
+      result = await execute(reservation.reservedUsd);
+      succeeded = true;
+      return result;
+    } finally {
+      // This campaign-specific renewable lease makes the receipt window belong
+      // to this operation; without it, concurrent enrichment calls could each
+      // charge the other's receipts and corrupt the campaign's spend ledger.
+      const receipts = await listTregReceipts(userId, 200, runtime.organizationId);
+      const receiptSpend = receipts.filter((receipt) => receipt.missionId === missionId && !seenCallIds.has(receipt.callId)).reduce((sum, receipt) => sum + receipt.costUsd, 0);
+      const resultSpend = result && typeof result === "object" && "totalCostUsd" in result && Number.isFinite(Number((result as Record<string, unknown>).totalCostUsd))
+        ? Number((result as Record<string, unknown>).totalCostUsd)
+        : result && typeof result === "object" && "receipt" in result && (result as any).receipt && Number.isFinite(Number((result as any).receipt.costUsd))
+          ? Number((result as any).receipt.costUsd)
+          : 0;
+      const actualSpend = Math.max(receiptSpend, resultSpend);
+      // The provider may have completed a paid request before its response was
+      // lost. Without a receipt, keep the reservation consumed rather than
+      // blindly retrying into an unknown billable effect.
+      await settleLeadCampaignTregSpend(userId, reservation.campaignId, reservation.reservedUsd, !succeeded && actualSpend === 0 ? reservation.reservedUsd : actualSpend);
+    }
+  });
 }
 
 function taskCreateIdempotencyId(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime): string | undefined {
@@ -1821,13 +1856,14 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     }
     case "CHUCK_TREG_ENRICH_PERSON": {
       const missionId = effectiveTregMissionId(args, runtime);
+      const leadCandidate = await leadCampaignEnrichmentInput(userId, missionId, runtime.missionStepId, args.candidateId, "person");
       const requestedSpend = args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd);
       return withLeadCampaignTregBudget(userId, missionId, requestedSpend, runtime, (reservedUsd) => tregGateway().enrichPerson({
         userId,
-        name: args.name ? text(args.name, 240) : undefined,
-        domain: args.domain ? text(args.domain, 240) : undefined,
-        company: args.company ? text(args.company, 240) : undefined,
-        linkedinUrl: args.linkedinUrl ? text(args.linkedinUrl, 1000) : undefined,
+        name: leadCandidate ? leadCandidate.name : (args.name ? text(args.name, 240) : undefined),
+        domain: leadCandidate ? leadCandidate.domain : (args.domain ? text(args.domain, 240) : undefined),
+        company: leadCandidate ? leadCandidate.company : (args.company ? text(args.company, 240) : undefined),
+        linkedinUrl: leadCandidate ? leadCandidate.linkedinUrl : (args.linkedinUrl ? text(args.linkedinUrl, 1000) : undefined),
         missionId,
         maxSpendUsd: reservedUsd ?? (runtime.tregMaxSpendUsd === undefined ? requestedSpend : Math.min(runtime.tregMaxSpendUsd, requestedSpend ?? runtime.tregMaxSpendUsd)),
         organizationId: runtime.organizationId,
@@ -1835,11 +1871,12 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     }
     case "CHUCK_TREG_ENRICH_COMPANY": {
       const missionId = effectiveTregMissionId(args, runtime);
+      const leadCandidate = await leadCampaignEnrichmentInput(userId, missionId, runtime.missionStepId, args.candidateId, "company");
       const requestedSpend = args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd);
       return withLeadCampaignTregBudget(userId, missionId, requestedSpend, runtime, (reservedUsd) => tregGateway().enrichCompany({
         userId,
-        domain: args.domain ? text(args.domain, 240) : undefined,
-        name: args.name ? text(args.name, 240) : undefined,
+        domain: leadCandidate ? leadCandidate.domain : (args.domain ? text(args.domain, 240) : undefined),
+        name: leadCandidate ? leadCandidate.name : (args.name ? text(args.name, 240) : undefined),
         missionId,
         maxSpendUsd: reservedUsd ?? (runtime.tregMaxSpendUsd === undefined ? requestedSpend : Math.min(runtime.tregMaxSpendUsd, requestedSpend ?? runtime.tregMaxSpendUsd)),
         organizationId: runtime.organizationId,
@@ -1847,6 +1884,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     }
     case "CHUCK_TREG_RESOLVE": {
       const missionId = effectiveTregMissionId(args, runtime);
+      if (missionId && (await listLeadCampaigns(userId)).some((campaign) => campaign.missionId === missionId)) {
+        throw new Error("General-purpose Treg data resolution is disabled inside lead campaigns; enrich an exact persisted qualified candidate instead.");
+      }
       const requestedSpend = args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd);
       return withLeadCampaignTregBudget(userId, missionId, requestedSpend, runtime, (reservedUsd) => tregGateway().resolveDataNeed({
         userId,

@@ -36,6 +36,17 @@ test("meeting upgrade preset contains bounded, accurate release highlights", () 
   assert.throws(() => getAgentUpgradePreset("unknown"), /Unknown upgrade preset/);
 });
 
+test("meeting continuity preset distinguishes proactive joins, recoverable state, and transcript privacy", () => {
+  const bullets = getAgentUpgradePreset("meetingContinuity");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.meetingContinuity]);
+  assert.match(bullets[0], /default to proactive copilot participation/);
+  assert.match(bullets[0], /shared rooms continue to use their configured behavior/);
+  assert.match(bullets[1], /continue after a voice reconnect/);
+  assert.match(bullets[2], /raw live transcript remains transient/);
+  assert.match(bullets[2], /not provider-action receipts/);
+});
+
 test("mission upgrade preset contains bounded, accurate release highlights", () => {
   const bullets = getAgentUpgradePreset("missions");
   assert.equal(bullets.length, 3);
@@ -224,12 +235,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces autonomous trigger execution across dashboard surfaces", async () => {
+test("current upgrade manifest announces live meeting continuity and proactive participation", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.53.0");
-  assert.equal(notice?.version, "4.53.0");
-  assert.match(notice?.bullets[1] ?? "", /bounded private provider context and source references/);
-  assert.match(notice?.bullets[2] ?? "", /autonomously handle routine writes/);
+  assert.equal(notice?.id, "release-4.54.0");
+  assert.equal(notice?.version, "4.54.0");
+  assert.match(notice?.bullets[0] ?? "", /default to proactive copilot participation/);
+  assert.match(notice?.bullets[1] ?? "", /continue after a voice reconnect/);
+  assert.match(notice?.bullets[2] ?? "", /raw live transcript remains transient/);
 });
 
 test("lead campaign preset describes durable, discovery-first work and bounded enrichment", () => {

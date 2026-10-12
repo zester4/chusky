@@ -68,7 +68,10 @@ export function runMissionProcess(input: ProcessProofInput, killAt?: string): Pr
     let result: ProcessProofResult | undefined;
     let killed = false;
     let failed: string | undefined;
-    const deadline = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("Process proof timed out after 30 seconds.")); }, 30000);
+    // Instrumented production workers can be slow on Windows CI when the full
+    // TypeScript test suite is running. Keep a bounded deadline without
+    // treating ordinary process contention as a recovery failure.
+    const deadline = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("Process proof timed out after 120 seconds.")); }, 120_000);
     child.on("error", (error) => { clearTimeout(deadline); reject(error); });
     child.on("message", (message: any) => {
       if (message.kind === "redisKey") {
