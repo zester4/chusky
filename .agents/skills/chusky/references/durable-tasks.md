@@ -26,6 +26,7 @@ Do not use a reminder for a long mission, a recurring job for a one-off wait, or
   cancelled;
 - `checkpoint` and `nextAction` for recovery;
 - `attempt`, `maxAttempts`, `runAt`, and `workflowRunId`;
+- consecutive QStash delivery failures, tracked separately from worker attempts;
 - a lease with token, worker ID, acquisition time, and expiry;
 - bounded lifecycle events;
 - optional SDK run/thread linkage;
@@ -51,6 +52,13 @@ failures are requeued only within `maxAttempts` with bounded backoff.
 Every task mutation must remain owner-scoped and should be idempotent. A
 workflow payload contains IDs, not the prompt, credentials, or raw provider
 payload.
+
+QStash delivery exhaustion is reconciled from the signed failure callback. A
+still-queued, due task with no worker lease may be republished under a fresh
+workflow run ID; callbacks for stale run IDs cannot replace a newer publication.
+Three consecutive delivery failures before a worker claim make the task failed
+with an operator-visible retry action. This counter resets only after a worker
+claims the task, and it is separate from the task's bounded execution attempts.
 
 ## Internal durable waits
 
@@ -233,9 +241,11 @@ When a reminder/job/task appears not to run, inspect in this order:
 3. The record is active and not paused/cancelled/expired.
 4. `runAt`, schedule ID, workflow run ID, occurrence ID, and idempotency key are
    present and consistent.
-5. The linked task/mission has a valid checkpoint, next action, and lease state.
-6. The latest bounded event/error explains the next recovery action.
-7. The durable outbox has not already delivered the result.
+5. For a QStash failure callback, confirm its signed `workflowRunId` still
+   matches the task's current publication before retrying or changing state.
+6. The linked task/mission has a valid checkpoint, next action, and lease state.
+7. The latest bounded event/error explains the next recovery action.
+8. The durable outbox has not already delivered the result.
 
 When a task is stuck in `running`, compare lease expiry and worker ID before
 retrying. When a pulse repeats itself, compare dedupe key, occurrence ID,

@@ -1,8 +1,9 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { chuckTools, validateNativeToolArguments } from "../src/agentTools.js";
-import { nativeTool } from "../src/nativeTools.js";
-import { finalizeLeadCampaign, getMission, initStore, listLeadCampaignCandidates, listMissions, reserveLeadCampaignTregSpend, settleLeadCampaignTregSpend, upsertLeadCampaignCandidates } from "../src/store.js";
+import { nativeTool, setTregGatewayForTests } from "../src/nativeTools.js";
+import { finalizeLeadCampaign, getMission, initStore, listLeadCampaignCandidates, listMissions, reserveLeadCampaignTregSpend, settleLeadCampaignTregSpend, upsertLeadCampaignCandidates, withLeadCampaignTregLease } from "../src/store.js";
+import type { TregGateway } from "../src/treg/gateway.js";
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
 
@@ -85,6 +86,67 @@ test("campaign Treg reservations are atomic, cumulative, and bounded by the conf
   const finalReservation = await reserveLeadCampaignTregSpend(981001, campaign.missionId, 0.31);
   assert.deepEqual(finalReservation, { campaignId: campaign.id, reservedUsd: 0.3 });
   await assert.rejects(reserveLeadCampaignTregSpend(981001, campaign.missionId, 0.01), /exhausted/i);
+});
+
+test("campaign Treg lease serializes spend attribution and releases after provider failure", async () => {
+  const campaign = await tool({
+    action: "start", title: "Serialized enrichment", objective: "Enrich one shortlist",
+    idealCustomerProfile: "B2B services", geography: "US", targetCount: 2,
+    maxTregSpendUsd: 1, idempotencyKey: "campaign-treg-lease-test",
+  }) as { id: string };
+  let active = 0;
+  let peak = 0;
+  const execute = async (label: string, fail = false) => withLeadCampaignTregLease(981001, campaign.id, async () => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    active -= 1;
+    if (fail) throw new Error(`${label} failed`);
+    return label;
+  });
+  const first = execute("first", true);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const second = execute("second");
+  await assert.rejects(first, /first failed/);
+  assert.equal(await second, "second");
+  assert.equal(peak, 1, "same-campaign paid calls must not overlap when receipts are used for settlement");
+});
+
+test("campaign enrichment can only spend on the saved identity of a qualified candidate", async () => {
+  const campaign = await tool({
+    action: "start", title: "Qualified enrichment", objective: "Verify one qualified prospect",
+    idealCustomerProfile: "B2B services", geography: "US", targetCount: 1,
+    maxTregSpendUsd: 1, idempotencyKey: "campaign-qualified-enrichment-test",
+  }) as { id: string; missionId: string };
+  const runtime = campaignRuntime({ missionId: campaign.missionId, missionStepId: "shortlist-enrichment" });
+  const recorded = await nativeTool(981001, "CHUCK_LEAD_CAMPAIGN", { action: "record_candidates", id: campaign.id, candidates: [{
+    companyName: "Northstar Mechanical", domain: "northstar.example", personName: "Avery Stone", linkedinUrl: "https://www.linkedin.com/in/avery-stone",
+    sourceUrls: ["https://northstar.example/about"], evidenceSummary: "Company source describes commercial HVAC service in Texas.",
+    qualificationStatus: "review", qualificationReason: "Awaiting confirmation of service area.",
+  }] }, runtime) as { candidates: Array<{ id: string }> };
+  const candidateId = recorded.candidates[0]!.id;
+  const calls: Array<Record<string, unknown>> = [];
+  setTregGatewayForTests({ enrichPerson: async (input: Record<string, unknown>) => { calls.push(input); return { totalCostUsd: 0.2 }; } } as unknown as TregGateway);
+  try {
+    await assert.rejects(nativeTool(981001, "CHUCK_TREG_ENRICH_PERSON", { candidateId }, runtime), /only a persisted qualified lead/i);
+    await assert.rejects(nativeTool(981001, "CHUCK_TREG_ENRICH_PERSON", { name: "Unrelated Person" }, runtime), /candidateId is required/i);
+    await assert.rejects(nativeTool(981001, "CHUCK_TREG_RESOLVE", { need: "arbitrary contact search" }, runtime), /disabled inside lead campaigns/i);
+    assert.equal(calls.length, 0, "unqualified, unbound, and broad requests must be rejected before provider calls");
+
+    await nativeTool(981001, "CHUCK_LEAD_CAMPAIGN", {
+      action: "update_candidate", id: campaign.id, candidateId,
+      qualificationStatus: "qualified", qualificationReason: "Verified industry and geography from cited source.",
+    }, runtime);
+    await nativeTool(981001, "CHUCK_TREG_ENRICH_PERSON", {
+      candidateId, name: "Attacker Supplied Name", linkedinUrl: "https://example.net/not-the-saved-profile", maxSpendUsd: 0.5,
+    }, runtime);
+    assert.equal(calls.length, 1);
+    assert.deepEqual({ name: calls[0]?.name, domain: calls[0]?.domain, company: calls[0]?.company, linkedinUrl: calls[0]?.linkedinUrl }, {
+      name: "Avery Stone", domain: "northstar.example", company: "Northstar Mechanical", linkedinUrl: "https://www.linkedin.com/in/avery-stone",
+    });
+  } finally {
+    setTregGatewayForTests(undefined);
+  }
 });
 
 test("finalization records a server-derived snapshot and freezes the candidate set", async () => {

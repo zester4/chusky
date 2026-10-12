@@ -440,6 +440,7 @@ function safeMeeting(record: RecallMeetingRecord) {
     joinAt: record.joinAt,
     error: record.error,
     ...(record.mission ? { mission: { clientName: record.mission.clientName, objective: record.mission.objective, preparedAt: new Date(record.mission.preparedAt).toISOString() } } : {}),
+    ...(record.missionState ? { missionState: { ...record.missionState, checkpointAt: new Date(record.missionState.checkpointAt).toISOString() } } : {}),
     createdAt: new Date(record.createdAt).toISOString(),
     updatedAt: new Date(record.updatedAt).toISOString(),
   };

@@ -54,7 +54,7 @@ ledger. Durable run completion accounting is idempotent by project and run ID.
 | Company agents | `GET/POST/PATCH/DELETE /v1/account/projects/:id/agents` and `/v1/agents` | Dashboard management is role-checked; SDK routes require project `agents:read/write` scopes. Templates are listed at `GET /v1/agents/templates`. |
 | Runs | `POST /v1/threads/:threadId/runs` | Executes durable Chusky work. `wait` is bounded. Optional `attachments` contains up to five available file IDs owned by the authenticated user; image bridge runs accept verified JPEG, PNG, or WebP files. Dashboard actions may include `metadata.triggerEventId` and `metadata.triggerActionId`; the server verifies that the event belongs to this owner and that the stored action is valid before starting Chat. Completed runs may include metadata for generated images saved to the owner's private image store. |
 | Native tool catalog | `GET /v1/tools`, `GET /v1/tools/:slug` | Native tools include their JSON input schema and `execution: durable_run`; `chusky.tools.run()` starts a durable run restricted to one of the five tool-reliability capabilities. Normal project policy and approval gates still apply. |
-| Run stream | `POST /v1/threads/:threadId/runs/stream` | `application/x-ndjson`; emits typed run events. |
+| Run stream | `POST /v1/threads/:threadId/runs/stream` | `application/x-ndjson`; emits typed run events, including structured `run.progress` updates. |
 | Runs | `GET /v1/threads/:threadId/runs/:runId`, `POST .../cancel` | Cancellation is request-specific; durable task results stay queryable. |
 | Tasks | `GET /v1/tasks`, `GET /v1/tasks/:taskId` | Cursor pagination, project and end-user authorized. |
 | Approvals | `GET /v1/approvals/:approvalId`, `POST /v1/approvals/:approvalId` | Decision body is `{ decision: "approve" | "deny" }`. |
@@ -89,12 +89,40 @@ ledger. Durable run completion accounting is idempotent by project and run ID.
 
 The stream contains one JSON object per line and may emit:
 
-`run.started`, `run.delta`, `run.tool_started`, `run.tool_activity`, `run.approval_required`, `run.completed`, `run.failed`.
+`run.started`, `run.status`, `run.progress`, `run.delta`, `run.tool_started`,
+`run.tool_activity`, `run.subagent_activity`, `run.approval_required`,
+`run.completed`, `run.failed`, `run.cancelled`.
+
+`run.progress` has the shape:
+
+```json
+{
+  "type": "run.progress",
+  "runId": "run_…",
+  "progress": {
+    "phase": "planning | researching | acting | waiting | completed",
+    "title": "Reviewing your request",
+    "detail": "Chusky is organizing the right context before it acts.",
+    "provider": "gmail",
+    "progress": 0.4,
+    "requiresApproval": false,
+    "evidence": [{ "label": "Found 3 relevant messages", "kind": "step" }]
+  }
+}
+```
+
+The progress projection is bounded and user-facing. Evidence contains only
+safe labels, short details, and allow-listed artifact/source links; raw tool
+arguments, provider payloads, prompts, credentials, and results are excluded.
+The latest projection is also included on the run record and persisted as an
+append-only event so clients can recover it through the run or events endpoint.
 
 `run.tool_activity` reports a tool's policy-owned human-readable purpose and
 `started`, `completed`, `failed`, `approval_required`, or `cancelled` state.
-Completed events may include elapsed time and a content-free result count or
-summary. Events never include tool arguments or raw connected-app results.
+`run.subagent_activity` reports bounded worker/tool handoff lifecycle metadata
+with no hidden prompts or provider payloads. Completed events may include
+elapsed time and a content-free result count or summary. Events never include
+tool arguments or raw connected-app results.
 
 Events are append-only for a single run. The terminal `completed` or `failed` event includes the canonical run record. Connections can be retried by querying the run; do not assume an interrupted stream means work failed.
 

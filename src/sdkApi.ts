@@ -45,6 +45,7 @@ import { confirmRecallMeetingParticipant } from "./meetings/service.js";
 import { defaultMediaInstruction } from "./mediaInput.js";
 import { fetchPublicWebsite, normalizePublicWebsiteUrl } from "./onboardingWebsite.js";
 import { displayTriggerSummary } from "./triggerEventSummary.js";
+import { initialSdkRunProgress, normalizeSdkRunProgress, progressFromSdkStatus, progressFromSdkSubagentActivity, progressFromSdkToolActivity, terminalSdkRunProgress, type SdkRunProgress } from "./sdkRunProgress.js";
 
 import { validateNativeToolArguments } from "./agentTools.js";
 import { chuckTools } from "./agentTools.js";
@@ -157,6 +158,18 @@ function memoryPersistenceDiagnostic(error: unknown, fallbackStage: string, star
   };
 }
 const event = (type: string, text?: string) => ({ id: `evt_${randomUUID()}`, type, at: Date.now(), ...(text ? { text: text.slice(0, 4000) } : {}) });
+
+function appendSdkRunProgress(run: SdkRunRecord, progress: SdkRunProgress): SdkRunRecord["events"][number] | undefined {
+  const normalized = normalizeSdkRunProgress(progress);
+  if (!normalized) return undefined;
+  if (run.progress && JSON.stringify(run.progress) === JSON.stringify(normalized)) return undefined;
+  const at = Date.now();
+  const progressEvent = { id: `evt_${randomUUID()}`, type: "run.progress", at, progress: normalized };
+  run.progress = normalized;
+  run.events.push(progressEvent);
+  run.updatedAt = at;
+  return progressEvent;
+}
 const SELF_SERVICE_PROJECT_LIMIT = 10;
 const SELF_SERVICE_SCOPES = new Set<string>(SELF_SERVICE_PROJECT_SCOPES);
 
@@ -751,6 +764,7 @@ function meetingView(meeting: any, includeParticipantIdentity = false) {
     ...(meeting.transcriptErrorCode && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? { transcriptErrorCode: meeting.transcriptErrorCode } : {}),
     ...(meeting.transcriptRetentionDays && meeting.transcriptExpiresAt ? { transcriptExpiresAt: new Date(meeting.transcriptExpiresAt).toISOString() } : {}),
     ...(meeting.mission ? { mission: { clientName: meeting.mission.clientName, objective: meeting.mission.objective, preparedAt: new Date(meeting.mission.preparedAt).toISOString() } } : {}),
+    ...(includeParticipantIdentity && meeting.missionState ? { missionState: { ...meeting.missionState, checkpointAt: new Date(meeting.missionState.checkpointAt).toISOString() } } : {}),
     participantRoster: (meeting.participantRoster ?? []).map((person: any) => ({
       id: person.id,
       name: person.name,
@@ -1815,8 +1829,8 @@ export function registerSdkApi(app: Hono): void {
         createdAt: new Date(event.createdAt).toISOString(),
         updatedAt: new Date(event.updatedAt).toISOString(),
       })),
-      devices: devices.filter((item) => !item.revokedAt).map(({ tokenHash, ...item }) => ({ ...item, id: createHash("sha256").update(tokenHash).digest("hex").slice(0, 24), createdAt: new Date(item.createdAt).toISOString(), lastSeenAt: new Date(item.lastSeenAt).toISOString() })),
       missionNotifications,
+      devices: devices.filter((item) => !item.revokedAt).map(({ tokenHash, ...item }) => ({ ...item, id: createHash("sha256").update(tokenHash).digest("hex").slice(0, 24), createdAt: new Date(item.createdAt).toISOString(), lastSeenAt: new Date(item.lastSeenAt).toISOString() })),
       workspace: workspace ? { sandboxId: workspace.sandboxId, name: workspace.name, lastKnownState: workspace.lastKnownState, createdAt: new Date(workspace.createdAt).toISOString(), updatedAt: new Date(workspace.updatedAt).toISOString(), ptySessions: workspace.ptySessions?.length ?? 0, lastUrl: workspace.browser?.lastUrl } : null,
       webhooks: (session.sdkWebhooks ?? []).filter((item) => !item.disabledAt).map(({ secretCiphertext: _secret, ...item }) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
       telegramLink: { linked: Boolean(webAuthUserId && await getTelegramUserIdForWebAuth(webAuthUserId)) },
@@ -3039,7 +3053,8 @@ export function registerSdkApi(app: Hono): void {
     try {
     try { await validateAttentionCandidateForRun(owner.userId, attentionContext); triggerEvent = await validateTriggerEventForRun(owner.userId, triggerContext); } catch (error) { const detail = runContextError(error); if (detail) return apiError(c, 409, detail.code, detail.message); throw error; }
     const agentOptions = await sdkAgentOptions(body, undefined, undefined, companyPolicy.agent?.instructions, dashboardRequest(c), undefined, triggerEvent);
-    const now = Date.now(); let run: SdkRunRecord = { id: `run_${randomUUID()}`, status: body.wait === false ? "queued" : "running", ...(owner.organizationId ? { companyProjectId: owner.projectId } : {}), ...(body.organizationId ? { organizationId: body.organizationId } : {}), ...(dashboardRequest(c) ? { ownerPrivateRun: true } : {}), input: resolved.input, model: body.model ?? session.model, agentId: companyPolicy.agent?.id, agentName: companyPolicy.agent?.name, agentInstructions: companyPolicy.agent?.instructions, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event(body.wait === false ? "run.queued" : "run.started")], createdAt: now, updatedAt: now };
+    const now = Date.now(); const initialProgress = initialSdkRunProgress(); let run: SdkRunRecord = { id: `run_${randomUUID()}`, status: body.wait === false ? "queued" : "running", ...(owner.organizationId ? { companyProjectId: owner.projectId } : {}), ...(body.organizationId ? { organizationId: body.organizationId } : {}), ...(dashboardRequest(c) ? { ownerPrivateRun: true } : {}), input: resolved.input, model: body.model ?? session.model, agentId: companyPolicy.agent?.id, agentName: companyPolicy.agent?.name, agentInstructions: companyPolicy.agent?.instructions, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event(body.wait === false ? "run.queued" : "run.started")], createdAt: now, updatedAt: now };
+    appendSdkRunProgress(run, initialProgress);
     let quotaReservationId: string | undefined;
     if (body.wait === false) {
       try {
@@ -3090,11 +3105,11 @@ export function registerSdkApi(app: Hono): void {
       throw error;
     }
     let privateLinks: PrivateRunLink[] | undefined;
-    try { const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions, dashboardRequest(c), undefined, triggerEvent)); privateLinks = result.privateLinks; run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; run.events.push(event("run.completed")); appendSdkRunHistoryToSession(session, thread.id, run.id, [
+    try { const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions, dashboardRequest(c), undefined, triggerEvent)); privateLinks = result.privateLinks; run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; appendSdkRunProgress(run, terminalSdkRunProgress("completed", { previous: run.progress, artifacts: run.artifacts })); run.events.push(event("run.completed")); appendSdkRunHistoryToSession(session, thread.id, run.id, [
       { role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}`, createdAt: run.createdAt },
       { role: "assistant", content: result.text, createdAt: Date.now() },
     ]); }
-    catch (error) { if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); } else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); } }
+    catch (error) { if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; appendSdkRunProgress(run, { phase: "waiting", title: "Approval needed to continue", detail: "Review the requested action and approve it before Chusky continues.", provider: run.progress?.provider, requiresApproval: true, evidence: run.progress?.evidence }); run.events.push(event("run.approval_required")); } else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; appendSdkRunProgress(run, terminalSdkRunProgress("failed", { previous: run.progress, error: run.error.message })); run.events.push(event("run.failed", run.error.message)); } }
     if (run.status === "failed") appendSdkRunHistoryToSession(session, thread.id, run.id, failedSdkRunHistory(run));
     run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await appendReliabilitySample({ ownerId: owner.userId, operation: "sdk.run", status: run.status === "completed" ? "success" : run.status === "requires_approval" ? "uncertain" : "failure", costUsd: run.cost, latencyMs: run.updatedAt - run.createdAt, at: run.updatedAt }); const response = runView(thread.id, run, privateLinks); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response: runView(thread.id, run), createdAt: Date.now() }; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status }); return c.json(response, 201);
     } finally { await releaseUserLock(owner.userId, lockToken); }
@@ -3121,7 +3136,7 @@ export function registerSdkApi(app: Hono): void {
     const triggerContext = triggerEventRunContext(body);
     let triggerEvent: TriggerEventRecord | undefined;
     try { await validateAttentionCandidateForRun(owner.userId, attentionContext); triggerEvent = await validateTriggerEventForRun(owner.userId, triggerContext); } catch (error) { const detail = runContextError(error); if (detail) { await releaseUserLock(owner.userId, lockToken); return apiError(c, 409, detail.code, detail.message); } await releaseUserLock(owner.userId, lockToken); throw error; }
-    const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", ...(owner.organizationId ? { companyProjectId: owner.projectId } : {}), ...(body.organizationId ? { organizationId: body.organizationId } : {}), ...(dashboardRequest(c) ? { ownerPrivateRun: true } : {}), input: resolved.input, model: body.model ?? session.model, agentId: companyPolicy.agent?.id, agentName: companyPolicy.agent?.name, agentInstructions: companyPolicy.agent?.instructions, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event("run.started")], createdAt: now, updatedAt: now }; thread.runs.push(run); await persistSdkCompanyRun(run);
+    const now = Date.now(); const initialProgress = initialSdkRunProgress(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", ...(owner.organizationId ? { companyProjectId: owner.projectId } : {}), ...(body.organizationId ? { organizationId: body.organizationId } : {}), ...(dashboardRequest(c) ? { ownerPrivateRun: true } : {}), input: resolved.input, model: body.model ?? session.model, agentId: companyPolicy.agent?.id, agentName: companyPolicy.agent?.name, agentInstructions: companyPolicy.agent?.instructions, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event("run.started")], createdAt: now, updatedAt: now }; appendSdkRunProgress(run, initialProgress); thread.runs.push(run); await persistSdkCompanyRun(run);
     await saveSession(owner.userId, session);
     try {
       await acceptAttentionCandidateForRun(owner.userId, attentionContext);
@@ -3141,13 +3156,20 @@ export function registerSdkApi(app: Hono): void {
         try { controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`)); }
         catch { clientDisconnected = true; }
       };
+      const publishProgress = async (progress: SdkRunProgress): Promise<void> => {
+        const progressEvent = appendSdkRunProgress(run, progress);
+        if (!progressEvent) return;
+        await persistSdkRunSnapshot(owner.userId, thread.id, run);
+        send({ type: "run.progress", runId: run.id, progress: run.progress });
+      };
       let costIncrement = 0;
       send({ type: "run.started", run: runView(thread.id, run) });
       try {
-        const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, (text) => {
+        const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, async (text) => {
           // Reuse the policy-owned status vocabulary that Telegram already
           // presents. Web and SDK consumers should not have to infer meaning
           // from internal CHUCK_/COMPOSIO_ tool slugs.
+          await publishProgress(progressFromSdkStatus(text, run.progress));
           send({ type: "run.status", runId: run.id, text: text.slice(0, 4000) });
         }, abort.signal, (text) => { run.events.push(event("run.delta", text)); send({ type: "run.delta", runId: run.id, text }); }, undefined, undefined, {
           ...await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions, dashboardRequest(c), undefined, triggerEvent),
@@ -3156,27 +3178,32 @@ export function registerSdkApi(app: Hono): void {
             run.events.push(activityEvent);
             run.updatedAt = activityEvent.at;
             thread.updatedAt = activityEvent.at;
-            return persistSdkRunSnapshot(owner.userId, thread.id, run).then(() => send({ runId: run.id, ...activityEvent }));
+            return persistSdkRunSnapshot(owner.userId, thread.id, run)
+              .then(() => publishProgress(progressFromSdkToolActivity(activity, run.progress)))
+              .then(() => send({ runId: run.id, ...activityEvent }));
           },
           onSubagentActivity: (activity: SubagentActivityUpdate & { parentToolCallId: string }) => {
             const activityEvent = { id: `evt_${randomUUID()}`, type: "run.subagent_activity", at: Date.now(), ...activity };
             run.events.push(activityEvent);
             run.updatedAt = activityEvent.at;
             thread.updatedAt = activityEvent.at;
-            return persistSdkRunSnapshot(owner.userId, thread.id, run).then(() => send({ runId: run.id, ...activityEvent }));
+            return persistSdkRunSnapshot(owner.userId, thread.id, run)
+              .then(() => publishProgress(progressFromSdkSubagentActivity(activity, run.progress)))
+              .then(() => send({ runId: run.id, ...activityEvent }));
           },
         });
         if (abort.signal.aborted) {
           run.status = "cancelled";
+          await publishProgress(terminalSdkRunProgress("cancelled", { previous: run.progress }));
           run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved."));
           send({ type: "run.cancelled", run: runView(thread.id, run) });
         } else {
-          run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; costIncrement = result.cost ?? 0; run.events.push(event("run.completed")); send({ type: "run.completed", run: runView(thread.id, run, result.privateLinks) });
+          run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; costIncrement = result.cost ?? 0; await publishProgress(terminalSdkRunProgress("completed", { previous: run.progress, artifacts: run.artifacts })); run.events.push(event("run.completed")); send({ type: "run.completed", run: runView(thread.id, run, result.privateLinks) });
         }
       } catch (error) {
-        if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); const approval = await getApproval(owner.userId, error.approvalId); send({ type: "run.approval_required", run: runView(thread.id, run), approval }); }
-        else if (abort.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) { run.status = "cancelled"; run.events.push(event("run.cancelled")); send({ type: "run.cancelled", run: runView(thread.id, run) }); }
-        else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); send({ type: "run.failed", run: runView(thread.id, run), error: run.error }); }
+        if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; await publishProgress({ phase: "waiting", title: "Approval needed to continue", detail: "Review the requested action and approve it before Chusky continues.", provider: run.progress?.provider, requiresApproval: true, evidence: run.progress?.evidence }); run.events.push(event("run.approval_required")); const approval = await getApproval(owner.userId, error.approvalId); send({ type: "run.approval_required", run: runView(thread.id, run), approval }); }
+        else if (abort.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) { run.status = "cancelled"; await publishProgress(terminalSdkRunProgress("cancelled", { previous: run.progress })); run.events.push(event("run.cancelled")); send({ type: "run.cancelled", run: runView(thread.id, run) }); }
+        else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; await publishProgress(terminalSdkRunProgress("failed", { previous: run.progress, error: run.error.message })); run.events.push(event("run.failed", run.error.message)); send({ type: "run.failed", run: runView(thread.id, run), error: run.error }); }
       } finally {
         c.req.raw.signal.removeEventListener("abort", markClientDisconnected);
         activeRuns.delete(run.id);
@@ -3221,12 +3248,12 @@ export function registerSdkApi(app: Hono): void {
     const owner = sdkUser(c)!; const session = await getSessionWithSdkRuns(owner.userId, c.req.param("threadId")); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); const prior = thread?.runs.find((item) => item.id === c.req.param("runId"));
     if (!thread || !prior) return apiError(c, 404, "not_found", "Run not found.");
     if (!["failed", "cancelled", "requires_approval"].includes(prior.status)) return apiError(c, 409, "run_not_resumable", "Only failed, cancelled, or approval-paused runs can be resumed.");
-    const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", ...(prior.companyProjectId ? { companyProjectId: prior.companyProjectId } : {}), ...(prior.organizationId ? { organizationId: prior.organizationId } : {}), ...(prior.ownerPrivateRun ? { ownerPrivateRun: true } : {}), agentId: prior.agentId, agentName: prior.agentName, agentInstructions: prior.agentInstructions, input: prior.input, model: prior.model ?? session.model, attachments: prior.attachments, metadata: prior.metadata, budget: prior.budget, tools: prior.tools, skills: prior.skills, events: [event("run.started", "Resumed from a previous run")], createdAt: Date.now(), updatedAt: Date.now() }; thread.runs.push(run);
-     try { const resolved = await resolveRunInput(session, { input: prior.input, attachments: prior.attachments?.map((file) => file.id) }); const result = await runAgent(owner.userId, resolved.message, thread.history, run.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions({ budget: prior.budget, tools: prior.tools, skills: prior.skills }, run.id, thread.id, prior.agentInstructions, prior.ownerPrivateRun === true, prior.organizationId)); run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); appendSdkRunHistoryToSession(session, thread.id, run.id, [
+    const initialProgress = initialSdkRunProgress(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", ...(prior.companyProjectId ? { companyProjectId: prior.companyProjectId } : {}), ...(prior.organizationId ? { organizationId: prior.organizationId } : {}), ...(prior.ownerPrivateRun ? { ownerPrivateRun: true } : {}), agentId: prior.agentId, agentName: prior.agentName, agentInstructions: prior.agentInstructions, input: prior.input, model: prior.model ?? session.model, attachments: prior.attachments, metadata: prior.metadata, budget: prior.budget, tools: prior.tools, skills: prior.skills, events: [event("run.started", "Resumed from a previous run")], createdAt: Date.now(), updatedAt: Date.now() }; appendSdkRunProgress(run, initialProgress); thread.runs.push(run);
+     try { const resolved = await resolveRunInput(session, { input: prior.input, attachments: prior.attachments?.map((file) => file.id) }); const result = await runAgent(owner.userId, resolved.message, thread.history, run.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions({ budget: prior.budget, tools: prior.tools, skills: prior.skills }, run.id, thread.id, prior.agentInstructions, prior.ownerPrivateRun === true, prior.organizationId)); run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); appendSdkRunProgress(run, terminalSdkRunProgress("completed", { previous: run.progress, artifacts: run.artifacts })); run.events.push(event("run.completed")); appendSdkRunHistoryToSession(session, thread.id, run.id, [
        { role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}`, createdAt: run.createdAt },
        { role: "assistant", content: result.text, createdAt: Date.now() },
      ]); }
-    catch (error) { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); }
+    catch (error) { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; appendSdkRunProgress(run, terminalSdkRunProgress("failed", { previous: run.progress, error: run.error.message })); run.events.push(event("run.failed", run.error.message)); }
     if (run.status === "failed") appendSdkRunHistoryToSession(session, thread.id, run.id, failedSdkRunHistory(run));
     run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await appendReliabilitySample({ ownerId: owner.userId, operation: "sdk.run", status: run.status === "completed" ? "success" : "failure", costUsd: run.cost, latencyMs: run.updatedAt - run.createdAt, at: run.updatedAt }); await saveSession(owner.userId, session); await persistSdkCompanyRun(run); return c.json(runView(thread.id, run), 201);
   });
@@ -3248,6 +3275,7 @@ export function registerSdkApi(app: Hono): void {
       if (!latestThread || !latestRun) return { kind: "not_found" as const };
       if (!["queued", "running"].includes(latestRun.status)) return { kind: "not_cancellable" as const };
       latestRun.status = "cancelled";
+      appendSdkRunProgress(latestRun, terminalSdkRunProgress("cancelled", { previous: latestRun.progress }));
       latestRun.events.push(event("run.cancelled", "Cancellation requested; the active worker will stop at its next safe boundary."));
       latestRun.updatedAt = Date.now();
       latestThread.updatedAt = latestRun.updatedAt;
@@ -4128,6 +4156,7 @@ export function registerSdkApi(app: Hono): void {
       if (approvedActivity) { approvedActivity.status = "started"; approvedActivity.message = "Approval accepted; executing the approved action."; }
       run.status = "running";
       run.approvalId = undefined;
+      appendSdkRunProgress(run, { phase: "acting", title: "Executing the approved action", detail: "Approval was accepted and the requested action is now running.", provider: run.progress?.provider, evidence: run.progress?.evidence });
       run.events.push(event("run.started", "Approval granted; continuing this run."));
       run.updatedAt = Date.now();
       thread.updatedAt = run.updatedAt;
@@ -4152,6 +4181,7 @@ export function registerSdkApi(app: Hono): void {
           run.status = "completed";
           run.output = `Approval accepted. Mission ${mission.id} is continuing automatically from its saved checkpoint. The mission remains active until its persisted work and verification finish.`;
           run.error = undefined;
+          appendSdkRunProgress(run, terminalSdkRunProgress("completed", { previous: run.progress }));
           run.events.push(event("run.completed"));
         } else {
         const result = await runAgent(owner.userId, approval.request, approval.history, approval.model, undefined, abort.signal, undefined, approval.id, undefined, {
@@ -4163,6 +4193,8 @@ export function registerSdkApi(app: Hono): void {
             run.updatedAt = activityEvent.at;
             thread.updatedAt = activityEvent.at;
             await persistSdkRunSnapshot(owner.userId, thread.id, run);
+            appendSdkRunProgress(run, progressFromSdkToolActivity(activity, run.progress));
+            await persistSdkRunSnapshot(owner.userId, thread.id, run);
           },
           onSubagentActivity: async (activity: SubagentActivityUpdate & { parentToolCallId: string }) => {
             const activityEvent = { id: `evt_${randomUUID()}`, type: "run.subagent_activity", at: Date.now(), ...activity };
@@ -4170,10 +4202,12 @@ export function registerSdkApi(app: Hono): void {
             run.updatedAt = activityEvent.at;
             thread.updatedAt = activityEvent.at;
             await persistSdkRunSnapshot(owner.userId, thread.id, run);
+            appendSdkRunProgress(run, progressFromSdkSubagentActivity(activity, run.progress));
+            await persistSdkRunSnapshot(owner.userId, thread.id, run);
           },
         });
-        if (abort.signal.aborted) { run.status = "cancelled"; run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved.")); }
-        else { run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; costIncrement = result.cost ?? 0; run.error = undefined; run.events.push(event("run.completed")); }
+        if (abort.signal.aborted) { run.status = "cancelled"; appendSdkRunProgress(run, terminalSdkRunProgress("cancelled", { previous: run.progress })); run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved.")); }
+        else { run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; costIncrement = result.cost ?? 0; run.error = undefined; appendSdkRunProgress(run, terminalSdkRunProgress("completed", { previous: run.progress, artifacts: run.artifacts })); run.events.push(event("run.completed")); }
         const settledApproval = await getApproval(owner.userId, approval.id);
         if (approvedActivity && settledApproval?.status === "consumed") {
           const outcome = [...run.events].reverse().find((item) => item !== approvedActivity && item.type === "run.tool_activity" && item.toolSlug === approval.toolSlug && (item.status === "completed" || item.status === "failed" || item.status === "cancelled"));
@@ -4188,15 +4222,16 @@ export function registerSdkApi(app: Hono): void {
           run.error = { code: "approved_action_not_executed", message: "The approved action was not executed. Review the saved steps before retrying." };
           await setApprovalStatus(owner.userId, approval.id, "consumed");
           run.events = run.events.filter((item) => item.type !== "run.completed");
+          appendSdkRunProgress(run, terminalSdkRunProgress("failed", { previous: run.progress, error: run.error.message }));
           run.events.push(event("run.failed", run.error.message));
         }
         }
       } catch (error) {
         if (approvedActivity) { approvedActivity.status = "failed"; approvedActivity.message = "Approval accepted, but the action could not be completed."; }
         await setApprovalStatus(owner.userId, approval.id, "consumed");
-        if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required", "Another action needs your approval.")); }
-        else if (abort.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) { run.status = "cancelled"; run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved.")); }
-        else { run.status = "failed"; run.error = { code: "resume_failed", message: error instanceof Error ? error.message : "Approval resume failed" }; run.events.push(event("run.failed", run.error.message)); }
+        if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; appendSdkRunProgress(run, { phase: "waiting", title: "Approval needed to continue", detail: "Review the next requested action before Chusky continues.", provider: run.progress?.provider, requiresApproval: true, evidence: run.progress?.evidence }); run.events.push(event("run.approval_required", "Another action needs your approval.")); }
+        else if (abort.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) { run.status = "cancelled"; appendSdkRunProgress(run, terminalSdkRunProgress("cancelled", { previous: run.progress })); run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved.")); }
+        else { run.status = "failed"; run.error = { code: "resume_failed", message: error instanceof Error ? error.message : "Approval resume failed" }; appendSdkRunProgress(run, terminalSdkRunProgress("failed", { previous: run.progress, error: run.error.message })); run.events.push(event("run.failed", run.error.message)); }
       }
       run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt;
       try {

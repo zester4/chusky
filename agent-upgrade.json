@@ -1,11 +1,11 @@
 {
-  "id": "release-4.53.0",
-  "version": "4.53.0",
+  "id": "release-4.54.0",
+  "version": "4.54.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Manage provider-backed triggers from the authenticated dashboard or typed SDK using the same live Composio catalogue as Chusky's chat interfaces.",
-    "Every signed event now receives bounded private provider context and source references so Chusky can inspect the originating record and carry routine work through provider execution and confirmation.",
-    "Trigger runs autonomously handle routine writes across Composio toolkits, pause for refunds, deletion, and critical actions, and report verified completion, drafts, decisions, or blockers in Telegram and the dashboard."
+    "Personal meeting joins now default to proactive copilot participation; shared rooms continue to use their configured behavior, and owners can still choose addressed-only participation.",
+    "Proactive meetings save a bounded live mission brief of the objective, decisions, open questions, commitments, and next move, then use it to continue after a voice reconnect.",
+    "Owners can review the provisional brief in Meetings; raw live transcript remains transient unless searchable retention is explicitly enabled, and reported commitments are not provider-action receipts."
   ],
-  "createdAt": "2026-10-11T15:30:25.198Z"
+  "createdAt": "2026-10-12T01:13:18.161Z"
 }

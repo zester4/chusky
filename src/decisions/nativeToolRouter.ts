@@ -355,7 +355,9 @@ export async function computeNativeToolRoute(query: string, tools: ToolSchema[],
   if (!availableNative.length) return baseline;
   const routingContext = [query, options.recentContext].filter(Boolean).join("\n");
   const candidates = candidateSet(tools, routingContext);
-  if (!candidates.matched || candidates.candidates.length < 2) return noNativeToolRoute(tools, "no_native_candidate_set", 1, config.nativeToolLoading === "bundle");
+  if (!candidates.matched || candidates.candidates.length < 2) {
+    return noNativeToolRoute(tools, "no_native_candidate_set", 1, config.nativeToolLoading === "bundle" && !options.preserveAll);
+  }
   const client = options.client ?? jevClient();
   const state = {
     request: jevText(query, 3_000),

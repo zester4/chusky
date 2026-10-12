@@ -47,6 +47,7 @@ import { normalizeProviderSmokeChecks, PROVIDER_SMOKE_CAPABILITIES } from "./rel
 import type { ApprovalEscalationRecord } from "./approvals/escalation.js";
 import type { TregCallReceipt, TregSpendSnapshot } from "./treg/types.js";
 import type { LinkOAuthStateRecord, LinkSpendRequestRecord, LinkWalletRecord } from "./link/types.js";
+import { normalizeSdkRunProgress, type SdkRunProgress } from "./sdkRunProgress.js";
 
 export interface Message {
   /** Stable per-message identity used for idempotent durable history writes. */
@@ -134,6 +135,7 @@ function addHistoryCompactionSummary(session: UserSession, dropped: Message[]): 
 function compactSdkRun(run: SdkRunRecord): SdkRunRecord {
   return {
     ...run,
+    ...(run.progress ? { progress: normalizeSdkRunProgress(run.progress) } : {}),
     input: boundPersistedText(typeof run.input === "string" ? run.input : "", PERSISTED_RUN_INPUT_MAX_CHARS),
     ...(typeof run.output === "string" ? { output: boundPersistedText(run.output, PERSISTED_RUN_OUTPUT_MAX_CHARS) } : {}),
     ...(typeof run.agentInstructions === "string" ? { agentInstructions: boundPersistedText(run.agentInstructions, PERSISTED_RUN_INPUT_MAX_CHARS) } : {}),
@@ -145,6 +147,7 @@ function compactSdkRun(run: SdkRunRecord): SdkRunRecord {
       ...(typeof event.summary === "string" ? { summary: boundPersistedText(event.summary, PERSISTED_EVENT_TEXT_MAX_CHARS) } : {}),
       ...(typeof event.actionLabel === "string" ? { actionLabel: boundPersistedText(event.actionLabel, 240) } : {}),
       ...(typeof event.objective === "string" ? { objective: boundPersistedText(event.objective, 2_000) } : {}),
+      ...(event.progress ? { progress: normalizeSdkRunProgress(event.progress) } : {}),
       ...(Array.isArray(event.batchActions) ? { batchActions: event.batchActions.slice(0, 50).map((action) => ({
         ...action,
         ...(typeof action.actionLabel === "string" ? { actionLabel: boundPersistedText(action.actionLabel, 240) } : {}),
@@ -539,6 +542,23 @@ export interface RecallMeetingFollowThrough {
   completedTools?: string[];
 }
 
+export type RecallMeetingCommitmentStatus = "proposed" | "agreed" | "in_progress" | "reported_done" | "blocked";
+
+/** Compact meeting-only working memory; never contains the raw transcript. */
+export interface RecallMeetingMissionState {
+  summary: string;
+  decisions: string[];
+  openQuestions: string[];
+  commitments: Array<{
+    task: string;
+    owner: string;
+    status: RecallMeetingCommitmentStatus;
+    dueDate?: string;
+  }>;
+  nextMove: string;
+  checkpointAt: number;
+}
+
 /** Bounded, meeting-only attendee state. Display names are not identity proof or general memory. */
 export interface RecallMeetingParticipant {
   id: string;
@@ -635,6 +655,8 @@ export interface RecallMeetingRecord {
   title?: string;
   /** Explicit owner-selected client context. Never contains a meeting URL or raw provider payload. */
   mission?: MeetingMission;
+  /** Provisional, bounded working state distilled from the ephemeral live meeting window. */
+  missionState?: RecallMeetingMissionState;
   joinAt?: string;
   error?: string;
   providerStatusAt?: number;
@@ -774,8 +796,10 @@ export interface SdkRunRecord {
   budget?: { duration?: string; maxToolCalls?: number; maxCost?: number };
   tools?: { allow?: string[]; deny?: string[]; requireApproval?: string[] };
   skills?: string[];
+  /** Last safe user-facing progress projection for live and replayed dashboard runs. */
+  progress?: SdkRunProgress;
   error?: { code: string; message: string };
-  events: Array<{ id: string; type: string; at: number; text?: string; toolSlug?: string; callId?: string; status?: "started" | "completed" | "failed" | "approval_required" | "cancelled" | "waiting" | "unknown"; message?: string; actionLabel?: string; summary?: string; durationMs?: number; activityId?: string; handoffId?: string; parentToolCallId?: string; worker?: string; objective?: string; kind?: "worker" | "tool"; toolkitSlug?: string; toolkitName?: string; toolkitLogo?: string; toolCallId?: string; batchActions?: Array<{ id: string; toolSlug: string; actionLabel?: string; toolkitSlug?: string; toolkitName?: string; toolkitLogo?: string; status: "started" | "completed" | "failed" | "unknown" | "approval_required" | "cancelled"; summary?: string }> }>;
+  events: Array<{ id: string; type: string; at: number; text?: string; progress?: SdkRunProgress; toolSlug?: string; callId?: string; status?: "started" | "completed" | "failed" | "approval_required" | "cancelled" | "waiting" | "unknown"; message?: string; actionLabel?: string; summary?: string; durationMs?: number; activityId?: string; handoffId?: string; parentToolCallId?: string; worker?: string; objective?: string; kind?: "worker" | "tool"; toolkitSlug?: string; toolkitName?: string; toolkitLogo?: string; toolCallId?: string; batchActions?: Array<{ id: string; toolSlug: string; actionLabel?: string; toolkitSlug?: string; toolkitName?: string; toolkitLogo?: string; status: "started" | "completed" | "failed" | "unknown" | "approval_required" | "cancelled"; summary?: string }> }>;
   createdAt: number;
   updatedAt: number;
 }
@@ -1163,6 +1187,10 @@ export interface TaskRecord {
   workflowRunId?: string;
   /** When the provider accepted the current workflow publication. */
   workflowPublishedAt?: number;
+  /** Consecutive QStash delivery failures before a worker claimed this task. */
+  workflowDeliveryFailures?: number;
+  /** Last failed QStash run, used to make failure callback redelivery idempotent. */
+  lastFailedWorkflowRunId?: string;
   /** Short-lived claim used while publishing a task to QStash. */
   enqueueClaim?: { token: string; expiresAt: number };
   lease?: TaskLease;
@@ -3250,7 +3278,13 @@ class RedisBackend implements Backend {
       const overduePublishedTask = current?.status === "queued" && typeof current.runAt === "number" && current.runAt <= now && current.workflowRunId && !current.workflowRunId.startsWith("pending:")
         && typeof current.workflowPublishedAt === "number" && now - current.workflowPublishedAt >= 60_000;
       if (!current || current.status !== "queued" || (current.workflowRunId && !current.workflowRunId.startsWith("pending:") && !overduePublishedTask) || claimActive) return undefined;
-      const next = normalizeTask({ ...current, workflowRunId: `pending:${token}`, enqueueClaim: { token, expiresAt: now + claimMs }, updatedAt: now, version: current.version + 1 });
+      // A stale, already-published workflow may still be active, but reusing
+      // its fixed workflowRunId cannot create a fresh QStash workflow run.
+      // Move the due time forward by one millisecond so this recovery attempt
+      // gets a new deterministic run ID. The new due time is persisted with
+      // the pending claim, so a crash during publish still retries the same ID.
+      const runAt = overduePublishedTask ? Math.max(now, current.runAt! + 1) : current.runAt;
+      const next = normalizeTask({ ...current, ...(runAt !== undefined ? { runAt } : {}), workflowRunId: `pending:${token}`, enqueueClaim: { token, expiresAt: now + claimMs }, updatedAt: now, version: current.version + 1 });
       if (await this.writeTaskIfVersion(userId, current.version, next)) return next;
     }
     return undefined;
@@ -3531,7 +3565,7 @@ class RedisBackend implements Backend {
       const continuationWake = task.events.at(-1)?.type === "waiting";
       const nextAttempt = continuationWake ? task.attempt : task.attempt + 1;
       const lease: TaskLease = { token: randomUUID(), workerId, acquiredAt: now, expiresAt: now + leaseMs };
-      const next = normalizeTask({ ...task, status: "running", lease, attempt: nextAttempt, updatedAt: now, version: task.version + 1, events: [...task.events, taskEvent("claimed", `Claimed by ${workerId}`, nextAttempt, now)].slice(-100) });
+      const next = normalizeTask({ ...task, status: "running", lease, attempt: nextAttempt, workflowDeliveryFailures: 0, updatedAt: now, version: task.version + 1, events: [...task.events, taskEvent("claimed", `Claimed by ${workerId}`, nextAttempt, now)].slice(-100) });
       if (await this.writeTaskIfVersion(userId, task.version, next)) return next;
     }
     return undefined;
@@ -4523,7 +4557,12 @@ class MemoryBackend implements Backend {
     const overduePublishedTask = current?.status === "queued" && typeof current.runAt === "number" && current.runAt <= now && current.workflowRunId && !current.workflowRunId.startsWith("pending:")
       && typeof current.workflowPublishedAt === "number" && now - current.workflowPublishedAt >= 60_000;
     if (!current || current.status !== "queued" || (current.workflowRunId && !current.workflowRunId.startsWith("pending:") && !overduePublishedTask) || claimActive) return undefined;
-    const next = normalizeTask({ ...current, workflowRunId: `pending:${token}`, enqueueClaim: { token, expiresAt: now + claimMs }, updatedAt: now, version: current.version + 1 });
+    // Keep the recovery behavior identical to RedisBackend: a stale,
+    // published workflow ID is a singleton and must not be reused for a new
+    // wake-up. Persist the new runAt together with the pending claim so a
+    // crash during publish retries the exact same new workflow ID.
+    const runAt = overduePublishedTask ? Math.max(now, current.runAt! + 1) : current.runAt;
+    const next = normalizeTask({ ...current, ...(runAt !== undefined ? { runAt } : {}), workflowRunId: `pending:${token}`, enqueueClaim: { token, expiresAt: now + claimMs }, updatedAt: now, version: current.version + 1 });
     tasks[index] = next; this.tasks.set(userId, tasks); return next;
   }
   async renewTaskLease(userId: number, id: string, leaseToken: string, leaseMs: number) {
@@ -4597,7 +4636,7 @@ class MemoryBackend implements Backend {
     // cannot consume the task's retry budget.
     const continuationWake = task.events.at(-1)?.type === "waiting";
     const nextAttempt = continuationWake ? task.attempt : task.attempt + 1;
-    const next = normalizeTask({ ...task, status: "running", lease: { token: randomUUID(), workerId, acquiredAt: now, expiresAt: now + leaseMs }, attempt: nextAttempt, updatedAt: now, version: task.version + 1, events: [...task.events, taskEvent("claimed", `Claimed by ${workerId}`, nextAttempt, now)].slice(-100) });
+    const next = normalizeTask({ ...task, status: "running", lease: { token: randomUUID(), workerId, acquiredAt: now, expiresAt: now + leaseMs }, attempt: nextAttempt, workflowDeliveryFailures: 0, updatedAt: now, version: task.version + 1, events: [...task.events, taskEvent("claimed", `Claimed by ${workerId}`, nextAttempt, now)].slice(-100) });
     tasks[index] = next;
     this.tasks.set(userId, tasks);
     return next;
@@ -5091,6 +5130,40 @@ function normalizeMeetingTimeline(value: unknown): RecallMeetingTimelineEvent[] 
     .slice(-100);
 }
 
+function normalizeRecallMeetingMissionState(value: unknown): RecallMeetingMissionState | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const cleanText = (item: unknown, max: number) => typeof item === "string"
+    ? item.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, max)
+    : "";
+  if (!Number.isSafeInteger(input.checkpointAt) || Number(input.checkpointAt) <= 0) return undefined;
+  const list = (item: unknown, maxItems: number, maxText: number) => Array.isArray(item)
+    ? [...new Set(item.map((entry) => cleanText(entry, maxText)).filter(Boolean))].slice(0, maxItems)
+    : [];
+  const commitments = Array.isArray(input.commitments)
+    ? input.commitments.slice(0, 8).flatMap((raw) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+      const item = raw as Record<string, unknown>;
+      const task = cleanText(item.task, 300);
+      const owner = cleanText(item.owner, 100);
+      const status = item.status;
+      if (!task || !owner || !["proposed", "agreed", "in_progress", "reported_done", "blocked"].includes(String(status))) return [];
+      const dueDate = cleanText(item.dueDate, 80);
+      return [{ task, owner, status: status as RecallMeetingCommitmentStatus, ...(dueDate ? { dueDate } : {}) }];
+    })
+    : [];
+  const summary = cleanText(input.summary, 1_200);
+  if (!summary) return undefined;
+  return {
+    summary,
+    decisions: list(input.decisions, 8, 500),
+    openQuestions: list(input.openQuestions, 8, 500),
+    commitments,
+    nextMove: cleanText(input.nextMove, 300),
+    checkpointAt: Number(input.checkpointAt),
+  };
+}
+
 function normalizeMeetingTurnMetrics(value: unknown): RecallMeetingTurnMetrics | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const input = value as Record<string, unknown>;
@@ -5504,6 +5577,7 @@ export async function getSession(uid: number): Promise<UserSession> {
     runtimeState: meeting.runtimeState === "degraded" || meeting.runtimeState === "reconnecting" || meeting.runtimeState === "voice_unavailable" || meeting.runtimeState === "ended" ? meeting.runtimeState : "healthy" as const,
     turnMetrics: normalizeMeetingTurnMetrics(meeting.turnMetrics),
     timeline: normalizeMeetingTimeline(meeting.timeline),
+    missionState: normalizeRecallMeetingMissionState(meeting.missionState),
   })) : [];
   s.approvalEscalations = Array.isArray(s.approvalEscalations) ? s.approvalEscalations.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.approvalId === "string" && ["pending", "escalated", "acknowledged", "closed", "failed"].includes(item.status)).slice(-500) : [];
   return { ...fresh(), ...s, providerProofs: uid === 0 && Array.isArray(s.providerProofs) ? s.providerProofs.filter((item): item is ProviderProof => Boolean(item) && typeof item.surface === "string" && typeof item.correlationId === "string" && Number.isFinite(item.verifiedAt) && Number.isFinite(item.expiresAt)).slice(-100) : [], voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], autonomyRuns: Array.isArray(s.autonomyRuns) ? s.autonomyRuns.flatMap((item) => { const normalized = normalizeAutonomyRun(item, uid); return normalized ? [normalized] : []; }).slice(-200) : [], jobOccurrences: Array.isArray(s.jobOccurrences) ? s.jobOccurrences.flatMap((item) => { const normalized = normalizeJobOccurrence(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], externalActions: Array.isArray(s.externalActions) ? s.externalActions.flatMap((item) => { const normalized = normalizeExternalAction(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], reliabilitySamples: Array.isArray(s.reliabilitySamples) ? s.reliabilitySamples.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.operation === "string" && Number.isFinite(item.at) && ["success", "failure", "uncertain", "timeout"].includes(item.status)).slice(-2000) : [], outcomeVerifications: Array.isArray(s.outcomeVerifications) ? s.outcomeVerifications.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.status === "string").slice(-200) : [], compensations: Array.isArray(s.compensations) ? s.compensations.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.originalActionId === "string" && typeof item.objective === "string").slice(-500) : [], reliabilityTrace: Array.isArray(s.reliabilityTrace) ? s.reliabilityTrace.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.kind === "string" && typeof item.type === "string" && typeof item.summary === "string" && Number.isFinite(item.at)).slice(-5000) : [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, mcpConnections: Array.isArray(s.mcpConnections) ? s.mcpConnections.flatMap((item) => { const normalized = normalizeMcpConnectionRecord(item); return normalized ? [normalized] : []; }).slice(0, 50) : [], browserPlaybooks, browserAudit, browserHandoffs, meetingRooms: uid === 0 && Array.isArray(s.meetingRooms) ? s.meetingRooms.map(normalizeMeetingRoom).filter((item): item is MeetingRoomRecord => Boolean(item)).slice(0, 100) : [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, ...(typeof meeting.roomId === "string" && /^room_[A-Za-z0-9_-]{1,96}$/.test(meeting.roomId) ? { roomId: meeting.roomId } : { roomId: undefined }), ...(typeof meeting.organizationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(meeting.organizationId) ? { organizationId: meeting.organizationId } : { organizationId: undefined }), ...(typeof meeting.teamId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(meeting.teamId) ? { teamId: meeting.teamId } : { teamId: undefined }), ...(typeof meeting.projectId === "string" && /^proj_[A-Za-z0-9_-]{1,120}$/.test(meeting.projectId) ? { projectId: meeting.projectId } : { projectId: undefined }), ...(Array.isArray(meeting.roomAllowedComposioTools) ? { roomAllowedComposioTools: meeting.roomAllowedComposioTools.filter((tool): tool is string => typeof tool === "string").slice(0, 100) } : {}), ...(Array.isArray(meeting.roomAllowedNativeTools) ? { roomAllowedNativeTools: meeting.roomAllowedNativeTools.filter((tool): tool is string => typeof tool === "string").slice(0, 50) } : {}), visibility: meeting.visibility === "team" || meeting.visibility === "organization" ? meeting.visibility : undefined, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, visualContextEnabled: meeting.visualContextEnabled === true, transcriptRetentionDays: [1, 7, 30].includes(meeting.transcriptRetentionDays as number) ? meeting.transcriptRetentionDays as 1 | 7 | 30 : undefined, transcriptExpiresAt: Number.isSafeInteger(meeting.transcriptExpiresAt) && Number(meeting.transcriptExpiresAt) > 0 ? Number(meeting.transcriptExpiresAt) : undefined, transcriptStatus: ["processing", "ready", "failed"].includes(meeting.transcriptStatus as string) ? meeting.transcriptStatus as "processing" | "ready" | "failed" : undefined, transcriptErrorCode: typeof meeting.transcriptErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? meeting.transcriptErrorCode : undefined, mission: normalizeMeetingMission(meeting.mission), calendarAttendees: normalizeCalendarAttendees(meeting.calendarAttendees), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 180) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], attendees: normalizeCalendarAttendees(item.attendees), sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
@@ -6689,9 +6763,10 @@ export async function listRecallMeetings(uid: number, limit = 10): Promise<Recal
   return [...stored, ...missingLegacy].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, boundedLimit);
 }
 
-export async function updateRecallMeeting(uid: number, id: string, patch: Partial<Pick<RecallMeetingRecord, "status" | "providerBotId" | "title" | "joinAt" | "error" | "providerStatusAt" | "participantRoster" | "speakerEvents" | "outcomeTranscript" | "outcomeTranscriptCapturedAt" | "outcome" | "outcomeFollowThrough" | "outcomeStatus" | "outcomeNotificationStatus" | "transcriptRetentionDays" | "transcriptExpiresAt" | "transcriptStatus" | "transcriptErrorCode" | "languageMode" | "languageHints" | "keyterms" | "capabilities" | "runtimeState" | "turnMetrics" | "timeline">>): Promise<RecallMeetingRecord | undefined> {
+export async function updateRecallMeeting(uid: number, id: string, patch: Partial<Pick<RecallMeetingRecord, "status" | "providerBotId" | "title" | "joinAt" | "error" | "providerStatusAt" | "participantRoster" | "speakerEvents" | "outcomeTranscript" | "outcomeTranscriptCapturedAt" | "outcome" | "outcomeFollowThrough" | "outcomeStatus" | "outcomeNotificationStatus" | "transcriptRetentionDays" | "transcriptExpiresAt" | "transcriptStatus" | "transcriptErrorCode" | "languageMode" | "languageHints" | "keyterms" | "capabilities" | "runtimeState" | "turnMetrics" | "timeline" | "missionState">>): Promise<RecallMeetingRecord | undefined> {
   const current = await getRecallMeeting(uid, id);
   if (!current) return undefined;
+  const effectivePatch = { ...patch };
   if (patch.providerStatusAt !== undefined && current.providerStatusAt !== undefined && patch.providerStatusAt < current.providerStatusAt) return current;
   if (patch.outcome) {
     if (patch.outcome.title.length > 180 || patch.outcome.summary.length > 2_000 || patch.outcome.decisions.length > 10 || patch.outcome.actionItems.length > 10 || patch.outcome.openQuestions.length > 10) throw new Error("Meeting outcome exceeds storage bounds");
@@ -6720,11 +6795,15 @@ export async function updateRecallMeeting(uid: number, id: string, patch: Partia
   if (patch.runtimeState !== undefined && !["healthy", "degraded", "reconnecting", "voice_unavailable", "ended"].includes(patch.runtimeState)) throw new Error("Meeting runtime state is invalid");
   if (patch.timeline !== undefined && (!Array.isArray(patch.timeline) || patch.timeline.length > 100 || patch.timeline.some((event) => !event || !/^[A-Za-z0-9_-]{1,96}$/.test(event.id) || !Number.isSafeInteger(event.at) || typeof event.summary !== "string" || event.summary.length > 280))) throw new Error("Meeting timeline is invalid");
   if (patch.turnMetrics !== undefined && (!Number.isSafeInteger(patch.turnMetrics.updatedAt) || patch.turnMetrics.updatedAt <= 0)) throw new Error("Meeting turn metrics are invalid");
+  if (patch.missionState !== undefined) {
+    const normalized = normalizeRecallMeetingMissionState(patch.missionState);
+    if (!normalized || normalized.checkpointAt !== patch.missionState.checkpointAt) throw new Error("Meeting mission state is invalid");
+    effectivePatch.missionState = normalized;
+  }
   if (patch.outcomeFollowThrough?.notionTool && (patch.outcomeFollowThrough.notionTool.length > 128 || !/^NOTION_[A-Z0-9_]+$/.test(patch.outcomeFollowThrough.notionTool))) throw new Error("Meeting outcome Notion action is invalid");
   if (patch.outcomeFollowThrough?.notionUrl && (patch.outcomeFollowThrough.notionUrl.length > 2_048 || !/^https:\/\/(?:[\w-]+\.)*notion\.so\//.test(patch.outcomeFollowThrough.notionUrl) && !/^https:\/\/(?:[\w-]+\.)*notion\.site\//.test(patch.outcomeFollowThrough.notionUrl))) throw new Error("Meeting outcome Notion URL is invalid");
   if (patch.participantRoster && (patch.participantRoster.length > 40 || patch.participantRoster.some((participant) => !participant || !/^[A-Za-z0-9_-]{1,128}$/.test(participant.id) || typeof participant.name !== "string" || !participant.name.trim() || participant.name.length > 160 || (participant.email !== undefined && (typeof participant.email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(participant.email))) || (participant.emailSource !== undefined && participant.emailSource !== "recall_match") || (participant.providerUserId !== undefined && (typeof participant.providerUserId !== "string" || !/^[A-Za-z0-9:_-]{1,160}$/.test(participant.providerUserId))) || (participant.assurance !== undefined && !["confirmed", "calendar_matched", "unverified"].includes(participant.assurance)) || (participant.identityStatus !== undefined && participant.identityStatus !== "named" && participant.identityStatus !== "unknown") || (participant.isHost !== undefined && typeof participant.isHost !== "boolean") || (participant.status !== "present" && participant.status !== "left") || !Number.isSafeInteger(participant.updatedAt)))) throw new Error("Meeting participant roster is invalid");
   if (patch.speakerEvents && (patch.speakerEvents.length > 200 || patch.speakerEvents.some((event) => !event || (event.type !== "speech_on" && event.type !== "speech_off") || typeof event.participantId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(event.participantId) || !Number.isSafeInteger(event.at) || event.at <= 0))) throw new Error("Meeting speaker timeline is invalid");
-  const effectivePatch = { ...patch };
   if (patch.status === "ended" && current.transcriptRetentionDays && !current.transcriptExpiresAt) {
     effectivePatch.transcriptExpiresAt = Date.now() + current.transcriptRetentionDays * 24 * 60 * 60_000;
   }
@@ -6743,6 +6822,32 @@ export async function updateRecallMeeting(uid: number, id: string, patch: Partia
     await backend.deleteRecallTranscript(uid, id);
   }
   return current;
+}
+
+/** Save a newer bounded checkpoint under a per-meeting lease so stale jobs cannot overwrite it. */
+export async function saveRecallMeetingMissionState(uid: number, id: string, value: RecallMeetingMissionState): Promise<RecallMeetingRecord | undefined> {
+  if (!Number.isSafeInteger(uid) || uid <= 0 || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(id)) throw new Error("Meeting mission state identity is invalid");
+  const state = normalizeRecallMeetingMissionState(value);
+  if (!state || state.checkpointAt !== value.checkpointAt) throw new Error("Meeting mission state is invalid");
+  const token = randomUUID();
+  const leaseKey = `recall-mission-state:${uid}:${id}`;
+  let acquired = false;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    if (await claimDeliveryLease(leaseKey, token, 5_000) === "acquired") { acquired = true; break; }
+    await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+  }
+  if (!acquired) return undefined;
+  try {
+    const current = await getRecallMeeting(uid, id);
+    if (!current || current.status !== "in_call") return current;
+    if ((current.missionState?.checkpointAt ?? 0) >= state.checkpointAt) return current;
+    current.missionState = state;
+    current.updatedAt = Date.now();
+    await backend.saveRecallMeeting(current);
+    return current;
+  } finally {
+    await releaseDeliveryLease(leaseKey, token).catch(() => undefined);
+  }
 }
 
 /** Persist content-free live runtime diagnostics and a bounded operator timeline. */
@@ -7290,6 +7395,8 @@ function normalizeTask(task: TaskRecord): TaskRecord {
       : { lastFailureClass: undefined }),
     automaticRepairCount: Math.max(0, Math.min(3, Math.floor(Number(task.automaticRepairCount) || 0))),
     ...(typeof task.workflowRunId === "string" && task.workflowRunId && Number.isFinite(task.workflowPublishedAt) && (task.workflowPublishedAt ?? 0) > 0 ? { workflowPublishedAt: Number(task.workflowPublishedAt) } : { workflowPublishedAt: undefined }),
+    workflowDeliveryFailures: Math.max(0, Math.min(3, Math.floor(Number(task.workflowDeliveryFailures) || 0))),
+    ...(typeof task.lastFailedWorkflowRunId === "string" && task.lastFailedWorkflowRunId.length <= 200 ? { lastFailedWorkflowRunId: task.lastFailedWorkflowRunId } : { lastFailedWorkflowRunId: undefined }),
     events: (task.events ?? []).slice(-100),
     ...(typeof task.missionId === "string" && /^mis_[A-Za-z0-9_-]{1,160}$/.test(task.missionId) ? { missionId: task.missionId } : { missionId: undefined }),
     ...(typeof task.missionStepId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(task.missionStepId) ? { missionStepId: task.missionStepId } : { missionStepId: undefined }),
@@ -8643,8 +8750,10 @@ export async function retryTask(userId: number, id: string): Promise<TaskRecord 
       // A retry is a new provider publication. Never carry the previous
       // workflow id or an expired/pending enqueue claim into that attempt.
       workflowRunId: undefined,
+      workflowDeliveryFailures: 0,
+      lastFailedWorkflowRunId: undefined,
       enqueueClaim: undefined,
-      runAt: Date.now(),
+      runAt: Math.max(Date.now(), (task.runAt ?? 0) + 1),
       events: [...task.events, taskEvent("retried", "Task requeued", task.attempt)],
     });
 }
@@ -8673,6 +8782,72 @@ export async function claimTask(userId: number, id: string, workerId: string, le
 /** Claim the enqueue slot before contacting QStash so concurrent schedulers cannot publish duplicates. */
 export async function claimTaskEnqueue(userId: number, id: string, token: string, claimMs = 120_000): Promise<TaskRecord | undefined> {
   return backend.claimTaskEnqueue(userId, id, token.slice(0, 120), Math.max(1_000, Math.min(15 * 60_000, claimMs)));
+}
+
+/**
+ * Reconcile a signed QStash failure callback without touching work that has
+ * already started, been cancelled, or been published under a newer run ID.
+ * Consecutive delivery failures are bounded separately from worker attempts.
+ */
+export async function recoverTaskAfterWorkflowFailure(
+  userId: number,
+  id: string,
+  failedWorkflowRunId: string,
+): Promise<{ task: TaskRecord; shouldEnqueue: boolean } | undefined> {
+  const existing = await getTask(userId, id);
+  if (!existing || existing.status !== "queued" || existing.lease || (existing.runAt ?? 0) > Date.now()) return undefined;
+  const expectedPendingRunId = `wfr_task-${id}-${existing.runAt ?? 0}`;
+  const pendingWorkflowFailed = Boolean(existing.workflowRunId?.startsWith("pending:") && failedWorkflowRunId === expectedPendingRunId);
+  if (existing.workflowRunId?.startsWith("pending:") && !pendingWorkflowFailed) return undefined;
+  if (existing.workflowRunId && !existing.workflowRunId.startsWith("pending:") && existing.workflowRunId !== failedWorkflowRunId) return undefined;
+  if (!existing.workflowRunId && existing.lastFailedWorkflowRunId) {
+    return existing.lastFailedWorkflowRunId === failedWorkflowRunId ? { task: existing, shouldEnqueue: true } : undefined;
+  }
+  const task = await mutateTask(userId, id, (current) => {
+    if (current.status !== "queued" || current.lease || (current.runAt ?? 0) > Date.now()) return undefined;
+    const currentRunId = current.workflowRunId;
+    const currentExpectedPendingRunId = `wfr_task-${id}-${current.runAt ?? 0}`;
+    if ((currentRunId?.startsWith("pending:") && failedWorkflowRunId !== currentExpectedPendingRunId) || (currentRunId && !currentRunId.startsWith("pending:") && currentRunId !== failedWorkflowRunId)) return undefined;
+    const deliveryFailures = Math.min(3, current.workflowDeliveryFailures ?? 0);
+    const reason = "QStash exhausted delivery retries before this task could be claimed.";
+    if (deliveryFailures >= 2) {
+      return {
+        status: "failed" as const,
+        workflowRunId: undefined,
+        workflowPublishedAt: undefined,
+        lastFailedWorkflowRunId: failedWorkflowRunId,
+        enqueueClaim: undefined,
+        workflowDeliveryFailures: 3,
+        error: reason,
+        nextAction: "Retry this task after the workflow endpoint or QStash configuration is healthy.",
+        events: [...current.events, taskEvent("failed", "Task delivery failed three consecutive times before a worker claimed it.", current.attempt)],
+      };
+    }
+    return {
+      status: "queued" as const,
+      workflowRunId: undefined,
+      workflowPublishedAt: undefined,
+      lastFailedWorkflowRunId: failedWorkflowRunId,
+      enqueueClaim: undefined,
+      workflowDeliveryFailures: deliveryFailures + 1,
+      runAt: Math.max(Date.now(), (current.runAt ?? 0) + 1),
+      error: reason,
+      nextAction: "The task will be republished with a new workflow run ID.",
+      events: [...current.events, taskEvent("retried", "Task workflow delivery failed; scheduling a fresh workflow run.", current.attempt)],
+    };
+  });
+  if (!task) {
+    // A previous callback may have cleared the failed ID but crashed before
+    // publishing its replacement. Reclaim only a due, queued task with no
+    // current/pending workflow; enqueueTaskWithClaim provides the CAS fence.
+    const current = await getTask(userId, id);
+    if (current?.status === "queued" && !current.lease && !current.workflowRunId && current.lastFailedWorkflowRunId === failedWorkflowRunId && (current.runAt ?? 0) <= Date.now()) {
+      return { task: current, shouldEnqueue: true };
+    }
+    return undefined;
+  }
+  if (task.status === "failed") await reconcileTerminalMissionTask(task);
+  return { task, shouldEnqueue: task.status === "queued" };
 }
 
 /** Renew a task lease while a bounded worker slice is still executing. */
@@ -9996,6 +10171,24 @@ function withLeadCampaignMutation<T>(userId: number, campaignId: string, work: (
   });
 }
 
+/** Serialize billable calls within one campaign so receipt-window accounting
+ * cannot attribute another concurrent call's spend to this reservation. */
+export function withLeadCampaignTregLease<T>(userId: number, campaignId: string, work: () => Promise<T>): Promise<T> {
+  const key = `lead-campaign-treg:${userId}:${campaignId}`;
+  const token = randomUUID();
+  return withDistributedLease({
+    acquire: async () => backend.acquireKeyLock(key, token, 60),
+    renew: async () => backend.renewKeyLock(key, token, 60),
+    release: async () => backend.releaseKeyLock(key, token),
+  }, work, {
+    acquisitionAttempts: 40,
+    retryDelayMs: 25,
+    renewalIntervalMs: 15_000,
+    busyMessage: "Lead campaign enrichment is already in progress; retry shortly.",
+    lostMessage: "Lead campaign enrichment lost its coordination lease; inspect the saved spend and receipts before retrying.",
+  });
+}
+
 export async function createLeadCampaign(userId: number, input: Omit<LeadCampaignRecord, "id" | "userId" | "createdAt" | "updatedAt">): Promise<LeadCampaignRecord> {
   const collection = collectionFor("lead_campaign");
   const now = Date.now();
@@ -10099,6 +10292,13 @@ export async function listLeadCampaignCandidates(userId: number, campaignId: str
   const offset = Math.max(0, Math.floor(options.offset ?? 0));
   const limit = Math.max(1, Math.min(100, Math.floor(options.limit ?? 50)));
   return records.slice(offset, offset + limit);
+}
+
+export async function getLeadCampaignCandidate(userId: number, campaignId: string, candidateId: string): Promise<LeadCampaignCandidateRecord | undefined> {
+  const collection = collectionFor("lead_candidate");
+  return (await backend.getAttentionRecords(userId, collection))
+    .map((item) => safeAttentionRecord(collection, item))
+    .find((item): item is LeadCampaignCandidateRecord => Boolean(item && "campaignId" in item && item.userId === userId && item.campaignId === campaignId && item.id === candidateId));
 }
 
 export async function countLeadCampaignCandidates(userId: number, campaignId: string): Promise<{ total: number; qualified: number; review: number; rejected: number }> {

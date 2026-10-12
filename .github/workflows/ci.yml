@@ -11,7 +11,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     # The test suite imports src/config.ts. These are non-secret placeholders;
     # provider calls are mocked by the contract tests and no real credentials
     # belong in CI.
@@ -63,4 +63,13 @@ jobs:
       - run: npm run build
       - run: npm run build:sdk
       - run: npm run test:sdk
+      - name: Set up pnpm for the private dashboard submodule
+        run: corepack enable
+      - name: Verify dashboard
+        working-directory: chusky-web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run typecheck
+          pnpm run lint
+          pnpm run build
       - run: git diff --check

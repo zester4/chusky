@@ -1,4 +1,4 @@
-import test, { before } from "node:test";
+import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import { runAgent, invalidateSession, setAgentDependenciesForTests } from "../src/agent.js";
@@ -11,7 +11,14 @@ import { settleMissionSlice } from "../src/missionSlice.js";
 import { MissionFakeQStash } from "./helpers/missionKernelHarness.js";
 import { nativeTool } from "../src/nativeTools.js";
 
-before(async () => { await initStore({ memoryOnly: true }); });
+const originalRedisUrl = config.redisUrl;
+before(async () => {
+  // Agent context can use the hot-memory cache independently of the primary
+  // store. Keep this mocked-provider proof fully local even when .env has Redis.
+  config.redisUrl = "";
+  await initStore({ memoryOnly: true });
+});
+after(() => { config.redisUrl = originalRedisUrl; });
 
 function completion(content: string | null, call?: { id: string; name: string; args: object }) {
   return new Response(JSON.stringify({ choices: [{ finish_reason: call ? "tool_calls" : "stop", message: {
@@ -67,7 +74,6 @@ test("every mission model request retains all lifecycle controls after routing",
   await scriptedAgent(task, queue, () => completion("The step remains in progress."), { omitToolAllow: true, capturedTools });
   for (const control of MISSION_WORKER_CONTROL_TOOLS) assert.ok(capturedTools.includes(control), `missing mission lifecycle tool ${control}`);
 });
-
 test("real agent dispatch advances a three-step mission through durable handoffs", async () => {
   const userId = 981001;
   const queue = new MissionFakeQStash();

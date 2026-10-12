@@ -59,7 +59,7 @@ function chooseEveryTool(): typeof fetch {
 }
 
 test("native routing is inert when Jev native routing is disabled", async () => {
-  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["native"]), jevNativeToolRouting: false });
+  const restore = withConfig({ nativeToolLoading: "full", jevMode: "enforce", jevSurfaces: new Set(["native"]), jevNativeToolRouting: false });
   try {
     const all = tools();
     const route = await routeNativeToolsForTurn(all, "Create a PDF report", { client: new JevClient({ apiKey: "k", fetchImpl: chooseRequestedTool() }) });
@@ -333,7 +333,7 @@ test("shadow mode evaluates native routing without changing the catalog", async 
 });
 
 test("native routing falls back when no request signal matches the local catalog", async () => {
-  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["native"]), jevNativeToolRouting: true });
+  const restore = withConfig({ nativeToolLoading: "full", jevMode: "enforce", jevSurfaces: new Set(["native"]), jevNativeToolRouting: true });
   try {
     const all = tools();
     const route = await computeNativeToolRoute("Tell me a joke", all, { client: new JevClient({ apiKey: "k", fetchImpl: chooseRequestedTool() }) });

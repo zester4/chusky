@@ -6,6 +6,15 @@ import { config } from "./config.js";
 
 export interface ReminderWorkflowPayload { reminderId: string; userId: number; approvalId?: string; attemptId?: string; }
 export interface JobWorkflowPayload { jobId: string; userId: number; occurrenceId?: string; approvalId?: string; forceAttentionPulse?: boolean; }
+export interface TaskWorkflowPayload { taskId: string; userId: number; }
+
+export function parseTaskWorkflowPayload(value: unknown): TaskWorkflowPayload {
+  if (!value || typeof value !== "object") throw new Error("Workflow payload must be an object");
+  const payload = value as Record<string, unknown>;
+  if (typeof payload.taskId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/.test(payload.taskId)) throw new Error("Invalid taskId");
+  if (!Number.isSafeInteger(payload.userId) || Number(payload.userId) < 1) throw new Error("Invalid userId");
+  return { taskId: payload.taskId, userId: Number(payload.userId) };
+}
 
 export interface WorkflowDependencies {
   getReminder(userId: number, id: string): Promise<ReminderRecord | undefined>;

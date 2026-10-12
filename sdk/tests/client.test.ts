@@ -216,15 +216,17 @@ test("SDK exposes authenticated A2A discovery and task lifecycle", async () => {
 });
 
 test("SDK parses NDJSON run events in order", async () => {
-  const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode('{"type":"run.started","run":{"id":"run_1"}}\n{"type":"run.delta","runId":"run_1","text":"Hello"}\n')); controller.close(); } });
+  const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode('{"type":"run.started","run":{"id":"run_1","progress":{"phase":"planning","title":"Preparing your request"}}}\n{"type":"run.progress","runId":"run_1","progress":{"phase":"researching","title":"Researching the request","provider":"gmail"}}\n{"type":"run.delta","runId":"run_1","text":"Hello"}\n')); controller.close(); } });
   const sdk = new Chusky({ apiKey: "key", userId: "customer_1", baseUrl: "https://example.test", fetch: mockFetch(() => new Response(stream, { status: 200 })) });
-  const events = [] as Array<{ type: string }>;
+  const events = [] as Array<{ type: string; progress?: { phase: string; provider?: string } }>;
   for await (const event of sdk.threads.runs("thr_1").stream({ input: "hi" })) events.push(event);
-  assert.deepEqual(events.map((event) => event.type), ["run.started", "run.delta"]);
+  assert.deepEqual(events.map((event) => event.type), ["run.started", "run.progress", "run.delta"]);
+  assert.equal(events[1]?.progress?.phase, "researching");
+  assert.equal(events[1]?.progress?.provider, "gmail");
 });
 
 test("SDK parses owner-scoped meeting SSE snapshots in order", async () => {
-  const workspace = { rooms: [], preparations: [], meetings: [{ id: "mtg_1", platform: "google_meet", status: "in_call", interactionMode: "representative", screenShareUnderstanding: false, searchableTranscript: false, createdAt: "2026-09-15T12:00:00.000Z", updatedAt: "2026-09-15T12:00:01.000Z" }], contacts: [] };
+  const workspace = { rooms: [], preparations: [], meetings: [{ id: "mtg_1", platform: "google_meet", status: "in_call", interactionMode: "representative", screenShareUnderstanding: false, searchableTranscript: false, missionState: { summary: "Qualification is in progress", decisions: [], openQuestions: ["Timeline"], commitments: [], nextMove: "Confirm rollout timing", checkpointAt: "2026-10-12T12:00:00.000Z" }, createdAt: "2026-09-15T12:00:00.000Z", updatedAt: "2026-09-15T12:00:01.000Z" }], contacts: [] };
   const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(`event: snapshot\ndata: ${JSON.stringify(workspace)}\n\nevent: keepalive\ndata: 123\n\n`)); controller.close(); } });
   let request: { url: string; headers: Headers } | undefined;
   const sdk = new Chusky({ apiKey: "key", userId: "customer_1", baseUrl: "https://example.test", fetch: mockFetch((url, init) => { request = { url, headers: new Headers(init?.headers) }; return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } }); }) });
@@ -234,6 +236,7 @@ test("SDK parses owner-scoped meeting SSE snapshots in order", async () => {
   assert.equal(request?.headers.get("accept"), "text/event-stream");
   assert.deepEqual(events.map((event) => event.type), ["snapshot", "keepalive"]);
   assert.equal(events[0]?.workspace?.meetings[0]?.id, "mtg_1");
+  assert.equal(events[0]?.workspace?.meetings[0]?.missionState?.nextMove, "Confirm rollout timing");
 });
 
 test("SDK exposes root project lifecycle endpoints", async () => {

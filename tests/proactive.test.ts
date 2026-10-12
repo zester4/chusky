@@ -10,6 +10,13 @@ import { addJob, createAttentionRecord, initStore, listAttentionRecords } from "
 import { runDueAutonomyWatches } from "../src/autonomy/reconciliation.js";
 import { nativeTool } from "../src/nativeTools.js";
 import { attentionChecklistPrompt } from "../src/proactive/checklist.js";
+import { config } from "../src/config.js";
+
+// Contract tests must not inherit external storage/vector credentials from the
+// developer's dotenv file; their records and provider calls are local fixtures.
+config.redisUrl = "";
+config.upstashVectorRestUrl = "";
+config.upstashVectorRestToken = "";
 
 test("proactive catalogue contains all twenty bounded behaviors", () => {
   assert.equal(PROACTIVE_CAPABILITIES.length, 20);
@@ -23,7 +30,6 @@ test("proactive catalogue contains all twenty bounded behaviors", () => {
   assert.throws(() => normalizeProactiveCapabilityIds(["made_up_capability"]), /Unknown proactive capability/);
   assert.equal(new Set([...PROACTIVE_SIGNAL_CAPABILITY_IDS, ...PROACTIVE_RUN_LEVEL_CAPABILITY_IDS]).size, 20);
 });
-
 test("default watches are read-only and idempotently discoverable", () => {
   assert.equal(DEFAULT_PROACTIVE_WATCHES.length, 2);
   const input = defaultWatchInput(DEFAULT_PROACTIVE_WATCHES[0]!, 1_000);

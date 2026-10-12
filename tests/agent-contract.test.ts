@@ -14,6 +14,9 @@ import { JevClient, setJevClientForTests } from "../src/decisions/jev.js";
 // to a developer's configured Upstash Vector instance.
 config.upstashVectorRestUrl = "";
 config.upstashVectorRestToken = "";
+// The repository's dotenv file may contain a real Upstash Redis URL. These
+// contract tests use memory-only persistence and must never open that client.
+config.redisUrl = "";
 
 function chatResponse(message: any) {
   return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message }] }), { status: 200, headers: { "content-type": "application/json" } });
@@ -36,7 +39,6 @@ test("routes voice call objectives to bounded exact Composio capability bundles"
     "GOOGLECALENDAR_PATCH_EVENT", "GOOGLECALENDAR_DELETE_EVENT",
   ]);
 });
-
 test("voice fast lane only applies to ordinary conversation", () => {
   assert.equal(voiceFastLaneEligible("How are you doing today?"), true);
   assert.equal(voiceFastLaneEligible("Why are you calling me?"), true);
@@ -878,6 +880,8 @@ test("an image fetched from saved assets is uploaded on a referential LinkedIn p
   await initStore({ memoryOnly: true });
   invalidateSession(userId);
   const originalFetch = globalThis.fetch;
+  const originalNativeToolLoading = config.nativeToolLoading;
+  const originalObjectCatalogEnabled = config.durableObjectCatalogEnabled;
   const originalR2 = {
     accountId: config.r2AccountId,
     accessKeyId: config.r2AccessKeyId,
@@ -888,6 +892,8 @@ test("an image fetched from saved assets is uploaded on a referential LinkedIn p
   config.r2AccessKeyId = "test-access-key";
   config.r2SecretAccessKey = "test-secret-key";
   config.r2Bucket = "test-images";
+  config.nativeToolLoading = "full";
+  config.durableObjectCatalogEnabled = false;
 
   const imageBytes = Buffer.alloc(24);
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
@@ -990,6 +996,8 @@ test("an image fetched from saved assets is uploaded on a referential LinkedIn p
     assert.equal(serializedRequests.includes("https://signed.example/private-image"), false, "signed image URLs stay out of model tool results");
   } finally {
     globalThis.fetch = originalFetch;
+    config.nativeToolLoading = originalNativeToolLoading;
+    config.durableObjectCatalogEnabled = originalObjectCatalogEnabled;
     config.r2AccountId = originalR2.accountId;
     config.r2AccessKeyId = originalR2.accessKeyId;
     config.r2SecretAccessKey = originalR2.secretAccessKey;
@@ -1140,10 +1148,14 @@ test("raises the output budget for structured artifact calls", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830054);
   const originalFetch = globalThis.fetch;
+  const originalNativeToolLoading = config.nativeToolLoading;
   const requests: Array<Record<string, unknown>> = [];
+  config.nativeToolLoading = "full";
   setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "artifact-budget-session", tools: async () => [], execute: async () => undefined }) } });
   globalThis.fetch = (async (input, init) => {
-    if (String(input).includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    const url = String(input);
+    if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    if (!url.includes("/chat/completions")) return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
     requests.push(JSON.parse(String(init?.body)));
     return requests.length === 1
       ? toolResponse("CHUCK_CREATE_PDF", "{\"title\":\"truncated")
@@ -1153,7 +1165,10 @@ test("raises the output budget for structured artifact calls", async () => {
     const result = await runAgent(830054, "Create a PDF playbook with charts", [], "test/model");
     assert.match(result.text, /could not complete/);
     assert.equal(requests[0]?.max_tokens, config.openRouterArtifactMaxTokens);
-  } finally { globalThis.fetch = originalFetch; }
+  } finally {
+    globalThis.fetch = originalFetch;
+    config.nativeToolLoading = originalNativeToolLoading;
+  }
 });
 
 test("emails a generated artifact through the exact connected Composio action", async () => {
@@ -1538,7 +1553,7 @@ test("private voice turns keep the Chusky context but skip Composio setup and du
       sort: { by: "latency", partition: "none" },
     });
     assert.equal(requestBody?.max_tokens, config.voiceMaxTokens);
-    assert.deepEqual(requestBody?.models, ["test/model", "google/gemini-3.5-flash"]);
+    assert.deepEqual(requestBody?.models, ["test/model", ...config.voiceFallbackModels.filter((fallback) => fallback !== "test/model")]);
     assert.equal(requestBody?.reasoning_effort, "minimal");
     assert.equal((await listAgentRuns(userId)).length, 0);
     await assert.rejects(
@@ -2224,32 +2239,36 @@ test("a Jev-routed mission recovery rejects a stray start-with-id call with a us
   await initStore({ memoryOnly: true });
   invalidateSession(userId);
   const requests: Array<Record<string, any>> = [];
-  await withAgentMocks([
-    toolResponse("CHUCK_MISSION_START", JSON.stringify({ id: "mis_existing" })),
-    chatResponse({ role: "assistant", content: "I’ll continue the existing mission." }),
-  ], async () => assert.fail("The disallowed new-mission tool must not execute"), async () => {
-    const result = await runAgent(
-      userId,
-      "Continue the existing mission mis_existing",
-      [],
-      "test/model",
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      { ephemeral: true, toolAllow: ["CHUCK_MISSION_RESUME"] },
-    );
-    assert.equal(result.text, "I’ll continue the existing mission.");
-    assert.deepEqual(result.toolsSucceeded, []);
-  }, false, undefined, (body) => requests.push(body));
+  const originalNativeToolLoading = config.nativeToolLoading;
+  config.nativeToolLoading = "bundle";
+  try {
+    await withAgentMocks([
+      toolResponse("CHUCK_MISSION_START", JSON.stringify({ id: "mis_existing" })),
+      chatResponse({ role: "assistant", content: "I’ll continue the existing mission." }),
+    ], async () => assert.fail("The disallowed new-mission tool must not execute"), async () => {
+      const result = await runAgent(
+        userId,
+        "Continue the existing mission mis_existing",
+        [],
+        "test/model",
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { ephemeral: true, toolAllow: ["CHUCK_MISSION_RESUME"] },
+      );
+      assert.equal(result.text, "I’ll continue the existing mission.");
+      assert.deepEqual(result.toolsSucceeded, []);
+    }, false, undefined, (body) => requests.push(body));
 
-  const visibleTools = requests[0]?.tools?.map((tool: any) => tool.function.name) ?? [];
-  assert.ok(visibleTools.includes("CHUCK_MISSION_RESUME"));
-  assert.ok(!visibleTools.includes("CHUCK_MISSION_START"));
-  const correction = requests[1]?.messages?.find((message: any) => message.role === "tool")?.content ?? "";
-  assert.match(correction, /CHUCK_MISSION_RESUME.*No mission was created/i);
-  assert.deepEqual(await listMissions(userId), []);
+    const visibleTools = requests[0]?.tools?.map((tool: any) => tool.function.name) ?? [];
+    assert.ok(visibleTools.includes("CHUCK_MISSION_RESUME"));
+    assert.ok(!visibleTools.includes("CHUCK_MISSION_START"));
+    const correction = requests[1]?.messages?.find((message: any) => message.role === "tool")?.content ?? "";
+    assert.match(correction, /CHUCK_MISSION_RESUME.*No mission was created/i);
+    assert.deepEqual(await listMissions(userId), []);
+  } finally { config.nativeToolLoading = originalNativeToolLoading; }
 });
 
 test("routes a direct Composio tool to the requested connected-account alias", async () => {
@@ -2362,15 +2381,24 @@ test("resolves linked web accounts before the history-import marker is written",
 
 test("reconnects one expired connected account by its existing Composio ID", async () => {
   const refreshed: Array<{ id: string; options: unknown }> = [];
-  setAgentDependenciesForTests({ composio: {
-    connectedAccounts: {
-      list: async ({ userIds }: { userIds: string[] }) => ({ items: userIds[0] === "user_830016" ? [{ id: "ca_expired", alias: "work-gmail", toolkit: { slug: "gmail" }, status: "EXPIRED" }] : [] }),
-      refresh: async (id: string, options: unknown) => { refreshed.push({ id, options }); return { redirectUrl: "https://composio.example/reconnect/ca_expired" }; },
-    },
-  } });
-  assert.equal(await getReconnectUrl(830016, "ca_expired"), "https://composio.example/reconnect/ca_expired");
-  assert.deepEqual(refreshed, [{ id: "ca_expired", options: {} }]);
-  await assert.rejects(() => getReconnectUrl(830017, "ca_expired"), /not found for this Chusky account/);
+  const originalCallbackUrl = config.composioCallbackUrl;
+  const originalDashboardUrl = config.dashboardUrl;
+  config.composioCallbackUrl = "";
+  config.dashboardUrl = "";
+  try {
+    setAgentDependenciesForTests({ composio: {
+      connectedAccounts: {
+        list: async ({ userIds }: { userIds: string[] }) => ({ items: userIds[0] === "user_830016" ? [{ id: "ca_expired", alias: "work-gmail", toolkit: { slug: "gmail" }, status: "EXPIRED" }] : [] }),
+        refresh: async (id: string, options: unknown) => { refreshed.push({ id, options }); return { redirectUrl: "https://composio.example/reconnect/ca_expired" }; },
+      },
+    } });
+    assert.equal(await getReconnectUrl(830016, "ca_expired"), "https://composio.example/reconnect/ca_expired");
+    assert.deepEqual(refreshed, [{ id: "ca_expired", options: {} }]);
+    await assert.rejects(() => getReconnectUrl(830017, "ca_expired"), /not found for this Chusky account/);
+  } finally {
+    config.composioCallbackUrl = originalCallbackUrl;
+    config.dashboardUrl = originalDashboardUrl;
+  }
 });
 
 test("accepts Composio's wire-format reconnect URL without creating a new account", async () => {
