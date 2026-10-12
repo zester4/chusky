@@ -2,8 +2,10 @@ import { config } from "../../config.js";
 
 const VECTOR_REQUEST_TIMEOUT_MS = 2_500;
 const VECTOR_MAX_ATTEMPTS = 2;
-const VECTOR_RETRY_BASE_DELAY_MS = 100;
+const VECTOR_RETRY_BASE_DELAY_MS = 250;
+const VECTOR_MAX_INLINE_RETRY_DELAY_MS = 2_000;
 const VECTOR_DEGRADED_COOLDOWN_MS = 30_000;
+const VECTOR_MAX_RETRY_AFTER_MS = 5 * 60_000;
 const vectorDegradedUntil = new Map<string, number>();
 
 export class UpstashVectorRequestError extends Error {
@@ -19,7 +21,20 @@ function retryableStatus(status: number): boolean {
 
 function retryDelay(attempt: number): number {
   const exponential = VECTOR_RETRY_BASE_DELAY_MS * (2 ** attempt);
-  return exponential + Math.floor(Math.random() * VECTOR_RETRY_BASE_DELAY_MS);
+  return exponential + Math.floor(Math.random() * exponential);
+}
+
+function retryAfterDelay(header: string | null, now = Date.now()): number | undefined {
+  if (!header) return undefined;
+  const trimmed = header.trim();
+  const seconds = /^\d+(?:\.\d+)?$/.test(trimmed) ? Number(trimmed) : undefined;
+  const target = seconds !== undefined ? now + seconds * 1_000 : Date.parse(trimmed);
+  if (!Number.isFinite(target)) return undefined;
+  return Math.max(0, Math.min(VECTOR_MAX_RETRY_AFTER_MS, target - now));
+}
+
+function coolDown(url: string, retryAfterMs?: number): void {
+  vectorDegradedUntil.set(url, Date.now() + Math.max(VECTOR_DEGRADED_COOLDOWN_MS, retryAfterMs ?? 0));
 }
 
 function wait(milliseconds: number): Promise<void> {
@@ -50,7 +65,7 @@ export class UpstashKnowledgeStore {
   private async call<T>(path: string, body: unknown, method: "POST" | "DELETE" = "POST"): Promise<T> {
     const degradedUntil = vectorDegradedUntil.get(this.url) ?? 0;
     if (degradedUntil > Date.now()) {
-      throw new UpstashVectorRequestError("Upstash Vector is temporarily unavailable; use structured search until it recovers");
+      throw new UpstashVectorRequestError("Upstash Vector is temporarily unavailable; use structured search until it recovers", 503);
     }
     if (degradedUntil) vectorDegradedUntil.delete(this.url);
 
@@ -72,15 +87,21 @@ export class UpstashKnowledgeStore {
         }
         await response.body?.cancel();
         if (attempt + 1 < VECTOR_MAX_ATTEMPTS && retryableStatus(response.status)) {
-          await wait(retryDelay(attempt));
-          continue;
+          const serverDelay = retryAfterDelay(response.headers.get("retry-after"));
+          const delay = Math.max(retryDelay(attempt), serverDelay ?? 0);
+          if (delay <= VECTOR_MAX_INLINE_RETRY_DELAY_MS) {
+            await wait(delay);
+            continue;
+          }
+          coolDown(this.url, serverDelay);
+          throw new UpstashVectorRequestError(`Upstash Vector request failed (${response.status}); retry deferred by Retry-After`, response.status);
         }
-        if (retryableStatus(response.status)) vectorDegradedUntil.set(this.url, Date.now() + VECTOR_DEGRADED_COOLDOWN_MS);
+        if (retryableStatus(response.status)) coolDown(this.url, retryAfterDelay(response.headers.get("retry-after")));
         throw new UpstashVectorRequestError(`Upstash Vector request failed (${response.status})`, response.status);
       } catch (error) {
         if (error instanceof UpstashVectorRequestError) throw error;
         if (attempt + 1 >= VECTOR_MAX_ATTEMPTS) {
-          vectorDegradedUntil.set(this.url, Date.now() + VECTOR_DEGRADED_COOLDOWN_MS);
+          coolDown(this.url);
           throw new UpstashVectorRequestError("Upstash Vector request failed before a response", undefined);
         }
         await wait(retryDelay(attempt));

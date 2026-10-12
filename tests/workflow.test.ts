@@ -4,6 +4,7 @@ import { deliverJob, deliverReminder, parseJobWorkflowPayload, parseReminderWork
 import type { JobRecord, ReminderRecord } from "../src/store.js";
 import type { JobOccurrenceRecord } from "../src/autonomy/types.js";
 import { resolveWorkflowEndpoint } from "../src/workflowUrls.js";
+import { parseWorkflowFailureRequestPayload, triggerWorkflowVersionForPayload, TRIGGER_WORKFLOW_VERSION } from "../src/triggerWorkflow.js";
 
 function deps(overrides: Partial<Parameters<typeof deliverReminder>[1]> = {}) {
   const sent: { chatId: number; text: string }[] = [];
@@ -31,6 +32,18 @@ test("workflow endpoints always use the configured public HTTPS URL", () => {
   assert.equal(resolveWorkflowEndpoint("", "https://chusky.example", "/workflows/job", "Job workflows"), "https://chusky.example/workflows/job");
   assert.equal(resolveWorkflowEndpoint("https://jobs.example/workflows/job", "https://chusky.example", "/workflows/job", "Job workflows"), "https://jobs.example/workflows/job");
   assert.throws(() => resolveWorkflowEndpoint("http://chusky.example/workflows/job", "https://chusky.example", "/workflows/job", "Job workflows"), /HTTPS URL/);
+});
+
+test("trigger workflow payloads keep old runs on the legacy step graph and pin new runs", () => {
+  assert.equal(triggerWorkflowVersionForPayload(undefined), "legacy");
+  assert.equal(triggerWorkflowVersionForPayload(TRIGGER_WORKFLOW_VERSION), "v2");
+  assert.throws(() => triggerWorkflowVersionForPayload(3), /Unsupported trigger workflow version/);
+});
+
+test("QStash failure payload parser reads the documented base64 source body", () => {
+  const original = { eventId: "evt_123", userId: 7 };
+  const sourceBody = Buffer.from(JSON.stringify(original)).toString("base64");
+  assert.deepEqual(parseWorkflowFailureRequestPayload({ sourceBody, url: "https://chusky.example/workflows/trigger-event" }), original);
 });
 
 test("reminder delivery is idempotent for cancelled or already-sent records", async () => {

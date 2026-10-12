@@ -766,8 +766,11 @@ owner and persisted as waiting until the approval or verified continuation is re
 
 Composio trigger events are verified, ownership-checked, deduplicated, and handed to the durable
 `/workflows/trigger-event` endpoint. The webhook returns `202` before the agent runs. Set
-`TRIGGER_WORKFLOW_URL` explicitly when the public workflow URL differs from
-`${WEBHOOK_URL}/workflows/trigger-event`; otherwise Chusky derives it from `WEBHOOK_URL`.
+`TRIGGER_WORKFLOW_URL` when the public workflow URL differs from
+`${WEBHOOK_URL}/workflows/trigger-event`; otherwise Chusky derives it from `WEBHOOK_URL`. Each new
+publication pins its workflow step graph in the durable payload. Older queued runs without a version
+field continue through the original step graph, so no additional workflow URL or deployment setting
+is required.
 Trigger workflow runs use `trigger-<event-id>` as their stable QStash workflow ID, so provider
 retries do not start a second agent run. Chusky stores a bounded safe summary for owner-facing
 activity and a separate, bounded private event context for the agent. The private context excludes

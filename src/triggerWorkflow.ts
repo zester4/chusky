@@ -7,6 +7,31 @@ import { createHash } from "node:crypto";
 
 export { resolveWorkflowEndpoint } from "./workflowUrls.js";
 
+export const TRIGGER_WORKFLOW_VERSION = 2 as const;
+
+export function triggerWorkflowVersionForPayload(version: unknown): "legacy" | "v2" {
+  if (version === undefined) return "legacy";
+  if (version === TRIGGER_WORKFLOW_VERSION) return "v2";
+  throw new Error("Unsupported trigger workflow version.");
+}
+
+export function parseWorkflowFailureRequestPayload(body: Record<string, unknown>): Record<string, unknown> {
+  const parse = (value: unknown): Record<string, unknown> | undefined => {
+    if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+    if (typeof value !== "string" || value.length > 128_000) return undefined;
+    const candidates = [value];
+    try { candidates.push(Buffer.from(value, "base64").toString("utf8")); } catch { /* not base64 */ }
+    for (const candidate of candidates) {
+      try {
+        const parsed = JSON.parse(candidate);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+      } catch { /* try the other supported QStash payload encoding */ }
+    }
+    return undefined;
+  };
+  return parse(body.sourceBody) ?? parse(body.requestPayload) ?? parse(body.body) ?? body;
+}
+
 export function triggerWorkflowUrl(): string {
   return resolveWorkflowEndpoint(config.triggerWorkflowUrl, config.webhookUrl, "/workflows/trigger-event", "Trigger workflows");
 }
