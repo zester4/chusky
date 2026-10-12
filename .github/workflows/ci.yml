@@ -28,12 +28,28 @@ jobs:
             echo "::error::The read-only chusky-web deploy key is not configured for this repository's Actions secrets."
             exit 1
           fi
-      - name: Route chusky-web submodule through SSH
-        run: git config --global url."git@github.com:zester4/chusky-web.git".insteadOf "https://github.com/zester4/chusky-web.git"
+      - name: Configure SSH for the private web submodule
+        env:
+          CHUSKY_WEB_SUBMODULE_DEPLOY_KEY: ${{ secrets.CHUSKY_WEB_SUBMODULE_DEPLOY_KEY }}
+        run: |
+          eval "$(ssh-agent -s)"
+          ssh-add - <<< "$CHUSKY_WEB_SUBMODULE_DEPLOY_KEY"
+          {
+            echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK"
+            echo "SSH_AGENT_PID=$SSH_AGENT_PID"
+          } >> "$GITHUB_ENV"
+          install -d -m 700 ~/.ssh
+          cat >> ~/.ssh/known_hosts <<'EOF'
+          github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+          github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+          EOF
+          chmod 600 ~/.ssh/known_hosts
+          echo 'GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=yes' >> "$GITHUB_ENV"
+          git config --global url."git@github.com:zester4/chusky-web.git".insteadOf "https://github.com/zester4/chusky-web.git"
       - uses: actions/checkout@v4
         with:
           token: ${{ github.token }}
-          ssh-key: ${{ secrets.CHUSKY_WEB_SUBMODULE_DEPLOY_KEY }}
           submodules: recursive
       - uses: actions/setup-node@v4
         with:
