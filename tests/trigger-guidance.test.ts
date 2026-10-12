@@ -1,7 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mdToTelegramHtml } from "../src/markdown.js";
-import { ensureTriggerCloseout, parseTriggerSuggestedActions, TRIGGER_DEFAULT_HANDLING } from "../src/triggerGuidance.js";
+import { ensureTriggerCloseout, parseTriggerSuggestedActions, TRIGGER_DEFAULT_HANDLING, triggerWorkflowExhaustion } from "../src/triggerGuidance.js";
+
+test("exhausted trigger workflow preserves a saved outcome without inventing delivery failure", () => {
+  assert.deepEqual(triggerWorkflowExhaustion({ status: "running", result: "Replied and verified in the original thread." }), {
+    status: "completed",
+    result: "Replied and verified in the original thread.",
+    notificationStatus: "unknown",
+    error: "The trigger work was saved, but a later workflow step did not finish. Check the saved result before retrying any external action.",
+  });
+});
+
+test("exhausted trigger workflow makes an unsaved run visibly failed without exposing provider errors", () => {
+  const failure = triggerWorkflowExhaustion({ status: "running" });
+  assert.equal(failure?.status, "failed");
+  assert.equal(failure?.notificationStatus, "unknown");
+  assert.match(failure?.result ?? "", /could not finish handling this trigger/i);
+  assert.doesNotMatch(failure?.result ?? "", /token|password|responsebody/i);
+  assert.equal(triggerWorkflowExhaustion({ status: "awaiting_approval" }), undefined);
+  assert.equal(triggerWorkflowExhaustion({ status: "completed", result: "Done" }), undefined);
+});
 
 test("default trigger policy requires end-to-end execution and provider-specific handling", () => {
   assert.match(TRIGGER_DEFAULT_HANDLING, /standing instruction to handle every matching event/i);
@@ -13,6 +32,9 @@ test("default trigger policy requires end-to-end execution and provider-specific
   assert.match(TRIGGER_DEFAULT_HANDLING, /Ashby applications: inspect the complete application, answers, resume/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /Pause only before a refund, deletion, or a critical decision/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /Never return NO_ACTION/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /at most six short bullets/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /how the result was verified/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /Do not paste the provider message/i);
 });
 
 test("trigger Telegram heading uses Markdown that renders as bold HTML", () => {
