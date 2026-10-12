@@ -52,3 +52,26 @@ test("opens a short outage circuit after bounded retries and avoids repeated pro
     globalThis.fetch = originalFetch;
   }
 });
+
+test("honors a long Retry-After by opening the outage circuit without hammering Vector", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response("temporarily unavailable", { status: 503, headers: { "retry-after": "30" } });
+  };
+  try {
+    const store = new UpstashKnowledgeStore("https://vector-retry-after.test", "token");
+    await assert.rejects(() => store.upsert([chunk]), (error: unknown) => {
+      assert.ok(error instanceof UpstashVectorRequestError);
+      assert.equal(error.status, 503);
+      assert.match(error.message, /retry deferred by Retry-After/);
+      return true;
+    });
+    assert.equal(calls, 1);
+    await assert.rejects(() => store.query("7906015891", "timezone"), /temporarily unavailable/);
+    assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
