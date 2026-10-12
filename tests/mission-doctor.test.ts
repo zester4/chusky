@@ -54,6 +54,26 @@ test("mission doctor distinguishes an exact provider wait from a stranded missio
   assert.ok(report.nextActions.some((action) => /exact signed provider event/i.test(action)));
 });
 
+test("mission doctor flags a timer wait whose saved step is already completed", () => {
+  const report = diagnoseMission({
+    mission: mission({
+      status: "waiting",
+      currentStepId: "step-2",
+      activeStepIds: ["step-2"],
+      steps: [
+        { id: "step-1", title: "Completed", objective: "Already done", status: "completed", dependsOn: [], attempts: 1, updatedAt: 1 },
+        { id: "step-2", title: "Active", objective: "Resume here", status: "running", dependsOn: ["step-1"], attempts: 1, updatedAt: 2 },
+      ],
+      waiting: { kind: "timer", runAt: 5_000, stepId: "step-1" },
+    }),
+    tasks: [],
+    now: 1_000,
+  });
+  assert.equal(report.health, "stalled");
+  assert.ok(report.reasons.includes("mission_wait_step_mismatch"));
+  assert.ok(report.nextActions.some((action) => /saved wait continuation/i.test(action)));
+});
+
 test("mission doctor reports uncertain provider failure as blocked and never recommends blind replay", () => {
   const report = diagnoseMission({ mission: mission({ status: "blocked", error: "Provider outcome is uncertain." }), tasks: [task({ status: "blocked", lastFailureClass: "provider_uncertain", error: "Timeout after dispatch." })], now: 1_000 });
   assert.equal(report.health, "blocked");

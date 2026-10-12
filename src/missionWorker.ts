@@ -131,6 +131,25 @@ export function missionStepInstruction(step?: Pick<MissionStepRecord, "title" | 
   return `Execute only this mission step now: ${step.title}\nStep objective: ${step.objective}\nDo not summarize the remaining mission or defer this step to another worker. Persist the result, evidence, checkpoint, wait, block, or step completion before ending this slice.`;
 }
 
+/** Resolve a timer wake target from the latest persisted mission frontier. */
+export function missionTimerResumeStep(
+  mission: Pick<MissionRecord, "steps" | "activeStepIds" | "currentStepId">,
+  preferredStepId?: string,
+): MissionStepRecord | undefined {
+  const activeStepIds = new Set(mission.activeStepIds ?? []);
+  if (preferredStepId && activeStepIds.has(preferredStepId)) {
+    const preferred = mission.steps.find((step) => step.id === preferredStepId && step.status === "running");
+    if (preferred) return preferred;
+  }
+  const current = mission.currentStepId && activeStepIds.has(mission.currentStepId)
+    ? mission.steps.find((step) => step.id === mission.currentStepId && step.status === "running")
+    : undefined;
+  if (current) return current;
+  return (mission.activeStepIds ?? [])
+    .map((stepId) => mission.steps.find((step) => step.id === stepId && step.status === "running"))
+    .find((step): step is MissionStepRecord => Boolean(step));
+}
+
 export function missionNoProgressNextAction(step?: Pick<MissionStepRecord, "title" | "objective">): string {
   if (!step) return "Retry the worker with one concrete action and persist its result before ending the slice.";
   return `Retry the worker for step “${step.title}” and execute this objective directly: ${step.objective}`;
@@ -143,11 +162,10 @@ export function missionNoProgressNextAction(step?: Pick<MissionStepRecord, "titl
  */
 export function missionPostWakeNextAction(
   step: Pick<MissionStepRecord, "title" | "objective"> | undefined,
-  requestedNextAction: string,
+  _requestedNextAction?: string,
 ): string {
-  const requested = requestedNextAction.trim().slice(0, 900);
-  if (!step) return `After the durable wait wakes, execute the saved action now. Do not wait again. Saved action: ${requested}`.slice(0, 2000);
-  return `After the durable wait wakes, execute only mission step “${step.title}” now: ${step.objective} Do not call CHUCK_TASK_WAIT again. Persist the post-wake result and complete this step when its objective is verified. Saved continuation: ${requested}`.slice(0, 2000);
+  if (!step) return "The durable timer is due, but the saved continuation has no active step. Reconcile the mission frontier before running work.";
+  return `After the durable timer wakes, resume only active mission step “${step.title}”: ${step.objective} Do not repeat completed steps. Do not call CHUCK_TASK_WAIT again for this timer. Persist the post-wake result and complete this step only when its objective is verified.`.slice(0, 2000);
 }
 
 /** A timer wake with no tool call is safe to retry once inside the same slice. */
@@ -195,11 +213,20 @@ export function missionNeedsLifecycleCloseoutNudge(result: {
  * first slice.
  */
 export function missionHasTimerWakeContinuation(
-  mission?: Pick<MissionRecord, "status" | "events" | "currentStepId" | "activeStepIds">,
+  mission?: Pick<MissionRecord, "status" | "events" | "currentStepId" | "activeStepIds"> & { steps?: Array<Pick<MissionStepRecord, "id" | "status">> },
   missionStepId?: string,
 ): boolean {
   if (!mission || mission.status !== "running") return false;
-  const stepId = missionStepId ?? mission.currentStepId ?? mission.activeStepIds?.[0];
+  const requestedStepIsActive = Boolean(missionStepId && mission.activeStepIds?.includes(missionStepId));
+  const requestedStepCompleted = Boolean(missionStepId && mission.steps?.some((step) => step.id === missionStepId && step.status === "completed"));
+  // Timer waits can be requested after the model completes its original step
+  // in the same turn. In that case the same durable task resumes on the new
+  // active frontier, while its immutable task record still names the old step.
+  const stepId = requestedStepIsActive
+    ? missionStepId
+    : requestedStepCompleted
+      ? mission.currentStepId ?? mission.activeStepIds?.[0]
+      : missionStepId ?? mission.currentStepId ?? mission.activeStepIds?.[0];
   const matchesStep = (event: { stepId?: string }) => !event.stepId || !stepId || event.stepId === stepId;
   const terminalOrProgressEvents = new Set([
     "checkpointed", "waiting", "paused", "blocked", "completed", "failed", "cancelled",
