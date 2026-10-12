@@ -114,9 +114,11 @@ test("Recall bot subscribes to chat and live roster events without enabling reta
     events: ["participant_events.chat_message", "participant_events.join", "participant_events.leave", "participant_events.update", "participant_events.speech_on", "participant_events.speech_off", "transcript.data"],
   }]);
   assert.equal(request.chat?.on_bot_join.send_to, "everyone");
-  assert.match(request.chat?.on_bot_join.message ?? "", /Chusky is a digital assistant/i);
-  assert.match(request.chat?.on_bot_join.message ?? "", /may contribute proactively/i);
-  assert.doesNotMatch(request.chat?.on_bot_join.message ?? "", /say ‘Chusky’/i);
+  assert.match(request.chat?.on_bot_join.message ?? "", /^Hi everyone, I’m here to help\./i);
+  assert.match(request.chat?.on_bot_join.message ?? "", /I’ll join in when I can help/i);
+  assert.match(request.chat?.on_bot_join.message ?? "", /processed live/i);
+  assert.match(request.chat?.on_bot_join.message ?? "", /no audio or video recording is retained/i);
+  assert.doesNotMatch(request.chat?.on_bot_join.message ?? "", /digital assistant|Recall recording and media retention/i);
 });
 
 test("proactive meeting transcript capture uses low-latency Recall transcription and keeps provider retention disabled", () => {
@@ -136,8 +138,8 @@ test("proactive meeting transcript capture uses low-latency Recall transcription
     diarization: { use_separate_streams_when_available: true },
   });
   assert.ok(request.recording_config.realtime_endpoints?.[0]?.events.includes("transcript.data"));
-  assert.match(request.chat?.on_bot_join.message ?? "", /live transcript/i);
-  assert.match(request.chat?.on_bot_join.message ?? "", /not retained as a searchable record/i);
+  assert.match(request.chat?.on_bot_join.message ?? "", /live transcript supports the conversation and meeting outcome/i);
+  assert.match(request.chat?.on_bot_join.message ?? "", /not kept as a searchable record/i);
 });
 
 test("Recall dashboard transcript artifact events map only sanitized bot and lifecycle state", () => {
@@ -181,11 +183,11 @@ test("transcript retention is disabled by default and requires a supported expli
   const retained = buildRecallCreateBotRequest({ ...base, transcriptRetentionDays: 7 });
   assert.equal(retained.recording_config.retention, null);
   assert.deepEqual(retained.recording_config.transcript?.diarization, { use_separate_streams_when_available: true });
-  assert.match(retained.chat?.on_bot_join.message ?? "", /retain a searchable transcript for 7 days/i);
+  assert.match(retained.chat?.on_bot_join.message ?? "", /searchable transcript is kept for 7 days, then deleted/i);
   assert.throws(() => buildRecallCreateBotRequest({ ...base, transcriptRetentionDays: 2 }), /1, 7, or 30 days/);
 });
 
-test("Recall addressed-mode disclosure clearly explains the wake-word behavior", () => {
+test("Recall addressed-mode disclosure explains direct participation and leave control", () => {
   const request = buildRecallCreateBotRequest({
     meetingUrl: "https://meet.google.com/abc-defg-hij",
     botName: "Chusky Meeting Assistant",
@@ -195,7 +197,7 @@ test("Recall addressed-mode disclosure clearly explains the wake-word behavior",
     interactionMode: "addressed",
     realtimeWebhookUrl: "https://chusky.example/recall/realtime-webhook",
   });
-  assert.match(request.chat?.on_bot_join.message ?? "", /Say ‘Chusky’ when you’d like a response/i);
+  assert.match(request.chat?.on_bot_join.message ?? "", /speak to me directly or ask me to leave at any time/i);
 });
 
 test("Recall visual context is an explicit, platform-limited Create Bot opt-in", () => {
@@ -222,7 +224,7 @@ test("Recall visual context is an explicit, platform-limited Create Bot opt-in",
   ]);
   assert.equal(request.recording_config.retention, null);
   assert.equal(request.recording_config.video_mixed_mp4, null);
-  assert.match(request.chat?.on_bot_join.message ?? "", /Shared-screen frames may also be briefly analyzed/i);
+  assert.match(request.chat?.on_bot_join.message ?? "", /Shared-screen frames may be analyzed to answer questions/i);
   assert.throws(() => buildRecallCreateBotRequest({
     meetingUrl: "https://meet.google.com/abc-defg-hij",
     botName: "Chusky",

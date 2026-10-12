@@ -200,13 +200,16 @@ export function buildRecallCreateBotRequest(input: {
   });
   if (visualWebsocketUrl) realtimeEndpoints.push({ type: "websocket", url: visualWebsocketUrl, events: ["video_separate_png.data"] });
   const participantDisclosure = interactionMode === "addressed"
-    ? "Say ‘Chusky’ when you’d like a response; you may ask it to leave at any time."
-    : "Chusky may contribute proactively when it can help; you may also address it directly or ask it to leave at any time.";
+    ? "You can speak to me directly or ask me to leave at any time."
+    : "I’ll join in when I can help. You can speak to me directly or ask me to leave at any time.";
   const transcriptDisclosure = transcriptRetentionDays !== undefined
-    ? ` At the owner’s request, Chusky will retain a searchable transcript for ${transcriptRetentionDays} day${transcriptRetentionDays === 1 ? "" : "s"} after the meeting, then delete it.`
+    ? ` At the owner’s request, a searchable transcript is kept for ${transcriptRetentionDays} day${transcriptRetentionDays === 1 ? "" : "s"}, then deleted.`
     : transcriptCaptureEnabled
-      ? " A live transcript is processed for conversation and the private meeting outcome, then deleted; it is not retained as a searchable record."
+      ? " A live transcript supports the conversation and meeting outcome, then is deleted; it is not kept as a searchable record."
       : "";
+  const continuityDisclosure = interactionMode === "addressed"
+    ? ""
+    : " I keep a short private summary for continuity in the owner’s Meetings history; it is not a searchable transcript.";
   const request: RecallCreateBotRequest = {
     meeting_url: meeting.url,
     bot_name: botName,
@@ -238,7 +241,7 @@ export function buildRecallCreateBotRequest(input: {
       chat: {
         on_bot_join: {
           send_to: "everyone",
-          message: `Chusky is a digital assistant joining this meeting. Live audio is processed to enable conversation; Recall recording and media retention are off.${transcriptDisclosure}${screenShareContextEnabled ? " Shared-screen frames may also be briefly analyzed to answer questions about what is shown; images are not added to meeting history." : ""} ${participantDisclosure}`,
+          message: `Hi everyone, I’m here to help. Meeting audio is processed live so I can participate; no audio or video recording is retained.${continuityDisclosure}${transcriptDisclosure}${screenShareContextEnabled ? " Shared-screen frames may be analyzed to answer questions; they are not saved to meeting history." : ""} ${participantDisclosure}`,
         },
       },
     } : {}),
