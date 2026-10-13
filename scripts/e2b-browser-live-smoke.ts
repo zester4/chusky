@@ -9,7 +9,9 @@ import path from "node:path";
 
 const apiKey = process.env.E2B_API_KEY?.trim();
 const template = process.env.E2B_BROWSER_TEMPLATE?.trim() || "chusky-browser-playwright";
+const harness = process.env.E2B_BROWSER_HARNESS?.trim().toLowerCase() || "agent-browser";
 if (!apiKey) throw new Error("E2B_API_KEY is required");
+if (harness !== "playwright" && harness !== "agent-browser") throw new Error("E2B_BROWSER_HARNESS must be playwright or agent-browser");
 
 async function main() {
   const checks: Array<{ name: string; ok: boolean; detail?: string }> = [];
@@ -21,6 +23,7 @@ async function main() {
       requestTimeoutMs: phaseTimeoutMs("startup"),
       allowInternetAccess: process.env.E2B_ALLOW_INTERNET !== "false",
       network: { allowPublicTraffic: true, denyOut: [...E2B_BROWSER_DENY_OUT_CIDRS] },
+      envs: { CHUSKY_BROWSER_HARNESS: harness, CHUSKY_BROWSER_CDP_PORT: "9222" },
       metadata: { app: "chusky", purpose: "disposable-browser-integration-smoke" },
     });
     const run = async (label: string, command: string, options: Record<string, unknown> = {}) => {
@@ -77,6 +80,7 @@ async function main() {
     const opened = await requestBrowser({ action: "open", url: publicUrl });
     const publicSnapshot = await requestBrowser({ action: "snapshot", includePageContent: true });
     assertCheck("public internet navigation and readable page content", typeof opened.url === "string" && publicSnapshot.pageContent?.length > 80, JSON.stringify({ openedUrl: opened.url, snapshotUrl: publicSnapshot.url, title: publicSnapshot.title, pageContentChars: String(publicSnapshot.pageContent || "").length, challenge: publicSnapshot.challenge }));
+    if (harness === "agent-browser") assertCheck("Vercel agent-browser attaches to the same E2B Chromium", publicSnapshot.agentBrowser?.provider === "agent-browser" && publicSnapshot.agentBrowser.available === true && Number(publicSnapshot.agentBrowser.refCount) > 0, JSON.stringify(publicSnapshot.agentBrowser));
 
     const fixture = await requestBrowser({ action: "smoke_fixture" });
     assertCheck("private smoke fixture content", String(fixture.pageContent).includes("Visible content proves page reading works."));
@@ -297,7 +301,7 @@ try {
     const screenshotPath = path.join(artifactDir, "browser.jpg");
     const reportPath = path.join(artifactDir, "report.json");
     await writeFile(screenshotPath, screenshotBytes);
-    const report = { ok: checks.every((item) => item.ok), sandboxId: sandbox.sandboxId, template, publicSite: { url: opened.url, title: opened.title, pageContentChars: String(publicSnapshot.pageContent).length }, checks, screenshotPath };
+    const report = { ok: checks.every((item) => item.ok), sandboxId: sandbox.sandboxId, template, harness, publicSite: { url: opened.url, title: opened.title, pageContentChars: String(publicSnapshot.pageContent).length }, checks, screenshotPath };
     await writeFile(reportPath, JSON.stringify(report, null, 2));
     console.log(JSON.stringify({ ...report, reportPath }));
   } catch (error) {
@@ -306,9 +310,9 @@ try {
     const artifactDir = path.resolve(process.env.E2B_SMOKE_ARTIFACT_DIR || path.join(tmpdir(), "chusky-e2b-browser-smoke"));
     try {
       await mkdir(artifactDir, { recursive: true });
-      await writeFile(path.join(artifactDir, "report.json"), JSON.stringify({ ok: false, template, checks }, null, 2));
+      await writeFile(path.join(artifactDir, "report.json"), JSON.stringify({ ok: false, template, harness, checks }, null, 2));
     } catch { /* Preserve the original failure in stdout if local report writing fails. */ }
-    console.log(JSON.stringify({ ok: false, template, sandboxId: sandbox?.sandboxId, checks }));
+    console.log(JSON.stringify({ ok: false, template, harness, sandboxId: sandbox?.sandboxId, checks }));
     process.exitCode = 1;
   } finally {
     if (sandbox) await sandbox.kill().catch((error) => console.error(`Disposable E2B sandbox cleanup failed: ${error instanceof Error ? error.message : String(error)}`));

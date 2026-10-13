@@ -127,6 +127,9 @@ test("form inspection is a structured, safe browser capability", () => {
   assert.match(agent, /locator\.press\("Enter"\)/);
   assert.match(agent, /aria-autocomplete/);
   assert.match(agent, /autocompleteCommittedByPage/);
+  assert.match(agent, /formControlMatches/);
+  assert.match(agent, /mergeObservationMatches/);
+  assert.match(agent, /nameAttr/);
     assert.match(agent, /setAttribute\(['"]role['"],\s*['"]option['"]\)/);
   const engine = readFileSync("src/lib/e2b/browser.ts", "utf8");
   assert.match(engine, /activeTabIndex/);
@@ -143,6 +146,23 @@ test("form inspection is a structured, safe browser capability", () => {
   assert.match(engine, /repeated action because the page made no progress/);
   assert.doesNotMatch(engine, /retryable = .*click/);
   assert.doesNotMatch(agent, /forms.*password.*value/);
+});
+
+test("agent-browser harness is optional, CDP-attached, and read-only", () => {
+  const agent = readFileSync("e2b/browser-template/browser-agent.mjs", "utf8");
+  const templatePackage = JSON.parse(readFileSync("e2b/browser-template/package.json", "utf8")) as { dependencies?: Record<string, string> };
+  const templateLock = readFileSync("e2b/browser-template/package-lock.json", "utf8");
+  const browserConfig = readFileSync("src/config.ts", "utf8");
+  assert.equal(templatePackage.dependencies?.["agent-browser"], "0.39.0");
+  assert.match(templateLock, /node_modules\/agent-browser/);
+  assert.match(browserConfig, /E2B_BROWSER_HARNESS/);
+  assert.match(browserConfig, /E2B_BROWSER_ENGINE/);
+  assert.match(agent, /AGENT_BROWSER_CDP/);
+  assert.match(agent, /CHUSKY_BROWSER_CDP_PORT/);
+  assert.match(agent, /agentBrowserSnapshot/);
+  assert.match(agent, /AGENT_BROWSER_NO_WEBMCP/);
+  assert.match(agent, /snapshot", "-i/);
+  assert.doesNotMatch(agent, /agentBrowserCommand\(\["click"/);
 });
 
 test("browser reliability contract keeps visual fallback fresh and checkpoints non-sensitive", () => {

@@ -1,11 +1,11 @@
 {
-  "id": "release-4.55.2",
-  "version": "4.55.2",
+  "id": "release-4.57.0",
+  "version": "4.57.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added purpose-built voice call plans with bounded tool capabilities, interruption behavior, identity and objective guidance, and escalation paths.",
-    "Per-call controls cover greeting mode, quiet hours, voicemail, human handoff, opt-out handling, recording policy, and retention; quiet hours are checked before outbound dialing.",
-    "Owner-safe call timelines and a local voice QA replay scorecard track role, disclosure, purpose, latency, tool receipts, interruptions, and resolution without saving raw audio."
+    "Added a provider-neutral BrowserSessionManager with warm-session scheduling, preferred-region placement, bounded owner concurrency, reconnectable leases, and adapters for E2B, Kernel, Playwright, or Agent Browser.",
+    "Provider CDP endpoints stay inside trusted adapters behind opaque owner-bound broker tickets; encrypted profile envelopes and generation-bound refs prevent cross-account state leakage and stale DOM actions.",
+    "Browser attach, reconnect, action, and challenge telemetry now exposes bounded latency percentiles, failure rates, and challenge outcomes, while one shared policy evaluator keeps high-impact browser actions approval-gated or blocked."
   ],
-  "createdAt": "2026-10-13T13:20:56.548Z"
+  "createdAt": "2026-10-13T15:12:13.719Z"
 }

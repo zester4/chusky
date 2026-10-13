@@ -254,13 +254,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces voice controls and QA accurately", async () => {
+test("current upgrade manifest announces the browser control plane accurately", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.55.2");
-  assert.equal(notice?.version, "4.55.2");
-  assert.match(notice?.bullets[0] ?? "", /purpose-built voice call plans.*bounded tool capabilities/);
-  assert.match(notice?.bullets[1] ?? "", /quiet hours.*voicemail.*human handoff.*opt-out handling/);
-  assert.match(notice?.bullets[2] ?? "", /Owner-safe call timelines.*voice QA replay scorecard/);
+  assert.equal(notice?.id, "release-4.57.0");
+  assert.equal(notice?.version, "4.57.0");
+  assert.match(notice?.bullets[0] ?? "", /BrowserSessionManager.*warm-session.*reconnectable leases/);
+  assert.match(notice?.bullets[1] ?? "", /CDP endpoints.*opaque.*encrypted profile.*generation-bound refs/);
+  assert.match(notice?.bullets[2] ?? "", /latency percentiles.*challenge outcomes.*approval-gated or blocked/);
 });
 
 test("lead campaign preset describes durable, discovery-first work and bounded enrichment", () => {
@@ -296,12 +296,20 @@ test("browser agent reliability preset documents bounded execution and postcondi
   assert.match(bullets[2]!, /Challenges stop.*fresh observation.*generic repeated no-progress/i);
 });
 
-test("browser live view preset describes the retained owner-only stream", () => {
+test("browser live view preset describes the provider-neutral owner-only stream", () => {
   const bullets = getAgentUpgradePreset("browserLiveView");
   assert.equal(bullets.length, 3);
-  assert.match(bullets[0]!, /owner-only live viewing.*retained E2B.*noVNC/i);
-  assert.match(bullets[1]!, /start returns a private viewer URL.*status.*stop/i);
-  assert.match(bullets[2]!, /never persisted.*CAPTCHA.*2FA/i);
+  assert.match(bullets[0]!, /provider-neutral.*encrypted tickets.*owner-stream binding/i);
+  assert.match(bullets[1]!, /read-only.*interactive mode.*reissue/i);
+  assert.match(bullets[2]!, /stream_stop.*Kernel.*CAPTCHA.*2FA/i);
+});
+
+test("browser control-plane preset describes sessions, broker isolation, refs, and metrics", () => {
+  const bullets = getAgentUpgradePreset("browserControlPlane");
+  assert.equal(bullets.length, 3);
+  assert.match(bullets[0]!, /provider-neutral BrowserSessionManager.*warm-session.*reconnectable leases/i);
+  assert.match(bullets[1]!, /CDP endpoints.*opaque.*encrypted profile.*generation-bound refs/i);
+  assert.match(bullets[2]!, /latency percentiles.*challenge outcomes.*approval-gated or blocked/i);
 });
 
 test("browser domain workflow preset describes safe travel, service, and streaming planning", () => {

@@ -37,8 +37,12 @@ export type E2BBrowserNode = {
 
 export type E2BBrowserRecord = {
   sandboxId: string;
-  /** Safe resource references only. CDP and live-view bearer URLs are never persisted. */
+  /** Safe resource references only. CDP and live-view bearer URLs are never persisted in plaintext. */
   kernel?: { sessionId: string; profileId: string };
+  /** Browser-side observation harness selected when this retained session was created. */
+  harness?: "playwright" | "agent-browser";
+  /** Local browser binary selected when this retained session was created. */
+  engine?: "chrome" | "chromium";
   /** RFC 7638 thumbprint of the Web Bot Auth key loaded at sandbox creation. */
   webBotAuthKeyId?: string;
   sessionId?: string;
@@ -53,8 +57,8 @@ export type E2BBrowserRecord = {
   health?: Record<string, unknown>;
   checkpoint?: E2BBrowserCheckpoint;
   paused?: boolean;
-  /** The live owner-only noVNC stream state. The password and URL are never persisted. */
-  stream?: { startedAt: number; expiresAt: number; port: number };
+  /** Owner-only live stream state. The provider URL is held only in an encrypted ticket envelope. */
+  stream?: { startedAt: number; expiresAt: number; port: number; provider?: "e2b" | "kernel"; mode?: "read-only" | "interactive"; viewerId?: string; ticketCiphertext?: string };
   evidence?: Array<{ action: string; at: number; url?: string; title?: string; observationId?: string; screenshotHash?: string; verified?: boolean }>;
   /** The last bounded agent run, retained for resumable diagnostics without page content. */
   lastAgent?: E2BBrowserAgentSummary;
@@ -94,6 +98,12 @@ export type E2BBrowserAgentSummary = {
 
 export type E2BBrowserFormControl = {
   id?: string;
+  index?: number;
+  nameAttr?: string;
+  placeholder?: string;
+  autocomplete?: string;
+  inputType?: string;
+  tagName?: string;
   role: string;
   type?: string;
   name: string;
@@ -169,6 +179,7 @@ export type E2BCommandResult = {
   workflowCheckpoint?: Omit<E2BBrowserCheckpoint, "action" | "updatedAt"> & { action?: string };
   actionVerification?: { attempted: boolean; observed: boolean; urlChanged: boolean; titleChanged: boolean; pageGenerationChanged: boolean; accessibilityChanged?: boolean; validationErrors?: Array<{ label: string; message: string }> };
   formState?: { value?: string; valueLength?: number; checked?: boolean; selectedText?: string; controlRole?: string; required?: boolean; disabled?: boolean; invalid?: boolean; validationMessage?: string };
+  wait?: { conditioned: boolean; waitedMs: number; matched?: string[] };
   downloads?: Array<{ id: string; name: string; state: string; size: number; createdAt: number; error?: string }>;
   download?: { id: string; name: string; state: string; size: number; createdAt: number; error?: string } | null;
   recordings?: Array<{ id: string; name: string; state: string; size: number; createdAt: number; error?: string }>;
@@ -186,6 +197,14 @@ export type E2BCommandResult = {
   error?: string;
   diagnostics?: { console?: Array<Record<string, unknown>>; errors?: Array<Record<string, unknown>>; dialogs?: Array<Record<string, unknown>>; pages?: Array<Record<string, unknown>> };
   events?: Array<Record<string, unknown>>;
+  agentBrowser?: {
+    provider: "agent-browser";
+    available: boolean;
+    snapshot?: string;
+    refCount?: number;
+    activeUrl?: string;
+    error?: string;
+  };
   pdf?: { filePath: string; name: string; size: number };
   forks?: Array<{ sandboxId?: string; error?: string }>;
   stream?: { url?: string; startedAt?: number; expiresAt?: number; port?: number; ready?: boolean; active?: boolean };

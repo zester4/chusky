@@ -41,6 +41,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.5)
+      '@onkernel/sdk':
+        specifier: 0.122.0
+        version: 0.122.0
       '@stripe/link-sdk':
         specifier: ^0.8.0
         version: 0.8.0
@@ -676,6 +679,9 @@ packages:
   '@nodelib/fs.walk@1.2.8':
     resolution: {integrity: sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg==}
     engines: {node: '>= 8'}
+
+  '@onkernel/sdk@0.122.0':
+    resolution: {integrity: sha512-cHjduH6Ssfs29Q/vetvvc4jACIDDTd/OVJ0p3frLXFJQ9mloLgKygyAilBrJBuXNtgeUsd9fhgXfVsTpDzhZGA==}
 
   '@opentelemetry/api-logs@0.222.0':
     resolution: {integrity: sha512-9mb1If+IF6u0ZVXkHQ6ogEae5HwA6ajIVUgpSDQyRASxft6BSXHvBvPooRle3yFN/fKnCdSOnuu0OC3PLcF6+g==}
@@ -3618,6 +3624,8 @@ snapshots:
     dependencies:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.20.2
+
+  '@onkernel/sdk@0.122.0': {}
 
   '@opentelemetry/api-logs@0.222.0':
     dependencies:
