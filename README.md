@@ -341,6 +341,48 @@ stores only an expiring owner-scoped state hash and safe connection metadata;
 Treg retains provider credentials. For company deployments, use
 `TREG_ORG_TOKENS_JSON` to map trusted `org_*` IDs to server-only Treg tokens.
 
+### Monid external API catalog
+
+Monid is an optional second catalog for external API capabilities. Chusky
+searches its catalog, inspects the exact endpoint schema and price, then can
+run one endpoint through a server-side gateway. Use existing Chusky tools,
+Composio, Treg, or an owner-configured MCP server first when they already cover
+the task; Monid fills a catalog gap rather than replacing those systems.
+
+Configure a server-side key from the Monid access page and enable the feature
+only after reviewing the current Monid terms and data handling:
+
+```text
+MONID_ENABLED=true
+MONID_API_KEY=...
+```
+
+For separate company billing, `MONID_ORG_TOKENS_JSON` maps trusted Chusky
+organization IDs to server-only Monid API keys. Chusky never exposes these
+credentials to model tools or browser code. Default spend controls are $5 per
+owner per day, $1 per mission, $0.25 per call, and 20 requests per minute;
+operators can tune these with the `MONID_*` budget and rate settings. These
+application controls complement Monid's own wallet limits. Endpoint execution
+always requires owner approval because the catalog does not provide Chusky a
+verified per-endpoint safety classification. Per-result pricing requires an
+explicit `maxSpendUsd` reservation. Monid does not document a hard per-run
+spend cap in this API, so the reservation does not guarantee that the provider
+charge will stay below that amount; use Monid workspace budgets/run caps when a
+hard ceiling is required. Async runs keep a durable reservation and are
+polled by run ID; uncertain submissions are never retried automatically.
+Receipts are owner-scoped and contain bounded metadata, not raw endpoint input
+or full provider output. Workspace run history is filtered to run IDs present
+in that owner's receipts.
+
+Native tools are `CHUCK_MONID_SEARCH`, `CHUCK_MONID_INSPECT`,
+`CHUCK_MONID_RUN`, `CHUCK_MONID_RUN_GET`, `CHUCK_MONID_RUNS_LIST`,
+`CHUCK_MONID_BALANCE`, and `CHUCK_MONID_USAGE`. Monid's published OAuth
+quickstart says OAuth client credentials require contacting Monid support, so
+this integration uses server-side API keys and does not claim user OAuth.
+Monid's published Terms currently restrict automated/nonhuman access while its
+agent skill and API docs describe agent use; keep `MONID_ENABLED=false` until
+Monid clarifies that conflict for this deployment.
+
 ### Stripe Link Agent Wallet
 
 Chusky can use Stripe's Link Agent Wallet as an owner-controlled payment rail.
@@ -1570,6 +1612,14 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `TREG_PER_CALL_SOFT_CAP_USD` | — | `0.25` | Maximum estimated cost of one Treg call |
 | `TREG_RATE_LIMIT_PER_MINUTE` | — | `30` | Per-owner Treg call-attempt limit per minute |
 | `TREG_ORG_TOKENS_JSON` | Treg | `{}` | Server-only organization-to-token map; never put this in client config |
+| `MONID_ENABLED` | — | `false` | Enable the optional Monid external API gateway after terms review |
+| `MONID_API_KEY` | Monid | — | Server-only Monid API key; never place it in prompts or client config |
+| `MONID_ORG_TOKENS_JSON` | Monid | `{}` | Server-only Chusky organization-to-Monid-key map |
+| `MONID_TIMEOUT_MS` | — | `30000` | Maximum time for one Monid request |
+| `MONID_DAILY_BUDGET_USD` | — | `5` | Per-owner daily Monid spend cap |
+| `MONID_MISSION_BUDGET_USD` | — | `1` | Per-mission Monid spend cap |
+| `MONID_PER_CALL_SOFT_CAP_USD` | — | `0.25` | Maximum estimated cost reserved for one Monid run |
+| `MONID_RATE_LIMIT_PER_MINUTE` | — | `20` | Per-owner Monid call-attempt limit per minute |
 | `JEV_MODE` | — | `off` | Jev decision routing for skills, Composio toolkits/actions, Treg, and optional native-tool exposure: `off`, `shadow` (log only), or `enforce` (apply with deterministic fallback). See `.agents/skills/chusky/references/jev.md` |
 | `JEV_PROVIDER` | — | `openrouter` | `openrouter` reuses `OPENROUTER_API_KEY`; `typesafe` needs `JEV_API_KEY` |
 | `JEV_SURFACES` | — | `skills,composio,treg,autonomy,browser` | Jev surfaces: skills, Composio, Treg, bounded autonomy, inspected browser next-step proposals, and opt-in `native` tool exposure |

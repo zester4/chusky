@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 test("validates capability registry manifests for all worker capabilities", () => {
-  const workers = ["lucas", "maya", "leo", "sofia", "dexter", "elena", "nora", "ivy", "quinn", "aria", "kai"] as const;
+  const workers = ["lucas", "maya", "leo", "sofia", "dexter", "elena", "nora", "ivy", "quinn", "aria", "kai", "muna"] as const;
   for (const w of workers) {
     const cap = WORKER_CAPABILITIES[w];
     assert.ok(cap);
@@ -89,6 +89,7 @@ test("declares the intended worker-to-skill map", () => {
   assert.ok(WORKER_CAPABILITIES.quinn.skills.primary.includes("customer-research"));
   assert.ok(WORKER_CAPABILITIES.aria.skills.primary.includes("meeting-pro"));
   assert.ok(WORKER_CAPABILITIES.kai.skills.primary.includes("research-pro"));
+  assert.deepEqual(WORKER_CAPABILITIES.muna.skills.primary, ["monid"]);
 });
 
 test("routes business workflow objectives to their owning specialists", () => {
@@ -96,6 +97,35 @@ test("routes business workflow objectives to their owning specialists", () => {
   assert.deepEqual(classifyDelegationObjective("clean the sales pipeline and prepare qualified deal next steps"), ["quinn"]);
   assert.deepEqual(classifyDelegationObjective("run customer onboarding and identify churn risk"), ["aria"]);
   assert.deepEqual(classifyDelegationObjective("prepare the weekly KPI report and flag anomalies"), ["kai"]);
+  assert.deepEqual(classifyDelegationObjective("Use Monid to find verified work emails for sales leaders at target companies"), ["muna"]);
+  assert.deepEqual(classifyDelegationObjective("Find sales leads in the healthcare market for our new service"), ["muna"]);
+  assert.deepEqual(classifyDelegationObjective("Find local businesses that fit my web design services and cite website evidence"), ["muna"]);
+  assert.deepEqual(classifyDelegationObjective("Prepare a sourced company partnership brief with recent developments"), ["muna"]);
+  assert.deepEqual(classifyDelegationObjective("Prepare a company brief before a partnership meeting"), ["muna"]);
+  assert.deepEqual(classifyDelegationObjective("Compare our AI citation visibility with two competitors"), ["muna"]);
+  assert.deepEqual(classifyDelegationObjective("Digest this week's YouTube videos with transcript coverage"), ["muna"]);
+  assert.deepEqual(classifyDelegationObjective("Which videos are outperforming for small specialty coffee creators this month?"), ["muna"]);
+  assert.deepEqual(classifyDelegationObjective("Which SEO pages or FAQs should my store prioritize using keyword evidence?"), ["muna"]);
+  assert.deepEqual(classifyDelegationObjective("Compare products using balanced customer review evidence"), ["muna"]);
+  assert.deepEqual(classifyDelegationObjective("Clean the sales pipeline and prepare qualified deal next steps"), ["quinn"]);
+  assert.deepEqual(classifyDelegationObjective("Research the latest evidence about a scientific question"), ["nora"]);
+});
+
+test("Muna has only Monid and read-only public evidence tools with strict research instructions", () => {
+  const muna = WORKER_CAPABILITIES.muna;
+  for (const tool of ["CHUCK_MONID_SEARCH", "CHUCK_MONID_INSPECT", "CHUCK_MONID_RUN", "CHUCK_MONID_RUN_GET", "CHUCK_MONID_RUNS_LIST", "CHUCK_MONID_BALANCE", "CHUCK_MONID_USAGE", "CHUCK_TINYFISH_SEARCH", "CHUCK_TINYFISH_FETCH"]) {
+    assert.ok(muna.allowedTools.includes(tool), `${tool} must be available to Muna`);
+  }
+  for (const tool of ["CHUCK_CREATE_TRIGGER", "CHUCK_SCHEDULE_JOB", "CHUCK_TASK_CREATE", "CHUCK_EMAIL_ARTIFACT", "CHUCK_BROWSER", "CHUCK_MISSION_CREATE"]) {
+    assert.equal(muna.allowedTools.includes(tool), false, `${tool} must not be available to Muna`);
+  }
+  assert.deepEqual(muna.allowedComposioPrefixes, []);
+  assert.deepEqual(muna.allowedMemoryCategories, ["business", "project", "procedural"]);
+  assert.match(muna.systemPrompt, /verification state/i);
+  assert.match(muna.systemPrompt, /actual spend/i);
+  assert.match(muna.systemPrompt, /contact people or businesses/i);
+  assert.match(muna.systemPrompt, /not a hard provider spend ceiling/i);
+  assert.match(muna.systemPrompt, /monitoring/i);
 });
 
 test("keeps business workers inside their intended connected-app families", () => {

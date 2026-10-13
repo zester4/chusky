@@ -62,6 +62,22 @@ function secretMap(key: string): Record<string, { token: string; tregOrgId?: str
   return result;
 }
 
+function organizationSecretMap(key: string): Record<string, string> {
+  const raw = process.env[key];
+  if (!raw) return {};
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { throw new Error(`${key} must be valid JSON`); }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`${key} must be a JSON object`);
+  const result: Record<string, string> = {};
+  for (const [organizationId, value] of Object.entries(parsed)) {
+    if (!/^org_[A-Za-z0-9_-]{1,120}$/.test(organizationId)) throw new Error(`${key} contains an invalid Chusky organization ID`);
+    const token = typeof value === "string" ? value : value && typeof value === "object" && typeof (value as Record<string, unknown>).token === "string" ? String((value as Record<string, unknown>).token) : "";
+    if (!token.trim()) throw new Error(`${key}.${organizationId} must contain a token`);
+    result[organizationId] = token.trim();
+  }
+  return result;
+}
+
 function boundedInt(key: string, fallback: number, min: number, max: number): number {
   const value = positiveInt(key, fallback);
   if (value < min || value > max) throw new Error(`${key} must be between ${min} and ${max}, got: ${value}`);
@@ -208,6 +224,17 @@ export const config = {
   tregRateLimitPerMinute: positiveInt("TREG_RATE_LIMIT_PER_MINUTE", 30),
   tregOrganizationTokens: secretMap("TREG_ORG_TOKENS_JSON"),
   tregEnabled: optional("TREG_ENABLED", "false") === "true",
+
+  // Monid is a server-side catalog and execution gateway for public data
+  // endpoints. API keys stay in server configuration and never reach tools.
+  monidApiKey: optional("MONID_API_KEY", ""),
+  monidOrganizationTokens: organizationSecretMap("MONID_ORG_TOKENS_JSON"),
+  monidTimeoutMs: boundedInt("MONID_TIMEOUT_MS", 30_000, 1_000, 120_000),
+  monidDailyBudgetUsd: nonNegativeNumber("MONID_DAILY_BUDGET_USD", 5),
+  monidMissionBudgetUsd: nonNegativeNumber("MONID_MISSION_BUDGET_USD", 1),
+  monidPerCallSoftCapUsd: nonNegativeNumber("MONID_PER_CALL_SOFT_CAP_USD", 0.25),
+  monidRateLimitPerMinute: positiveInt("MONID_RATE_LIMIT_PER_MINUTE", 20),
+  monidEnabled: optional("MONID_ENABLED", "false") === "true",
 
   // TinyFish provides server-side public web search and page extraction.
   tinyFishApiKey: optional("TINYFISH_API_KEY", ""),
