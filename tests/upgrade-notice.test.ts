@@ -56,6 +56,16 @@ test("mission upgrade preset contains bounded, accurate release highlights", () 
   assert.match(bullets[2], /Telegram, the CLI, SDK\/API, dashboard, and MCP/);
 });
 
+test("voice controls preset covers call planning, per-call safeguards, and replay QA", () => {
+  const bullets = getAgentUpgradePreset("voiceControls");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.voiceControls]);
+  assert.match(bullets[0], /bounded tool capabilities.*interruption behavior/);
+  assert.match(bullets[1], /quiet hours.*voicemail.*human handoff.*opt-out handling/);
+  assert.match(bullets[2], /Owner-safe call timelines.*voice QA replay scorecard/);
+  assert.match(bullets[2], /without saving raw audio/);
+});
+
 test("autonomy upgrade preset covers the current orchestration surfaces", () => {
   const bullets = getAgentUpgradePreset("autonomy");
   assert.equal(bullets.length, 3);
@@ -244,13 +254,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces Muna accurately", async () => {
+test("current upgrade manifest announces voice controls and QA accurately", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.55.0");
-  assert.equal(notice?.version, "4.55.0");
-  assert.match(notice?.bullets[0] ?? "", /Added Muna.*Monid-focused research specialist/);
-  assert.match(notice?.bullets[1] ?? "", /exact verification states.*spend/);
-  assert.match(notice?.bullets[2] ?? "", /does not buy personal contact data.*Monid remains disabled/);
+  assert.equal(notice?.id, "release-4.55.2");
+  assert.equal(notice?.version, "4.55.2");
+  assert.match(notice?.bullets[0] ?? "", /purpose-built voice call plans.*bounded tool capabilities/);
+  assert.match(notice?.bullets[1] ?? "", /quiet hours.*voicemail.*human handoff.*opt-out handling/);
+  assert.match(notice?.bullets[2] ?? "", /Owner-safe call timelines.*voice QA replay scorecard/);
 });
 
 test("lead campaign preset describes durable, discovery-first work and bounded enrichment", () => {

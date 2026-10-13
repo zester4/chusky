@@ -130,11 +130,13 @@ test("keeps internal task lifecycle and scratchpad bookkeeping autonomous in str
 
 test("mission proof, evidence, verification, and repair stay autonomous even in strict runs", () => {
   for (const slug of [
-    "CHUCK_MISSION_PROOF", "CHUCK_MISSION_EVIDENCE", "CHUCK_MISSION_VERIFY", "CHUCK_MISSION_REPAIR",
+    "CHUCK_MISSION_PROOF", "CHUCK_MISSION_DOCTOR", "CHUCK_MISSION_EVIDENCE", "CHUCK_MISSION_VERIFY", "CHUCK_MISSION_REPAIR",
   ]) {
     assert.equal(toolApprovalPolicy(slug), "private", slug);
     assert.equal(requiresToolApproval(slug, {}, true), false, `${slug} must not become approval-gated by a run override`);
   }
+  assert.equal(isReadOnlyToolSlug("CHUCK_MISSION_DOCTOR"), true);
+  assert.equal(humanToolStatus("CHUCK_MISSION_DOCTOR"), "🩺 I’m checking that mission’s runtime health…");
   assert.equal(requiresToolApproval("GITHUB_DELETE_REPOSITORY", {}, false), true);
   assert.equal(requiresToolApproval("GOOGLECALENDAR_CREATE_EVENT", {}, true), true);
 });

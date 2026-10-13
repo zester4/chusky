@@ -32,6 +32,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Durable task wakes now preserve the queued task state across early wake-ups and lease races, sleeping and retrying the same task instead of silently ending the workflow.",
     "Approval handoffs and mission status remain explicit: the approval turn can finish while the mission stays active and reports its final persisted verification result separately.",
   ],
+  voiceControls: [
+    "Added purpose-built voice call plans with bounded tool capabilities, interruption behavior, identity and objective guidance, and escalation paths.",
+    "Per-call controls cover greeting mode, quiet hours, voicemail, human handoff, opt-out handling, recording policy, and retention; quiet hours are checked before outbound dialing.",
+    "Owner-safe call timelines and a local voice QA replay scorecard track role, disclosure, purpose, latency, tool receipts, interruptions, and resolution without saving raw audio.",
+  ],
   autonomy: [
     "Added bounded personal and business autonomy queues with read-only reconciliation, checkpoints, watches, quiet hours, budgets, and explicit authority modes.",
     "Added a persisted dependency-graph workflow composer that fans out ready stages, joins dependencies, carries bounded results forward, enforces retries and budgets, and pauses at approval checkpoints.",
