@@ -1,6 +1,7 @@
 import type { PhoneCallRecord } from "../store.js";
 import { voiceContinuityInstructions } from "./continuity.js";
 import { voiceProfileInstructions } from "./voiceProfile.js";
+import { buildVoiceCallPlan, voiceCallPlanInstructions } from "./voicePlan.js";
 
 function spoken(value: unknown, maximum: number): string {
   return String(value ?? "")
@@ -53,12 +54,32 @@ export function twilioVoiceOpening(call: PhoneCallRecord): string {
     : `Hello, this is ${identity}, an AI assistant. How may I help you today?`;
 }
 
+/** Return approved, bounded vocabulary for Flux recognition on this call. */
+export function twilioVoiceKeyterms(call: PhoneCallRecord): string[] {
+  const profile = call.voiceProfile;
+  const values = [profile?.identity, profile?.organization, ...(profile?.facts ?? [])].filter((value): value is string => Boolean(value));
+  const terms: string[] = [];
+  const seen = new Set<string>();
+  let totalLength = 0;
+  for (const value of values) {
+    const term = spoken(value, 80);
+    const key = term.toLowerCase();
+    if (!term || seen.has(key) || totalLength + term.length > 2_000 || terms.length >= 50) continue;
+    seen.add(key);
+    terms.push(term);
+    totalLength += term.length;
+  }
+  return terms;
+}
+
 /** Keep the external speaker distinct from the owner's private chat history. */
-export function twilioVoiceTranscript(call: PhoneCallRecord, transcript: string): string {
+export function twilioVoiceTranscript(call: PhoneCallRecord, transcript: string, interruptedAssistantSpeech?: string): string {
   const speaker = call.direction === "outbound"
     ? "The external contact answering the outbound call said"
     : "The external caller on the inbound call said";
-  return `${speaker}: ${spoken(transcript, 5_000)}`;
+  const interrupted = spoken(interruptedAssistantSpeech, 2_000);
+  const interruptedEnding = interrupted && /[.!?]$/.test(interrupted) ? "" : ".";
+  return `${interrupted ? `The assistant was interrupted after saying: ${interrupted}${interruptedEnding} ` : ""}${speaker}: ${spoken(transcript, 5_000)}`;
 }
 
 /**
@@ -67,10 +88,11 @@ export function twilioVoiceTranscript(call: PhoneCallRecord, transcript: string)
  * conversation, never authority to execute an external action.
  */
 export function twilioVoiceInstructions(call: PhoneCallRecord): string {
+  const plan = buildVoiceCallPlan(call);
   const purpose = call.purpose.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 1_000) || "Have the approved conversation.";
   const callerTopic = callerFacingCallTopic(call.purpose);
   const profile = call.callProfile === "business" ? "business" : "personal";
   const verification = call.callVerification ?? (profile === "business" ? "identified" : "verified");
   const continuity = voiceContinuityInstructions(call.continuity);
-  return `${voiceProfileInstructions(call.voiceProfile, call.direction, purpose)} Caller-facing topic after identity confirmation: ${callerTopic}. Call profile: ${profile}. Inbound verification tier: ${verification} (public → identified → verified). Use relevant owner-scoped history, memory, knowledge, and connected tools as private working context. In a business call, do not volunteer unrelated personal information; in a personal call, do not reveal unrelated confidential business information. Never disclose sensitive account information before the configured verification tier is satisfied.${continuity}`;
+  return `${voiceProfileInstructions(call.voiceProfile, call.direction, purpose)} ${voiceCallPlanInstructions(plan)} Caller-facing topic after identity confirmation: ${callerTopic}. Call profile: ${profile}. Inbound verification tier: ${verification} (public → identified → verified). Use relevant owner-scoped history, memory, knowledge, and connected tools as private working context. In a business call, do not volunteer unrelated personal information; in a personal call, do not reveal unrelated confidential business information. Never disclose sensitive account information before the configured verification tier is satisfied.${continuity}`;
 }

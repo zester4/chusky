@@ -13,6 +13,8 @@ import { backfillMissionSnapshotToNeon } from "./missionBackfill.js";
 import { HOT_CONVERSATION_MESSAGES, joinSessionDomains, mergeDurableSessionDomain, sessionUsesNeonDomains, splitSessionDomains } from "./sessionDomains.js";
 import { repairIncompleteDurableSession } from "./durableSessionBackfill.js";
 import { normalizeVoiceCallProfile, type VoiceCallProfile } from "./calls/voiceProfile.js";
+import { createVoiceCallEvent, normalizeVoiceCallEvents, type VoiceCallEvent, type VoiceCallEventInput } from "./calls/voiceEvents.js";
+import type { VoiceQaScorecard } from "./calls/voiceEvaluation.js";
 import { logger } from "./logger.js";
 import { publishWebNotification } from "./webNotificationBus.js";
 import { instrumentRedisClient, RedisCommandMetrics } from "./redisMetrics.js";
@@ -484,6 +486,10 @@ export interface PhoneCallRecord {
   summary?: string;
   /** Structured owner-private outcome generated from bounded completed turns. */
   outcome?: import("./calls/outcome.js").PhoneCallOutcome;
+  /** Bounded provider-neutral lifecycle facts for the call page and QA. */
+  timeline?: VoiceCallEvent[];
+  /** Deterministic post-call QA result; never contains raw audio or transcript. */
+  qa?: VoiceQaScorecard;
   outcomeStatus?: "pending" | "completed" | "failed";
   outcomeErrorCode?: string;
   callLengthSeconds?: number;
@@ -5325,6 +5331,19 @@ function normalizePhoneCallOutcome(value: unknown): PhoneCallRecord["outcome"] |
   return title && summary ? { title, summary, decisions: list(item.decisions, 700), actionItems, openQuestions: list(item.openQuestions, 700) } : undefined;
 }
 
+function normalizeVoiceQaScorecard(value: unknown): VoiceQaScorecard | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const item = value as Record<string, unknown>;
+  if (item.version !== "voice-qa-v1" || item.status !== "computed") return undefined;
+  const dimensions = item.dimensions && typeof item.dimensions === "object" && !Array.isArray(item.dimensions) ? item.dimensions as Record<string, unknown> : {};
+  const keys = ["role", "disclosure", "purpose", "latency", "toolAccuracy", "interruptions", "resolution"] as const;
+  const normalizedDimensions = Object.fromEntries(keys.map((key) => [key, typeof dimensions[key] === "number" && Number.isFinite(dimensions[key]) ? Math.max(0, Math.min(100, Math.floor(dimensions[key] as number))) : 0])) as VoiceQaScorecard["dimensions"];
+  const evidence = Array.isArray(item.evidence) ? item.evidence.filter((entry): entry is string => typeof entry === "string").slice(0, 30).map((entry) => entry.slice(0, 240)) : [];
+  const scoredAt = typeof item.scoredAt === "number" && Number.isFinite(item.scoredAt) ? Math.max(0, Math.floor(item.scoredAt)) : undefined;
+  if (scoredAt === undefined) return undefined;
+  return { version: "voice-qa-v1", status: "computed", score: typeof item.score === "number" && Number.isFinite(item.score) ? Math.max(0, Math.min(100, Math.floor(item.score))) : 0, dimensions: normalizedDimensions, passed: item.passed === true, evidence, scoredAt };
+}
+
 function normalizePulseEvidence(value: unknown): JobOccurrenceRecord["pulseEvidence"] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const input = value as Record<string, unknown>;
@@ -5509,6 +5528,8 @@ export async function getSession(uid: number): Promise<UserSession> {
       ...(typeof item.error === "string" ? { error: item.error.slice(0, 500) } : {}),
       ...(typeof item.summary === "string" ? { summary: item.summary.slice(0, 2000) } : {}),
       ...(item.outcome && typeof item.outcome === "object" && !Array.isArray(item.outcome) ? { outcome: normalizePhoneCallOutcome(item.outcome) } : {}),
+      ...(Array.isArray(item.timeline) ? { timeline: normalizeVoiceCallEvents(item.timeline) } : {}),
+      ...(item.qa && typeof item.qa === "object" && !Array.isArray(item.qa) ? { qa: normalizeVoiceQaScorecard(item.qa) } : {}),
       ...(item.outcomeStatus === "pending" || item.outcomeStatus === "completed" || item.outcomeStatus === "failed" ? { outcomeStatus: item.outcomeStatus } : {}),
       ...(typeof item.outcomeErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(item.outcomeErrorCode) ? { outcomeErrorCode: item.outcomeErrorCode } : {}),
       ...(typeof item.callLengthSeconds === "number" && Number.isFinite(item.callLengthSeconds) && item.callLengthSeconds >= 0 ? { callLengthSeconds: Math.min(item.callLengthSeconds, 86_400) } : {}),
@@ -6061,15 +6082,16 @@ function publishPhoneCallNotification(call: PhoneCallRecord): void {
 }
 
 export async function addPhoneCall(uid: number, record: PhoneCallRecord): Promise<PhoneCallRecord> {
+  const initial = record.timeline?.length ? record : { ...record, timeline: [createVoiceCallEvent({ type: "call_started", summary: `${record.direction === "inbound" ? "Inbound" : "Outbound"} call created.` })] };
   const added = await mutateSession(uid, (session) => {
-    session.phoneCalls = [record, ...(session.phoneCalls ?? [])].slice(0, 50);
-    return record;
+    session.phoneCalls = [initial, ...(session.phoneCalls ?? [])].slice(0, 50);
+    return initial;
   });
   publishPhoneCallNotification(added);
   return added;
 }
 
-type PhoneCallPatch = Partial<Pick<PhoneCallRecord, "status" | "runtimeState" | "bridgeSessionId" | "lastCommittedTurnId" | "continuity" | "providerCallId" | "error" | "summary" | "callLengthSeconds" | "postCallProcessedAt" | "outcome" | "outcomeStatus" | "outcomeErrorCode">>;
+type PhoneCallPatch = Partial<Pick<PhoneCallRecord, "status" | "runtimeState" | "bridgeSessionId" | "lastCommittedTurnId" | "continuity" | "providerCallId" | "error" | "summary" | "callLengthSeconds" | "postCallProcessedAt" | "outcome" | "outcomeStatus" | "outcomeErrorCode" | "timeline" | "qa">>;
 
 function nextPhoneCallStatus(current: PhoneCallRecord["status"], next: PhoneCallRecord["status"], provider?: PhoneCallRecord["provider"]): PhoneCallRecord["status"] {
   if (provider !== "bland") return next;
@@ -6502,6 +6524,20 @@ export async function updatePhoneCall(uid: number, id: string, patch: PhoneCallP
     if (current.provider === "bland" && current.providerCallId && !(await backend.linkBlandProviderCall(current.providerCallId, uid, id))) {
       throw new Error("Bland provider call ID is already linked to another Chusky call");
     }
+    return current;
+  });
+  if (updated) publishPhoneCallNotification(updated);
+  return updated;
+}
+
+/** Append one bounded lifecycle fact atomically, without exposing provider payloads. */
+export async function appendPhoneCallEvent(uid: number, id: string, input: VoiceCallEventInput): Promise<PhoneCallRecord | undefined> {
+  const updated = await mutateSession(uid, (session) => {
+    const current = (session.phoneCalls ?? []).find((item) => item.id === id && item.userId === uid);
+    if (!current) return undefined;
+    const event = createVoiceCallEvent(input);
+    current.timeline = [...(current.timeline ?? []), event].slice(-200);
+    current.updatedAt = Date.now();
     return current;
   });
   if (updated) publishPhoneCallNotification(updated);

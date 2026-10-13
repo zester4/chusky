@@ -14,7 +14,7 @@ import { listAttentionRecords } from "./store.js";
 import { updateAttentionRecord } from "./store.js";
 import type { AttentionCandidateRecord, AutonomyProfileRecord, DeliveryPreferenceRecord, ObservationRecord, AutonomyWatchRecord } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
-import { initStore, getTelegramChatId, createTriggerEventIfAbsent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, saveRecallMeetingMissionState, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
+import { initStore, getTelegramChatId, createTriggerEventIfAbsent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, appendPhoneCallEvent, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, saveRecallMeetingMissionState, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcriptionFormatForMimeType, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -52,7 +52,7 @@ import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
 import { recordMeetingTurn } from "./decisions/telemetry.js";
-import { twilioVoiceInstructions, twilioVoiceOpening, twilioVoiceTranscript } from "./calls/twilioContext.js";
+import { twilioVoiceInstructions, twilioVoiceKeyterms, twilioVoiceOpening, twilioVoiceTranscript } from "./calls/twilioContext.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
 import { buildMeetingMissionStatePrompt, parseMeetingMissionState } from "./meetings/liveState.js";
 import { attentionPulseCloseoutOutput, attentionPulseDeliveredToday, attentionPulseDeliveryConfirmation, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, attentionPulseRefreshOwnerState, attentionPulseRequireDueWatchReport, buildAttentionPulsePlan, getAttentionPulseWatchCoverage, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "./attentionPulse.js";
@@ -719,9 +719,15 @@ async function main(): Promise<void> {
       const call = await getPhoneCall(userId, callId);
       if (!call || call.provider !== "twilio") return c.text("Not found", 404);
       const answeredBy = String(form.AnsweredBy ?? "").trim().toLowerCase();
-      if (config.twilioVoicemailEnabled && answeredBy.startsWith("machine_")) {
+      if ((call.voiceProfile?.controls?.allowVoicemail ?? config.twilioVoicemailEnabled) && answeredBy.startsWith("machine_")) {
+        await appendPhoneCallEvent(userId, callId, { type: "voicemail_detected", summary: "The recipient's voicemail system answered." });
         await updatePhoneCall(userId, callId, { status: "ended", runtimeState: "ended", summary: "A voicemail message was delivered." });
         return c.body(twilioVoicemailTwiML(config.twilioVoicemailMessage), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
+      }
+      if (answeredBy.startsWith("machine_")) {
+        await appendPhoneCallEvent(userId, callId, { type: "voicemail_detected", summary: "The recipient's voicemail system answered; voicemail delivery is disabled." });
+        await updatePhoneCall(userId, callId, { status: "ended", runtimeState: "ended", summary: "Voicemail delivery was disabled by call controls." });
+        return c.body("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Hangup/></Response>", 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
       }
       await updatePhoneCall(userId, callId, { status: "bridging", providerCallId: callSid || call.providerCallId });
       return c.body(await twilioStreamTwiML(callId, userId), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
@@ -742,6 +748,7 @@ async function main(): Promise<void> {
         direction: call.direction ?? "outbound",
         callProfile: call.callProfile ?? "personal",
         purpose: call.purpose.slice(0, 1_000),
+        keyterms: twilioVoiceKeyterms(call),
         greeting: twilioVoiceOpening(call),
       }, 200, { "Cache-Control": "no-store" });
     });
@@ -781,8 +788,12 @@ async function main(): Promise<void> {
       const call = await getPhoneCall(userId, callId);
       if (!call || call.provider !== "twilio") return c.text("Not found", 404);
       const providerStatus = String(form.CallStatus ?? "").toLowerCase();
+      if (providerStatus === "in-progress" || providerStatus === "answered") await appendPhoneCallEvent(userId, callId, { type: "call_answered", summary: "The call was answered." });
       const status = ["completed", "canceled"].includes(providerStatus) ? "ended" : ["busy", "failed", "no-answer"].includes(providerStatus) ? "failed" : undefined;
-      if (status) await updatePhoneCall(userId, callId, { status, providerCallId: String(form.CallSid ?? call.providerCallId ?? "").slice(0, 100), ...(status === "failed" ? { error: `Twilio call ${providerStatus}` } : {}) });
+      if (status) {
+        await appendPhoneCallEvent(userId, callId, { type: status === "failed" ? "call_failed" : "call_ended", summary: status === "failed" ? `The call ended because Twilio reported ${providerStatus}.` : "The call ended." });
+        await updatePhoneCall(userId, callId, { status, providerCallId: String(form.CallSid ?? call.providerCallId ?? "").slice(0, 100), ...(status === "failed" ? { error: `Twilio call ${providerStatus}` } : {}) });
+      }
       return c.body(null, 204);
     });
 
@@ -806,7 +817,7 @@ async function main(): Promise<void> {
     // speculative audio turns remain tool-less.
     app.post("/internal/twilio/turn", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.twilioMediaBridgeSecret)) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string; speculative?: boolean };
+      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string; speculative?: boolean; interruptedAssistantSpeech?: string };
       const callId = String(body.callId ?? "").trim();
       const userId = Number(body.userId);
       const transcript = String(body.transcript ?? "").trim();
@@ -819,7 +830,7 @@ async function main(): Promise<void> {
       try {
         const result = await withCliLock(userId, c.req.raw.signal, async () => {
           const session = await getSession(userId);
-          return runAgent(userId, twilioVoiceTranscript(call, transcript), session.history, config.voiceModel, undefined, c.req.raw.signal, undefined, undefined,
+          return runAgent(userId, twilioVoiceTranscript(call, transcript, body.interruptedAssistantSpeech), session.history, config.voiceModel, undefined, c.req.raw.signal, undefined, undefined,
             { accountId: `account_${userId}`, provider: "voice", conversationId: callId, scope: "private" }, {
             instructions: twilioVoiceInstructions(call),
             ...(speculative ? { toolAllow: [] } : { ownerPrivateRun: true }),
@@ -913,7 +924,7 @@ async function main(): Promise<void> {
     // interrupted speech from being persisted.
     app.post("/internal/twilio/turn-stream", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.twilioMediaBridgeSecret)) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string; speculative?: boolean };
+      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string; speculative?: boolean; interruptedAssistantSpeech?: string };
       const callId = String(body.callId ?? "").trim();
       const userId = Number(body.userId);
       const transcript = String(body.transcript ?? "").trim();
@@ -929,8 +940,9 @@ async function main(): Promise<void> {
           const send = (event: unknown) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
           try {
             const result = await withCliLock(userId, c.req.raw.signal, async () => {
+              if (!speculative) await appendPhoneCallEvent(userId, callId, { type: "turn_started", summary: "The agent started processing a caller turn." });
               send({ type: "start", model: config.voiceModel, speculative });
-              return runAgent(userId, twilioVoiceTranscript(call, transcript), (await getSession(userId)).history, config.voiceModel, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined,
+              return runAgent(userId, twilioVoiceTranscript(call, transcript, body.interruptedAssistantSpeech), (await getSession(userId)).history, config.voiceModel, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined,
                 { accountId: `account_${userId}`, provider: "voice", conversationId: callId, scope: "private" }, {
                 instructions: twilioVoiceInstructions(call),
                 ...(speculative ? { toolAllow: [] } : { ownerPrivateRun: true }),
@@ -938,8 +950,14 @@ async function main(): Promise<void> {
                 voiceSessionId: `twilio:${callId}`,
                 voiceRoutingHint: call.purpose,
                 onVoiceActivity: (activity) => send({ type: activity.type, toolSlug: activity.toolSlug, text: normalizeVoiceText(activity.message).slice(0, 4000) }),
+                onToolActivity: async (activity) => {
+                  if (speculative) return;
+                  const eventType = activity.status === "started" ? "tool_started" : activity.status === "completed" ? "tool_completed" : activity.status === "failed" ? "tool_failed" : undefined;
+                  if (eventType) await appendPhoneCallEvent(userId, callId, { type: eventType, summary: normalizeVoiceText(activity.message).slice(0, 400), toolSlug: activity.toolSlug });
+                },
               });
             });
+            if (!speculative) await appendPhoneCallEvent(userId, callId, { type: "turn_completed", summary: "The agent completed the caller turn." });
             send({ type: "done", text: normalizeVoiceText(result.text).slice(0, 5000), cost: result.cost ?? 0, speculative });
           } catch (error) {
             if (error instanceof ApprovalRequiredError && !speculative) {

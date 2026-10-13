@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import twilio from "twilio";
 import { config } from "../config.js";
-import { addPhoneCall, getPhoneCall, updatePhoneCall, type PhoneCallRecord } from "../store.js";
+import { addPhoneCall, appendPhoneCallEvent, getPhoneCall, updatePhoneCall, type PhoneCallRecord } from "../store.js";
 import { resolveVoiceContinuity } from "./continuity.js";
-import { normalizeVoiceCallProfile, type CallProfile, type VoiceCallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
+import { normalizeVoiceCallProfile, voiceCallDialBlockReason, type CallProfile, type VoiceCallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
 
 export interface TwilioCallInput { phoneNumber: string; purpose: string; profile?: VoiceCallProfileInput; callProfile?: CallProfile; continuityFromCallId?: string; }
 export interface TwilioCallDependencies {
@@ -70,7 +70,14 @@ export async function controlTwilioCallForUser(userId: number, callId: string, i
     await update(call.providerCallId, { status: "completed" });
     return (await updatePhoneCall(userId, call.id, { status: "ended" }))!;
   }
-  await update(call.providerCallId, { twiml: twilioControlTwiML(control, options.callerId) });
+  if (control.action === "transfer") await appendPhoneCallEvent(userId, call.id, { type: "handoff_requested", summary: "The call requested a human handoff." });
+  try {
+    await update(call.providerCallId, { twiml: twilioControlTwiML(control, options.callerId) });
+    if (control.action === "transfer") await appendPhoneCallEvent(userId, call.id, { type: "handoff_started", summary: "The provider accepted the human handoff request." });
+  } catch (error) {
+    if (control.action === "transfer") await appendPhoneCallEvent(userId, call.id, { type: "handoff_failed", summary: "The human handoff could not be started." });
+    throw error;
+  }
   return (await updatePhoneCall(userId, call.id, { status: "active" }))!;
 }
 
@@ -120,6 +127,8 @@ export async function startTwilioCallForUser(userId: number, input: TwilioCallIn
   if (options.voicemailMessage !== undefined && (!options.voicemailMessage.trim() || options.voicemailMessage.length > 500)) throw new Error("voicemailMessage must be 1-500 characters");
   const { phoneNumber, purpose, profile, callProfile } = validateTwilioCallInput(input);
   const continuity = await resolveVoiceContinuity(userId, input.continuityFromCallId);
+  const dialBlockReason = voiceCallDialBlockReason(profile);
+  if (dialBlockReason) throw new Error(dialBlockReason);
   const call: PhoneCallRecord = { id: `twc_${randomUUID()}`, userId, provider: "twilio", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, ...(continuity ? { continuity } : {}), status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
   await addPhoneCall(userId, call);
   const base = httpsUrl(options.webhookBaseUrl, "TWILIO_WEBHOOK_BASE_URL");

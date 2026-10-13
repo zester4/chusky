@@ -309,6 +309,14 @@ export const VOICE_TURN_NATIVE_TOOLS = [
   "CHUCK_LIST_PHONE_CALLS",
 ] as const;
 const VOICE_TURN_TOOL_NAMES = new Set<string>(VOICE_TURN_NATIVE_TOOLS);
+
+/** Pure capability fence used by the live voice payload and its contract tests. */
+export function voiceToolIsWithinCapabilityFence(name: string, capabilityNames: Iterable<string>, explicitAllow: Iterable<string> = []): boolean {
+  const canonical = name.trim().toUpperCase();
+  const capabilities = new Set([...capabilityNames].map(composioActionSlug));
+  const allowed = new Set([...explicitAllow].map((value) => value.trim().toUpperCase()));
+  return VOICE_TURN_TOOL_NAMES.has(canonical) || allowed.has(canonical) || capabilities.has(composioActionSlug(canonical));
+}
 const GROUP_ARTIFACT_TOOLS = new Set([
   "CHUCK_ARTIFACT",
   "CHUCK_CREATE_PDF",
@@ -2494,9 +2502,14 @@ export async function runAgent(
     ...voiceCapabilitySlugs.map(composioActionSlug),
     ...uniqueVoiceCapabilityTools.map((tool) => composioActionSlug(toolName(tool))),
   ]);
+  const boundedOwnerVoice = voiceTurn && ownerPrivateRun && !options?.meetingId && !voiceFastLane && !voiceToolFreeTurn;
+  const voiceModelAllowed = (name: string): boolean => {
+    if (!boundedOwnerVoice) return true;
+    return voiceToolIsWithinCapabilityFence(name, voiceCapabilityNames, allow ?? []);
+  };
   if (uniqueVoiceCapabilityTools.length) logger.info({ count: uniqueVoiceCapabilityTools.length, requested: voiceCapabilitySlugs.length }, "Voice Composio capability tools preloaded");
   const composioTools = [
-    ...(fullComposioTools.length > 80
+    ...(fullComposioTools.length > 80 || boundedOwnerVoice
       ? fullComposioTools.filter((tool) => toolName(tool).startsWith("COMPOSIO_") || Boolean(allow?.has(toolName(tool))))
       : fullComposioTools),
     ...discoveredMeetingTools,
@@ -2509,7 +2522,7 @@ export async function runAgent(
       || (sharedMeetingRoomAccess && !toolName(tool).startsWith("COMPOSIO_") && Boolean(allow?.has(toolName(tool)))))
     .map(addAccountSelector).map((tool) => meetingComposioAccountAliases ? hideMeetingAccountSelector(tool) : tool);
   composioTools.push(...LOCAL_TOOLS);
-  const mcpDiscovery = (!toolsDisabled && !voiceFastLane && (!voiceTurn || ownerPrivateRun) && !sharedScope && (!options?.meetingId || ownerPrivateRun))
+  const mcpDiscovery = (!toolsDisabled && !voiceFastLane && (!voiceTurn || Boolean(options?.meetingId && ownerPrivateRun)) && !sharedScope && (!options?.meetingId || ownerPrivateRun))
     ? await mcpClient.discoverToolsForUser(userId, signal)
     : { tools: [], failures: [] };
   const mcpTools = mcpDiscovery.tools;
@@ -2517,7 +2530,7 @@ export async function runAgent(
   const availableTools = [...composioTools, ...mcpTools].filter((tool) => {
     const name = toolName(tool);
     if (sharedScope && isSharedChannelToolDenied(name)) return false;
-    return (!allow || allow.has(name) || ownerPrivateRun && voiceCapabilityNames.has(composioActionSlug(name))) && !deny.has(name);
+    return (!allow || allow.has(name) || ownerPrivateRun && voiceCapabilityNames.has(composioActionSlug(name))) && voiceModelAllowed(name) && !deny.has(name);
   });
   // A ToolRouter session may expose only gateway/meta tools when its catalogue
   // is large. The exact purpose-bounded voice schemas are already resolved
