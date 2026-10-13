@@ -177,15 +177,19 @@ test("TinyFish upgrade preset describes durable research, monitored changes, and
   assert.match(bullets[2], /browser-agent APIs remain excluded/);
 });
 
-test("Muna upgrade preset describes Monid research coverage and its boundaries", () => {
+test("Muna upgrade preset describes Treg-first business intelligence and its boundaries", () => {
   const bullets = getAgentUpgradePreset("muna");
   assert.equal(bullets.length, 3);
   assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.muna]);
-  assert.match(bullets[0], /Monid-focused research specialist/);
+  assert.match(bullets[0], /Treg-first Business and Data Intelligence specialist/);
+  assert.match(bullets[0], /buying-signal research/);
+  assert.match(bullets[0], /bounded hiring evidence/);
   assert.match(bullets[1], /exact verification states/);
-  assert.match(bullets[2], /does not buy personal contact data/);
-  assert.match(bullets[2], /Monid remains disabled/);
+  assert.match(bullets[1], /distinct from confirmed purchase intent/);
+  assert.match(bullets[2], /cannot buy personal contact data/);
+  assert.match(bullets[2], /Chusky retains Treg administration/);
 });
+
 test("Treg upgrade preset describes live provider data and spend controls", () => {
   const bullets = getAgentUpgradePreset("treg");
   assert.equal(bullets.length, 3);
@@ -199,8 +203,17 @@ test("Treg lead-signal preset describes durable monitoring and external-action b
   assert.equal(bullets.length, 3);
   assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.tregLeadSignals]);
   assert.match(bullets[0], /scheduled personal or business lead-signal watches/);
-  assert.match(bullets[1], /hashed and persisted per owner\/watch/);
+  assert.match(bullets[1], /fingerprinted per owner\/watch/);
   assert.match(bullets[2], /never contact leads or write to connected apps/);
+});
+
+test("Treg intelligence preset describes routed discovery, evidence, and spend controls", () => {
+  const bullets = getAgentUpgradePreset("tregIntelligence");
+  assert.equal(bullets.length, 3);
+  assert.match(bullets[0], /people and company search/);
+  assert.match(bullets[0], /hard per-route cost cap/);
+  assert.match(bullets[1], /verified email/);
+  assert.match(bullets[2], /confirmed purchase intent/);
 });
 
 test("Link Agent Wallet upgrade preset describes approval and credential boundaries", () => {

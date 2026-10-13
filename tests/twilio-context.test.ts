@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { callerFacingCallTopic, twilioVoiceInstructions, twilioVoiceOpening, twilioVoiceTranscript } from "../src/calls/twilioContext.js";
+import { callerFacingCallTopic, twilioVoiceInstructions, twilioVoiceKeyterms, twilioVoiceOpening, twilioVoiceTranscript } from "../src/calls/twilioContext.js";
 
 const base = {
   id: "twc_00000000-0000-0000-0000-000000000000", userId: 7, provider: "twilio" as const,
@@ -61,6 +61,21 @@ test("Twilio transcript identifies the external speaker separately from owner hi
   assert.equal(
     twilioVoiceTranscript({ ...base, direction: "outbound" }, "Why are you calling me?"),
     "The external contact answering the outbound call said: Why are you calling me?",
+  );
+});
+
+test("Twilio vocabulary contains only bounded approved call facts", () => {
+  const keyterms = twilioVoiceKeyterms({
+    ...base,
+    voiceProfile: { identity: "Amina", organization: "United Cars", mode: "scheduling", tone: "professional", facts: ["Treffley", "Tomorrow at nine AM"], guardrails: [], capabilities: [] },
+  });
+  assert.deepEqual(keyterms, ["Amina", "United Cars", "Treffley", "Tomorrow at nine AM"]);
+});
+
+test("interrupted assistant speech is kept separate from the next caller turn", () => {
+  assert.equal(
+    twilioVoiceTranscript({ ...base, direction: "outbound" }, "Can we do two PM?", "I can offer ten AM or two PM"),
+    "The assistant was interrupted after saying: I can offer ten AM or two PM. The external contact answering the outbound call said: Can we do two PM?",
   );
 });
 

@@ -13,15 +13,23 @@ Telegram, SDK clients, or logs.
   MCP endpoint, not REST. An identity token may also use `x-treg-org`.
 - Search by job with `GET /catalog/search?q=...&limit=...`.
 - Inspect one endpoint with `GET /catalog/endpoints/{endpoint_id}`.
-- Compare providers with `GET /catalog/platforms/{slug}`. Choose by the inputs
-  available, then observed reliability, price, and recency. Treg does not
-  automatically choose or fail over between providers.
+- Compare providers with `GET /catalog/platforms/{slug}` when you need to
+  inspect alternatives. For standard jobs, prefer Treg's routed `treg.*`
+  capabilities (for example `treg.people.search`, `treg.people.enrich`,
+  `treg.companies.search`, and `treg.companies.enrich`); Treg selects a route
+  from the inputs and its available provider coverage. Named upstream provider
+  endpoints are direct calls and do not imply routed failover.
 - Discover organization-owned HTTP tools with authenticated `GET /tools`.
   Return only names, hosts, base URLs, and binding names. Never expose binding
   values. Call only a registered tool through `/call/`; never accept an
   arbitrary model-supplied host.
 - A catalog call uses `/call/{endpoint_id}`. A registered team HTTP tool uses
   the real upstream URL or registered name/path after `/call/`.
+- For routed `treg.*` calls, pass `X-Treg-Route-Max-Cost` with the owner's
+  approved hard cap. Chusky reserves that amount locally before dispatch and
+  marks async `202` results pending; never start another job while one is
+  pending. Route metadata can identify the selected provider, attempted routes,
+  and filters that could not be applied.
 - Use the same `Idempotency-Key` for a retry of the exact same call. Use a new
   key for new work. Never blindly retry a pending or provider-mutating call.
 - The settled cost and provider call reference come from `X-Treg-Cost-Micro`
@@ -40,6 +48,18 @@ Telegram, SDK clients, or logs.
 4. Use `CHUCK_TREG_MY_TOOLS` before calling an organization-owned API.
 5. Use `CHUCK_TREG_ENRICH_PERSON`, `CHUCK_TREG_ENRICH_COMPANY`, or bounded
    `CHUCK_TREG_RESOLVE` for the common evidence workflows.
+5a. Use `CHUCK_TREG_PEOPLE_SEARCH` and `CHUCK_TREG_COMPANY_SEARCH` for bounded
+  discovery. Prefer company domains plus precise titles/geography, use small
+  result limits, keep source URLs, and review filters Treg says it ignored.
+  Treat provider match scores as provider-specific; don't convert them to a
+  universal probability. An email is verified only when the result explicitly
+  says so; verification is a separate step before outreach.
+5b. Use `CHUCK_TREG_EMAIL_VERIFY` for one existing address when its status is
+  unknown. Preserve catch-all and unknown as distinct outcomes; verification
+  results do not authorize sending.
+5c. If a routed operation returns pending, use its `callId` with
+  `CHUCK_TREG_CALL_STATUS` to inspect the existing job or retrieve its finished
+  result. Do not start a duplicate billable call while it is pending.
 6. Use `CHUCK_TREG_CALL` for an inspected catalog endpoint or verified team
    tool. Reuse `idempotencyKey` only for the same request after a lost response.
 7. Use `CHUCK_TREG_BALANCE` for Treg's upstream balance and
@@ -73,6 +93,22 @@ capacity checks, and idempotency rules. Calls to registered organization-owned
 tools remain approval-gated because they can change company systems. OAuth
 start and revoke remain approval-gated because they change an external account
 authorization.
+
+## Delegated business research
+
+Muna is the Treg-first specialist for bounded people/company discovery, lead
+qualification, selective enrichment, existing work-email verification, fixed
+route hiring evidence, and one-time buying-signal research. Her delegated tool
+grant includes routed search/enrichment, provider inspection, bounded resolve,
+and pending-call status. Muna's resolve path inspects endpoint metadata,
+requires an explicitly read-only GET/HEAD/OPTIONS method and known per-call
+pricing within budget, and makes at most one provider call per resolution. It
+excludes the generic `CHUCK_TREG_CALL`, organization-owned tool execution,
+balance/usage administration, and OAuth controls. Chusky retains Treg
+administration; Elena handles durable recurring signal-watch setup. Hiring
+evidence is a timing signal, not confirmation of purchase intent.
+Buying signals are dated evidence for qualification and timing, not proof of a
+confirmed purchase or intent to buy.
 
 ## MCP distinction
 

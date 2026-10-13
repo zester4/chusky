@@ -10,6 +10,7 @@ from audio_formats import (
     deepgram_flux_listen_url,
     deepgram_flux_speak_url,
     deepgram_nova_listen_url,
+    normalize_flux_tts_expressivity,
     twilio_deepgram_listen_url,
     twilio_deepgram_speak_url,
     twilio_mulaw_to_deepgram_linear16,
@@ -56,7 +57,7 @@ class TwilioAudioFormatTests(unittest.TestCase):
             deepgram_linear16_to_twilio_mulaw(b"\x00")
 
     def test_twilio_flux_listen_contract_uses_native_mulaw_and_turn_detection(self):
-        url = twilio_deepgram_listen_url("flux-general-en", 0.45, 0.65, 800)
+        url = twilio_deepgram_listen_url("flux-general-en", 0.45, 0.65, 800, keyterms=["United Cars", "Treffley"])
         query = parse_qs(urlparse(url).query)
 
         self.assertEqual(urlparse(url).path, "/v2/listen")
@@ -66,6 +67,7 @@ class TwilioAudioFormatTests(unittest.TestCase):
         self.assertEqual(query["eager_eot_threshold"], ["0.45"])
         self.assertEqual(query["eot_threshold"], ["0.65"])
         self.assertEqual(query["eot_timeout_ms"], ["800"])
+        self.assertEqual(query["keyterm"], ["United Cars", "Treffley"])
 
         # Recall supplies its own 48 kHz mono PCM directly and keeps a
         # separate Flux contract from Twilio's native μ-law transport.
@@ -88,16 +90,25 @@ class TwilioAudioFormatTests(unittest.TestCase):
         assert "language_hint" not in parse_qs(urlparse(auto_url).query)
 
     def test_twilio_flux_speak_contract_uses_native_mulaw(self):
-        url = twilio_deepgram_speak_url("flux-haley-en")
+        url = twilio_deepgram_speak_url("flux-haley-en", expressivity=1)
         query = parse_qs(urlparse(url).query)
 
         self.assertEqual(urlparse(url).path, "/v2/speak")
         self.assertEqual(query["model"], ["flux-haley-en"])
         self.assertEqual(query["encoding"], ["mulaw"])
         self.assertEqual(query["sample_rate"], ["8000"])
-        recall_query = parse_qs(urlparse(deepgram_flux_speak_url("flux-haley-en")).query)
+        self.assertEqual(query["expressivity"], ["1"])
+        recall_query = parse_qs(urlparse(deepgram_flux_speak_url("flux-haley-en", expressivity=-1)).query)
         self.assertEqual(recall_query["encoding"], ["linear16"])
         self.assertEqual(recall_query["sample_rate"], ["24000"])
+        self.assertEqual(recall_query["expressivity"], ["-1"])
+
+    def test_flux_tts_expressivity_is_strictly_bounded(self):
+        self.assertEqual(normalize_flux_tts_expressivity("+1"), 1)
+        self.assertEqual(normalize_flux_tts_expressivity(0), 0)
+        for value in ("-3", "3", "animated", True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize_flux_tts_expressivity(value)
 
     def test_nova_listen_contract_uses_v1_vad_endpointing_and_stable_results(self):
         url = deepgram_nova_listen_url("nova-3", 500, 1000)

@@ -16,6 +16,45 @@ SAMPLE_WIDTH_BYTES = 2
 AUDIOOP_AVAILABLE = audioop is not None
 
 
+def normalize_flux_tts_expressivity(value: object) -> int:
+    """Validate Deepgram Flux TTS expressivity without widening its beta range."""
+    if isinstance(value, bool):
+        raise ValueError("Flux TTS expressivity must be an integer from -2 to 2")
+    try:
+        expressivity = int(str(value).strip())
+    except (TypeError, ValueError) as error:
+        raise ValueError("Flux TTS expressivity must be an integer from -2 to 2") from error
+    if expressivity < -2 or expressivity > 2:
+        raise ValueError("Flux TTS expressivity must be an integer from -2 to 2")
+    return expressivity
+
+
+def normalize_flux_keyterms(value: object) -> list[str]:
+    """Keep Flux keyterms bounded and provider-compatible."""
+    if isinstance(value, str):
+        values = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        values = list(value)
+    else:
+        values = []
+    terms: list[str] = []
+    seen: set[str] = set()
+    total_chars = 0
+    for item in values:
+        if not isinstance(item, str):
+            continue
+        term = " ".join(item.split()).strip()[:80]
+        key = term.lower()
+        if not term or key in seen:
+            continue
+        if total_chars + len(term) > 2_000 or len(terms) >= 50:
+            break
+        terms.append(term)
+        seen.add(key)
+        total_chars += len(term)
+    return terms
+
+
 def _legacy_audioop():
     if audioop is None:
         raise RuntimeError(
@@ -72,6 +111,7 @@ def deepgram_flux_listen_url(
     eot_timeout_ms: int,
     *,
     language_hints: list[str] | None = None,
+    keyterms: list[str] | None = None,
 ) -> str:
     query_values: dict[str, object] = {
         "model": model,
@@ -89,6 +129,9 @@ def deepgram_flux_listen_url(
         # provider's dynamic language detection.
         if hints:
             query_values["language_hint"] = hints
+    terms = normalize_flux_keyterms(keyterms)
+    if terms:
+        query_values["keyterm"] = terms
     query = urlencode(query_values, doseq=True)
     return f"wss://api.deepgram.com/v2/listen?{query}"
 
@@ -116,12 +159,13 @@ def deepgram_nova_listen_url(
     return f"wss://api.deepgram.com/v1/listen?{query}"
 
 
-def deepgram_flux_speak_url(model: str) -> str:
+def deepgram_flux_speak_url(model: str, *, expressivity: int = 0) -> str:
     query = urlencode(
         {
             "model": model,
             "encoding": "linear16",
             "sample_rate": DEEPGRAM_OUTPUT_SAMPLE_RATE,
+            "expressivity": normalize_flux_tts_expressivity(expressivity),
         }
     )
     return f"wss://api.deepgram.com/v2/speak?{query}"
@@ -134,6 +178,7 @@ def twilio_deepgram_listen_url(
     eot_timeout_ms: int,
     *,
     native_mulaw: bool = True,
+    keyterms: list[str] | None = None,
 ) -> str:
     """Build the Flux STT URL for a Twilio media stream.
 
@@ -144,9 +189,8 @@ def twilio_deepgram_listen_url(
     never uses this function.
     """
     if not native_mulaw:
-        return deepgram_flux_listen_url(model, eager_eot_threshold, eot_threshold, eot_timeout_ms)
-    query = urlencode(
-        {
+        return deepgram_flux_listen_url(model, eager_eot_threshold, eot_threshold, eot_timeout_ms, keyterms=keyterms)
+    query_values: dict[str, object] = {
             "model": model,
             "encoding": "mulaw",
             "sample_rate": TWILIO_SAMPLE_RATE,
@@ -154,19 +198,28 @@ def twilio_deepgram_listen_url(
             "eot_threshold": eot_threshold,
             "eot_timeout_ms": eot_timeout_ms,
         }
-    )
+    terms = normalize_flux_keyterms(keyterms)
+    if terms:
+        query_values["keyterm"] = terms
+    query = urlencode(query_values, doseq=True)
     return f"wss://api.deepgram.com/v2/listen?{query}"
 
 
-def twilio_deepgram_speak_url(model: str, *, native_mulaw: bool = True) -> str:
+def twilio_deepgram_speak_url(
+    model: str,
+    *,
+    native_mulaw: bool = True,
+    expressivity: int = 0,
+) -> str:
     """Build the Flux TTS URL for Twilio's raw 8 kHz μ-law output contract."""
     if not native_mulaw:
-        return deepgram_flux_speak_url(model)
+        return deepgram_flux_speak_url(model, expressivity=expressivity)
     query = urlencode(
         {
             "model": model,
             "encoding": "mulaw",
             "sample_rate": TWILIO_SAMPLE_RATE,
+            "expressivity": normalize_flux_tts_expressivity(expressivity),
         }
     )
     return f"wss://api.deepgram.com/v2/speak?{query}"

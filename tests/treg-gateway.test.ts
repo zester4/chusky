@@ -71,6 +71,81 @@ test("TregGateway uses the server token and preserves idempotency across transie
     }
 });
 
+test("read-only Treg resolution inspects methods and skips write endpoints", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken, retries: config.tregMaxRetries };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  config.tregMaxRetries = 0;
+  const requests: string[] = [];
+  const spend = new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} });
+  const fetchImpl = async (url: string, init: RequestInit) => {
+    const path = new URL(url).pathname;
+    requests.push(`${String(init.method)} ${path}`);
+    if (path === "/catalog/search") {
+      return new Response(JSON.stringify([
+        { id: "company.profile.write", title: "Company profile update", provider: "test", category: "company", price_usd: 0.01, price_unit: "call" },
+        { id: "company.signal.read", title: "Company signal search", provider: "test", category: "company", price_usd: 0.01, price_unit: "call" },
+      ]), { status: 200 });
+    }
+    if (path.startsWith("/catalog/endpoints/")) {
+      const id = decodeURIComponent(path.slice("/catalog/endpoints/".length));
+      return new Response(JSON.stringify({ endpoint: { id, method: id.endsWith(".write") ? "PATCH" : "GET", provider: "test", category: "company", title: id, price_usd: 0.01, price_unit: "call" } }), { status: 200 });
+    }
+    if (path === "/call/company.signal.read") {
+      return new Response(JSON.stringify({ result: { company: "Acme", signal: "hiring" }, cost_usd: 0.01 }), { status: 200 });
+    }
+    throw new Error(`Unexpected Treg test request: ${path}`);
+  };
+  try {
+    const gateway = new TregGateway({ spend, recordReceipt: async () => {}, fetchImpl });
+    const result = await gateway.resolveDataNeed({ userId: 1, need: "company hiring signals", maxCalls: 1, maxSpendUsd: 0.05, readOnlyOnly: true });
+    assert.deepEqual(result.endpointsUsed, ["company.signal.read"]);
+    assert.ok(result.warnings.some((warning) => warning.includes("company.profile.write") && warning.includes("not explicitly declared read-only")));
+    assert.equal(requests.some((request) => request.endsWith("/call/company.profile.write")), false);
+    assert.equal(requests.some((request) => request === "GET /call/company.signal.read"), true);
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+    config.tregMaxRetries = previous.retries;
+  }
+});
+
+test("Treg company hiring-signal search uses only the fixed routed endpoint and enforces its route budget", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken, retries: config.tregMaxRetries };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  config.tregMaxRetries = 0;
+  const requests: Array<{ method: string; path: string; body?: string; headers: Headers }> = [];
+  const spend = new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} });
+  const fetchImpl = async (url: string, init: RequestInit) => {
+    const path = new URL(url).pathname;
+    requests.push({ method: String(init.method), path, body: typeof init.body === "string" ? init.body : undefined, headers: new Headers(init.headers) });
+    if (path === "/catalog/endpoints/treg.companies.jobs.search") {
+      return new Response(JSON.stringify({ endpoint: { id: "treg.companies.jobs.search", method: "POST", provider: "treg", category: "company", title: "Search company job listings", price_usd: 0.009, price_unit: "call" } }), { status: 200 });
+    }
+    if (path === "/call/treg.companies.jobs.search") {
+      return new Response(JSON.stringify({ result: { jobs: [{ company_name: "Acme", company_domain: "acme.example", title: "VP of Security", posted_at: "2026-10-01", job_url: "https://jobs.example/1" }] }, cost_usd: 0.009 }), { status: 200 });
+    }
+    throw new Error(`Unexpected Treg test request: ${path}`);
+  };
+  try {
+    const gateway = new TregGateway({ spend, recordReceipt: async () => {}, fetchImpl });
+    const result = await gateway.searchCompanyJobs({ userId: 1, domain: "acme.example", limit: 5, maxSpendUsd: 0.05 });
+    assert.equal(result.jobs[0]?.title, "VP of Security");
+    assert.deepEqual(result.jobs[0]?.sourceUrls, ["https://jobs.example/1"]);
+    const request = requests.find((item) => item.path === "/call/treg.companies.jobs.search");
+    assert.equal(request?.method, "POST");
+    assert.deepEqual(JSON.parse(request?.body ?? "{}"), { domain: "acme.example", limit: 5 });
+    assert.equal(request?.headers.get("X-Treg-Route-Max-Cost"), "0.050000");
+    await assert.rejects(gateway.searchCompanyJobs({ userId: 1, name: "Acme", maxSpendUsd: 0.005 }), /exceeds the available per-call spend limit/i);
+    assert.equal(requests.filter((item) => item.path === "/call/treg.companies.jobs.search").length, 1);
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+    config.tregMaxRetries = previous.retries;
+  }
+});
+
 test("TregGateway accepts a caller idempotency key and settles the documented response headers", async () => {
   const previous = { enabled: config.tregEnabled, token: config.tregToken, retries: config.tregMaxRetries };
   config.tregEnabled = true;
@@ -99,6 +174,109 @@ test("TregGateway accepts a caller idempotency key and settles the documented re
     config.tregToken = previous.token;
     config.tregMaxRetries = previous.retries;
   }
+});
+
+test("routed people search enforces a hard route cost cap and preserves evidence and pending state", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken, cap: config.tregPerCallSoftCapUsd };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  config.tregPerCallSoftCapUsd = 0.25;
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  let snapshot: TregSpendSnapshot | undefined;
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => snapshot, saveSnap: async (next) => { snapshot = next; } }),
+      recordReceipt: async () => {},
+      fetchImpl: async (url, init) => {
+        requests.push({ url, init });
+        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "treg.people.search", title: "People search", price_usd: 0.01 }), { status: 200 });
+        return new Response(JSON.stringify({ result: { people: [{ full_name: "Ada Lovelace", title: "VP Sales", company_domain: "example.com", email: "ada@example.com", email_verification_status: "verified", source_url: "https://example.com/profile", confidence: 92 }, { full_name: "Grace Hopper", company_domain: "example.com", email: "grace@example.com" }] }, _treg: { served_by: "provider-a", tried: ["provider-a"] } }), { status: 200, headers: { "X-Treg-Cost-Micro": "12000" } });
+      },
+    });
+    const result = await gateway.searchPeople({ userId: 5, companyDomain: "example.com", title: "VP Sales", limit: 4, maxSpendUsd: 0.05 });
+    const call = requests.find((item) => item.url.includes("/call/treg.people.search"))!;
+    assert.equal((call.init?.headers as Record<string, string>)["X-Treg-Route-Max-Cost"], "0.050000");
+    assert.equal(JSON.parse(String(call.init?.body)).limit, 4);
+    assert.equal(result.people[0]?.fullName, "Ada Lovelace");
+    assert.deepEqual(result.people[0]?.sourceUrls, ["https://example.com/profile"]);
+    assert.equal(result.people[0]?.emailVerified, true, "explicit verified status is preserved even when returned as text");
+    assert.equal(result.people[1]?.emailVerified, undefined, "an absent verification state remains unknown");
+    assert.equal(result.servedBy, "provider-a");
+    assert.ok(result.warnings.some((warning) => /not treated as verified/i.test(warning)));
+    assert.equal(snapshot?.spentUsd, 0.012);
+  } finally {
+    config.tregEnabled = previous.enabled; config.tregToken = previous.token; config.tregPerCallSoftCapUsd = previous.cap;
+  }
+});
+
+test("routed async Treg calls are marked pending and reserve their capped budget", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken, cap: config.tregPerCallSoftCapUsd };
+  config.tregEnabled = true; config.tregToken = "test-token"; config.tregPerCallSoftCapUsd = 0.25;
+  let snapshot: TregSpendSnapshot | undefined;
+  let receipt: any;
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => snapshot, saveSnap: async (next) => { snapshot = next; } }),
+      recordReceipt: async (next) => { receipt = next; },
+      fetchImpl: async (url) => url.includes("/catalog/endpoints/")
+        ? new Response(JSON.stringify({ id: "treg.people.search" }), { status: 200 })
+        : new Response(JSON.stringify({ call_id: "async-call-1", _treg: { outcome: "pending", reserved_micro: 10000 } }), { status: 202 }),
+    });
+    const result = await gateway.searchPeople({ userId: 6, query: "founders at climate software companies", maxSpendUsd: 0.03 });
+    assert.equal(result.incomplete, true);
+    assert.ok(result.warnings.some((warning) => /Do not retry/i.test(warning)));
+    assert.equal(receipt.pending, true);
+    assert.equal(receipt.costIsEstimate, true);
+    assert.equal(snapshot?.spentUsd, 0.03, "pending reserve is conservatively booked to prevent retry spend");
+  } finally { config.tregEnabled = previous.enabled; config.tregToken = previous.token; config.tregPerCallSoftCapUsd = previous.cap; }
+});
+
+test("Treg email verification keeps unknown states explicit and never authorizes outreach", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken, cap: config.tregPerCallSoftCapUsd };
+  config.tregEnabled = true; config.tregToken = "test-token"; config.tregPerCallSoftCapUsd = 0.25;
+  const requests: RequestInit[] = [];
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
+      recordReceipt: async () => {},
+      fetchImpl: async (url, init) => {
+        requests.push(init);
+        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "treg.people.email.verify", price_usd: 0.01 }), { status: 200 });
+        return new Response(JSON.stringify({ result: { status: "unknown", catch_all: true } }), { status: 200, headers: { "X-Treg-Cost-Micro": "0" } });
+      },
+    });
+    const result = await gateway.verifyEmail({ userId: 7, email: "person@example.com", maxSpendUsd: 0.04 });
+    assert.equal((requests.at(-1)?.headers as Record<string, string>)["X-Treg-Route-Max-Cost"], "0.040000");
+    assert.deepEqual(JSON.parse(String(requests.at(-1)?.body)), { email: "person@example.com" });
+    assert.equal(result.valid, null);
+    assert.equal(result.status, "unknown");
+    assert.ok(result.warnings.some((warning) => /unknown state/i.test(warning)));
+    await assert.rejects(gateway.verifyEmail({ userId: 7, email: "not-an-email" }), /valid email/i);
+  } finally { config.tregEnabled = previous.enabled; config.tregToken = previous.token; config.tregPerCallSoftCapUsd = previous.cap; }
+});
+
+test("Treg pending call status retrieves bounded results and removes credential-like fields", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true; config.tregToken = "test-token";
+  const urls: string[] = [];
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
+      recordReceipt: async () => {},
+      fetchImpl: async (url) => {
+        urls.push(url);
+        if (url.endsWith("/calls/call-123")) return new Response(JSON.stringify({ status: "completed", provider: "provider-a", charged_micro: 12000 }), { status: 200 });
+        return new Response(JSON.stringify({ result: { people: [{ name: "Ada", email: "ada@example.com" }], api_key: "must-not-return" } }), { status: 200 });
+      },
+    });
+    const result = await gateway.callStatus("call-123");
+    assert.equal(result.status, "completed");
+    assert.equal(result.pending, false);
+    assert.equal(result.costUsd, 0.012);
+    assert.equal((result.result as any).api_key, undefined);
+    assert.deepEqual(urls.map((url) => new URL(url).pathname), ["/calls/call-123", "/calls/call-123/result"]);
+    await assert.rejects(gateway.callStatus("call/123"), /Invalid Treg call ID/i);
+  } finally { config.tregEnabled = previous.enabled; config.tregToken = previous.token; }
 });
 
 test("TregGateway exposes platform comparisons and registered team tools without secrets", async () => {
@@ -267,7 +445,7 @@ test("TregGateway sends the company enrichment contract and unwraps provider out
       },
     });
     const result = await gateway.enrichCompany({ userId: 1, domain: "acme.test", name: "Acme" });
-    assert.equal(searchCalls, 2);
+    assert.equal(searchCalls, 0, "standard company enrichment uses the Treg-routed endpoint");
     assert.deepEqual(requestBody, { domain: "acme.test", name: "Acme" });
     assert.deepEqual(result.items.map((item) => item.field), ["company_name", "domain", "industry", "employee_count"]);
     assert.equal(result.items.some((item) => item.field === "raw"), false);
@@ -424,6 +602,56 @@ test("native Treg resolution cannot widen a trusted signal-monitor budget", asyn
     await nativeTool(42, "CHUCK_TREG_RESOLVE", { need: "new hiring signals", maxCalls: 5, maxSpendUsd: 10 }, { tregMaxCalls: 1, tregMaxSpendUsd: 0.25 });
     assert.equal(received?.maxCalls, 1);
     assert.equal(received?.maxSpendUsd, 0.25);
+    assert.equal(received?.readOnlyOnly, undefined);
+  } finally {
+    setTregGatewayForTests(undefined);
+  }
+});
+
+test("Muna Treg resolution is read-only, one-call, and capped by the per-call budget", async () => {
+  let received: Record<string, unknown> | undefined;
+  const gateway = { resolveDataNeed: async (options: Record<string, unknown>) => (received = options) } as unknown as TregGateway;
+  setTregGatewayForTests(gateway);
+  try {
+    await nativeTool(42, "CHUCK_TREG_RESOLVE", { need: "recent company buying signals", maxCalls: 5, maxSpendUsd: 10 }, { worker: "muna", tregMaxCalls: 4, tregMaxSpendUsd: 0.5 });
+    assert.equal(received?.maxCalls, 1);
+    assert.equal(received?.maxSpendUsd, Math.min(config.tregPerCallSoftCapUsd, 0.5, 10));
+    assert.equal(received?.readOnlyOnly, true);
+  } finally {
+    setTregGatewayForTests(undefined);
+  }
+});
+
+test("Muna hiring-signal search cannot widen its trusted per-call Treg budget", async () => {
+  let received: Record<string, unknown> | undefined;
+  const gateway = { searchCompanyJobs: async (options: Record<string, unknown>) => (received = options) } as unknown as TregGateway;
+  setTregGatewayForTests(gateway);
+  try {
+    await nativeTool(42, "CHUCK_TREG_COMPANY_JOBS_SEARCH", { domain: "example.com", maxSpendUsd: 10 }, { worker: "muna", tregMaxSpendUsd: 0.03 });
+    assert.equal(received?.maxSpendUsd, Math.min(config.tregPerCallSoftCapUsd, 0.03, 10));
+  } finally {
+    setTregGatewayForTests(undefined);
+  }
+});
+
+test("Muna people search, company search, and email verification share the trusted Treg spend cap", async () => {
+  const received: Array<{ tool: string; maxSpendUsd?: unknown }> = [];
+  const gateway = {
+    searchPeople: async (options: Record<string, unknown>) => { received.push({ tool: "people", maxSpendUsd: options.maxSpendUsd }); },
+    searchCompanies: async (options: Record<string, unknown>) => { received.push({ tool: "company", maxSpendUsd: options.maxSpendUsd }); },
+    verifyEmail: async (options: Record<string, unknown>) => { received.push({ tool: "verify", maxSpendUsd: options.maxSpendUsd }); },
+  } as unknown as TregGateway;
+  setTregGatewayForTests(gateway);
+  try {
+    const runtime = { worker: "muna", tregMaxSpendUsd: 0.03 };
+    await nativeTool(42, "CHUCK_TREG_PEOPLE_SEARCH", { query: "security leaders", maxSpendUsd: 10 }, runtime);
+    await nativeTool(42, "CHUCK_TREG_COMPANY_SEARCH", { domain: "example.com" }, runtime);
+    await nativeTool(42, "CHUCK_TREG_EMAIL_VERIFY", { email: "person@example.com" }, runtime);
+    assert.deepEqual(received, [
+      { tool: "people", maxSpendUsd: 0.03 },
+      { tool: "company", maxSpendUsd: 0.03 },
+      { tool: "verify", maxSpendUsd: 0.03 },
+    ]);
   } finally {
     setTregGatewayForTests(undefined);
   }

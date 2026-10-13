@@ -245,6 +245,9 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings.chusky_status_url, "https://chusky.example/internal/twilio/status")
         self.assertFalse(settings.elevenlabs_enabled)
         self.assertEqual(settings.turn_start_budget_ms, 2500)
+        self.assertEqual(settings.tts_expressivity, 0)
+        self.assertEqual(settings.stt_keyterms, [])
+        self.assertFalse(settings.stt_adaptive_endpointing)
 
         with patch.dict(voice_app.os.environ, {
             "TWILIO_MEDIA_BRIDGE_SECRET": "twilio-bridge-test-secret",
@@ -255,6 +258,20 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         }, clear=True):
             guarded_settings = voice_app.Settings.from_env()
         self.assertEqual(guarded_settings.turn_start_budget_ms, 2500)
+
+        with patch.dict(voice_app.os.environ, {
+            "TWILIO_MEDIA_BRIDGE_SECRET": "twilio-bridge-test-secret",
+            "DEEPGRAM_API_KEY": "deepgram-test-key",
+            "CHUSKY_VOICE_TURN_URL": "https://chusky.example/internal/twilio/turn",
+            "CHUSKY_VOICE_STATUS_URL": "https://chusky.example/internal/twilio/status",
+            "VOICE_TTS_EXPRESSIVITY": "+1",
+            "VOICE_STT_KEYTERMS": "United Cars, Treffley, United Cars",
+            "VOICE_STT_ADAPTIVE_ENDPOINTING": "true",
+        }, clear=True):
+            expressive_settings = voice_app.Settings.from_env()
+        self.assertEqual(expressive_settings.tts_expressivity, 1)
+        self.assertEqual(expressive_settings.stt_keyterms, ["United Cars", "Treffley"])
+        self.assertTrue(expressive_settings.stt_adaptive_endpointing)
 
     def test_elevenlabs_requires_credentials_only_when_enabled(self):
         base = {
@@ -288,7 +305,9 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
             stt_eager_eot_threshold=0.45,
             stt_eot_threshold=0.65,
             stt_eot_timeout_ms=800,
+            stt_keyterms=[],
             tts_model="flux-haley-en",
+            tts_expressivity=1,
             twilio_native_mulaw=True,
             greeting="",
             turn_start_budget_ms=1000,
@@ -311,7 +330,12 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
                 return None
 
             def json(self):
-                return {"ok": True, "direction": "outbound", "greeting": "Hello, this is Amina calling on behalf of Chusky Labs about your appointment. Is now a good time?"}
+                return {
+                    "ok": True,
+                    "direction": "outbound",
+                    "keyterms": ["United Cars", "Treffley"],
+                    "greeting": "Hello, this is Amina calling on behalf of Chusky Labs about your appointment. Is now a good time?",
+                }
 
         class ContextHttp:
             async def get(self, _url, **_kwargs):
@@ -322,6 +346,7 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         greeting = await self.call._load_call_greeting()
         self.assertIn("calling on behalf of Chusky Labs", greeting)
         self.assertIn("appointment", greeting)
+        self.assertEqual(self.call.stt_keyterms, ["United Cars", "Treffley"])
 
     async def test_context_failure_uses_neutral_identity_opening(self):
         class ContextHttp:
@@ -382,6 +407,7 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         query = parse_qs(urlparse(opened_urls[0]).query)
         self.assertEqual(query["encoding"], ["mulaw"])
         self.assertEqual(query["sample_rate"], ["8000"])
+        self.assertEqual(query["expressivity"], ["1"])
         media = next(item for item in self.websocket.sent if item.get("event") == "media")
         encoded_payload = media["media"]["payload"]
         self.assertEqual(base64.b64decode(encoded_payload), b"\xff" * 160)
@@ -398,6 +424,44 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["event"] for item in self.websocket.sent], ["media", "media", "mark"])
         self.assertEqual(self.call.metrics.tts_audio_frames, 2)
         self.assertEqual(self.call.metrics.playback_marks_sent, 1)
+        self.assertEqual(self.call.tts_playback_offset_ms, 40)
+
+    async def test_flux_barge_in_sends_playback_offset_and_clears_twilio_buffer(self):
+        tts_socket = StreamingFakeTtsSocket()
+        self.call.tts_socket = tts_socket
+        self.call.stream_sid = "MZ_test"
+        self.call.tts_playback_offset_ms = 640
+        self.call.response_task = asyncio.create_task(asyncio.sleep(10))
+
+        await self.call._barge_in()
+
+        self.assertEqual(
+            tts_socket.sent,
+            [{"type": "Interrupt", "playback_offset": {"type": "time_ms", "value": 640}}],
+        )
+        self.assertIn({"event": "clear", "streamSid": "MZ_test"}, self.websocket.sent)
+        self.assertTrue(self.call.awaiting_tts_interrupt_context)
+        self.call._handle_flux_tts_event({"type": "SpeechInterrupted", "text_spoken": "I was saying"})
+        self.assertFalse(self.call.awaiting_tts_interrupt_context)
+
+    async def test_flux_speech_interrupted_event_is_forwarded_with_next_turn(self):
+        self.call.awaiting_tts_interrupt_context = True
+        self.call._handle_flux_tts_event({"type": "SpeechInterrupted", "text_spoken": "I can offer ten AM."})
+        self.assertEqual(self.call.pending_interrupted_speech, "I can offer ten AM.")
+
+        agent_http = FakeAgentHttp()
+        self.call.http = agent_http
+        tts_socket = StreamingFakeTtsSocket()
+        self.call.tts_socket = tts_socket
+        self.call.tts_reader_task = asyncio.create_task(self.call._receive_persistent_tts())
+        result = await self.call._request_agent_stream("Can we do two PM?")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            agent_http.stream_requests[0]["json"]["interruptedAssistantSpeech"],
+            "I can offer ten AM.",
+        )
+        self.assertEqual(self.call.pending_interrupted_speech, "")
 
     async def test_selected_voice_overrides_bridge_default_for_tts_connection(self):
         opened_urls = []

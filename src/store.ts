@@ -1498,6 +1498,8 @@ export interface AutonomyWatchRecord {
   toolSlugs?: string[]; cursor?: string; lastDigestKey?: string; consecutiveFailures?: number; freshnessMs?: number; lastObservedAt?: number;
   /** Bounded hashes of first-seen provider signal identities for Treg monitors. */
   seenSignalKeys?: string[];
+  /** Last observed content fingerprint per provider signal, for changed-only updates. */
+  signalFingerprints?: Record<string, string>;
   cadenceSeconds: number;
   authority: "observe" | "prepare" | "execute_reversible";
   status: "active" | "paused" | "revoked";
@@ -10096,6 +10098,9 @@ function attentionRecord(collection: AttentionCollection, raw: Record<string, un
       ...base, name: attentionText(raw.name, "name", 200, true)!, domain: attentionText(raw.domain, "domain", 120, true)!, toolkit: attentionText(raw.toolkit, "toolkit", 120), connectedAccountId: attentionText(raw.connectedAccountId, "connectedAccountId", 200), accountAlias: attentionText(raw.accountAlias, "accountAlias", 120), mode: raw.mode === "business" ? "business" : "personal", objective: attentionText(raw.objective, "objective", 2000, true)!, query: attentionText(raw.query, "query", 1000),
       capabilityIds: attentionArray(raw.capabilityIds, "capabilityIds", 20)?.map((item) => item.trim()).filter((item) => /^[a-z][a-z0-9_]{2,80}$/.test(item)), toolSlugs: attentionArray(raw.toolSlugs, "toolSlugs", 20)?.map((item) => item.trim()).filter((item) => /^[A-Z][A-Z0-9]{1,31}_[A-Z0-9_]+$/.test(item)), cursor: attentionText(raw.cursor, "cursor", 500), lastDigestKey: attentionText(raw.lastDigestKey, "lastDigestKey", 128), consecutiveFailures: Math.round(attentionNumber(raw.consecutiveFailures, "consecutiveFailures", 0, 0, 100)), freshnessMs: Math.round(attentionNumber(raw.freshnessMs, "freshnessMs", 24 * 60 * 60_000, 60_000, 7 * 24 * 60 * 60_000)), lastObservedAt: attentionTimestamp(raw.lastObservedAt, "lastObservedAt"),
       seenSignalKeys: Array.isArray(raw.seenSignalKeys) ? [...new Set(raw.seenSignalKeys.filter((item): item is string => typeof item === "string" && /^[a-f0-9]{64}$/.test(item)))].slice(-2000) : undefined,
+      signalFingerprints: raw.signalFingerprints && typeof raw.signalFingerprints === "object" && !Array.isArray(raw.signalFingerprints)
+        ? Object.fromEntries(Object.entries(raw.signalFingerprints as Record<string, unknown>).filter((entry): entry is [string, string] => /^[a-f0-9]{64}$/.test(entry[0]) && typeof entry[1] === "string" && /^[a-f0-9]{64}$/.test(entry[1])).slice(-2000))
+        : undefined,
       cadenceSeconds: Math.round(attentionNumber(raw.cadenceSeconds, "cadenceSeconds", 3600, 300, 2_592_000)), authority: attentionStatus(raw.authority, ["observe", "prepare", "execute_reversible"], "observe") as AutonomyWatchRecord["authority"], status: attentionStatus(raw.status, ["active", "paused", "revoked"], "active") as AutonomyWatchRecord["status"],
       nextCheckAt: attentionTimestamp(raw.nextCheckAt, "nextCheckAt"), lastCheckedAt: attentionTimestamp(raw.lastCheckedAt, "lastCheckedAt"), lastChangedAt: attentionTimestamp(raw.lastChangedAt, "lastChangedAt"), lastResult: attentionText(raw.lastResult, "lastResult", 4000), lastError: attentionText(raw.lastError, "lastError", 1000), maxItems: Math.round(attentionNumber(raw.maxItems, "maxItems", 20, 1, 100)),
     };

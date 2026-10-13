@@ -35,7 +35,7 @@ sheets). You never confuse the two.
 ```text
 1. Extract the ICP, geography, target, offer, exclusions, and qualification rule from the owner's request and existing authorized context. Ask only for a missing input that materially changes who qualifies or creates spend/authority ambiguity.
 2. For a sustained campaign, start `CHUCK_LEAD_CAMPAIGN`. It creates the owner-scoped durable mission and tracker. Report its mission ID/status and let the worker continue; do not run campaign steps in the initiating turn.
-3. Discover from user-supplied leads/seeds and exact connected read-only sources first. Then use bounded TinyFish/Composio public-web search. Deduplicate before storing small batches. Every row needs an HTTPS source and concise observed evidence; label uncertainty and shortfall honestly.
+3. Discover from user-supplied leads/seeds and exact connected read-only sources first. Then use bounded TinyFish/Composio public-web search. If that does not cover the requested market, use `CHUCK_TREG_COMPANY_SEARCH` or `CHUCK_TREG_PEOPLE_SEARCH` with precise filters, a small result limit, and `maxSpendUsd` within the remaining campaign allowance. Deduplicate before storing small batches. Every row needs an HTTPS source and concise observed evidence; label uncertainty and shortfall honestly.
 4. Qualify against explicit ICP evidence and geography, with reasoned fit/review/reject statuses. A fit score is not buying intent and no score should be fabricated.
 5. Enrich only the qualified shortlist. Inspect/select a narrow Treg path and pass the remaining campaign budget; do not bulk-enrich or retry uncertain paid calls blindly. Persist returned fields, provider/source, cost, and no-match state.
 6. Keep durable stages and next actions in the campaign tracker. Prepare an internal XLSX artifact when the mission's artifact step is available; campaign records remain the progress source of truth.
@@ -61,7 +61,7 @@ Load **workspace-pro** for inbox/CRM trigger handling after leads exist.
 
 | Need | Use |
 |------|-----|
-| Find starting candidates | Owner-provided data and connected read-only sources, then **TinyFish/Composio web search** |
+| Find starting candidates | Owner-provided data and connected read-only sources, then **TinyFish/Composio web search**, then bounded routed **Treg people/company search** when needed |
 | Verify/enrich qualified people or companies | **Treg** (`CHUCK_TREG_*`) within the campaign's remaining budget |
 | Track durable candidate state | **`CHUCK_LEAD_CAMPAIGN`** (`get`, `list`, candidate record/update) |
 | Internal spreadsheet deliverable | Native verified spreadsheet artifact workflow |
@@ -71,16 +71,19 @@ Load **workspace-pro** for inbox/CRM trigger handling after leads exist.
 
 ## Scheduled buyer-signal monitoring
 
-When the owner asks for ongoing prospect or buying-signal discovery, create an
-owner-scoped `autonomy_watch` with `toolkit: "treg"`. Put the ICP, geography,
+When the owner asks for ongoing prospect or buying-signal discovery, Chusky
+owns setup and delegates the durable watch creation to Elena. Muna may prepare
+the ICP, geography, and signal criteria but does not create or change watches.
+Create an owner-scoped `autonomy_watch` with `toolkit: "treg"`. Put the ICP, geography,
 excluded segments, qualifying signal types (such as hiring, funding, role
 changes, technology adoption, or public requests for help), and the definition
 of a qualified lead in its objective/query. Use `mode: "business"` for a
 company pipeline and `mode: "personal"` for an individual's research.
 
 The Treg reconciliation path searches its live catalog and uses the bounded
-`CHUCK_TREG_RESOLVE` path. It persists hashed first-seen signal identities and
-private observations so repeated provider results do not reappear as new leads.
+`CHUCK_TREG_RESOLVE` path. It persists hashed signal identities and content
+fingerprints so repeats are suppressed and material changes become private
+observations.
 Keep `maxItems` modest, obey configured Treg mission/daily spend limits, and
 retain source URLs and evidence when supplied. A signal is a reason to qualify
 a lead, not proof that a person wants to buy. Do not contact leads or write them

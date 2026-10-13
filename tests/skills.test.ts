@@ -136,12 +136,12 @@ test("loads Quinn's expansion and billing references for a revenue objective", a
   assert.match(context, /Prefer source system of truth/);
 });
 
-test("loads Muna's Monid workflow references before starting a data task", async () => {
-  const context = await skillContextForBinding(WORKER_SKILL_BINDINGS.muna, "Find verified business contacts and compare customer reviews");
-  assert.match(context, /Reference: references\/lead-sourcing\.md/);
-  assert.match(context, /Reference: references\/local-prospects\.md/);
+test("loads Muna's Treg-first lead-intelligence and optional Monid references", async () => {
+  const context = await skillContextForBinding(WORKER_SKILL_BINDINGS.muna, "Use Treg and Monid to find verified business contacts and compare customer reviews");
+  assert.match(context, /Reference: references\/05-treg-tooling\.md/);
+  assert.match(context, /Treg's routed people\/company search/);
+  assert.match(context, /hiring may indicate a timing change.*not proof of a purchase or confirmed intent/i);
   assert.match(context, /Reference: references\/research-briefs\.md/);
-  assert.match(context, /catch-all/);
   assert.match(context, /balance ratings and dates/);
 });
 

@@ -174,7 +174,14 @@ VOICE_STT_MODEL=flux-general-en
 VOICE_STT_EAGER_EOT_THRESHOLD=0.45
 VOICE_STT_EOT_THRESHOLD=0.65
 VOICE_STT_EOT_TIMEOUT_MS=800
+VOICE_STT_KEYTERMS=
+# Optional bounded adaptation after three clean/resumed turns. Keep disabled
+# for the first canary, then enable after comparing latency and interruption
+# metrics against the static baseline.
+VOICE_STT_ADAPTIVE_ENDPOINTING=false
 VOICE_TTS_MODEL=flux-haley-en
+# Deepgram Flux TTS beta expressivity: -2 calm, 0 neutral, +2 animated.
+VOICE_TTS_EXPRESSIVITY=0
 VOICE_ELEVENLABS_ENABLED=false
 # Required only when VOICE_ELEVENLABS_ENABLED=true.
 # ELEVENLABS_API_KEY=<server-only ElevenLabs key>
@@ -345,6 +352,7 @@ DEEPGRAM_API_KEY=<Deepgram server API key>
 RECALL_STT_MODEL=flux-general-en
 VOICE_STT_MODEL=flux-general-en
 VOICE_TTS_MODEL=flux-haley-en
+VOICE_TTS_EXPRESSIVITY=0
 CHUSKY_RECALL_TURN_STREAM_URL=https://<chusky-host>/internal/recall/turn-stream
 CHUSKY_RECALL_COMMIT_TURN_URL=https://<chusky-host>/internal/recall/commit-turn
 CHUSKY_RECALL_MEDIA_AUTHORIZE_URL=https://<chusky-host>/internal/recall/media-authorize

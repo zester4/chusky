@@ -224,25 +224,48 @@ function signalIdentity(watch: AutonomyWatchRecord, signal: NormalizedBusinessSi
   return createHash("sha256").update(`${watch.id}:${identity}`).digest("hex");
 }
 
-async function recordNewLeadSignals(userId: number, watch: AutonomyWatchRecord, signals: NormalizedBusinessSignal[], now: number): Promise<{ count: number; seenSignalKeys: string[] }> {
+async function recordNewLeadSignals(userId: number, watch: AutonomyWatchRecord, signals: NormalizedBusinessSignal[], now: number): Promise<{ count: number; updatedCount: number; seenSignalKeys: string[]; signalFingerprints: Record<string, string> }> {
   const seen = new Set(watch.seenSignalKeys ?? []);
+  const fingerprints = { ...(watch.signalFingerprints ?? {}) };
   let count = 0;
+  let updatedCount = 0;
   for (const signal of signals) {
     const signalKey = signalIdentity(watch, signal);
-    if (seen.has(signalKey)) continue;
+    const fingerprintInput = {
+      source: signal.source, kind: signal.kind, subject: signal.subject, status: signal.status,
+      createdAt: signal.createdAt, updatedAt: signal.updatedAt, dueAt: signal.dueAt,
+      lastActivityAt: signal.lastActivityAt, repliedAt: signal.repliedAt,
+      company: signal.metadata?.company, domain: signal.metadata?.domain, url: signal.metadata?.url,
+      signal: signal.metadata?.signal, evidence: signal.metadata?.evidence,
+      score: signal.metadata?.score, confidence: signal.metadata?.confidence,
+    };
+    const fingerprint = createHash("sha256").update(JSON.stringify(fingerprintInput)).digest("hex");
+    const previousFingerprint = fingerprints[signalKey];
+    const isNew = !seen.has(signalKey);
+    // Existing watches only had identity hashes. Seed their first content
+    // fingerprint silently so the migration does not replay old signals.
+    const isUpdated = !isNew && Boolean(previousFingerprint) && previousFingerprint !== fingerprint;
+    fingerprints[signalKey] = fingerprint;
+    if (!isNew && !isUpdated) continue;
     seen.add(signalKey);
-    count += 1;
-    const url = typeof signal.metadata?.url === "string" ? signal.metadata.url : undefined;
+    if (isNew) count += 1;
+    else updatedCount += 1;
+    const rawUrl = typeof signal.metadata?.url === "string" ? signal.metadata.url : undefined;
+    let url: string | undefined;
+    try { const parsed = rawUrl ? new URL(rawUrl) : undefined; if (parsed?.protocol === "https:" && !parsed.username && !parsed.password) url = parsed.toString(); } catch { /* discard untrusted provider URL */ }
     const summary = compact([signal.subject || "Unspecified target", signal.kind, typeof signal.metadata?.signal === "string" ? signal.metadata.signal : undefined, typeof signal.metadata?.evidence === "string" ? signal.metadata.evidence : undefined, url].filter(Boolean).join(" · "), 4000);
+    const eventType = isNew ? "lead_signal.detected" : "lead_signal.updated";
     await createAttentionRecord(userId, "observation", {
-      source: `treg:${signal.source}`, eventType: "lead_signal.detected", summary, entityId: watch.id,
-      dedupeKey: `treg-watch:${watch.id}:${signalKey}`,
-      metadata: { watchId: watch.id, signalKey, ...(url ? { url } : {}), ...(typeof signal.metadata?.company === "string" ? { company: signal.metadata.company } : {}), ...(typeof signal.metadata?.domain === "string" ? { domain: signal.metadata.domain } : {}), ...(typeof signal.metadata?.score === "number" ? { score: signal.metadata.score } : {}), ...(typeof signal.metadata?.confidence === "number" ? { confidence: signal.metadata.confidence } : {}) },
-      occurredAt: now, importance: 0.8, novelty: 1, confidence: typeof signal.metadata?.confidence === "number" ? signal.metadata.confidence : 0.7,
+      source: `treg:${signal.source}`, eventType, summary, entityId: watch.id,
+      dedupeKey: `treg-watch:${watch.id}:${signalKey}:${fingerprint}`,
+      metadata: { watchId: watch.id, signalKey, fingerprint, ...(typeof signal.kind === "string" ? { signalKind: signal.kind.slice(0, 100) } : {}), ...(typeof signal.status === "string" ? { signalStatus: signal.status.slice(0, 100) } : {}), ...(typeof signal.createdAt === "string" ? { providerCreatedAt: signal.createdAt.slice(0, 80) } : {}), ...(typeof signal.updatedAt === "string" ? { providerUpdatedAt: signal.updatedAt.slice(0, 80) } : {}), ...(url ? { url } : {}), ...(typeof signal.metadata?.company === "string" ? { company: signal.metadata.company } : {}), ...(typeof signal.metadata?.domain === "string" ? { domain: signal.metadata.domain } : {}), ...(typeof signal.metadata?.score === "number" ? { providerScore: signal.metadata.score } : {}), ...(typeof signal.metadata?.confidence === "number" ? { providerConfidence: signal.metadata.confidence } : {}) },
+      occurredAt: now, importance: 0.8, novelty: isNew ? 1 : 0.8, confidence: 0.7,
       privacyScope: "private", status: "new",
     });
   }
-  return { count, seenSignalKeys: [...seen].slice(-2000) };
+  const seenSignalKeys = [...seen].slice(-2000);
+  const boundedFingerprints = Object.fromEntries(Object.entries(fingerprints).filter(([key]) => seen.has(key)).slice(-2000));
+  return { count, updatedCount, seenSignalKeys, signalFingerprints: boundedFingerprints };
 }
 
 async function resolveComposioAccount(userId: number, watch: AutonomyWatchRecord, toolSlugs: string[]): Promise<string | undefined> {
@@ -385,9 +408,11 @@ export async function runDueAutonomyWatches(userId: number, options: Reconciliat
       if (!options.execute && (!executed.toolsSucceeded || executed.toolsSucceeded.length === 0)) throw new Error("Reconciliation did not complete an allowed provider data call.");
       const parsed = parseAutonomyResult(executed.text, watch.domain, now);
       const newLeadSignals = tregMonitor ? await recordNewLeadSignals(userId, watch, parsed.signals, now) : undefined;
-      const changed = newLeadSignals ? newLeadSignals.count > 0 : parsed.changed;
+      const changed = newLeadSignals ? newLeadSignals.count + newLeadSignals.updatedCount > 0 : parsed.changed;
       const summary = newLeadSignals
-        ? newLeadSignals.count ? `${newLeadSignals.count} new lead signal${newLeadSignals.count === 1 ? "" : "s"}. ${parsed.summary}`.slice(0, 4000) : `No new lead signals. ${parsed.summary}`.slice(0, 4000)
+        ? newLeadSignals.count || newLeadSignals.updatedCount
+          ? `${newLeadSignals.count} new and ${newLeadSignals.updatedCount} updated lead signal${newLeadSignals.count + newLeadSignals.updatedCount === 1 ? "" : "s"}. ${parsed.summary}`.slice(0, 4000)
+          : `No new or changed lead signals. ${parsed.summary}`.slice(0, 4000)
         : parsed.summary || "No changes found.";
       const signals = parsed.signals;
       const gaps = mode === "business" ? [...detectBusinessGaps(signals, { now }), ...detectBusinessOpportunities(signals, now)] : detectBusinessGaps(signals, { now });
@@ -413,7 +438,7 @@ export async function runDueAutonomyWatches(userId: number, options: Reconciliat
       if (changed && digestKey !== watch.lastDigestKey) {
         await recordWatchObservation(userId, watch, "watch.changed", summary, digestKey, now);
       }
-      await updateAttentionRecord(userId, "autonomy_watch", watch.id, { lastCheckedAt: now, lastObservedAt: now, nextCheckAt, lastChangedAt: changed ? now : watch.lastChangedAt, lastResult: summary, lastError: undefined, cursor: parsed.cursor ?? watch.cursor, toolSlugs, ...(composioAccount ? { connectedAccountId: composioAccount } : {}), ...(newLeadSignals ? { seenSignalKeys: newLeadSignals.seenSignalKeys } : {}), lastDigestKey: digestKey, consecutiveFailures: 0 });
+      await updateAttentionRecord(userId, "autonomy_watch", watch.id, { lastCheckedAt: now, lastObservedAt: now, nextCheckAt, lastChangedAt: changed ? now : watch.lastChangedAt, lastResult: summary, lastError: undefined, cursor: parsed.cursor ?? watch.cursor, toolSlugs, ...(composioAccount ? { connectedAccountId: composioAccount } : {}), ...(newLeadSignals ? { seenSignalKeys: newLeadSignals.seenSignalKeys, signalFingerprints: newLeadSignals.signalFingerprints } : {}), lastDigestKey: digestKey, consecutiveFailures: 0 });
       await dismissWatchRepairCandidates(userId, watch.id);
       results.push({ watchId: watch.id, status: "completed", changed, summary, toolSlugs, gaps: gaps.length, nextCheckAt });
     } catch (error) {

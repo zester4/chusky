@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CaptchaTracker, waitForChallengeClear } from "../e2b/browser-template/kernel-controller.mjs";
+import { CaptchaTracker, shouldAttemptAutomaticCaptchaWait, waitForChallengeClear } from "../e2b/browser-template/kernel-controller.mjs";
 import { kernelLiveViewUrl } from "../src/lib/e2b/kernel.js";
 import { config } from "../src/config.js";
 import { E2BBrowserEngine } from "../src/lib/e2b/browser.js";
@@ -26,6 +26,13 @@ test("current challenge telemetry keeps press-and-hold terminal outcomes without
   tracker.accept({ type: "captcha_challenge_result", data: { challenge_id: "challenge-one", captcha_provider: "human", task_kind: "press_and_hold", status: "failure" } });
   assert.deepEqual(tracker.snapshot(), { pending: false, results: [], challengeResults: ["failure"], pageVerificationRequired: true });
   assert.equal(tracker.terminalSince(0)?.status, "failure");
+});
+
+test("automatic CAPTCHA waiting happens once before a human handoff", () => {
+  assert.equal(shouldAttemptAutomaticCaptchaWait({ detected: true, type: "captcha" }), true);
+  assert.equal(shouldAttemptAutomaticCaptchaWait({ detected: true, type: "captcha" }, true), false);
+  assert.equal(shouldAttemptAutomaticCaptchaWait({ detected: true, type: "two_factor" }), false);
+  assert.equal(shouldAttemptAutomaticCaptchaWait({ detected: false, type: "captcha" }), false);
 });
 
 test("challenge wait returns promptly on a terminal solver failure", async () => {
@@ -108,7 +115,7 @@ test("uncertain controller recovery preserves the retained browser and never cre
   Object.assign(config, { browserProvider: "kernel", kernelApiKey: "test", e2bEnabled: true, e2bApiKey: "test" });
   const owner = 961003;
   const session = await getSession(owner);
-  session.e2bBrowser = { sandboxId: "controller-owned", kernel: { sessionId: "remote-owned", profileId: "profile-owned" }, createdAt: Date.now(), updatedAt: Date.now(), expiresAt: Date.now() + 60_000 };
+  session.e2bBrowser = { sandboxId: "controller-owned", harness: "agent-browser", engine: "chrome", kernel: { sessionId: "remote-owned", profileId: "profile-owned" }, createdAt: Date.now(), updatedAt: Date.now(), expiresAt: Date.now() + 60_000 };
   await saveSession(owner, session);
   t.mock.method(Sandbox, "connect", async () => { throw new Error("uncertain connection failure"); });
   const client = new Kernel({ apiKey: "test" });

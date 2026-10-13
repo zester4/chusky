@@ -118,14 +118,19 @@ export const AGENT_UPGRADE_PRESETS = {
     "Monid is disabled until a server-side API key is configured. Review Monid's current terms and data handling before enabling it for production or sensitive workloads.",
   ],
   muna: [
-    "Added Muna, a Monid-focused research specialist for qualified business leads, selected contact enrichment, local prospects, company briefs, content insights, visibility comparisons, creator and video research, and review evidence.",
-    "Muna returns scoped, source-linked findings with exact verification states, sample coverage, uncertainty, and spend while reusing existing data and staying inside current Monid approval and budget controls.",
-    "Muna does not buy personal contact data, contact prospects, write CRM records, publish content, or create recurring monitoring; Monid remains disabled until configured and its terms are cleared.",
+    "Muna is Chusky's Treg-first Business and Data Intelligence specialist for people/company discovery, qualification, enrichment, bounded hiring evidence, and buying-signal research; Monid is an optional fallback.",
+    "Muna returns source-linked evidence, freshness, exact verification states, pending-call status, and settled spend under bounded Treg route budgets; buying signals remain distinct from confirmed purchase intent.",
+    "Muna cannot buy personal contact data, contact prospects, write CRM records, change Treg connections, or set recurring watches. Chusky retains Treg administration; Elena handles durable monitoring.",
   ],
   tregLeadSignals: [
     "Owners can create scheduled personal or business lead-signal watches that discover relevant external signal providers through Treg and return evidence-backed candidates.",
-    "First-seen signal identities are hashed and persisted per owner/watch, so repeated provider results are suppressed and new signals become private durable observations.",
+    "First-seen and changed signal evidence is fingerprinted per owner/watch, so repeats are suppressed and material updates become private durable observations.",
     "Checks run only when the owner enables the Attention Pulse, require Treg configuration, obey existing spend controls, and never contact leads or write to connected apps.",
+  ],
+  tregIntelligence: [
+    "Added direct Treg-routed people and company search for live discovery, plus email verification, with bounded result counts, source URLs, provider attribution, and a hard per-route cost cap.",
+    "People search distinguishes provider-returned email from explicitly verified email and reports ignored filters, pending jobs, and incomplete results; pending calls can be inspected without blind retries.",
+    "Lead campaigns can use bounded Treg discovery within their own reserved allowance; signal watches now record new and changed evidence while keeping buying signals separate from confirmed purchase intent.",
   ],
   leadCampaigns: [
     "Owners can start an idempotent, multi-day lead campaign that researches, deduplicates, qualifies, and tracks source-linked candidates in private durable state, with an honest shortfall report and verifiable closeout.",
