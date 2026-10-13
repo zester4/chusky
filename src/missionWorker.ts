@@ -70,6 +70,9 @@ export function deriveMissionToolHints(objective: string): string[] {
     selected.add("COMPOSIO_SEARCH_WEB");
     selected.add("COMPOSIO_SEARCH_FETCH_URL_CONTENT");
   }
+  if (/\bmonid\b/.test(text)) {
+    for (const tool of ["CHUCK_MONID_SEARCH", "CHUCK_MONID_INSPECT", "CHUCK_MONID_RUN", "CHUCK_MONID_RUN_GET", "CHUCK_MONID_RUNS_LIST", "CHUCK_MONID_BALANCE", "CHUCK_MONID_USAGE"]) selected.add(tool);
+  }
   return selected.size ? ["CHUCK_FIND_TOOLS", ...selected] : [];
 }
 

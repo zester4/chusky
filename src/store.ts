@@ -46,6 +46,7 @@ import type { CompensationRecord, ExecutionReservation, OutcomeVerification, Pro
 import { normalizeProviderSmokeChecks, PROVIDER_SMOKE_CAPABILITIES } from "./reliability/providerSmoke.js";
 import type { ApprovalEscalationRecord } from "./approvals/escalation.js";
 import type { TregCallReceipt, TregSpendSnapshot } from "./treg/types.js";
+import type { MonidRunReceipt, MonidSpendSnapshot } from "./monid/types.js";
 import type { LinkOAuthStateRecord, LinkSpendRequestRecord, LinkWalletRecord } from "./link/types.js";
 import { normalizeSdkRunProgress, type SdkRunProgress } from "./sdkRunProgress.js";
 
@@ -1814,6 +1815,10 @@ interface Backend {
   saveTregSpend(snapshot: TregSpendSnapshot): Promise<void>;
   appendTregReceipt(receipt: TregCallReceipt): Promise<void>;
   listTregReceipts(userId: number, limit: number, organizationId?: string): Promise<TregCallReceipt[]>;
+  getMonidSpend(userId: number, dayKey: string): Promise<MonidSpendSnapshot | undefined>;
+  saveMonidSpend(snapshot: MonidSpendSnapshot): Promise<void>;
+  saveMonidReceipt(receipt: MonidRunReceipt): Promise<void>;
+  listMonidReceipts(userId: number, limit: number, organizationId?: string): Promise<MonidRunReceipt[]>;
   getRecallMeeting(userId: number, id: string): Promise<RecallMeetingRecord | undefined>;
   saveRecallMeeting(record: RecallMeetingRecord): Promise<void>;
   listRecallMeetings(userId: number, limit: number): Promise<RecallMeetingRecord[]>;
@@ -2260,6 +2265,8 @@ class RedisBackend implements Backend {
   private agentUpgradeKey = (userId: number, upgradeId: string) => `chuck:agent-upgrade:${userId}:${createHash("sha256").update(upgradeId).digest("hex")}`;
   private tregSpendKey = (userId: number, dayKey: string) => `chuck:treg:spend:${userId}:${dayKey}`;
   private tregReceiptKey = (userId: number) => `chuck:treg:receipts:${userId}`;
+  private monidSpendKey = (userId: number, dayKey: string) => `chuck:monid:spend:${userId}:${dayKey}`;
+  private monidReceiptKey = (userId: number) => `chuck:monid:receipts:${userId}`;
   private triggerEventKey = (id: string) => `chuck:trigger:event:${createHash("sha256").update(id).digest("hex")}`;
   private triggerEventsIndexKey = (userId: number) => `chuck:user:${userId}:trigger-events`;
   private recallChatEventKey = (id: string) => `chuck:recall:chat-event:${createHash("sha256").update(id).digest("hex")}`;
@@ -2634,6 +2641,29 @@ class RedisBackend implements Backend {
   async listTregReceipts(userId: number, limit: number, organizationId?: string): Promise<TregCallReceipt[]> {
     const raw = await this.r.lrange(this.tregReceiptKey(userId), 0, Math.max(0, Math.min(200, Math.floor(limit)) - 1));
     return raw.flatMap((item) => { try { const receipt = JSON.parse(item) as TregCallReceipt; return receipt.userId === userId && (!organizationId || receipt.organizationId === organizationId) ? [receipt] : []; } catch { return []; } });
+  }
+
+  async getMonidSpend(userId: number, dayKey: string): Promise<MonidSpendSnapshot | undefined> {
+    const raw = await this.r.get(this.monidSpendKey(userId, dayKey));
+    if (!raw) return undefined;
+    try {
+      const snapshot = JSON.parse(raw) as MonidSpendSnapshot;
+      return snapshot.userId === userId && snapshot.dayKey === dayKey ? snapshot : undefined;
+    } catch { return undefined; }
+  }
+  async saveMonidSpend(snapshot: MonidSpendSnapshot): Promise<void> {
+    await this.r.setex(this.monidSpendKey(snapshot.userId, snapshot.dayKey), 8 * 24 * 60 * 60, JSON.stringify(snapshot));
+  }
+  async saveMonidReceipt(receipt: MonidRunReceipt): Promise<void> {
+    const key = this.monidReceiptKey(receipt.userId);
+    await this.r.eval(
+      "local rows=redis.call('lrange',KEYS[1],0,199); for i,row in ipairs(rows) do local ok,value=pcall(cjson.decode,row); if ok and value['id']==ARGV[1] then redis.call('lset',KEYS[1],i-1,ARGV[2]); redis.call('expire',KEYS[1],2592000); return 1 end end; redis.call('lpush',KEYS[1],ARGV[2]); redis.call('ltrim',KEYS[1],0,199); redis.call('expire',KEYS[1],2592000); return 1",
+      1, key, receipt.id, JSON.stringify(receipt),
+    );
+  }
+  async listMonidReceipts(userId: number, limit: number, organizationId?: string): Promise<MonidRunReceipt[]> {
+    const raw = await this.r.lrange(this.monidReceiptKey(userId), 0, Math.max(0, Math.min(200, Math.floor(limit)) - 1));
+    return raw.flatMap((item) => { try { const receipt = JSON.parse(item) as MonidRunReceipt; return receipt.userId === userId && (!organizationId || receipt.organizationId === organizationId) ? [receipt] : []; } catch { return []; } });
   }
 
   async getRecallMeeting(userId: number, id: string): Promise<RecallMeetingRecord | undefined> {
@@ -4001,6 +4031,8 @@ class MemoryBackend implements Backend {
   private sessions = new Map<number, UserSession>();
   private tregSpend = new Map<string, TregSpendSnapshot>();
   private tregReceipts = new Map<number, TregCallReceipt[]>();
+  private monidSpend = new Map<string, MonidSpendSnapshot>();
+  private monidReceipts = new Map<number, MonidRunReceipt[]>();
   private companyRuns = new Map<string, Map<string, CompanyRunSummary>>();
   private companyAudits = new Map<string, CompanyAuditEvent[]>();
   private companyCompletions = new Set<string>();
@@ -4106,6 +4138,23 @@ class MemoryBackend implements Backend {
   }
   async listTregReceipts(userId: number, limit: number, organizationId?: string) {
     return (this.tregReceipts.get(userId) ?? []).filter((receipt) => !organizationId || receipt.organizationId === organizationId).slice(0, Math.max(1, Math.min(200, Math.floor(limit)))).map((receipt) => structuredClone(receipt));
+  }
+  async getMonidSpend(userId: number, dayKey: string) {
+    const snapshot = this.monidSpend.get(`${userId}:${dayKey}`);
+    return snapshot ? structuredClone(snapshot) : undefined;
+  }
+  async saveMonidSpend(snapshot: MonidSpendSnapshot) {
+    this.monidSpend.set(`${snapshot.userId}:${snapshot.dayKey}`, structuredClone(snapshot));
+  }
+  async saveMonidReceipt(receipt: MonidRunReceipt) {
+    const receipts = this.monidReceipts.get(receipt.userId) ?? [];
+    const previous = receipts.findIndex((item) => item.id === receipt.id);
+    if (previous >= 0) receipts[previous] = structuredClone(receipt);
+    else receipts.unshift(structuredClone(receipt));
+    this.monidReceipts.set(receipt.userId, receipts.slice(0, 200));
+  }
+  async listMonidReceipts(userId: number, limit: number, organizationId?: string) {
+    return (this.monidReceipts.get(userId) ?? []).filter((receipt) => !organizationId || receipt.organizationId === organizationId).slice(0, Math.max(1, Math.min(200, Math.floor(limit)))).map((receipt) => structuredClone(receipt));
   }
   async getRecallMeeting(userId: number, id: string) {
     const record = this.recallMeetings.get(`${userId}:${id}`);
@@ -5743,6 +5792,22 @@ export async function listTregReceipts(userId: number, limit = 50, organizationI
   return backend.listTregReceipts(userId, Math.max(1, Math.min(200, Math.floor(limit))), organizationId);
 }
 
+export async function getMonidSpend(userId: number, dayKey: string): Promise<MonidSpendSnapshot | undefined> {
+  return backend.getMonidSpend(userId, dayKey);
+}
+
+export async function saveMonidSpend(snapshot: MonidSpendSnapshot): Promise<void> {
+  return backend.saveMonidSpend(snapshot);
+}
+
+export async function saveMonidReceipt(receipt: MonidRunReceipt): Promise<void> {
+  return backend.saveMonidReceipt(receipt);
+}
+
+export async function listMonidReceipts(userId: number, limit = 50, organizationId?: string): Promise<MonidRunReceipt[]> {
+  return backend.listMonidReceipts(userId, Math.max(1, Math.min(200, Math.floor(limit))), organizationId);
+}
+
 export async function saveTregOAuthState(userId: number, record: TregOAuthStateRecord): Promise<void> {
   const session = await getSession(userId);
   session.tregOAuthStates = [...(session.tregOAuthStates ?? []).filter((item) => item.stateHash !== record.stateHash), record].slice(-20);
@@ -5815,6 +5880,14 @@ export async function acquireTregSpendLock(userId: number, dayKey: string, token
 
 export async function releaseTregSpendLock(userId: number, dayKey: string, token: string): Promise<void> {
   return backend.releaseKeyLock(`treg-spend:${userId}:${dayKey}`, token);
+}
+
+export async function acquireMonidSpendLock(userId: number, dayKey: string, token: string, leaseSeconds = 15): Promise<boolean> {
+  return backend.acquireKeyLock(`monid-spend:${userId}:${dayKey}`, token, leaseSeconds);
+}
+
+export async function releaseMonidSpendLock(userId: number, dayKey: string, token: string): Promise<void> {
+  return backend.releaseKeyLock(`monid-spend:${userId}:${dayKey}`, token);
 }
 
 /**

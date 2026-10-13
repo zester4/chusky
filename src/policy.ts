@@ -124,6 +124,7 @@ const APPROVAL_NATIVE_TOOLS = new Set([
   "CHUCK_FORGET_MEMORY", "CHUCK_FORGET_IMAGE_ASSET", "CHUCK_SCRATCHPAD_CLEAR", "CHUCK_DAYTONA_SET_FILE_PERMISSIONS",
   "CHUCK_BROWSER_PLAYBOOK_REMOVE", "CHUCK_MEETING_CONTACT_DELETE", "CHUCK_MEETING_TRANSCRIPT_DELETE", "CHUCK_MISSION_COMPENSATE",
   "CHUCK_SHOPPING_REMOVE_SITE", "CHUCK_BROWSER_SESSION_REVOKE", "CHUCK_MEETING_PROFILE_UPDATE",
+  "CHUCK_MONID_RUN",
   // OAuth start/revoke change an external account authorization.
   "CHUCK_TREG_OAUTH_START", "CHUCK_TREG_OAUTH_REVOKE", "CHUCK_LINK_CONNECT", "CHUCK_LINK_WALLET_CONNECT", "CHUCK_LINK_WALLET_DISCONNECT",
 ]);
@@ -135,6 +136,11 @@ const TREG_AUTONOMOUS_TOOLS = new Set([
   "CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_MY_TOOLS",
   "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE",
   "CHUCK_TREG_BALANCE", "CHUCK_TREG_USAGE", "CHUCK_TREG_OAUTH_STATUS", "CHUCK_TREG_OAUTH_CONNECTIONS",
+]);
+
+const MONID_AUTONOMOUS_TOOLS = new Set([
+  "CHUCK_MONID_SEARCH", "CHUCK_MONID_INSPECT", "CHUCK_MONID_RUN_GET", "CHUCK_MONID_RUNS_LIST",
+  "CHUCK_MONID_BALANCE", "CHUCK_MONID_USAGE",
 ]);
 
 /**
@@ -228,6 +234,7 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
   if (slug === "CHUCK_TREG_CALL") return isAutonomousTregCatalogCall(args) ? "private" : "approval_required";
   if (APPROVAL_NATIVE_TOOLS.has(slug)) return "approval_required";
   if (TREG_AUTONOMOUS_TOOLS.has(slug)) return "private";
+  if (MONID_AUTONOMOUS_TOOLS.has(slug)) return "private";
   if (PRIVATE_NATIVE_TOOLS.has(slug) || PRIVATE_COMPOSIO_META_TOOLS.has(slug)) return "private";
   if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") {
     // Batch execution stays autonomous for routine communication/content
@@ -470,6 +477,7 @@ function triggerCriticalToolCall(slug: string, args: Record<string, unknown>, de
 }
 
 export function requiresToolApproval(slug: string, args: Record<string, unknown> = {}, forceApproval = false, ownerPrivateRun = false, triggerRun = false): boolean {
+  if (canonicalPolicySlug(slug) === "CHUCK_MONID_RUN") return true;
   if (triggerRun) return forceApproval || triggerCriticalToolCall(slug, args);
   if (BROWSER_HANDOFF_CONTROL_TOOLS.has(canonicalPolicySlug(slug))) return false;
   if (TINYFISH_AUTONOMOUS_TOOLS.has(canonicalPolicySlug(slug))) return false;
@@ -477,6 +485,7 @@ export function requiresToolApproval(slug: string, args: Record<string, unknown>
   if (BROWSER_AUTONOMOUS_TOOLS.has(canonicalPolicySlug(slug))) return false;
   if (slug === "CHUCK_TREG_CALL" && isAutonomousTregCatalogCall(args)) return false;
   if (TREG_AUTONOMOUS_TOOLS.has(slug)) return false;
+  if (MONID_AUTONOMOUS_TOOLS.has(slug)) return false;
   if (ownerPrivateRun) {
     if (slug.startsWith("MCP_")) {
       const actionValues = [args.action, args.operation, args.command]
@@ -510,6 +519,7 @@ export function requiresToolApproval(slug: string, args: Record<string, unknown>
 
 export function isReadOnlyToolSlug(slug: string): boolean {
   if (slug === "CHUCK_ATTENTION_STATE" || slug === "CHUCK_DAYTONA_FILE_DETAILS") return true;
+  if (MONID_AUTONOMOUS_TOOLS.has(canonicalPolicySlug(slug))) return true;
   if (!slug || RISKY_TOOL_PATTERN.test(slug) || COMPOSIO_WRITE_PATTERN.test(slug) || ADDITIONAL_MUTATING_TOOL_PATTERN.test(slug)) return false;
   return COMPOSIO_READ_ONLY_PATTERN.test(slug);
 }

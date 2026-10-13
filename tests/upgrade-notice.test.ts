@@ -177,6 +177,15 @@ test("TinyFish upgrade preset describes durable research, monitored changes, and
   assert.match(bullets[2], /browser-agent APIs remain excluded/);
 });
 
+test("Muna upgrade preset describes Monid research coverage and its boundaries", () => {
+  const bullets = getAgentUpgradePreset("muna");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.muna]);
+  assert.match(bullets[0], /Monid-focused research specialist/);
+  assert.match(bullets[1], /exact verification states/);
+  assert.match(bullets[2], /does not buy personal contact data/);
+  assert.match(bullets[2], /Monid remains disabled/);
+});
 test("Treg upgrade preset describes live provider data and spend controls", () => {
   const bullets = getAgentUpgradePreset("treg");
   assert.equal(bullets.length, 3);
@@ -235,13 +244,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces live meeting continuity and proactive participation", async () => {
+test("current upgrade manifest announces Muna accurately", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.54.0");
-  assert.equal(notice?.version, "4.54.0");
-  assert.match(notice?.bullets[0] ?? "", /default to proactive copilot participation/);
-  assert.match(notice?.bullets[1] ?? "", /continue after a voice reconnect/);
-  assert.match(notice?.bullets[2] ?? "", /raw live transcript remains transient/);
+  assert.equal(notice?.id, "release-4.55.0");
+  assert.equal(notice?.version, "4.55.0");
+  assert.match(notice?.bullets[0] ?? "", /Added Muna.*Monid-focused research specialist/);
+  assert.match(notice?.bullets[1] ?? "", /exact verification states.*spend/);
+  assert.match(notice?.bullets[2] ?? "", /does not buy personal contact data.*Monid remains disabled/);
 });
 
 test("lead campaign preset describes durable, discovery-first work and bounded enrichment", () => {

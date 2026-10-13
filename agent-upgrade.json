@@ -1,11 +1,11 @@
 {
-  "id": "release-4.54.0",
-  "version": "4.54.0",
+  "id": "release-4.55.0",
+  "version": "4.55.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Personal meeting joins now default to proactive copilot participation; shared rooms continue to use their configured behavior, and owners can still choose addressed-only participation.",
-    "Proactive meetings save a bounded live mission brief of the objective, decisions, open questions, commitments, and next move, then use it to continue after a voice reconnect.",
-    "Owners can review the provisional brief in Meetings; raw live transcript remains transient unless searchable retention is explicitly enabled, and reported commitments are not provider-action receipts."
+    "Added Muna, Chusky's Monid-focused research specialist for qualified business leads, selected contact enrichment, local prospects, company briefs, audience insights, visibility comparisons, creator and video research, and review evidence.",
+    "Muna returns source-linked findings with exact verification states, sample coverage, uncertainty, and spend under Monid approval and budget controls.",
+    "Muna does not buy personal contact data, contact prospects, write CRM records, publish content, or create recurring monitoring; Monid remains disabled until configured and its terms are cleared."
   ],
-  "createdAt": "2026-10-12T01:13:18.161Z"
+  "createdAt": "2026-10-13T00:00:00.000Z"
 }

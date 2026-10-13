@@ -112,6 +112,16 @@ export const AGENT_UPGRADE_PRESETS = {
     "Treg calls use server-only organization credentials, rate limits, atomic owner and mission spend reservations, bounded receipts, response-header settlement, and reusable idempotency keys.",
     "Treg OAuth handoffs keep provider tokens with Treg; authenticated actions stay in connected Composio apps, while empty, ambiguous, stale, or provider-flagged results are handled explicitly before customer-facing or irreversible work.",
   ],
+  monid: [
+    "Added Monid as an optional external API catalog and execution gateway with native discovery, endpoint inspection, bounded runs, status polling, wallet balance, and owner-scoped usage receipts.",
+    "Monid endpoint runs require owner approval; Chusky reserves per-owner and per-mission spend, requires an explicit cap for per-result pricing, and never blindly retries uncertain runs.",
+    "Monid is disabled until a server-side API key is configured. Review Monid's current terms and data handling before enabling it for production or sensitive workloads.",
+  ],
+  muna: [
+    "Added Muna, a Monid-focused research specialist for qualified business leads, selected contact enrichment, local prospects, company briefs, content insights, visibility comparisons, creator and video research, and review evidence.",
+    "Muna returns scoped, source-linked findings with exact verification states, sample coverage, uncertainty, and spend while reusing existing data and staying inside current Monid approval and budget controls.",
+    "Muna does not buy personal contact data, contact prospects, write CRM records, publish content, or create recurring monitoring; Monid remains disabled until configured and its terms are cleared.",
+  ],
   tregLeadSignals: [
     "Owners can create scheduled personal or business lead-signal watches that discover relevant external signal providers through Treg and return evidence-backed candidates.",
     "First-seen signal identities are hashed and persisted per owner/watch, so repeated provider results are suppressed and new signals become private durable observations.",
