@@ -20,6 +20,7 @@ import { browserLiveViewDeliveryConfigured, browserLiveViewUrl, createBrowserLiv
 import { browserMetrics } from "../browser-runtime/metrics.js";
 import { browserRefs } from "../browser-runtime/refs.js";
 import { browserSessionManager } from "../browser-runtime/manager.js";
+import { DedicatedBrowserRuntimeClient } from "../browser-runtime/client.js";
 
 const MAX_OUTPUT = 16_000;
 const MAX_NODES = 60;
@@ -36,6 +37,37 @@ const OWNER_PRIVATE_VISUAL_ACTIONS = new Set([
   "dialog_dismiss", "act", "agent",
 ]);
 const locks = new Map<number, Promise<void>>();
+
+const DEDICATED_RUNTIME_ACTIONS = new Set<E2BBrowserAction>([
+  "start", "stop", "status", "open", "state", "snapshot", "find", "observe", "screenshot", "screenshot_full", "click", "invoke", "fill", "type", "press", "scroll", "select_option", "check", "uncheck", "wait", "stream_start", "stream_status",
+]);
+
+function dedicatedBrowserRuntime(): DedicatedBrowserRuntimeClient | undefined {
+  if (!config.browserRuntimeEnabled) return undefined;
+  if (!config.browserRuntimeUrl || !config.browserRuntimeToken || !config.browserRuntimeOwnerSigningSecret) throw new E2BBrowserError("Dedicated browser runtime is enabled but its URL, token, or owner-signing secret is missing");
+  return new DedicatedBrowserRuntimeClient({ baseUrl: config.browserRuntimeUrl, token: config.browserRuntimeToken, ownerSigningSecret: config.browserRuntimeOwnerSigningSecret, timeoutMs: config.e2bRequestTimeoutMs });
+}
+
+function dedicatedActionKind(action: E2BBrowserAction): string {
+  if (action === "invoke") return "click";
+  if (action === "select_option") return "select";
+  if (action === "uncheck") return "check";
+  if (action === "type") return "fill";
+  if (["click", "fill", "press", "scroll", "check", "wait", "open"].includes(action)) return action;
+  throw new E2BBrowserError(`Dedicated runtime does not support ${action}`);
+}
+
+function dedicatedTarget(observation: Record<string, unknown>, args: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (["open", "scroll", "wait"].includes(String(args.action))) return undefined;
+  const controls = Array.isArray(observation.controls) ? observation.controls as Array<Record<string, unknown>> : [];
+  const nodeId = typeof args.nodeId === "string" ? args.nodeId : undefined;
+  const role = typeof args.role === "string" ? args.role : undefined;
+  const name = typeof args.name === "string" ? args.name : undefined;
+  const index = Number.isSafeInteger(args.index) ? Number(args.index) : undefined;
+  const match = controls.find((control) => (nodeId ? control.nodeId === nodeId : true) && (!role || control.role === role) && (!name || String(control.name).toLowerCase() === name.toLowerCase()) && (index === undefined || control.index === index));
+  if (!match) throw new E2BBrowserError("Dedicated browser control is missing or stale; observe the page and choose a fresh control");
+  return { observationId: observation.observationId, pageGeneration: observation.pageGeneration, frameIndex: match.frameIndex, nodeId: match.nodeId, role: match.role, name: match.name, index: match.index, stable: match.stable, screenshotHash: (observation.screenshot as Record<string, unknown> | undefined)?.hash };
+}
 
 type BrowserStepRecord = Record<string, unknown>;
 
@@ -365,10 +397,70 @@ async function withUserLock<T>(userId: number, operation: () => Promise<T>): Pro
   const current = new Promise<void>((resolve) => { release = resolve; });
   locks.set(userId, current);
   await previous;
-  try { return await (kernelBrowserEnabled() ? withKernelBrowserLease(userId, operation) : operation()); } finally { release(); if (locks.get(userId) === current) locks.delete(userId); }
+  try { return await (!dedicatedBrowserRuntime() && kernelBrowserEnabled() ? withKernelBrowserLease(userId, operation) : operation()); } finally { release(); if (locks.get(userId) === current) locks.delete(userId); }
 }
 
 export class E2BBrowserEngine {
+  private async dedicatedBrowser(userId: number, action: E2BBrowserAction, args: Record<string, unknown>, internal: { ownerPrivateRun?: boolean; ownerApprovedAction?: boolean }): Promise<unknown> {
+    const client = dedicatedBrowserRuntime();
+    if (!client) throw new E2BBrowserError("Dedicated browser runtime is not fully configured");
+    if (!internal.ownerPrivateRun) throw new E2BBrowserError("The dedicated browser runtime is available only in the owner's private conversation");
+    const highImpact = typeof args.vaultAction === "string" && !["browse", "search"].includes(args.vaultAction);
+    if (highImpact && !internal.ownerApprovedAction) throw new E2BBrowserError("This dedicated browser action requires exact owner approval");
+    const ownerScope = String(userId);
+    const session = await getSession(userId);
+    const retained = session.e2bBrowser?.runtime === "dedicated" ? session.e2bBrowser : undefined;
+    let sessionId = typeof args.sessionId === "string" && args.sessionId.trim() ? args.sessionId.trim() : retained?.sessionId;
+    if (action === "start" || (action === "open" && !sessionId)) {
+      const startUrl = typeof args.url === "string" && args.url.trim() ? args.url : "https://example.com";
+      const started = await client.start(ownerScope, { startUrl, ...(typeof args.profileId === "string" ? { profileId: args.profileId } : {}), headful: true, ...(typeof args.region === "string" ? { region: args.region } : {}) });
+      sessionId = boundedText(started.id, "sessionId", 160);
+      await this.saveDedicatedRecord(userId, sessionId, started);
+      return { provider: "dedicated", action, ...started, sessionId };
+    }
+    if (!sessionId) {
+      if (action === "status") return { provider: "dedicated", action, status: "stopped" };
+      throw new E2BBrowserError("No dedicated browser session is active; start the browser first");
+    }
+    if (action === "stop") {
+      const result = await client.stop(ownerScope, sessionId);
+      await this.saveDedicatedRecord(userId, undefined);
+      return { provider: "dedicated", action, ...result, sessionId };
+    }
+    if (action === "status") return { provider: "dedicated", action, ...(await client.session(ownerScope, sessionId)), sessionId };
+    if (action === "stream_start" || action === "stream_status") return { provider: "dedicated", action, ...(await client.liveView(ownerScope, sessionId)), sessionId, private: true };
+    if (action === "state" || action === "snapshot" || action === "observe" || action === "find" || action === "screenshot" || action === "screenshot_full") {
+      const visual = action === "screenshot" || action === "screenshot_full";
+      const observation = await client.observe(ownerScope, sessionId, { screenshot: action === "screenshot_full" ? "full-page" : visual ? "viewport" : "thumbnail", screenshotReason: visual ? "user-request" : "changed", includeFrames: true });
+      if (action === "find") {
+        const role = typeof args.role === "string" ? args.role : undefined;
+        const name = typeof args.name === "string" ? args.name.toLowerCase() : undefined;
+        const controls = Array.isArray(observation.controls) ? observation.controls.filter((item) => (!role || item.role === role) && (!name || String(item.name).toLowerCase().includes(name))).slice(0, 50) : [];
+        return { provider: "dedicated", action, sessionId, ...observation, controls };
+      }
+      return { provider: "dedicated", action, sessionId, ...observation };
+    }
+    const before = await client.observe(ownerScope, sessionId, { screenshot: "thumbnail", screenshotReason: "changed", includeFrames: true });
+    const target = dedicatedTarget(before, args);
+    const request: Record<string, unknown> = { id: String(args.actionId ?? `${action}_${randomUUID()}`), kind: dedicatedActionKind(action), mutation: highImpact ? "consequential" : "read-only", retry: "reobserve-only", ...(target ? { target } : {}) };
+    if (action === "open") Object.assign(request, { kind: "navigate", url: args.url });
+    if (["fill", "select_option"].includes(action)) request.value = args.value ?? args.text;
+    if (action === "press") request.key = args.key ?? args.keys;
+    if (action === "scroll") request.delta = { y: args.direction === "up" ? -Math.abs(Number(args.amount ?? 600)) : Math.abs(Number(args.amount ?? 600)) };
+    const result = await client.action(ownerScope, sessionId, request);
+    await this.saveDedicatedRecord(userId, sessionId, result);
+    return { provider: "dedicated", action, sessionId, ...result };
+  }
+
+  private async saveDedicatedRecord(userId: number, sessionId: string | undefined, result?: Record<string, unknown>): Promise<void> {
+    const session = await getSession(userId);
+    if (!sessionId) { session.e2bBrowser = undefined; await saveSession(userId, session); return; }
+    const now = Date.now();
+    const prior = session.e2bBrowser;
+    session.e2bBrowser = { sandboxId: "dedicated-runtime", runtime: "dedicated", sessionId, createdAt: prior?.createdAt ?? now, updatedAt: now, expiresAt: now + 24 * 60 * 60_000, ...(typeof result?.url === "string" ? { lastUrl: result.url } : prior?.lastUrl ? { lastUrl: prior.lastUrl } : {}), ...(typeof result?.title === "string" ? { title: result.title } : prior?.title ? { title: prior.title } : {}) };
+    await saveSession(userId, session);
+  }
+
   private async managedAuth(userId: number, action: string, args: Record<string, unknown>, ownerPrivateRun: boolean): Promise<unknown> {
     if (!ownerPrivateRun || !kernelBrowserEnabled()) throw new E2BBrowserError("Managed browser authentication requires Kernel and an owner-private conversation");
     if (Object.keys(args).some(key => /password|secret|cookie|token|username|credential|otp/i.test(key))) throw new E2BBrowserError("Managed auth accepts only website metadata; enter credentials through the private hosted form");
@@ -830,6 +922,11 @@ export class E2BBrowserEngine {
       await this.purgeExpiredBrowserFiles(userId);
       const action = safeAction(args.action);
       if (action.startsWith("auth_")) return this.managedAuth(userId, action, args, internal.ownerPrivateRun === true);
+      const dedicated = dedicatedBrowserRuntime();
+      if (dedicated) {
+        if (!DEDICATED_RUNTIME_ACTIONS.has(action)) throw new E2BBrowserError(`Dedicated runtime does not support ${action} through CHUCK_BROWSER yet`);
+        return this.dedicatedBrowser(userId, action, args, internal);
+      }
       if (kernelBrowserEnabled() && !internal.ownerPrivateRun) throw new E2BBrowserError("Kernel browser profiles are available only in the owner's private conversation");
       const commandTimeoutMs = resolveE2BBrowserCommandTimeout(args.timeoutMs, config.e2bRequestTimeoutMs);
       if (["clipboard_read", "clipboard_write"].includes(action)) {

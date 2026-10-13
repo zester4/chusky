@@ -39,3 +39,9 @@ RUN chrome_path="$(find /home/chusky/.agent-browser/browsers -type f -name chrom
 
 USER chusky
 ENV CHUSKY_BROWSER_EXECUTABLE_PATH=/usr/local/bin/chrome-for-testing
+
+# E2B's public port proxy only exposes declared template ports. The dedicated
+# browser runtime attaches over CDP and can optionally return the owner-only
+# noVNC live view, while the existing Chusky browser agent continues to use its
+# internal command port.
+EXPOSE 9222 6080 8765

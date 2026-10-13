@@ -883,6 +883,21 @@ browser or printing credentials. After rebuilding and setting the Kernel key,
 verifies the remote observation/live-view path, and closes its browser, controller
 and test profile. It does not test CAPTCHA success or a real user's login.
 
+### Dedicated Chusky browser runtime (opt-in)
+
+The standalone [`chusky-browser`](https://github.com/zester4/chusky-browser)
+service can be selected with `CHUSKY_BROWSER_RUNTIME_MODE=dedicated`. Chusky's
+`CHUCK_BROWSER` tool then signs owner-scoped requests to that runtime while the
+existing E2B/Kernel path remains the default fallback. The service owns the
+provider-neutral session manager, reconnectable Redis/Neon leases, fresh
+observation refs, metrics, rate limits, encrypted profile envelopes, and
+owner-only live-view/challenge handoff endpoints; it never returns raw CDP URLs.
+Set `CHUSKY_BROWSER_RUNTIME_URL`, `CHUSKY_BROWSER_RUNTIME_TOKEN`, and the
+matching `CHUSKY_BROWSER_RUNTIME_OWNER_SIGNING_SECRET` only after the dedicated
+service is deployed over HTTPS. E2B auto-provisioning still requires the E2B
+template to expose its configured CDP port (`9222` by default); rebuild the
+template after the committed Docker `EXPOSE 9222 6080 8765` change.
+
 ### E2B automated browser
 
 When `E2B_ENABLED=true`, `CHUCK_BROWSER` routes normal browser actions through the

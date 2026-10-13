@@ -417,6 +417,11 @@ export const config = {
   e2bBrowserGeolocation: optional("E2B_BROWSER_GEOLOCATION", ""),
   e2bTimeoutMs: boundedInt("E2B_TIMEOUT_MS", 900_000, 60_000, 86_400_000),
   e2bRequestTimeoutMs: boundedInt("E2B_REQUEST_TIMEOUT_MS", 120_000, 5_000, 300_000),
+  /** Optional dedicated chusky-browser service. Existing E2B remains the default. */
+  browserRuntimeUrl: optional("CHUSKY_BROWSER_RUNTIME_URL", ""),
+  browserRuntimeToken: optional("CHUSKY_BROWSER_RUNTIME_TOKEN", ""),
+  browserRuntimeOwnerSigningSecret: optional("CHUSKY_BROWSER_RUNTIME_OWNER_SIGNING_SECRET", ""),
+  browserRuntimeEnabled: optional("CHUSKY_BROWSER_RUNTIME_MODE", "off").toLowerCase() === "dedicated",
   // Cloudflare Web Bot Auth identity; the private key is used only by the
   // trusted E2B browser process and never enters page or model context.
   webBotAuthEnabled: optional("WEB_BOT_AUTH_ENABLED", "false") === "true",
