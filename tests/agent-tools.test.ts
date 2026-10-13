@@ -116,9 +116,11 @@ test("task creation gives an actionable correction when an existing task ID is p
 
 test("Treg exposes bounded intelligence tools without exposing a provider catalog", () => {
   const names = new Set(chuckTools.map((tool) => tool.function.name));
-  for (const name of ["CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_MY_TOOLS", "CHUCK_TREG_CALL", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE", "CHUCK_TREG_BALANCE", "CHUCK_TREG_USAGE", "CHUCK_TREG_OAUTH_START", "CHUCK_TREG_OAUTH_STATUS", "CHUCK_TREG_OAUTH_CONNECTIONS", "CHUCK_TREG_OAUTH_REVOKE"]) assert.equal(names.has(name), true, name);
+  for (const name of ["CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_MY_TOOLS", "CHUCK_TREG_CALL", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_COMPANY_JOBS_SEARCH", "CHUCK_TREG_RESOLVE", "CHUCK_TREG_BALANCE", "CHUCK_TREG_USAGE", "CHUCK_TREG_OAUTH_START", "CHUCK_TREG_OAUTH_STATUS", "CHUCK_TREG_OAUTH_CONNECTIONS", "CHUCK_TREG_OAUTH_REVOKE"]) assert.equal(names.has(name), true, name);
   validateNativeToolArguments("CHUCK_TREG_SEARCH", { q: "find company revenue", limit: 5 });
   validateNativeToolArguments("CHUCK_TREG_RESOLVE", { need: "Find the company domain", maxCalls: 2, maxSpendUsd: 0.2 });
+  validateNativeToolArguments("CHUCK_TREG_COMPANY_JOBS_SEARCH", { domain: "example.com", limit: 5, maxSpendUsd: 0.05 });
+  assert.match(chuckTools.find((tool) => tool.function.name === "CHUCK_TREG_RESOLVE")?.function.description ?? "", /Muna.*GET, HEAD, or OPTIONS.*at most once/);
   assert.throws(() => validateNativeToolArguments("CHUCK_TREG_SEARCH", { q: "x" }), /at least 2/i);
   assert.deepEqual(chuckTools.find((tool) => tool.function.name === "CHUCK_TREG_CALL")?.function.parameters.properties.method.enum, ["GET", "POST", "PUT", "PATCH", "DELETE"]);
   validateNativeToolArguments("CHUCK_TREG_USAGE", { dayKey: "2026-09-27", limit: 10 });
@@ -225,7 +227,8 @@ test("delegation tools expose every business workflow specialist", () => {
   const expected = ["nora", "lucas", "maya", "leo", "sofia", "dexter", "elena", "ivy", "quinn", "aria", "kai", "muna"];
   assert.deepEqual(delegate?.function.parameters.properties.worker.enum, expected);
   assert.deepEqual(handoff?.function.parameters.properties.targetWorker.enum, expected);
-  assert.match(delegate?.function.description ?? "", /Muna.*Monid-backed business data research/);
+  assert.match(delegate?.function.description ?? "", /Muna.*Treg-first business and data research.*Monid is her optional fallback/);
+  assert.match(handoff?.function.description ?? "", /Muna for Treg-first business and data research.*Elena for durable tasks and recurring signal watches/);
 });
 
 test("Recall meeting tools require explicit join details and expose owner-scoped controls", () => {

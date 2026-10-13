@@ -132,6 +132,20 @@ class RecallHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved.stt_eot_timeout_ms, 1200)
         self.assertEqual(resolved.turn_start_budget_ms, 9000)
 
+    def test_flux_tts_expressivity_is_shared_by_meetings(self):
+        env = {
+            "RECALL_MEETINGS_ENABLED": "true",
+            "RECALL_MEDIA_BRIDGE_SECRET": "b" * 32,
+            "DEEPGRAM_API_KEY": "deepgram-test",
+            "CHUSKY_RECALL_TURN_STREAM_URL": "https://chusky.test/turn",
+            "CHUSKY_RECALL_COMMIT_TURN_URL": "https://chusky.test/commit",
+            "CHUSKY_RECALL_MEDIA_AUTHORIZE_URL": "https://chusky.test/authorize",
+            "VOICE_TTS_EXPRESSIVITY": "+1",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            resolved = voice_app.RecallSettings.from_env()
+        self.assertEqual(resolved.tts_expressivity, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

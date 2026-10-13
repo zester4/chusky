@@ -89,7 +89,8 @@ test("declares the intended worker-to-skill map", () => {
   assert.ok(WORKER_CAPABILITIES.quinn.skills.primary.includes("customer-research"));
   assert.ok(WORKER_CAPABILITIES.aria.skills.primary.includes("meeting-pro"));
   assert.ok(WORKER_CAPABILITIES.kai.skills.primary.includes("research-pro"));
-  assert.deepEqual(WORKER_CAPABILITIES.muna.skills.primary, ["monid"]);
+  assert.deepEqual(WORKER_CAPABILITIES.muna.skills.primary, ["lead-intel-pro"]);
+  assert.deepEqual(WORKER_CAPABILITIES.muna.skills.supporting, ["monid"]);
 });
 
 test("routes business workflow objectives to their owning specialists", () => {
@@ -98,6 +99,10 @@ test("routes business workflow objectives to their owning specialists", () => {
   assert.deepEqual(classifyDelegationObjective("run customer onboarding and identify churn risk"), ["aria"]);
   assert.deepEqual(classifyDelegationObjective("prepare the weekly KPI report and flag anomalies"), ["kai"]);
   assert.deepEqual(classifyDelegationObjective("Use Monid to find verified work emails for sales leaders at target companies"), ["muna"]);
+  assert.deepEqual(classifyDelegationObjective("Use Treg people search to find qualified buyers at target companies"), ["muna"]);
+  assert.deepEqual(classifyDelegationObjective("Enrich the qualified lead list with current work-email and company data"), ["muna"]);
+  assert.deepEqual(classifyDelegationObjective("Find recent buying-intent signals for target accounts"), ["muna"]);
+  assert.deepEqual(classifyDelegationObjective("Set up a recurring buying intent signal watch for target accounts"), ["muna", "elena"]);
   assert.deepEqual(classifyDelegationObjective("Find sales leads in the healthcare market for our new service"), ["muna"]);
   assert.deepEqual(classifyDelegationObjective("Find local businesses that fit my web design services and cite website evidence"), ["muna"]);
   assert.deepEqual(classifyDelegationObjective("Prepare a sourced company partnership brief with recent developments"), ["muna"]);
@@ -111,21 +116,61 @@ test("routes business workflow objectives to their owning specialists", () => {
   assert.deepEqual(classifyDelegationObjective("Research the latest evidence about a scientific question"), ["nora"]);
 });
 
-test("Muna has only Monid and read-only public evidence tools with strict research instructions", () => {
+test("Muna has bounded Treg and Monid research tools with strict business-data instructions", () => {
   const muna = WORKER_CAPABILITIES.muna;
+  const tregTools = ["CHUCK_TREG_SEARCH", "CHUCK_TREG_PEOPLE_SEARCH", "CHUCK_TREG_COMPANY_SEARCH", "CHUCK_TREG_COMPANY_JOBS_SEARCH", "CHUCK_TREG_EMAIL_VERIFY", "CHUCK_TREG_CALL_STATUS", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE"];
+  for (const tool of tregTools) {
+    assert.ok(muna.allowedTools.includes(tool), `${tool} must be available to Muna`);
+    assert.ok(chuckTools.some((candidate) => candidate.function.name === tool), `${tool} must have a native schema`);
+  }
   for (const tool of ["CHUCK_MONID_SEARCH", "CHUCK_MONID_INSPECT", "CHUCK_MONID_RUN", "CHUCK_MONID_RUN_GET", "CHUCK_MONID_RUNS_LIST", "CHUCK_MONID_BALANCE", "CHUCK_MONID_USAGE", "CHUCK_TINYFISH_SEARCH", "CHUCK_TINYFISH_FETCH"]) {
     assert.ok(muna.allowedTools.includes(tool), `${tool} must be available to Muna`);
   }
-  for (const tool of ["CHUCK_CREATE_TRIGGER", "CHUCK_SCHEDULE_JOB", "CHUCK_TASK_CREATE", "CHUCK_EMAIL_ARTIFACT", "CHUCK_BROWSER", "CHUCK_MISSION_CREATE"]) {
+  for (const tool of ["CHUCK_TREG_CALL", "CHUCK_TREG_MY_TOOLS", "CHUCK_TREG_BALANCE", "CHUCK_TREG_USAGE", "CHUCK_TREG_OAUTH_START", "CHUCK_TREG_OAUTH_REVOKE", "CHUCK_CREATE_TRIGGER", "CHUCK_SCHEDULE_JOB", "CHUCK_TASK_CREATE", "CHUCK_EMAIL_ARTIFACT", "CHUCK_BROWSER", "CHUCK_MISSION_CREATE"]) {
     assert.equal(muna.allowedTools.includes(tool), false, `${tool} must not be available to Muna`);
   }
   assert.deepEqual(muna.allowedComposioPrefixes, []);
   assert.deepEqual(muna.allowedMemoryCategories, ["business", "project", "procedural"]);
-  assert.match(muna.systemPrompt, /verification state/i);
+  assert.match(muna.systemPrompt, /Treg-first Business and Data Intelligence Specialist/i);
+  assert.match(muna.systemPrompt, /Keep verified, catch-all, unknown, invalid, and no-match email outcomes distinct/i);
   assert.match(muna.systemPrompt, /actual spend/i);
+  assert.match(muna.systemPrompt, /not proof of a confirmed purchase/i);
   assert.match(muna.systemPrompt, /contact people or businesses/i);
   assert.match(muna.systemPrompt, /not a hard provider spend ceiling/i);
   assert.match(muna.systemPrompt, /monitoring/i);
+});
+
+test("delegates Treg business research to Muna with only the selected bounded tools", async () => {
+  const userId = 991020;
+  const previousApiKey = config.openRouterApiKey;
+  let visibleToolNames: string[] = [];
+  config.openRouterApiKey = "test-openrouter-key";
+  setSubagentExecutorDependenciesForTests({
+    chat: async (_model, _messages, tools) => {
+      visibleToolNames = tools.map((tool: any) => tool.function.name);
+      return { choices: [{ message: { role: "assistant", content: "I found source-backed buying-signal evidence." }, finish_reason: "stop" }] } as any;
+    },
+  });
+  try {
+    const result = await executeDelegation(userId, {
+      worker: "muna",
+      objective: "Find buying intent signals for target accounts and relevant decision makers",
+    allowedTools: ["CHUCK_TREG_COMPANY_SEARCH", "CHUCK_TREG_COMPANY_JOBS_SEARCH", "CHUCK_TREG_PEOPLE_SEARCH", "CHUCK_TREG_RESOLVE", "CHUCK_TREG_CALL_STATUS"],
+    });
+    assert.equal(result.status, "success");
+    assert.deepEqual(visibleToolNames.sort(), ["CHUCK_TREG_CALL_STATUS", "CHUCK_TREG_COMPANY_JOBS_SEARCH", "CHUCK_TREG_COMPANY_SEARCH", "CHUCK_TREG_PEOPLE_SEARCH", "CHUCK_TREG_RESOLVE"]);
+    await assert.rejects(
+      () => executeDelegation(userId, {
+        worker: "muna",
+        objective: "Find buying intent signals for target accounts",
+        allowedTools: ["CHUCK_TREG_CALL"],
+      }),
+      /not permitted for worker capability 'muna'/,
+    );
+  } finally {
+    config.openRouterApiKey = previousApiKey;
+    setSubagentExecutorDependenciesForTests();
+  }
 });
 
 test("keeps business workers inside their intended connected-app families", () => {

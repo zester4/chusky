@@ -97,10 +97,17 @@ export const WORKER_SKILL_BINDINGS: Record<Exclude<CapabilityWorkerName, "chusky
       },
     },
   muna: {
-      primary: ["monid"],
-      supporting: [],
+      primary: ["lead-intel-pro"],
+      supporting: ["monid"],
       requiredReferences: {
-        monid: ["references/lead-sourcing.md", "references/local-prospects.md", "references/research-briefs.md"],
+        "lead-intel-pro": [
+          "references/05-treg-tooling.md",
+          "references/01-enrichment-playbook.md",
+          "references/02-lead-qualification.md",
+          "references/03-icp-and-scoring.md",
+          "references/06-never-dos.md",
+        ],
+        monid: ["references/research-briefs.md"],
       },
     },
 };

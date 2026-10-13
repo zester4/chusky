@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { config } from "../config.js";
-import type { TregCallReceipt, TregCategory, TregEndpointHit, TregEvidenceBundle, TregEvidenceItem, TregOAuthConnection, TregOwnTool, TregPlatformOption } from "./types.js";
+import type { TregCallReceipt, TregCategory, TregCompanyJobResult, TregCompanySearchResult, TregEndpointHit, TregEvidenceBundle, TregEvidenceItem, TregOAuthConnection, TregOwnTool, TregPersonSearchResult, TregPlatformOption } from "./types.js";
 import type { TregSpendGuard } from "./spend.js";
 import type { TregEndpointJudge } from "../decisions/tregRouter.js";
 
@@ -88,6 +88,7 @@ function normalizeHit(raw: unknown): TregEndpointHit {
     title: String(row.title ?? row.name ?? id).slice(0, 240),
     provider: String(row.provider ?? row.platform ?? "unknown").slice(0, 120),
     category: mapCategory(row),
+    ...(typeof row.method === "string" && row.method.trim() ? { method: row.method.trim().toUpperCase().slice(0, 16) } : {}),
     priceUsd: numberOrUndefined(row.price_usd ?? row.price ?? row.unit_price ?? cost.usd ?? cost.value),
     priceUnit: row.price_unit === "call" || row.price_unit === "result" || row.price_unit === "row" ? row.price_unit : "unknown",
     successRate: numberOrUndefined(row.success_rate ?? observed.ok_rate),
@@ -155,6 +156,18 @@ function evidenceValue(value: unknown): string | number | boolean | null {
   return (JSON.stringify(value) ?? String(value)).slice(0, 2000);
 }
 
+function sanitizeProviderResult(value: unknown, depth = 0): unknown {
+  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "string") return value.slice(0, 4000);
+  if (depth >= 5) return "[nested result omitted]";
+  if (Array.isArray(value)) return value.slice(0, 25).map((item) => sanitizeProviderResult(item, depth + 1));
+  if (!isObject(value)) return undefined;
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => !/(?:secret|token|password|authorization|credential|api[_-]?key)/i.test(key))
+    .slice(0, 50)
+    .map(([key, item]) => [key.slice(0, 120), sanitizeProviderResult(item, depth + 1)]));
+}
+
 function providerScore(row: Record<string, unknown>): number | undefined {
   for (const key of ["provider_score", "match_score", "confidence", "confidence_score", "match_confidence"]) {
     const value = row[key];
@@ -186,17 +199,109 @@ function providerPayload(result: unknown): unknown {
   return result;
 }
 
+function httpsUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length > 2000) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password ? url.toString() : undefined;
+  } catch { return undefined; }
+}
+
+function resultRows(result: unknown, keys: string[]): JsonObject[] {
+  const payload = providerPayload(result);
+  const rows = Array.isArray(payload) ? payload : isObject(payload)
+    ? keys.map((key) => payload[key]).find(Array.isArray) as unknown[] | undefined
+    : undefined;
+  return (rows ?? []).filter(isObject).slice(0, 25);
+}
+
+function sourceUrls(row: JsonObject): string[] | undefined {
+  const values = [row.source_url, row.url, ...(Array.isArray(row.source_urls) ? row.source_urls : []), ...(Array.isArray(row.sources) ? row.sources : [])];
+  const urls = [...new Set(values.map(httpsUrl).filter((value): value is string => Boolean(value)))].slice(0, 5);
+  return urls.length ? urls : undefined;
+}
+
+function routeMetadata(result: unknown): { servedBy?: string; tried?: string[]; ignoredFilters?: string[]; pending: boolean } {
+  const payload = isObject(result) ? result : {};
+  const route = isObject(payload._treg) ? payload._treg : {};
+  return {
+    ...(typeof route.served_by === "string" ? { servedBy: route.served_by.slice(0, 120) } : {}),
+    ...(Array.isArray(route.tried) ? { tried: route.tried.filter((item): item is string => typeof item === "string").slice(0, 20).map((item) => item.slice(0, 120)) } : {}),
+    ...(Array.isArray(route.ignored_filters) ? { ignoredFilters: route.ignored_filters.filter((item): item is string => typeof item === "string").slice(0, 20).map((item) => item.slice(0, 120)) } : {}),
+    pending: route.outcome === "pending" || payload.outcome === "pending",
+  };
+}
+
+function normalizePersonSearchRow(row: JsonObject): TregPersonSearchResult {
+  const verified = row.email_verified ?? row.verified;
+  const status = row.email_verification_status ?? row.verification_status ?? row.email_status;
+  const normalizedStatus = typeof status === "string" ? status.toLowerCase() : "";
+  const emailVerified = typeof verified === "boolean" ? verified
+    : ["verified", "valid", "deliverable"].includes(normalizedStatus) ? true
+      : ["invalid", "undeliverable", "bounced"].includes(normalizedStatus) ? false
+        : undefined;
+  const employeeEmail = row.email ?? row.work_email;
+  const score = providerScore(row);
+  return {
+    ...(typeof (row.full_name ?? row.name) === "string" ? { fullName: String(row.full_name ?? row.name).slice(0, 240) } : {}),
+    ...(typeof (row.title ?? row.job_title ?? row.headline) === "string" ? { title: String(row.title ?? row.job_title ?? row.headline).slice(0, 240) } : {}),
+    ...(typeof (row.company ?? row.company_name ?? row.organization) === "string" ? { company: String(row.company ?? row.company_name ?? row.organization).slice(0, 240) } : {}),
+    ...(typeof (row.domain ?? row.company_domain) === "string" ? { domain: String(row.domain ?? row.company_domain).slice(0, 240) } : {}),
+    ...(httpsUrl(row.linkedin_url ?? row.profile_url ?? row.linkedin) ? { linkedinUrl: httpsUrl(row.linkedin_url ?? row.profile_url ?? row.linkedin) } : {}),
+    ...(typeof (row.location ?? row.country) === "string" ? { location: String(row.location ?? row.country).slice(0, 160) } : {}),
+    ...(typeof employeeEmail === "string" && employeeEmail.includes("@") ? { email: employeeEmail.slice(0, 320), ...(typeof status === "string" ? { emailVerificationStatus: status.slice(0, 80) } : {}), ...(emailVerified === undefined ? {} : { emailVerified }) } : {}),
+    ...(sourceUrls(row) ? { sourceUrls: sourceUrls(row) } : {}),
+    ...(score === undefined ? {} : { providerScore: score }),
+  };
+}
+
+function normalizeCompanySearchRow(row: JsonObject): TregCompanySearchResult {
+  const count = numberOrUndefined(row.employee_count ?? row.employees);
+  const score = providerScore(row);
+  return {
+    ...(typeof (row.name ?? row.company ?? row.company_name) === "string" ? { name: String(row.name ?? row.company ?? row.company_name).slice(0, 240) } : {}),
+    ...(typeof (row.domain ?? row.website) === "string" ? { domain: String(row.domain ?? row.website).slice(0, 240) } : {}),
+    ...(typeof row.industry === "string" ? { industry: row.industry.slice(0, 200) } : {}),
+    ...(count !== undefined && Number.isSafeInteger(count) && count >= 0 ? { employeeCount: count } : {}),
+    ...(typeof (row.location ?? row.country) === "string" ? { location: String(row.location ?? row.country).slice(0, 160) } : {}),
+    ...(typeof row.description === "string" ? { description: row.description.slice(0, 1000) } : {}),
+    ...(sourceUrls(row) ? { sourceUrls: sourceUrls(row) } : {}),
+    ...(score === undefined ? {} : { providerScore: score }),
+  };
+}
+
+function normalizeCompanyJobRow(row: JsonObject): TregCompanyJobResult {
+  const jobUrl = httpsUrl(row.job_url ?? row.url ?? row.apply_url);
+  const urls = sourceUrls(row) ?? (jobUrl ? [jobUrl] : undefined);
+  const score = providerScore(row);
+  return {
+    signalType: "hiring",
+    ...(typeof (row.company_name ?? row.company ?? row.organization) === "string" ? { companyName: String(row.company_name ?? row.company ?? row.organization).slice(0, 240) } : {}),
+    ...(typeof (row.company_domain ?? row.domain) === "string" ? { companyDomain: String(row.company_domain ?? row.domain).slice(0, 240) } : {}),
+    ...(typeof (row.title ?? row.job_title ?? row.position) === "string" ? { title: String(row.title ?? row.job_title ?? row.position).slice(0, 240) } : {}),
+    ...(typeof (row.location ?? row.location_name ?? row.country) === "string" ? { location: String(row.location ?? row.location_name ?? row.country).slice(0, 160) } : {}),
+    ...(typeof (row.posted_at ?? row.date_posted ?? row.created_at) === "string" ? { postedAt: String(row.posted_at ?? row.date_posted ?? row.created_at).slice(0, 80) } : {}),
+    ...(jobUrl ? { jobUrl } : {}),
+    ...(urls ? { sourceUrls: urls } : {}),
+    ...(typeof row.description === "string" ? { description: row.description.slice(0, 1000) } : {}),
+    ...(score === undefined ? {} : { providerScore: score }),
+  };
+}
+
 function normalizePersonPayload(result: unknown, hit: TregEndpointHit): TregEvidenceItem[] {
   const payload = providerPayload(result);
   const row = isObject(payload) ? payload : {};
   const score = providerScore(row);
   const items = [
     evidence("email", row.email ?? row.work_email ?? row.value, hit, score),
+    evidence("email_verified", row.email_verified ?? row.verified, hit, score),
+    evidence("email_verification_status", row.email_verification_status ?? row.verification_status ?? row.email_status, hit, score),
     evidence("full_name", row.name ?? row.full_name, hit, score),
     evidence("title", row.title ?? row.job_title, hit, score),
     evidence("linkedin_url", row.linkedin ?? row.linkedin_url, hit, score),
     evidence("company", row.company ?? row.organization, hit, score),
     evidence("domain", row.domain, hit, score),
+    evidence("source_url", httpsUrl(row.source_url ?? row.url), hit, score),
   ].filter((item): item is TregEvidenceItem => Boolean(item));
   if (!items.length && result !== null && typeof result === "object") {
     const raw = evidence("raw", result, hit, score);
@@ -299,7 +404,7 @@ export class TregGateway {
     return { token, tregOrgId: scoped?.tregOrgId };
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, query?: Record<string, string | number | undefined>, idempotencyKey?: string, organizationId?: string): Promise<{ data: T; status: number; durationMs: number; meta: { callId?: string; costUsd?: number; replayed?: boolean; servedVia?: string } }> {
+  private async request<T>(method: string, path: string, body?: unknown, query?: Record<string, string | number | undefined>, idempotencyKey?: string, organizationId?: string, tregRoute?: { maxCostUsd?: number; verify?: boolean }): Promise<{ data: T; status: number; durationMs: number; meta: { callId?: string; costUsd?: number; replayed?: boolean; servedVia?: string; servedBy?: string } }> {
     const upper = method.toUpperCase();
     const url = new URL(this.base + path);
     for (const [key, value] of Object.entries(query ?? {})) if (value !== undefined && value !== "") url.searchParams.set(key, String(value));
@@ -313,7 +418,7 @@ export class TregGateway {
       try {
         const response = await this.fetcher(url.toString(), {
           method: upper,
-          headers: { accept: "application/json", "content-type": "application/json", "X-Treg-Token": credential.token, ...(credential.tregOrgId ? { "x-treg-org": credential.tregOrgId } : {}), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) },
+          headers: { accept: "application/json", "content-type": "application/json", "X-Treg-Token": credential.token, ...(credential.tregOrgId ? { "x-treg-org": credential.tregOrgId } : {}), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}), ...(tregRoute?.maxCostUsd !== undefined ? { "X-Treg-Route-Max-Cost": tregRoute.maxCostUsd.toFixed(6) } : {}), ...(tregRoute?.verify ? { "X-Treg-Route-Verify": "true" } : {}) },
           body: body === undefined ? undefined : JSON.stringify(body),
           signal: controller.signal,
         });
@@ -352,6 +457,7 @@ export class TregGateway {
             ...(costMicro !== undefined ? { costUsd: costMicro / 1_000_000 } : {}),
             ...(response.headers.get("X-Treg-Idempotent-Replay") === "true" ? { replayed: true } : {}),
             ...(response.headers.get("X-Treg-Served-Via") ? { servedVia: response.headers.get("X-Treg-Served-Via") ?? undefined } : {}),
+            ...(response.headers.get("X-Treg-Served-By") ? { servedBy: response.headers.get("X-Treg-Served-By") ?? undefined } : {}),
           },
         };
       } catch (error) {
@@ -388,6 +494,134 @@ export class TregGateway {
   async myTools(organizationId?: string): Promise<TregOwnTool[]> {
     const result = await this.request<unknown>("GET", "/tools", undefined, undefined, undefined, organizationId);
     return payloadRows(result.data).map(normalizeOwnTool).filter((item): item is TregOwnTool => Boolean(item)).slice(0, 100);
+  }
+
+  async searchPeople(options: { userId: number; query?: string; companyDomain?: string; title?: string; country?: string; limit?: number; missionId?: string; maxSpendUsd?: number; organizationId?: string }): Promise<{ query: string; people: TregPersonSearchResult[]; endpoint: string; callId: string; servedBy?: string; tried?: string[]; totalCostUsd: number; warnings: string[]; incomplete: boolean; generatedAt: string }> {
+    const endpoint = "treg.people.search";
+    const query = [options.query, options.companyDomain ? `company domain ${options.companyDomain}` : "", options.title ? `title ${options.title}` : "", options.country ? `country ${options.country}` : ""].filter(Boolean).join("; ").slice(0, 1000);
+    if (!query) throw new Error("Provide a people-search description, company domain, job title, or country.");
+    const maxSpendUsd = options.maxSpendUsd ?? config.tregPerCallSoftCapUsd;
+    const limit = Math.max(1, Math.min(25, Math.floor(options.limit ?? 10)));
+    await this.getEndpoint(endpoint, options.organizationId);
+    const body = { ...(options.query ? { query: options.query.slice(0, 800) } : {}), ...(options.companyDomain ? { company_domain: options.companyDomain.slice(0, 240) } : {}), ...(options.title ? { title: options.title.slice(0, 240) } : {}), ...(options.country ? { country: options.country.slice(0, 120) } : {}), limit };
+    const response = await this.call({ userId: options.userId, endpointId: endpoint, method: "POST", body, missionId: options.missionId, organizationId: options.organizationId, estimateUsd: maxSpendUsd, routeMaxCostUsd: maxSpendUsd });
+    const route = routeMetadata(response.result);
+    const people = resultRows(response.result, ["people", "results", "items"]).map(normalizePersonSearchRow);
+    const warnings = [
+      ...(route.pending || response.receipt.pending ? ["Treg is still processing this search. Do not retry it yet; inspect the existing Treg call before starting another search."] : []),
+      ...(route.ignoredFilters?.length || response.receipt.ignoredFilters?.length ? [`Treg reports filters it could not apply: ${(route.ignoredFilters ?? response.receipt.ignoredFilters ?? []).join(", ")}. Review returned rows against the requested constraints.`] : []),
+      ...(response.receipt.costIsEstimate ? ["No confirmed charge was included; displayed cost is the locally reserved estimate."] : []),
+      ...(people.some((person) => person.email && person.emailVerified !== true) ? ["Email addresses without explicit verified status are not treated as verified; verify before outreach."] : []),
+      ...(!people.length && !route.pending && !response.receipt.pending ? ["No people matched the routed search inputs."] : []),
+    ];
+    return { query, people, endpoint, callId: response.receipt.callId, ...(route.servedBy || response.receipt.servedBy ? { servedBy: route.servedBy ?? response.receipt.servedBy } : {}), ...((route.tried ?? response.receipt.routeTried)?.length ? { tried: route.tried ?? response.receipt.routeTried } : {}), totalCostUsd: response.receipt.costUsd, warnings, incomplete: route.pending || response.receipt.pending === true || Boolean(route.ignoredFilters?.length || response.receipt.ignoredFilters?.length), generatedAt: new Date().toISOString() };
+  }
+
+  async searchCompanies(options: { userId: number; query?: string; name?: string; domain?: string; industry?: string; technology?: string; country?: string; limit?: number; missionId?: string; maxSpendUsd?: number; organizationId?: string }): Promise<{ query: string; companies: TregCompanySearchResult[]; endpoint: string; callId: string; servedBy?: string; tried?: string[]; totalCostUsd: number; warnings: string[]; incomplete: boolean; generatedAt: string }> {
+    const endpoint = "treg.companies.search";
+    const query = [options.query, options.name ? `company ${options.name}` : "", options.domain ? `domain ${options.domain}` : "", options.industry ? `industry ${options.industry}` : "", options.technology ? `technology ${options.technology}` : "", options.country ? `country ${options.country}` : ""].filter(Boolean).join("; ").slice(0, 1000);
+    if (!query) throw new Error("Provide a company-search description, company name, domain, industry, or technology.");
+    const maxSpendUsd = options.maxSpendUsd ?? config.tregPerCallSoftCapUsd;
+    const limit = Math.max(1, Math.min(25, Math.floor(options.limit ?? 10)));
+    await this.getEndpoint(endpoint, options.organizationId);
+    const body = { ...(options.query ? { query: options.query.slice(0, 800) } : {}), ...(options.name ? { name: options.name.slice(0, 240) } : {}), ...(options.domain ? { domain: options.domain.slice(0, 240) } : {}), ...(options.industry ? { industry: options.industry.slice(0, 200) } : {}), ...(options.technology ? { technology: options.technology.slice(0, 160) } : {}), ...(options.country ? { country: options.country.slice(0, 120) } : {}), limit };
+    const response = await this.call({ userId: options.userId, endpointId: endpoint, method: "POST", body, missionId: options.missionId, organizationId: options.organizationId, estimateUsd: maxSpendUsd, routeMaxCostUsd: maxSpendUsd });
+    const route = routeMetadata(response.result);
+    const companies = resultRows(response.result, ["companies", "results", "items"]).map(normalizeCompanySearchRow);
+    const warnings = [
+      ...(route.pending || response.receipt.pending ? ["Treg is still processing this search. Do not retry it yet; inspect the existing Treg call before starting another search."] : []),
+      ...(route.ignoredFilters?.length || response.receipt.ignoredFilters?.length ? [`Treg reports filters it could not apply: ${(route.ignoredFilters ?? response.receipt.ignoredFilters ?? []).join(", ")}. Review returned rows against the requested constraints.`] : []),
+      ...(response.receipt.costIsEstimate ? ["No confirmed charge was included; displayed cost is the locally reserved estimate."] : []),
+      ...(!companies.length && !route.pending && !response.receipt.pending ? ["No companies matched the routed search inputs."] : []),
+    ];
+    return { query, companies, endpoint, callId: response.receipt.callId, ...(route.servedBy || response.receipt.servedBy ? { servedBy: route.servedBy ?? response.receipt.servedBy } : {}), ...((route.tried ?? response.receipt.routeTried)?.length ? { tried: route.tried ?? response.receipt.routeTried } : {}), totalCostUsd: response.receipt.costUsd, warnings, incomplete: route.pending || response.receipt.pending === true || Boolean(route.ignoredFilters?.length || response.receipt.ignoredFilters?.length), generatedAt: new Date().toISOString() };
+  }
+
+  async searchCompanyJobs(options: { userId: number; name?: string; domain?: string; limit?: number; missionId?: string; maxSpendUsd?: number; organizationId?: string }): Promise<{ query: string; jobs: TregCompanyJobResult[]; endpoint: string; callId: string; servedBy?: string; tried?: string[]; totalCostUsd: number; warnings: string[]; incomplete: boolean; generatedAt: string }> {
+    const name = options.name?.trim().slice(0, 240);
+    const domain = options.domain?.trim().slice(0, 240);
+    if (!name && !domain) throw new Error("Provide a company name or domain to search hiring signals.");
+    const endpoint = "treg.companies.jobs.search";
+    const query = [name ? `company ${name}` : "", domain ? `domain ${domain}` : "", "current job listings"].filter(Boolean).join("; ").slice(0, 1000);
+    const maxSpendUsd = Math.min(options.maxSpendUsd ?? config.tregPerCallSoftCapUsd, config.tregPerCallSoftCapUsd);
+    if (maxSpendUsd <= 0) throw new Error("A positive Treg spend limit is required for hiring-signal search.");
+    const metadata = await this.getEndpoint(endpoint, options.organizationId);
+    if (metadata.id !== endpoint || metadata.method !== "POST") throw new Error("Treg hiring-signal route metadata did not match the expected bounded search operation.");
+    if (metadata.priceUsd !== undefined && metadata.priceUsd > maxSpendUsd) throw new Error("Treg hiring-signal route exceeds the available per-call spend limit.");
+    const limit = Math.max(1, Math.min(25, Math.floor(options.limit ?? 10)));
+    const response = await this.call({
+      userId: options.userId,
+      endpointId: endpoint,
+      method: "POST",
+      body: { ...(name ? { name } : {}), ...(domain ? { domain } : {}), limit },
+      missionId: options.missionId,
+      organizationId: options.organizationId,
+      estimateUsd: maxSpendUsd,
+      routeMaxCostUsd: maxSpendUsd,
+    });
+    const route = routeMetadata(response.result);
+    const jobs = resultRows(response.result, ["jobs", "results", "items", "listings"]).map(normalizeCompanyJobRow);
+    const warnings = [
+      ...(route.pending || response.receipt.pending ? ["Treg is still processing this hiring-signal search. Inspect the existing call before starting another search."] : []),
+      ...(route.ignoredFilters?.length || response.receipt.ignoredFilters?.length ? [`Treg reports filters it could not apply: ${(route.ignoredFilters ?? response.receipt.ignoredFilters ?? []).join(", ")}. Review returned listings against the requested company.`] : []),
+      ...(response.receipt.costIsEstimate ? ["No confirmed charge was included; displayed cost is the locally reserved estimate."] : []),
+      ...(!jobs.length && !route.pending && !response.receipt.pending ? ["No current job listings matched the company inputs; this is not evidence that the company is not hiring."] : []),
+      ...(jobs.some((job) => !job.postedAt || !job.sourceUrls?.length && !job.jobUrl) ? ["Some listings lack a posting date or source link; treat those rows as lower-quality evidence."] : []),
+    ];
+    return { query, jobs, endpoint, callId: response.receipt.callId, ...(route.servedBy || response.receipt.servedBy ? { servedBy: route.servedBy ?? response.receipt.servedBy } : {}), ...((route.tried ?? response.receipt.routeTried)?.length ? { tried: route.tried ?? response.receipt.routeTried } : {}), totalCostUsd: response.receipt.costUsd, warnings, incomplete: route.pending || response.receipt.pending === true || Boolean(route.ignoredFilters?.length || response.receipt.ignoredFilters?.length), generatedAt: new Date().toISOString() };
+  }
+
+  async verifyEmail(options: { userId: number; email: string; missionId?: string; maxSpendUsd?: number; organizationId?: string }): Promise<{ email: string; endpoint: string; callId: string; status: string; valid: boolean | null; catchAll?: boolean; disposable?: boolean; roleAccount?: boolean; servedBy?: string; totalCostUsd: number; pending: boolean; warnings: string[] }> {
+    const email = options.email.trim();
+    if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Provide one valid email address for verification.");
+    const endpoint = "treg.people.email.verify";
+    const maxSpendUsd = options.maxSpendUsd ?? config.tregPerCallSoftCapUsd;
+    const response = await this.call({ userId: options.userId, endpointId: endpoint, body: { email }, missionId: options.missionId, organizationId: options.organizationId, estimateUsd: maxSpendUsd, routeMaxCostUsd: maxSpendUsd });
+    const payload = providerPayload(response.result);
+    const row = isObject(payload) ? payload : {};
+    const nested = isObject(row.verification) ? row.verification : row;
+    const rawStatus = String(nested.status ?? nested.result ?? nested.deliverability ?? "unknown").toLowerCase().slice(0, 80);
+    const valid = nested.valid === true || nested.is_valid === true || ["valid", "verified", "deliverable"].includes(rawStatus)
+      ? true
+      : nested.valid === false || nested.is_valid === false || ["invalid", "undeliverable", "disposable", "blocked"].includes(rawStatus)
+        ? false
+        : null;
+    const pending = response.receipt.pending === true;
+    return {
+      email, endpoint, callId: response.receipt.callId, status: rawStatus, valid,
+      ...(nested.catch_all === true || rawStatus === "catch_all" ? { catchAll: true } : nested.catch_all === false ? { catchAll: false } : {}),
+      ...(nested.disposable === true || rawStatus === "disposable" ? { disposable: true } : nested.disposable === false ? { disposable: false } : {}),
+      ...(nested.role === true || nested.role_account === true ? { roleAccount: true } : {}),
+      ...(response.receipt.servedBy ? { servedBy: response.receipt.servedBy } : {}),
+      totalCostUsd: response.receipt.costUsd, pending,
+      warnings: [
+        ...(pending ? ["Treg is still processing this verification. Do not retry; inspect the existing Treg call first."] : []),
+        ...(valid === null && !pending ? ["The provider returned no decisive email-validity status; keep the address in an unknown state."] : []),
+        ...(response.receipt.costIsEstimate ? ["No confirmed charge was included; displayed cost is the locally reserved estimate."] : []),
+      ],
+    };
+  }
+
+  async callStatus(callIdInput: string, organizationId?: string): Promise<{ callId: string; status: string; pending: boolean; provider?: string; costUsd?: number; result?: unknown; error?: string }> {
+    const callId = callIdInput.trim();
+    if (!/^[A-Za-z0-9_-]{3,200}$/.test(callId)) throw new Error("Invalid Treg call ID");
+    const response = await this.request<unknown>("GET", `/calls/${encodeURIComponent(callId)}`, undefined, undefined, undefined, organizationId);
+    const row = isObject(response.data) ? response.data : {};
+    const status = String(row.status ?? row.outcome ?? "unknown").toLowerCase().slice(0, 80);
+    let result = row.result ?? row.output ?? row.data;
+    if (result === undefined && ["complete", "completed", "succeeded", "success"].includes(status)) {
+      const resultResponse = await this.request<unknown>("GET", `/calls/${encodeURIComponent(callId)}/result`, undefined, undefined, undefined, organizationId);
+      const resultRow = isObject(resultResponse.data) ? resultResponse.data : {};
+      result = resultRow.result ?? resultRow.output ?? resultResponse.data;
+    }
+    return {
+      callId, status,
+      pending: ["pending", "queued", "running", "in_progress", "processing"].includes(status),
+      ...(typeof (row.provider ?? row.served_by) === "string" ? { provider: String(row.provider ?? row.served_by).slice(0, 120) } : {}),
+      ...(numberOrUndefined(row.charged_micro) !== undefined ? { costUsd: Number(row.charged_micro) / 1_000_000 } : numberOrUndefined(row.cost_usd) !== undefined ? { costUsd: Number(row.cost_usd) } : {}),
+      ...(result === undefined ? {} : { result: sanitizeProviderResult(result) }),
+      ...(typeof row.error === "string" ? { error: boundedError(row.error) } : {}),
+    };
   }
 
   async balance(orgId?: string, organizationId?: string): Promise<{ balanceUsd?: number; raw: unknown }> {
@@ -431,7 +665,7 @@ export class TregGateway {
     return { revoked: true, id: secretId.slice(0, 200) };
   }
 
-  async call(options: { userId: number; endpointId: string; method?: string; body?: unknown; query?: Record<string, string | number | undefined>; missionId?: string; estimateUsd?: number; organizationId?: string; idempotencyKey?: string }): Promise<{ result: unknown; receipt: TregCallReceipt }> {
+  async call(options: { userId: number; endpointId: string; method?: string; body?: unknown; query?: Record<string, string | number | undefined>; missionId?: string; estimateUsd?: number; routeMaxCostUsd?: number; routeVerify?: boolean; organizationId?: string; idempotencyKey?: string }): Promise<{ result: unknown; receipt: TregCallReceipt }> {
     const target = options.endpointId.trim();
     if (!target || target.length > 500 || /[#?]/.test(target)) throw new Error("Invalid Treg endpoint or team-tool target");
     const isOwnTarget = /^https:\/\//i.test(target) || target.includes("/");
@@ -451,9 +685,13 @@ export class TregGateway {
       });
       if (!matches) throw new Error("Treg team tool is not registered for this organization; inspect CHUCK_TREG_MY_TOOLS first");
     }
-    const estimate = options.estimateUsd ?? (isOwnTarget ? 0 : metadata?.priceUsd);
+    const isRoutedEndpoint = /^treg\./i.test(target);
+    const routeMaxCostUsd = isRoutedEndpoint ? options.routeMaxCostUsd ?? config.tregPerCallSoftCapUsd : undefined;
+    const estimate = isOwnTarget ? 0 : metadata?.priceUsd !== undefined
+      ? Math.max(metadata.priceUsd, options.estimateUsd ?? 0)
+      : options.estimateUsd ?? (isRoutedEndpoint ? routeMaxCostUsd ?? config.tregPerCallSoftCapUsd : undefined);
     if (estimate === undefined) throw new Error("Treg endpoint price is unavailable; inspect the endpoint or provide an owner-approved estimate");
-    const reservation = await this.deps.spend.reserve(options.userId, estimate, options.missionId);
+    const reservation = await this.deps.spend.reserve(options.userId, Math.max(estimate, routeMaxCostUsd ?? 0), options.missionId);
     const method = (options.method ?? "POST").toUpperCase();
     const idempotencyKey = options.idempotencyKey?.trim() || randomUUID();
     if (idempotencyKey.length > 200) throw new Error("Treg idempotency key is too long");
@@ -461,7 +699,7 @@ export class TregGateway {
     const started = Date.now();
     let response: { data: unknown; status: number; durationMs: number };
     try {
-      response = await this.request<unknown>(method, callPath, options.body, options.query, idempotencyKey, options.organizationId);
+      response = await this.request<unknown>(method, callPath, options.body, options.query, idempotencyKey, options.organizationId, { ...(routeMaxCostUsd === undefined ? {} : { maxCostUsd: routeMaxCostUsd }), ...(options.routeVerify ? { verify: true } : {}) });
     } catch (error) {
       const providerError = boundedError(error instanceof Error ? error.message : error);
       let settlementError: string | undefined;
@@ -472,8 +710,18 @@ export class TregGateway {
     }
 
     const row = isObject(response.data) ? response.data : {};
-    const responseMeta = (response as { meta?: { callId?: string; costUsd?: number; replayed?: boolean; servedVia?: string } }).meta ?? {};
-    const cost = responseMeta.costUsd ?? numberOrUndefined(row.cost_usd ?? row.cost) ?? estimate;
+    const responseMeta = (response as { meta?: { callId?: string; costUsd?: number; replayed?: boolean; servedVia?: string; servedBy?: string } }).meta ?? {};
+    const route = routeMetadata(response.data);
+    const routeRow = isObject(row._treg) ? row._treg : {};
+    const reservedMicro = numberOrUndefined(routeRow.reserved_micro);
+    const chargedMicro = numberOrUndefined(routeRow.charged_micro);
+    const reportedCost = responseMeta.costUsd ?? numberOrUndefined(row.cost_usd ?? row.cost) ?? (chargedMicro === undefined ? undefined : chargedMicro / 1_000_000);
+    // Async routed jobs have no confirmed charge yet. Book the route's reserve
+    // (or our request reservation) conservatively so retries cannot bypass the
+    // local daily/mission budgets, and label it as provisional in the receipt.
+    const cost = route.pending
+      ? Math.max(reservedMicro === undefined ? 0 : reservedMicro / 1_000_000, reservation.estimateUsd)
+      : reportedCost ?? estimate;
     try {
       await this.deps.spend.settle(reservation, cost);
     } catch (error) {
@@ -482,7 +730,7 @@ export class TregGateway {
       throw new Error(receipt.error);
     }
 
-    const receipt: TregCallReceipt = { callId: String(responseMeta.callId ?? row.call_id ?? row.id ?? `treg_${randomUUID()}`), endpointId: target, userId: options.userId, missionId: options.missionId, ...(options.organizationId ? { organizationId: options.organizationId } : {}), costUsd: cost, ok: true, statusCode: response.status, durationMs: response.durationMs, at: Date.now(), idempotencyKey, ...(responseMeta.replayed ? { replayed: true } : {}), ...(responseMeta.servedVia ? { servedVia: responseMeta.servedVia } : {}) };
+    const receipt: TregCallReceipt = { callId: String(responseMeta.callId ?? row.call_id ?? routeRow.call_id ?? row.id ?? `treg_${randomUUID()}`), endpointId: target, userId: options.userId, missionId: options.missionId, ...(options.organizationId ? { organizationId: options.organizationId } : {}), costUsd: cost, ok: true, ...(route.pending ? { pending: true } : {}), ...(route.pending || reportedCost === undefined ? { costIsEstimate: true } : {}), ...(route.ignoredFilters?.length ? { ignoredFilters: route.ignoredFilters } : {}), statusCode: response.status, durationMs: response.durationMs, at: Date.now(), idempotencyKey, ...(responseMeta.replayed ? { replayed: true } : {}), ...(responseMeta.servedVia ? { servedVia: responseMeta.servedVia } : {}), ...(route.servedBy || responseMeta.servedBy ? { servedBy: route.servedBy ?? responseMeta.servedBy } : {}), ...(route.tried?.length ? { routeTried: route.tried } : {}) };
     if (options.missionId && this.deps.recordMissionEvidence) {
       try {
         receipt.missionEvidenceRecorded = await this.deps.recordMissionEvidence({ userId: options.userId, missionId: options.missionId, receipt, resultHash: safeResultHash(row.result ?? response.data) });
@@ -494,6 +742,19 @@ export class TregGateway {
 
   async enrichPerson(options: { userId: number; name?: string; domain?: string; company?: string; linkedinUrl?: string; missionId?: string; maxSpendUsd?: number; organizationId?: string }): Promise<TregEvidenceBundle> {
     const query = ["find work email and profile", options.name, options.domain, options.company, options.linkedinUrl].filter(Boolean).join(" ");
+    const routeCap = options.maxSpendUsd ?? config.tregPerCallSoftCapUsd;
+    const routedHit = await this.getEndpoint("treg.people.enrich", options.organizationId).catch(() => undefined);
+    if (routedHit?.id === "treg.people.enrich") {
+      const response = await this.call({ userId: options.userId, endpointId: routedHit.id, body: { full_name: options.name, domain: options.domain, company: options.company, linkedin_url: options.linkedinUrl }, missionId: options.missionId, organizationId: options.organizationId, estimateUsd: routeCap, routeMaxCostUsd: routeCap, routeVerify: true });
+      const items = normalizePersonPayload(response.result, routedHit);
+      const pending = response.receipt.pending === true;
+      return { query, intent: "enrich_person", items, endpointsUsed: [routedHit.id], callId: response.receipt.callId, totalCostUsd: response.receipt.costUsd, warnings: [
+        ...(pending ? ["Treg is still processing this enrichment. Do not retry; inspect the existing Treg call first."] : []),
+        ...(response.receipt.costIsEstimate ? ["No confirmed charge was included; displayed cost is the locally reserved estimate."] : []),
+        ...(items.some((item) => item.field === "email") && !items.some((item) => item.field === "email_verified" && item.value === true) ? ["An email was returned without explicit verified status; verify it before outreach."] : []),
+        ...(!items.length && !pending ? ["Provider returned no usable fields"] : []),
+      ], incomplete: pending || items.length < 2, generatedAt: new Date().toISOString() };
+    }
     const initialHits = await this.search(query, 6, options.organizationId);
     const personHits = initialHits.filter((item) => item.category === "enrichment_person" || /email|person|people|enrich/i.test(`${item.id} ${item.title}`));
     const fallbackHits = personHits.length > 0 ? [] : await this.search("work email person enrichment", 15, options.organizationId);
@@ -506,11 +767,19 @@ export class TregGateway {
       : Math.min(hit.priceUsd, options.maxSpendUsd ?? hit.priceUsd);
     const response = await this.call({ userId: options.userId, endpointId: hit.id, body: { full_name: options.name, domain: options.domain, company: options.company, linkedin_url: options.linkedinUrl }, missionId: options.missionId, organizationId: options.organizationId, ...(estimateUsd === undefined ? {} : { estimateUsd }) });
     const items = normalizePersonPayload(response.result, hit);
-    return { query, intent: "enrich_person", items, endpointsUsed: [hit.id], totalCostUsd: response.receipt.costUsd, warnings: items.length ? [] : ["Provider returned no usable fields"], incomplete: items.length < 2, generatedAt: new Date().toISOString() };
+    return { query, intent: "enrich_person", items, endpointsUsed: [hit.id], callId: response.receipt.callId, totalCostUsd: response.receipt.costUsd, warnings: items.length ? [] : ["Provider returned no usable fields"], incomplete: items.length < 2, generatedAt: new Date().toISOString() };
   }
 
   async enrichCompany(options: { userId: number; domain?: string; name?: string; missionId?: string; maxSpendUsd?: number; organizationId?: string }): Promise<TregEvidenceBundle> {
     const query = ["company enrichment", options.domain, options.name].filter(Boolean).join(" ");
+    const routeCap = options.maxSpendUsd ?? config.tregPerCallSoftCapUsd;
+    const routedHit = await this.getEndpoint("treg.companies.enrich", options.organizationId).catch(() => undefined);
+    if (routedHit?.id === "treg.companies.enrich") {
+      const response = await this.call({ userId: options.userId, endpointId: routedHit.id, body: { domain: options.domain, name: options.name }, missionId: options.missionId, organizationId: options.organizationId, estimateUsd: routeCap, routeMaxCostUsd: routeCap });
+      const items = normalizeCompanyPayload(response.result, routedHit);
+      const pending = response.receipt.pending === true;
+      return { query, intent: "enrich_company", items, endpointsUsed: [routedHit.id], callId: response.receipt.callId, totalCostUsd: response.receipt.costUsd, warnings: [...(pending ? ["Treg is still processing this enrichment. Do not retry; inspect the existing Treg call first."] : []), ...(response.receipt.costIsEstimate ? ["No confirmed charge was included; displayed cost is the locally reserved estimate."] : []), ...(!items.length && !pending ? ["Provider returned no usable fields"] : [])], incomplete: pending || items.length === 0, generatedAt: new Date().toISOString() };
+    }
     const initialHits = await this.search(query, 8, options.organizationId);
     const initialCompanyHits = initialHits.filter((item) => item.category === "enrichment_company" || /company|companies|firmographic|domain/i.test(`${item.id} ${item.title}`));
     const fallbackHits = initialCompanyHits.length > 0 ? [] : await this.search("company enrichment by domain", 10, options.organizationId);
@@ -519,10 +788,10 @@ export class TregGateway {
     if (!hit) return emptyBundle(query, "enrich_company", ["No catalog endpoint matched"]);
     const estimateUsd = hit.priceUsd === undefined ? options.maxSpendUsd : Math.min(hit.priceUsd, options.maxSpendUsd ?? hit.priceUsd);
     const response = await this.call({ userId: options.userId, endpointId: hit.id, body: { domain: options.domain, name: options.name }, missionId: options.missionId, organizationId: options.organizationId, estimateUsd });
-    return { query, intent: "enrich_company", items: normalizeCompanyPayload(response.result, hit), endpointsUsed: [hit.id], totalCostUsd: response.receipt.costUsd, warnings: [], incomplete: false, generatedAt: new Date().toISOString() };
+    return { query, intent: "enrich_company", items: normalizeCompanyPayload(response.result, hit), endpointsUsed: [hit.id], callId: response.receipt.callId, totalCostUsd: response.receipt.costUsd, warnings: [], incomplete: false, generatedAt: new Date().toISOString() };
   }
 
-  async resolveDataNeed(options: { userId: number; need: string; missionId?: string; maxCalls?: number; maxSpendUsd?: number; requiredFields?: string[]; organizationId?: string }): Promise<TregEvidenceBundle> {
+  async resolveDataNeed(options: { userId: number; need: string; missionId?: string; maxCalls?: number; maxSpendUsd?: number; requiredFields?: string[]; organizationId?: string; readOnlyOnly?: boolean }): Promise<TregEvidenceBundle> {
     const maxCalls = Math.min(options.maxCalls ?? 3, 5);
     const maxSpend = options.maxSpendUsd ?? config.tregMissionBudgetUsd;
     let spent = 0;
@@ -530,17 +799,51 @@ export class TregGateway {
     const used: string[] = [];
     const warnings: string[] = [];
     const ranked = await this.rank(await this.search(options.need, 10, options.organizationId), options.need, options.need, maxSpend, undefined, options.requiredFields);
-    for (const hit of ranked.slice(0, maxCalls)) {
+    const eligible: TregEndpointHit[] = [];
+    for (const hit of ranked) {
+      if (!options.readOnlyOnly) {
+        eligible.push(hit);
+        continue;
+      }
+      let inspected: TregEndpointHit;
+      try { inspected = await this.getEndpoint(hit.id, options.organizationId); }
+      catch (error) {
+        warnings.push(`Skipped ${hit.id}: endpoint method could not be inspected (${boundedError(error instanceof Error ? error.message : error)})`);
+        continue;
+      }
+      if (!inspected.method || !["GET", "HEAD", "OPTIONS"].includes(inspected.method)) {
+        warnings.push(`Skipped ${hit.id}: endpoint is not explicitly declared read-only`);
+        continue;
+      }
+      if (inspected.id !== hit.id || inspected.priceUnit !== "call" || inspected.priceUsd === undefined) {
+        warnings.push(`Skipped ${hit.id}: exact endpoint identity or per-call pricing could not be verified`);
+        continue;
+      }
+      if (inspected.priceUsd > maxSpend) {
+        warnings.push(`Skipped ${hit.id}: declared per-call price exceeds the available spend limit`);
+        continue;
+      }
+      eligible.push(inspected);
+    }
+    for (const hit of eligible.slice(0, maxCalls)) {
       if (spent >= maxSpend) { warnings.push("Stopped: mission spend cap"); break; }
       if (hit.requiresOwnAccount || hit.requiresByok) { warnings.push(`Skipped ${hit.id}: requires an owner account or BYOK`); continue; }
       try {
-        const response = await this.call({ userId: options.userId, endpointId: hit.id, body: { q: options.need }, missionId: options.missionId, organizationId: options.organizationId, estimateUsd: hit.priceUsd });
+        const response = await this.call({
+          userId: options.userId,
+          endpointId: hit.id,
+          method: options.readOnlyOnly ? hit.method : undefined,
+          ...(options.readOnlyOnly ? { query: { q: options.need } } : { body: { q: options.need } }),
+          missionId: options.missionId,
+          organizationId: options.organizationId,
+          estimateUsd: hit.priceUsd,
+        });
         spent += response.receipt.costUsd;
         used.push(hit.id);
         items.push(...coerceEvidence(response.result, hit));
         if (options.requiredFields?.length && options.requiredFields.every((field) => items.some((item) => item.field === field))) break;
       } catch (error) { warnings.push(`${hit.id}: ${boundedError(error instanceof Error ? error.message : error)}`); }
     }
-    return { query: options.need, intent: "resolve_data_need", items: dedupeEvidence(items), endpointsUsed: used, totalCostUsd: spent, warnings, incomplete: Boolean(options.requiredFields?.some((field) => !items.some((item) => item.field === field))), generatedAt: new Date().toISOString() };
+    return { query: options.need, intent: "resolve_data_need", items: dedupeEvidence(items), endpointsUsed: used, totalCostUsd: spent, warnings, incomplete: Boolean((options.readOnlyOnly && used.length === 0) || options.requiredFields?.some((field) => !items.some((item) => item.field === field))), generatedAt: new Date().toISOString() };
   }
 }

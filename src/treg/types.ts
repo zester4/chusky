@@ -12,6 +12,8 @@ export interface TregEndpointHit {
   title: string;
   provider: string;
   category: TregCategory;
+  /** Upstream provider method declared by Treg's endpoint metadata. */
+  method?: string;
   priceUsd?: number;
   priceUnit?: "call" | "result" | "row" | "unknown";
   successRate?: number;
@@ -62,6 +64,7 @@ export interface TregEvidenceBundle {
   warnings: string[];
   incomplete: boolean;
   generatedAt: string;
+  callId?: string;
 }
 
 export interface TregCallReceipt {
@@ -80,6 +83,49 @@ export interface TregCallReceipt {
   idempotencyKey?: string;
   replayed?: boolean;
   servedVia?: string;
+  servedBy?: string;
+  routeTried?: string[];
+  ignoredFilters?: string[];
+  pending?: boolean;
+  costIsEstimate?: boolean;
+}
+
+export interface TregPersonSearchResult {
+  fullName?: string;
+  title?: string;
+  company?: string;
+  domain?: string;
+  linkedinUrl?: string;
+  location?: string;
+  email?: string;
+  emailVerificationStatus?: string;
+  emailVerified?: boolean;
+  sourceUrls?: string[];
+  providerScore?: number;
+}
+
+export interface TregCompanySearchResult {
+  name?: string;
+  domain?: string;
+  industry?: string;
+  employeeCount?: number;
+  location?: string;
+  description?: string;
+  sourceUrls?: string[];
+  providerScore?: number;
+}
+
+export interface TregCompanyJobResult {
+  signalType: "hiring";
+  companyName?: string;
+  companyDomain?: string;
+  title?: string;
+  location?: string;
+  postedAt?: string;
+  jobUrl?: string;
+  sourceUrls?: string[];
+  description?: string;
+  providerScore?: number;
 }
 
 export interface TregSpendSnapshot {

@@ -268,11 +268,12 @@ test("Treg lead-signal watches bound tools, persist first-seen signals, and supp
   });
   let prompt = "";
   let toolSlugs: string[] = [];
+  let signalVersion = 0;
   const execute = async (input: { prompt: string; toolSlugs: string[] }) => {
     prompt = input.prompt;
     toolSlugs = input.toolSlugs;
     return { text: `AUTONOMY_RESULT: ${JSON.stringify({ changed: true, summary: "Two candidate signals returned by Treg", signals: [
-      { id: "provider-signal-1", source: "treg.linkedin", kind: "hiring", subject: "Acme is hiring its first SDR", createdAt: "2026-01-31T12:00:00Z", metadata: { company: "Acme", url: "https://example.com/jobs/1", score: 0.92, email: "must-not-persist@example.com" } },
+      { id: "provider-signal-1", source: "treg.linkedin", kind: "hiring", subject: signalVersion ? "Acme added two enterprise sales roles" : "Acme is hiring its first SDR", createdAt: "2026-01-31T12:00:00Z", updatedAt: signalVersion ? "2026-02-01T02:00:00Z" : undefined, metadata: { company: "Acme", url: "https://example.com/jobs/1", score: 0.92, evidence: signalVersion ? "Two new enterprise roles were posted" : undefined, email: "must-not-persist@example.com" } },
       { id: "provider-signal-2", source: "treg.reddit", kind: "intent", subject: "Looking for support automation", metadata: { signal: "Public request", url: "http://unsafe.example/post" } },
     ] })}` };
   };
@@ -293,9 +294,19 @@ test("Treg lead-signal watches bound tools, persist first-seen signals, and supp
   const second = await runDueAutonomyWatches(userId, { mode: "business", now: firstNow + 3_600_000, tregEnabled: true, execute: execute as any });
   assert.equal(second[0]?.status, "completed");
   assert.equal(second[0]?.changed, false);
-  assert.match(second[0]?.summary ?? "", /No new lead signals/);
+  assert.match(second[0]?.summary ?? "", /No new or changed lead signals/);
   const observations = await listAttentionRecords(userId, "observation") as any[];
   assert.equal(observations.filter((item) => item.eventType === "lead_signal.detected").length, 2);
+  signalVersion = 1;
+  const third = await runDueAutonomyWatches(userId, { mode: "business", now: firstNow + 7_200_000, tregEnabled: true, execute: execute as any });
+  assert.equal(third[0]?.status, "completed");
+  assert.equal(third[0]?.changed, true);
+  assert.match(third[0]?.summary ?? "", /0 new and 1 updated/);
+  const afterUpdate = await listAttentionRecords(userId, "observation") as any[];
+  assert.equal(afterUpdate.filter((item) => item.eventType === "lead_signal.updated").length, 1);
+  assert.equal(afterUpdate.find((item) => item.eventType === "lead_signal.updated")?.metadata.providerScore, 0.92);
+  assert.equal(afterUpdate.find((item) => item.eventType === "lead_signal.updated")?.metadata.providerUpdatedAt, "2026-02-01T02:00:00Z");
+  assert.equal(afterUpdate.find((item) => item.eventType === "lead_signal.updated")?.metadata.confidence, undefined, "provider confidence is not passed off as Chusky confidence");
 });
 
 test("Treg lead-signal watches fail closed when Treg is disabled", async () => {

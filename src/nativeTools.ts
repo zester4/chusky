@@ -38,7 +38,7 @@ import {
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
 import { e2bBrowserEngine } from "./lib/e2b/index.js";
-import { E2BBrowserHandoffWaitingError } from "./lib/e2b/errors.js";
+import { E2BBrowserError, E2BBrowserHandoffWaitingError } from "./lib/e2b/errors.js";
 import { browserHandoffWaitingResult } from "./lib/e2b/contracts.js";
 import { isTrustedBrowserUrlObservation } from "./lib/e2b/contracts.js";
 import { browserChallengeStillActive } from "./lib/e2b/handoffStatus.js";
@@ -98,6 +98,16 @@ import { beginLinkOAuth, cancelLinkSpendRequest, completeApprovedLinkCheckout, c
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
+
+function isBrowserObservationTimeout(error: unknown): boolean {
+  if (error instanceof E2BBrowserError && error.code === "action_timeout") return true;
+  const message = String(error instanceof Error ? error.message : error ?? "").toLowerCase();
+  return /deadline[_ ]exceeded|browser action timed out|command timed out|timed out|timeout/.test(message);
+}
+
+function browserHandoffObservationPending(id: string, expiresAt: number, next: string) {
+  return { id, status: "awaiting_verification", needsUserInteraction: true, retryable: true, expiresAt, next };
+}
 function modelVisibleImageAsset(asset: ImageAsset): Omit<ImageAsset, "userId" | "r2Key"> {
   const { id, name, purpose, description, tags, contentType, size, createdAt, updatedAt } = asset;
   return { id, name, purpose, description, tags, contentType, size, createdAt, updatedAt };
@@ -367,7 +377,7 @@ function leadCampaignTools(runtime: NativeToolRuntime): string[] {
     "CHUCK_LEAD_CAMPAIGN", "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE",
     "CHUCK_TINYFISH_SEARCH", "CHUCK_TINYFISH_FETCH", "COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT",
     ...connectedReadTools,
-    "CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE",
+    "CHUCK_TREG_SEARCH", "CHUCK_TREG_PEOPLE_SEARCH", "CHUCK_TREG_COMPANY_SEARCH", "CHUCK_TREG_COMPANY_JOBS_SEARCH", "CHUCK_TREG_EMAIL_VERIFY", "CHUCK_TREG_CALL_STATUS", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE",
     "CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT",
   ])];
 }
@@ -398,9 +408,9 @@ async function startLeadCampaign(userId: number, args: Record<string, unknown>, 
     requiredEvidence: ["kind:before_after"], verificationMode: "strict",
     steps: [
       { id: "campaign-intake", title: "Load lead research playbook and confirm campaign scope", objective: `Read lead-intel-pro skill and references needed for ${campaign.id}. Confirm ICP, geography, target, supplied seeds, and no-contact boundary. Use CHUCK_LEAD_CAMPAIGN get to inspect this campaign.`, allowedTools: ["CHUCK_LEAD_CAMPAIGN", "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE"] },
-      { id: "candidate-discovery", title: "Discover and persist source-linked candidates", objective: `Find candidates for campaign ${campaign.id} using owner-provided seeds, eligible connected-app read sources, and low-cost public research first. Use TinyFish/Composio web search where available and exact read-only connected-app actions already present in this private run. Never use a generic write gateway. Deduplicate and persist batches of at most 50 using CHUCK_LEAD_CAMPAIGN record_candidates. Every candidate must have an HTTPS source URL and a concise observed-fact summary. Aim for ${targetCount}; do not invent contacts or intent.`, dependsOn: ["campaign-intake"], allowedTools: leadCampaignTools(runtime).filter((slug) => !slug.startsWith("CHUCK_TREG_") && !["CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"].includes(slug)) },
+      { id: "candidate-discovery", title: "Discover and persist source-linked candidates", objective: `Find candidates for campaign ${campaign.id} using owner-provided seeds, eligible connected-app read sources, and low-cost public research first. Use TinyFish/Composio web search where available; when that is insufficient, use bounded Treg company/person search with a maxSpendUsd no greater than the remaining campaign Treg allowance. If Treg returns a pending call, inspect its callId with CHUCK_TREG_CALL_STATUS and do not repeat the search. Never use a generic write gateway. Deduplicate and persist batches of at most 50 using CHUCK_LEAD_CAMPAIGN record_candidates. Every candidate must have an HTTPS source URL and a concise observed-fact summary. Aim for ${targetCount}; do not invent contacts or intent.`, dependsOn: ["campaign-intake"], allowedTools: leadCampaignTools(runtime).filter((slug) => !slug.startsWith("CHUCK_TREG_") || ["CHUCK_TREG_PEOPLE_SEARCH", "CHUCK_TREG_COMPANY_SEARCH", "CHUCK_TREG_CALL_STATUS"].includes(slug)).filter((slug) => !["CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"].includes(slug)) },
       { id: "candidate-qualification", title: "Qualify and deduplicate candidates", objective: `Review persisted candidates in campaign ${campaign.id} against the explicit ICP/geography. Update qualificationStatus and reason; distinguish observed evidence from inference. Keep uncertain rows in review and reject clear mismatches. Qualification means fit, never purchase intent.`, dependsOn: ["candidate-discovery"], allowedTools: ["CHUCK_LEAD_CAMPAIGN", "CHUCK_TINYFISH_FETCH", "COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT"] },
-      { id: "shortlist-enrichment", title: "Enrich only the qualified shortlist within budget", objective: `For persisted qualified candidates only, call CHUCK_TREG_ENRICH_PERSON or CHUCK_TREG_ENRICH_COMPANY with that candidate's candidateId. The server binds enrichment to the saved candidate identity and rejects review/rejected candidates. Pass campaign mission ID and a maxSpendUsd no greater than the remaining campaign budget; paid calls are serialized and spend is reconciled from bounded receipts. Record returned fields, provider/source, and no-match state. Never enrich other people or companies or exceed the campaign cap. If the cap is zero/exhausted or Treg is unavailable, mark enrichment skipped and continue without asking the owner to reconnect unnecessarily.`, dependsOn: ["candidate-qualification"], allowedTools: ["CHUCK_LEAD_CAMPAIGN", "CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY"] },
+      { id: "shortlist-enrichment", title: "Enrich only the qualified shortlist within budget", objective: `For persisted qualified candidates only, call CHUCK_TREG_ENRICH_PERSON or CHUCK_TREG_ENRICH_COMPANY with that candidate's candidateId. The server binds enrichment to the saved candidate identity and rejects review/rejected candidates. Pass campaign mission ID and a maxSpendUsd no greater than the remaining campaign budget; paid calls are serialized and spend is reconciled from bounded receipts. If Treg returns a pending call, inspect its callId with CHUCK_TREG_CALL_STATUS and do not repeat the enrichment. Record returned fields, provider/source, and no-match state. Never enrich other people or companies or exceed the campaign cap. If the cap is zero/exhausted or Treg is unavailable, mark enrichment skipped and continue without asking the owner to reconnect unnecessarily.`, dependsOn: ["candidate-qualification"], allowedTools: ["CHUCK_LEAD_CAMPAIGN", "CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_CALL_STATUS", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY"] },
       { id: "campaign-tracker", title: "Prepare the internal campaign tracker", objective: `Read campaign ${campaign.id} candidates in bounded pages and prepare a professional spreadsheet artifact with company, contact, qualification, source URLs, enrichment status, and next action. Keep the persisted campaign records as the source of truth. Do not create or modify an external CRM/Sheet/Notion database or send outreach in this run; offer the user an approval-gated connected-app sync as a next action.`, dependsOn: ["shortlist-enrichment"], allowedTools: ["CHUCK_LEAD_CAMPAIGN", "CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"] },
       { id: "campaign-finalize", title: "Verify and finalize the campaign snapshot", objective: `Call CHUCK_LEAD_CAMPAIGN finalize for campaign ${campaign.id}. The server computes persisted candidate counts, shortfall, and a hash and records trusted mission evidence. Report actual persisted counts, Treg campaign spend, and unresolved gaps; never claim more leads than the store contains.`, dependsOn: ["campaign-tracker"], allowedTools: ["CHUCK_LEAD_CAMPAIGN"] },
     ],
@@ -566,7 +576,7 @@ async function withLeadCampaignTregBudget<T>(userId: number, missionId: string |
     const current = await getLeadCampaign(userId, campaign.id);
     if (!current || current.missionId !== missionId) throw new Error("Lead campaign changed while enrichment was waiting; inspect campaign state before retrying.");
     const remainingUsd = Math.max(0, current.maxTregSpendUsd - current.tregSpentUsd - current.tregReservedUsd);
-    const runLimit = runtime.tregMaxSpendUsd === undefined ? remainingUsd : Math.min(remainingUsd, runtime.tregMaxSpendUsd);
+    const runLimit = Math.min(remainingUsd, runtime.tregMaxSpendUsd ?? remainingUsd, config.tregPerCallSoftCapUsd);
     const requested = requestedUsd === undefined ? runLimit : Math.min(runLimit, requestedUsd);
     if (requested <= 0) throw new Error("This lead campaign has no remaining Treg enrichment budget; continue with the source data already collected.");
     const reservation = await reserveLeadCampaignTregSpend(userId, missionId, requested);
@@ -596,6 +606,18 @@ async function withLeadCampaignTregBudget<T>(userId: number, missionId: string |
       await settleLeadCampaignTregSpend(userId, reservation.campaignId, reservation.reservedUsd, !succeeded && actualSpend === 0 ? reservation.reservedUsd : actualSpend);
     }
   });
+}
+
+function effectiveTregSpendLimit(requestedUsd: number | undefined, runtime: NativeToolRuntime): number | undefined {
+  if (runtime.worker === "muna") {
+    return Math.min(
+      config.tregPerCallSoftCapUsd,
+      runtime.tregMaxSpendUsd ?? Number.POSITIVE_INFINITY,
+      requestedUsd ?? config.tregPerCallSoftCapUsd,
+    );
+  }
+  if (runtime.tregMaxSpendUsd === undefined) return requestedUsd;
+  return Math.min(runtime.tregMaxSpendUsd, requestedUsd ?? runtime.tregMaxSpendUsd);
 }
 
 function taskCreateIdempotencyId(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime): string | undefined {
@@ -1611,9 +1633,16 @@ async function resumeBrowserHandoff(userId: number, id: string, ownerPrivateRun:
   // be inspected for same-origin verification; no website mutation occurs in
   // this function.
   const browser = automatedBrowserEngine("state");
-  const observed = await browser.browser(userId, { action: "state", maxDepth: 8 }, { ownerPrivateRun: true }) as {
+  let observed: {
     provider?: unknown; observedUrl?: unknown; observationMethod?: unknown; title?: unknown; challenge?: unknown; needsUserInteraction?: unknown;
   };
+  try {
+    observed = await browser.browser(userId, { action: "state", maxDepth: 8 }, { ownerPrivateRun: true }) as typeof observed;
+  } catch (error) {
+    if (!isBrowserObservationTimeout(error)) throw error;
+    await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "verification_failed", ...(handoff.origin ? { origin: handoff.origin } : {}), status: "waiting", summary: "Private browser handoff verification is waiting for the retained page to become observable", createdAt: Date.now() });
+    return browserHandoffObservationPending(id, handoff.expiresAt, "The same retained browser session is still settling after the challenge. Retry the handoff resume shortly; no browser action was replayed.");
+  }
   const currentUrl = typeof observed.observedUrl === "string" ? observed.observedUrl : undefined;
   if (!currentUrl || !isTrustedBrowserUrlObservation(observed.provider, observed.observationMethod)) {
     return { id, status: "awaiting_verification", needsUserInteraction: true, next: "The retained browser URL is not yet observable. Keep the handoff open and try resume again." };
@@ -1883,6 +1912,57 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return { spend: spend ?? { userId, dayKey, spentUsd: 0, reservedUsd: 0, missionSpent: {}, missionReserved: {}, rateWindowCalls: 0, reservations: {} }, receipts: await listMonidReceipts(userId, args.limit === undefined ? 25 : Number(args.limit), runtime.organizationId) };
     }
     case "CHUCK_TREG_SEARCH": return tregGateway().search(text(args.q, 500), args.limit === undefined ? 8 : Number(args.limit), runtime.organizationId);
+    case "CHUCK_TREG_PEOPLE_SEARCH": {
+      const missionId = effectiveTregMissionId(args, runtime);
+      const requestedSpend = args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd);
+      return withLeadCampaignTregBudget(userId, missionId, requestedSpend, runtime, (reservedUsd) => tregGateway().searchPeople({
+        userId, query: args.query ? text(args.query, 800) : undefined,
+        companyDomain: args.companyDomain ? text(args.companyDomain, 240) : undefined,
+        title: args.title ? text(args.title, 240) : undefined,
+        country: args.country ? text(args.country, 120) : undefined,
+        limit: args.limit === undefined ? 10 : Number(args.limit), missionId,
+        maxSpendUsd: reservedUsd ?? effectiveTregSpendLimit(requestedSpend, runtime), organizationId: runtime.organizationId,
+      }));
+    }
+    case "CHUCK_TREG_COMPANY_SEARCH": {
+      const missionId = effectiveTregMissionId(args, runtime);
+      const requestedSpend = args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd);
+      return withLeadCampaignTregBudget(userId, missionId, requestedSpend, runtime, (reservedUsd) => tregGateway().searchCompanies({
+        userId, query: args.query ? text(args.query, 800) : undefined,
+        name: args.name ? text(args.name, 240) : undefined, domain: args.domain ? text(args.domain, 240) : undefined,
+        industry: args.industry ? text(args.industry, 200) : undefined, technology: args.technology ? text(args.technology, 160) : undefined,
+        country: args.country ? text(args.country, 120) : undefined, limit: args.limit === undefined ? 10 : Number(args.limit),
+        missionId, maxSpendUsd: reservedUsd ?? effectiveTregSpendLimit(requestedSpend, runtime), organizationId: runtime.organizationId,
+      }));
+    }
+    case "CHUCK_TREG_COMPANY_JOBS_SEARCH": {
+      const missionId = effectiveTregMissionId(args, runtime);
+      const requestedSpend = args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd);
+      const maxSpendUsd = effectiveTregSpendLimit(requestedSpend, runtime);
+      return withLeadCampaignTregBudget(userId, missionId, requestedSpend, runtime, (reservedUsd) => tregGateway().searchCompanyJobs({
+        userId,
+        name: args.name ? text(args.name, 240) : undefined,
+        domain: args.domain ? text(args.domain, 240) : undefined,
+        limit: args.limit === undefined ? 10 : Number(args.limit),
+        missionId,
+        maxSpendUsd: reservedUsd ?? maxSpendUsd,
+        organizationId: runtime.organizationId,
+      }));
+    }
+    case "CHUCK_TREG_EMAIL_VERIFY": {
+      const missionId = effectiveTregMissionId(args, runtime);
+      return tregGateway().verifyEmail({
+        userId, email: text(args.email, 320), missionId,
+        maxSpendUsd: effectiveTregSpendLimit(args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd), runtime),
+        organizationId: runtime.organizationId,
+      });
+    }
+    case "CHUCK_TREG_CALL_STATUS": {
+      const callId = text(args.callId, 200);
+      const receipts = await listTregReceipts(userId, 200, runtime.organizationId);
+      if (!receipts.some((receipt) => receipt.callId === callId)) throw new Error("That Treg call is not in this owner's recent receipts.");
+      return tregGateway().callStatus(callId, runtime.organizationId);
+    }
     case "CHUCK_TREG_GET": return tregGateway().getEndpoint(text(args.endpointId, 200), runtime.organizationId);
     case "CHUCK_TREG_PLATFORMS": return tregGateway().platforms(text(args.slug, 200), runtime.organizationId);
     case "CHUCK_TREG_MY_TOOLS": return tregGateway().myTools(runtime.organizationId);
@@ -1912,7 +1992,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         company: leadCandidate ? leadCandidate.company : (args.company ? text(args.company, 240) : undefined),
         linkedinUrl: leadCandidate ? leadCandidate.linkedinUrl : (args.linkedinUrl ? text(args.linkedinUrl, 1000) : undefined),
         missionId,
-        maxSpendUsd: reservedUsd ?? (runtime.tregMaxSpendUsd === undefined ? requestedSpend : Math.min(runtime.tregMaxSpendUsd, requestedSpend ?? runtime.tregMaxSpendUsd)),
+        maxSpendUsd: reservedUsd ?? effectiveTregSpendLimit(requestedSpend, runtime),
         organizationId: runtime.organizationId,
       }));
     }
@@ -1925,7 +2005,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         domain: leadCandidate ? leadCandidate.domain : (args.domain ? text(args.domain, 240) : undefined),
         name: leadCandidate ? leadCandidate.name : (args.name ? text(args.name, 240) : undefined),
         missionId,
-        maxSpendUsd: reservedUsd ?? (runtime.tregMaxSpendUsd === undefined ? requestedSpend : Math.min(runtime.tregMaxSpendUsd, requestedSpend ?? runtime.tregMaxSpendUsd)),
+        maxSpendUsd: reservedUsd ?? effectiveTregSpendLimit(requestedSpend, runtime),
         organizationId: runtime.organizationId,
       }));
     }
@@ -1935,17 +2015,19 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         throw new Error("General-purpose Treg data resolution is disabled inside lead campaigns; enrich an exact persisted qualified candidate instead.");
       }
       const requestedSpend = args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd);
+      const munaReadOnly = runtime.worker === "muna";
+      const spendLimit = effectiveTregSpendLimit(requestedSpend, runtime);
       return withLeadCampaignTregBudget(userId, missionId, requestedSpend, runtime, (reservedUsd) => tregGateway().resolveDataNeed({
         userId,
         need: text(args.need, 1000),
         requiredFields: Array.isArray(args.requiredFields) ? args.requiredFields.map((field) => text(field, 120)) : undefined,
-        maxCalls: runtime.tregMaxCalls === undefined
+        maxCalls: munaReadOnly ? 1 : runtime.tregMaxCalls === undefined
           ? args.maxCalls === undefined ? undefined : Number(args.maxCalls)
           : Math.max(1, Math.min(runtime.tregMaxCalls, args.maxCalls === undefined ? runtime.tregMaxCalls : Number(args.maxCalls))),
-        maxSpendUsd: reservedUsd ?? (runtime.tregMaxSpendUsd === undefined
-          ? requestedSpend : Math.min(runtime.tregMaxSpendUsd, requestedSpend ?? runtime.tregMaxSpendUsd)),
+        maxSpendUsd: reservedUsd ?? spendLimit,
         missionId,
         organizationId: runtime.organizationId,
+        ...(munaReadOnly ? { readOnlyOnly: true } : {}),
       }));
     }
     case "CHUCK_TREG_BALANCE": return tregGateway().balance(args.orgId ? text(args.orgId, 160) : undefined, runtime.organizationId);
@@ -2914,9 +2996,24 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       // Never let model-authored metadata authorize a retained website session.
       // Read the live retained desktop and verify only its observed state.
       const browser = automatedBrowserEngine("state");
-      const observed = await abortableToolCall(runtime, () => browser.browser(userId, { action: "state", maxDepth: 8 }, { ownerPrivateRun: runtime.ownerPrivateRun })) as {
+      let observed: {
         provider?: unknown; observedUrl?: unknown; title?: unknown; accessibility?: unknown; pageContent?: unknown; observationMethod?: unknown;
       };
+      try {
+        observed = await abortableToolCall(runtime, () => browser.browser(userId, { action: "state", maxDepth: 8 }, { ownerPrivateRun: runtime.ownerPrivateRun })) as typeof observed;
+      } catch (error) {
+        if (!isBrowserObservationTimeout(error)) throw error;
+        await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "verification_failed", ...(handoff?.origin ? { origin: handoff.origin } : {}), status: "waiting", summary: "Browser verification is waiting for the retained page to become observable", createdAt: Date.now() });
+        return {
+          passed: false,
+          matched: [],
+          missing: ["The retained browser did not return a fresh live observation before the bounded timeout"],
+          detectors: [],
+          retryable: true,
+          ...(handoffId ? { handoffId } : {}),
+          next: "Keep the same browser session open and retry verification shortly. Do not restart the browser or replay the previous website action.",
+        };
+      }
       const currentUrl = typeof observed.observedUrl === "string" ? observed.observedUrl : undefined;
       const title = typeof observed.title === "string" ? observed.title : undefined;
       const liveText = `${JSON.stringify(observed.accessibility ?? "")} ${typeof observed.pageContent === "string" ? observed.pageContent : ""}`.slice(0, 12_000);

@@ -15,6 +15,14 @@ on:
         description: "Exact SDK version to publish (x.y.z)"
         required: false
         type: string
+      operation:
+        description: "Release a version or approve a pending npm staged version"
+        required: false
+        default: release
+        type: choice
+        options:
+          - release
+          - approve-staged
 
 permissions:
   contents: write
@@ -24,7 +32,98 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  approve-staged:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'approve-staged'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Use staged-publishing npm CLI
+        run: |
+          npm install --global npm@11.18.0
+          npm --version
+      - name: Approve pending npm stage
+        env:
+          VERSION: ${{ inputs.version }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "A valid SDK version is required"
+            exit 1
+          fi
+          published=$(npm view "@chusky/sdk@$VERSION" version --json 2>/dev/null | tr -d '"\r\n' || true)
+          if [ "$published" = "$VERSION" ]; then
+            echo "@chusky/sdk@$VERSION is already live on npm."
+            exit 0
+          fi
+          stage_error="$RUNNER_TEMP/chusky-sdk-stage-error.txt"
+          set +e
+          npm stage list --json > "$RUNNER_TEMP/chusky-sdk-stages.json" 2>"$stage_error"
+          stage_list_status=$?
+          set -e
+          if [ "$stage_list_status" -ne 0 ]; then
+            echo "npm stage list failed; the GitHub token cannot inspect staged packages or npm rejected the request."
+            echo "npm stdout:"
+            cat "$RUNNER_TEMP/chusky-sdk-stages.json"
+            echo "npm stderr:"
+            cat "$stage_error"
+            exit 1
+          fi
+          echo "Staged package metadata:"
+          cat "$RUNNER_TEMP/chusky-sdk-stages.json"
+          stage_id=$(node - "$VERSION" "$RUNNER_TEMP/chusky-sdk-stages.json" <<'NODE'
+          const fs = require("node:fs");
+          const [wanted, file] = process.argv.slice(2);
+          const document = JSON.parse(fs.readFileSync(file, "utf8"));
+          const matches = new Set();
+          function visit(value, inheritedId = "", inheritedPackage = "") {
+            if (Array.isArray(value)) {
+              for (const item of value) visit(item, inheritedId, inheritedPackage);
+              return;
+            }
+            if (!value || typeof value !== "object") return;
+            const directId = [value.stageId, value.stage_id, value.id]
+              .find((candidate) => typeof candidate === "string" && candidate.length > 0) || "";
+            const currentId = directId || inheritedId;
+            const packageCandidate = [value.name, value.packageName, value.package_name, value.package]
+              .find((candidate) => typeof candidate === "string" && candidate.length > 0) || "";
+            const currentPackage = packageCandidate || inheritedPackage;
+            const version = value.version ?? value.packageVersion ?? value.package_version;
+            const packageMatches = !currentPackage || currentPackage === "@chusky/sdk";
+            if (String(version || "") === wanted && currentId && packageMatches) matches.add(currentId);
+            for (const child of Object.values(value)) visit(child, currentId, currentPackage);
+          }
+          visit(document);
+          if (matches.size !== 1) {
+            const ids = [...matches];
+            console.error(`Expected exactly one staged @chusky/sdk@${wanted}; found ${ids.length}.`);
+            if (ids.length > 0) console.error(`Matching stage IDs: ${ids.join(", ")}`);
+            process.exit(1);
+          }
+          process.stdout.write([...matches][0]);
+          NODE
+          )
+          echo "Approving the staged @chusky/sdk@$VERSION package."
+          npm stage approve "$stage_id"
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            published=$(npm view "@chusky/sdk@$VERSION" version --json 2>/dev/null | tr -d '"\r\n' || true)
+            if [ "$published" = "$VERSION" ]; then
+              echo "@chusky/sdk@$VERSION is live on npm."
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "npm approval returned, but the version is not visible on the public registry yet."
+          exit 1
+
   release:
+    if: github.event_name != 'workflow_dispatch' || inputs.operation != 'approve-staged'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
