@@ -178,9 +178,14 @@ export const AGENT_UPGRADE_PRESETS = {
     "Challenges stop the run for owner handoff, stale or ambiguous failures return a fresh observation for replanning, and generic repeated no-progress actions are blocked without persisting action values.",
   ],
   browserLiveView: [
-    "Added owner-only live viewing for the retained E2B headed Chromium browser through a short-lived noVNC stream, without introducing a second browser backend.",
-    "The stream lifecycle is explicit and bounded: start returns a private viewer URL, status reports readiness without returning the password, and stop tears down the viewer services.",
-    "Viewer URLs and passwords are never persisted in browser records; private-scope checks remain separate from CAPTCHA, 2FA, payment, and other approval or human-challenge boundaries.",
+    "Added a provider-neutral Chusky live-view layer for the retained E2B headed Chrome and Kernel browser, with short-lived encrypted tickets, owner-stream binding, and a public HTTPS watch URL.",
+    "Watch mode is read-only by default, explicit browser handoffs use interactive mode, and stream_status can reissue the current URL without returning raw provider credentials or URLs to durable model state.",
+    "Chusky stream_stop revokes the Chusky viewer and E2B services; Kernel provider URLs remain session-owned and require browser stop for provider-level revocation, while CAPTCHA, 2FA, payment, and approval boundaries remain unchanged.",
+  ],
+  browserControlPlane: [
+    "Added a provider-neutral BrowserSessionManager with warm-session scheduling, preferred-region placement, bounded owner concurrency, reconnectable leases, and adapters for E2B, Kernel, Playwright, or Agent Browser.",
+    "Provider CDP endpoints stay inside trusted adapters behind opaque owner-bound broker tickets; encrypted profile envelopes and generation-bound refs prevent cross-account state leakage and stale DOM actions.",
+    "Browser attach, reconnect, action, and challenge telemetry now exposes bounded latency percentiles, failure rates, and challenge outcomes, while one shared policy evaluator keeps high-impact browser actions approval-gated or blocked.",
   ],
   browserDomainWorkflows: [
     "Added owner-scoped browser planning for flights, stays, telecom services, and streaming accounts with structured route, date, guest, plan, title, and profile constraints.",

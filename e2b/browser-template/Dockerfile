@@ -16,11 +16,26 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npx playwright install --with-deps chromium
 
 COPY browser-agent.mjs browser-client.mjs web-bot-auth.mjs kernel-controller.mjs ./
+COPY browser-conditions.mjs ./
 COPY chusky-vnc.html /usr/share/novnc/chusky-vnc.html
-RUN chmod -R a+rX /opt/ms-playwright /app \
+RUN chmod a+rx /app/node_modules/agent-browser/bin/agent-browser-linux-x64 \
+    && chmod -R a+rX /opt/ms-playwright /app \
     && useradd --create-home --shell /bin/bash chusky \
     && mkdir -p /home/chusky/.cache/chusky-browser \
     && chown -R chusky:chusky /home/chusky
 
 USER chusky
 ENV HOME=/home/chusky
+
+# Install Google's Chrome for Testing through the pinned agent-browser release.
+# The controller launches this stable path for local E2B sessions; Playwright's
+# Chromium remains installed only as an explicit compatibility fallback.
+RUN /app/node_modules/.bin/agent-browser install
+
+USER root
+RUN chrome_path="$(find /home/chusky/.agent-browser/browsers -type f -name chrome | sort | tail -n 1)" \
+    && test -n "$chrome_path" \
+    && ln -s "$chrome_path" /usr/local/bin/chrome-for-testing
+
+USER chusky
+ENV CHUSKY_BROWSER_EXECUTABLE_PATH=/usr/local/bin/chrome-for-testing

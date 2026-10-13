@@ -1,11 +1,11 @@
 {
-  "id": "release-4.55.0",
-  "version": "4.55.0",
+  "id": "release-4.57.0",
+  "version": "4.57.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added Muna, Chusky's Monid-focused research specialist for qualified business leads, selected contact enrichment, local prospects, company briefs, audience insights, visibility comparisons, creator and video research, and review evidence.",
-    "Muna returns source-linked findings with exact verification states, sample coverage, uncertainty, and spend under Monid approval and budget controls.",
-    "Muna does not buy personal contact data, contact prospects, write CRM records, publish content, or create recurring monitoring; Monid remains disabled until configured and its terms are cleared."
+    "Added a provider-neutral BrowserSessionManager with warm-session scheduling, preferred-region placement, bounded owner concurrency, reconnectable leases, and adapters for E2B, Kernel, Playwright, or Agent Browser.",
+    "Provider CDP endpoints stay inside trusted adapters behind opaque owner-bound broker tickets; encrypted profile envelopes and generation-bound refs prevent cross-account state leakage and stale DOM actions.",
+    "Browser attach, reconnect, action, and challenge telemetry now exposes bounded latency percentiles, failure rates, and challenge outcomes, while one shared policy evaluator keeps high-impact browser actions approval-gated or blocked."
   ],
-  "createdAt": "2026-10-13T00:00:00.000Z"
+  "createdAt": "2026-10-13T15:12:13.719Z"
 }

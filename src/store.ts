@@ -5480,6 +5480,17 @@ function normalizeArtifactRegistrationIntents(uid: number, raw: unknown): Artifa
   }).slice(-50);
 }
 
+function normalizeE2BBrowserStream(value: unknown): E2BBrowserRecord["stream"] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const item = value as Record<string, unknown>;
+  if (typeof item.startedAt !== "number" || typeof item.expiresAt !== "number" || typeof item.port !== "number" || !Number.isFinite(item.startedAt) || !Number.isFinite(item.expiresAt) || !Number.isSafeInteger(item.port) || item.port < 1 || item.port > 65_535) return undefined;
+  const provider = item.provider === "e2b" || item.provider === "kernel" ? item.provider : undefined;
+  const mode = item.mode === "read-only" || item.mode === "interactive" ? item.mode : undefined;
+  const viewerId = typeof item.viewerId === "string" && /^lv_[A-Za-z0-9_-]{20,100}$/.test(item.viewerId) ? item.viewerId : undefined;
+  const ticketCiphertext = typeof item.ticketCiphertext === "string" && /^[A-Za-z0-9_-]{40,24000}$/.test(item.ticketCiphertext) ? item.ticketCiphertext : undefined;
+  return { startedAt: Number(item.startedAt), expiresAt: Number(item.expiresAt), port: Number(item.port), ...(provider ? { provider } : {}), ...(mode ? { mode } : {}), ...(viewerId ? { viewerId } : {}), ...(ticketCiphertext ? { ticketCiphertext } : {}) };
+}
+
 export async function getSession(uid: number): Promise<UserSession> {
   const raw = await backend.getSession(uid) as UserSession & { faceTimeCalls?: Array<Record<string, unknown>> };
   // Read and migrate the old persisted field once, without carrying the obsolete
@@ -5546,7 +5557,7 @@ export async function getSession(uid: number): Promise<UserSession> {
   const browserAudit = Array.isArray(s.browserAudit) ? s.browserAudit.filter((item): item is BrowserAuditRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string" && typeof item.summary === "string").slice(-200) : [];
   const now = Date.now();
   const e2bBrowser = s.e2bBrowser && typeof s.e2bBrowser === "object" && typeof s.e2bBrowser.sandboxId === "string" && Number.isFinite(s.e2bBrowser.createdAt) && Number.isFinite(s.e2bBrowser.updatedAt) && Number.isFinite(s.e2bBrowser.expiresAt)
-    ? { ...s.e2bBrowser, sandboxId: s.e2bBrowser.sandboxId.slice(0, 200), webBotAuthKeyId: typeof s.e2bBrowser.webBotAuthKeyId === "string" && /^[A-Za-z0-9_-]{20,80}$/.test(s.e2bBrowser.webBotAuthKeyId) ? s.e2bBrowser.webBotAuthKeyId : undefined, paused: s.e2bBrowser.paused === true, nodes: Array.isArray(s.e2bBrowser.nodes) ? s.e2bBrowser.nodes.filter((node) => node && typeof node.nodeId === "string" && typeof node.role === "string" && typeof node.name === "string" && Number.isSafeInteger(node.index) && Number.isFinite(node.capturedAt)).slice(-60) : [], evidence: Array.isArray(s.e2bBrowser.evidence) ? s.e2bBrowser.evidence.slice(-50).map((item) => ({ action: String(item.action).slice(0, 80), at: Number(item.at), ...(typeof item.url === "string" ? { url: item.url.slice(0, 2_000) } : {}), ...(typeof item.title === "string" ? { title: item.title.slice(0, 160) } : {}), ...(typeof item.observationId === "string" ? { observationId: item.observationId.slice(0, 100) } : {}), ...(typeof item.screenshotHash === "string" ? { screenshotHash: item.screenshotHash.slice(0, 100) } : {}), ...(typeof item.verified === "boolean" ? { verified: item.verified } : {}) })) : [] } satisfies E2BBrowserRecord
+    ? { ...s.e2bBrowser, sandboxId: s.e2bBrowser.sandboxId.slice(0, 200), harness: s.e2bBrowser.harness === "playwright" || s.e2bBrowser.harness === "agent-browser" ? s.e2bBrowser.harness : undefined, engine: s.e2bBrowser.engine === "chrome" || s.e2bBrowser.engine === "chromium" ? s.e2bBrowser.engine : undefined, webBotAuthKeyId: typeof s.e2bBrowser.webBotAuthKeyId === "string" && /^[A-Za-z0-9_-]{20,80}$/.test(s.e2bBrowser.webBotAuthKeyId) ? s.e2bBrowser.webBotAuthKeyId : undefined, paused: s.e2bBrowser.paused === true, stream: normalizeE2BBrowserStream(s.e2bBrowser.stream), nodes: Array.isArray(s.e2bBrowser.nodes) ? s.e2bBrowser.nodes.filter((node) => node && typeof node.nodeId === "string" && typeof node.role === "string" && typeof node.name === "string" && Number.isSafeInteger(node.index) && Number.isFinite(node.capturedAt)).slice(-60) : [], evidence: Array.isArray(s.e2bBrowser.evidence) ? s.e2bBrowser.evidence.slice(-50).map((item) => ({ action: String(item.action).slice(0, 80), at: Number(item.at), ...(typeof item.url === "string" ? { url: item.url.slice(0, 2_000) } : {}), ...(typeof item.title === "string" ? { title: item.title.slice(0, 160) } : {}), ...(typeof item.observationId === "string" ? { observationId: item.observationId.slice(0, 100) } : {}), ...(typeof item.screenshotHash === "string" ? { screenshotHash: item.screenshotHash.slice(0, 100) } : {}), ...(typeof item.verified === "boolean" ? { verified: item.verified } : {}) })) : [] } satisfies E2BBrowserRecord
     : undefined;
   if (e2bBrowser) s.e2bBrowser = e2bBrowser;
   const kernelReference = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(value);

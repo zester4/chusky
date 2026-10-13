@@ -22,12 +22,17 @@ const agentRuntime = readFileSync(resolve(root, "src", "agent.ts"), "utf8");
 test("E2B browser template installs readable Chromium for the non-root runtime", () => {
   assert.match(templateDockerfile, /PLAYWRIGHT_BROWSERS_PATH=\/opt\/ms-playwright/);
   assert.match(templateDockerfile, /playwright install --with-deps chromium/);
+  assert.match(templateDockerfile, /agent-browser install/);
+  assert.match(templateDockerfile, /chrome-for-testing/);
   assert.match(templateDockerfile, /chmod -R a\+rX \/opt\/ms-playwright \/app/);
   assert.match(templateDockerfile, /USER chusky/);
 });
 
 test("E2B browser agent uses a retained headed Playwright profile and safe Chromium flags", () => {
   assert.match(browserAgent, /const PROFILE = "\/home\/chusky\/\.cache\/chusky-browser"/);
+  assert.match(browserAgent, /CHUSKY_BROWSER_ENGINE/);
+  assert.match(browserAgent, /chrome-for-testing/);
+  assert.match(browserAgent, /executablePath: selectedBrowserExecutable/);
   assert.match(browserAgent, /launchPersistentContext\(PROFILE/);
   assert.match(browserAgent, /--no-sandbox/);
   assert.match(browserAgent, /getByRole/);
@@ -39,6 +44,9 @@ test("E2B browser agent uses a retained headed Playwright profile and safe Chrom
   assert.match(browserAgent, /page\.keyboard\.type/);
   assert.match(browserAgent, /dragTo/);
   assert.match(browserAgent, /challengeFor/);
+  assert.match(browserAgent, /heldChallenges/);
+  assert.match(browserAgent, /shouldAttemptAutomaticCaptchaWait/);
+  assert.match(browserAgent, /agent-browser subprocess can hang while a challenge page owns the/);
   assert.match(browserAgent, /headless: false/);
   assert.match(browserAgent, /const item = await startRecording\(request\.durationSeconds\)/);
   assert.match(browserClient, /127\.0\.0\.1:8765\/command/);
@@ -102,7 +110,9 @@ test("E2B browser exposes an owner-only live stream for the retained Chromium di
   assert.match(browserEngine, /stream_status/);
   assert.match(browserEngine, /stream_stop/);
   assert.match(browserEngine, /noVNC/);
-  assert.match(browserEngine, /stream: \{ startedAt: stream\.startedAt, expiresAt: stream\.expiresAt, port: stream\.port \}/);
+  assert.match(browserEngine, /stream: issued\.stream/);
+  assert.match(browserEngine, /sealBrowserLiveViewTicketForStorage/);
+  assert.match(browserEngine, /resolveBrowserLiveView/);
   assert.match(browserEngine, /Live browser streams are available only in the owner's private conversation/);
   assert.ok(chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER")?.function.parameters.properties.action.enum.includes("stream_start"));
 });
@@ -123,6 +133,7 @@ test("E2B browser configuration is opt-in and exposes the backend-neutral browse
   assert.match(envExample, /E2B_BROWSER_LOCALE=en-US/);
   assert.match(envExample, /E2B_BROWSER_TIMEZONE=America\/New_York/);
   assert.match(envExample, /E2B_BROWSER_GEOLOCATION=/);
+  assert.match(envExample, /E2B_BROWSER_ENGINE=chrome/);
   assert.ok(chuckTools.some((tool) => tool.function.name === "CHUCK_BROWSER"));
   const browserTool = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER");
   assert.ok(browserTool);

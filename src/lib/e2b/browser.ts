@@ -13,8 +13,13 @@ import { E2B_BROWSER_ACTIONS, type E2BBrowserAction, type E2BBrowserAgentSummary
 import { browserAgentProgressMarker, browserAgentStepKey, normalizeBrowserAgentRunLimits } from "./agentRunPolicy.js";
 import { planFormSubmission, type RequestedFormField } from "./formPlanner.js";
 import { auxiliaryBrowserRequest } from "./auxiliaryActions.js";
+import { normalizeBrowserWaitRequest } from "./waitConditions.js";
 import { webBotAuthConfigurationIssue, webBotAuthConfigurationStatus, webBotAuthKeyId, webBotAuthSandboxEnvironment, webBotAuthSigningEnabled } from "../../webBotAuth.js";
 import { kernelBrowserEnabled, kernelClient, kernelLiveViewUrl, kernelTimeoutSeconds } from "./kernel.js";
+import { browserLiveViewDeliveryConfigured, browserLiveViewUrl, createBrowserLiveViewTicket, normalizeBrowserLiveViewMode, openBrowserLiveViewTicketFromStorage, renderBrowserLiveView, sealBrowserLiveViewTicketForStorage, verifyBrowserLiveViewTicket, type BrowserLiveViewMode, type BrowserLiveViewTicket } from "./liveView.js";
+import { browserMetrics } from "../browser-runtime/metrics.js";
+import { browserRefs } from "../browser-runtime/refs.js";
+import { browserSessionManager } from "../browser-runtime/manager.js";
 
 const MAX_OUTPUT = 16_000;
 const MAX_NODES = 60;
@@ -89,6 +94,22 @@ function safeAction(value: unknown): E2BBrowserAction {
   const action = boundedText(value, "action", 32) as E2BBrowserAction;
   if (!(E2B_BROWSER_ACTIONS as readonly string[]).includes(action)) throw new E2BBrowserError(`Unsupported E2B browser action: ${action}`);
   return action;
+}
+
+function browserHarness(): "playwright" | "agent-browser" {
+  const harness = config.e2bBrowserHarness.trim().toLowerCase();
+  if (harness !== "playwright" && harness !== "agent-browser") {
+    throw new E2BBrowserError("E2B_BROWSER_HARNESS must be playwright or agent-browser");
+  }
+  return harness;
+}
+
+function browserEngine(): "chrome" | "chromium" {
+  const engine = config.e2bBrowserEngine.trim().toLowerCase();
+  if (engine !== "chrome" && engine !== "chromium") {
+    throw new E2BBrowserError("E2B_BROWSER_ENGINE must be chrome or chromium");
+  }
+  return engine;
 }
 
 function browserContentType(name: string, kind: "download" | "recording"): string {
@@ -400,6 +421,40 @@ export class E2BBrowserEngine {
     return (await getSession(userId)).e2bBrowser;
   }
 
+  private async issueLiveView(userId: number, record: E2BBrowserRecord, input: { targetUrl: string; startedAt: number; expiresAt: number; port: number; mode: BrowserLiveViewMode }): Promise<{ url: string; delivery: "chusky" | "provider"; ticket: string; stream: NonNullable<E2BBrowserRecord["stream"]> }> {
+    if (!browserLiveViewDeliveryConfigured()) {
+      return { url: input.targetUrl, delivery: "provider", ticket: "", stream: { startedAt: input.startedAt, expiresAt: input.expiresAt, port: input.port, provider: record.kernel ? "kernel" : "e2b", mode: input.mode } };
+    }
+    const viewerId = `lv_${randomUUID()}`;
+    const ticket = createBrowserLiveViewTicket({ viewerId, userId, provider: record.kernel ? "kernel" : "e2b", mode: input.mode, targetUrl: input.targetUrl, expiresAt: input.expiresAt });
+    const watchUrl = browserLiveViewUrl(ticket) ?? input.targetUrl;
+    const stream: NonNullable<E2BBrowserRecord["stream"]> = {
+      startedAt: input.startedAt,
+      expiresAt: input.expiresAt,
+      port: input.port,
+      provider: record.kernel ? "kernel" : "e2b",
+      mode: input.mode,
+      viewerId,
+      ticketCiphertext: sealBrowserLiveViewTicketForStorage(ticket),
+    };
+    return { url: watchUrl, delivery: watchUrl === input.targetUrl ? "provider" : "chusky", ticket, stream };
+  }
+
+  /** Resolve a Chusky viewer ticket and bind it to the owner's current stream record. */
+  async resolveBrowserLiveView(ticket: string): Promise<BrowserLiveViewTicket | undefined> {
+    const claim = verifyBrowserLiveViewTicket(ticket);
+    if (!claim) return undefined;
+    const record = await this.record(claim.userId);
+    const stream = record?.stream;
+    if (!stream || stream.viewerId !== claim.viewerId || stream.expiresAt <= Date.now() || !stream.ticketCiphertext) return undefined;
+    const persisted = openBrowserLiveViewTicketFromStorage(stream.ticketCiphertext);
+    return persisted === ticket ? claim : undefined;
+  }
+
+  renderBrowserLiveView(ticket: BrowserLiveViewTicket): string {
+    return renderBrowserLiveView(ticket);
+  }
+
   private async save(userId: number, browser: E2BBrowserRecord | undefined): Promise<void> {
     const session = await getSession(userId);
     session.e2bBrowser = browser;
@@ -412,30 +467,42 @@ export class E2BBrowserEngine {
     if (config.webBotAuthSignRequests && !webBotAuthSigningEnabled()) throw new E2BBrowserError(webBotAuthConfigurationIssue() ?? "Web Bot Auth signing is enabled but its configuration is invalid.");
     const prior = await this.record(userId);
     const useKernel = kernelBrowserEnabled();
+    const harness = browserHarness();
+    const engine = browserEngine();
+    const browserEnvironment = {
+      CHUSKY_BROWSER_HARNESS: harness,
+      CHUSKY_BROWSER_ENGINE: engine,
+      CHUSKY_BROWSER_CDP_PORT: "9222",
+    };
     if ((await getSession(userId)).kernelBrowserPending) throw new E2BBrowserError("A partially created Kernel browser needs cleanup. Use stop before creating another session.");
     if (prior && Boolean(prior.kernel) !== useKernel) throw new E2BBrowserError("Browser provider changed. Stop the retained browser before starting the new provider.");
+    if (prior && (prior.harness ?? "playwright") !== harness) throw new E2BBrowserError("Browser harness changed. Stop the retained browser before starting with a different harness.");
+    if (prior && (prior.engine ?? "chromium") !== engine) throw new E2BBrowserError("Browser engine changed. Stop the retained browser before starting with a different engine.");
     const now = Date.now();
     if (prior?.sandboxId && prior.expiresAt > now) {
       const authConfigured = webBotAuthSigningEnabled();
       const expectedKeyId = authConfigured ? webBotAuthKeyId() : undefined;
       if (authConfigured && prior.webBotAuthKeyId !== expectedKeyId) throw new E2BBrowserError("Web Bot Auth identity changed for this retained browser. Stop and start the browser to safely load the new identity.");
       try {
-        let sandbox: Sandbox | undefined;
-        let connectError: unknown;
-        for (let attempt = 0; attempt < 3; attempt += 1) {
+        let lastRecoveryError: unknown;
+        // Reattaching the sandbox and restarting only idempotent infrastructure
+        // is safe to retry. The browser action itself is outside this loop and
+        // is never replayed after an uncertain provider response.
+        for (let recoveryAttempt = 0; recoveryAttempt < 3; recoveryAttempt += 1) {
           try {
-            sandbox = await Sandbox.connect(prior.sandboxId, { apiKey: config.e2bApiKey, requestTimeoutMs: config.e2bRequestTimeoutMs });
-            break;
+            const attachStartedAt = Date.now();
+            const sandbox = await Sandbox.connect(prior.sandboxId, { apiKey: config.e2bApiKey, requestTimeoutMs: config.e2bRequestTimeoutMs });
+            browserMetrics.record({ kind: "attach", provider: prior.kernel ? "kernel" : "e2b", status: "success", durationMs: Date.now() - attachStartedAt, ownerId: userId });
+            await sandbox.setTimeout(config.e2bTimeoutMs, { requestTimeoutMs: config.e2bRequestTimeoutMs });
+            const remote = prior.kernel ? await kernelClient().browsers.retrieve(prior.kernel.sessionId) : undefined;
+            await this.ensureRuntime(sandbox, { ...browserEnvironment, ...(remote ? { CHUSKY_KERNEL_CDP_URL: remote.cdp_ws_url, CHUSKY_KERNEL_SESSION_ID: remote.session_id, KERNEL_API_KEY: config.kernelApiKey, CHUSKY_KERNEL_CAPTCHA_WAIT_MS: String(config.kernelCaptchaWaitMs), CHUSKY_KERNEL_STEALTH: String(config.kernelStealth) } : {}) });
+            return { sandbox, record: prior };
           } catch (error) {
-            connectError = error;
-            if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+            lastRecoveryError = error;
+            if (recoveryAttempt < 2) await new Promise((resolve) => setTimeout(resolve, 400 * 2 ** recoveryAttempt));
           }
         }
-        if (!sandbox) throw connectError instanceof Error ? connectError : new Error("E2B sandbox connection failed");
-        await sandbox.setTimeout(config.e2bTimeoutMs, { requestTimeoutMs: config.e2bRequestTimeoutMs });
-        const remote = prior.kernel ? await kernelClient().browsers.retrieve(prior.kernel.sessionId) : undefined;
-        await this.ensureRuntime(sandbox, remote ? { CHUSKY_KERNEL_CDP_URL: remote.cdp_ws_url, CHUSKY_KERNEL_SESSION_ID: remote.session_id, KERNEL_API_KEY: config.kernelApiKey, CHUSKY_KERNEL_CAPTCHA_WAIT_MS: String(config.kernelCaptchaWaitMs), CHUSKY_KERNEL_STEALTH: String(config.kernelStealth) } : {});
-        return { sandbox, record: prior };
+        throw lastRecoveryError instanceof Error ? lastRecoveryError : new Error("E2B browser recovery failed");
       } catch (error) {
         if (prior.kernel) throw new E2BBrowserError("Kernel controller recovery failed. Inspect status and stop the retained session before restarting; no browser action was replayed.");
         if (!create) throw error;
@@ -478,6 +545,7 @@ export class E2BBrowserEngine {
       await saveSession(userId, session);
       kernelEnvironment = { CHUSKY_KERNEL_CDP_URL: remote.cdp_ws_url, CHUSKY_KERNEL_SESSION_ID: remote.session_id, KERNEL_API_KEY: config.kernelApiKey, CHUSKY_KERNEL_CAPTCHA_WAIT_MS: String(config.kernelCaptchaWaitMs), CHUSKY_KERNEL_STEALTH: String(config.kernelStealth) };
     }
+    const attachStartedAt = Date.now();
     const sandbox = createdSandbox = await Sandbox.create(config.e2bBrowserTemplate, {
       apiKey: config.e2bApiKey,
       timeoutMs: config.e2bTimeoutMs,
@@ -485,12 +553,13 @@ export class E2BBrowserEngine {
       allowInternetAccess: config.e2bAllowInternetAccess,
       network: { allowPublicTraffic: true, denyOut: [...E2B_BROWSER_DENY_OUT_CIDRS] },
       lifecycle: { onTimeout: !useKernel && config.e2bAutoPause ? "pause" : "kill", autoResume: !useKernel && config.e2bAutoPause },
-      envs: { ...webBotAuthSandboxEnvironment(), ...kernelEnvironment, CHUSKY_BROWSER_LOCALE: config.e2bBrowserLocale, CHUSKY_BROWSER_TIMEZONE: config.e2bBrowserTimezone, CHUSKY_BROWSER_GEOLOCATION: config.e2bBrowserGeolocation },
+      envs: { ...webBotAuthSandboxEnvironment(), ...browserEnvironment, ...kernelEnvironment, CHUSKY_BROWSER_LOCALE: config.e2bBrowserLocale, CHUSKY_BROWSER_TIMEZONE: config.e2bBrowserTimezone, CHUSKY_BROWSER_GEOLOCATION: config.e2bBrowserGeolocation },
       metadata: { app: "chusky", surface: "browser", owner: String(userId) },
     });
-    const next: E2BBrowserRecord = { sandboxId: sandbox.sandboxId, ...(kernel ? { kernel } : {}), webBotAuthKeyId: webBotAuthSigningEnabled() ? webBotAuthKeyId() : undefined, createdAt: now, updatedAt: now, expiresAt };
+    browserMetrics.record({ kind: "attach", provider: useKernel ? "kernel" : "e2b", status: "success", durationMs: Date.now() - attachStartedAt, ownerId: userId });
+    const next: E2BBrowserRecord = { sandboxId: sandbox.sandboxId, ...(kernel ? { kernel } : {}), harness, engine, webBotAuthKeyId: webBotAuthSigningEnabled() ? webBotAuthKeyId() : undefined, createdAt: now, updatedAt: now, expiresAt };
     await this.save(userId, next);
-    await this.ensureRuntime(sandbox, kernelEnvironment);
+    await this.ensureRuntime(sandbox, { ...browserEnvironment, ...kernelEnvironment });
     return { sandbox, record: next };
     } catch (error) {
       if (kernel) await this.deleteKernelBrowser(kernel.sessionId);
@@ -701,6 +770,7 @@ export class E2BBrowserEngine {
       paused: record.paused === true,
     };
     await this.save(userId, next);
+    if (next.observationId !== undefined || next.pageGeneration !== undefined) browserRefs.invalidateForObservation(userId, record.sessionId, { observationId: next.observationId, pageGeneration: next.pageGeneration, url: next.lastUrl });
     return next;
   }
 
@@ -773,11 +843,13 @@ export class E2BBrowserEngine {
         const { sandbox, record } = await this.sandbox(userId);
         const requestedTtl = Number(args.ttlSeconds ?? config.e2bBrowserHandoffTtlSeconds);
         const ttlSeconds = Number.isFinite(requestedTtl) ? Math.min(900, Math.max(60, Math.floor(requestedTtl))) : 300;
+        const mode = normalizeBrowserLiveViewMode(args.mode);
         const stream = record.kernel
           ? { url: kernelLiveViewUrl((await kernelClient().browsers.retrieve(record.kernel.sessionId)).browser_live_view_url), startedAt: Date.now(), expiresAt: record.expiresAt, port: 443 }
           : await this.startBrowserStream(sandbox, ttlSeconds);
-        await this.save(userId, { ...record, stream: { startedAt: stream.startedAt, expiresAt: stream.expiresAt, port: stream.port }, updatedAt: Date.now() });
-        return { provider: record.kernel ? "kernel" : "e2b", sandboxId: record.sandboxId, action, url: stream.url, startedAt: stream.startedAt, expiresAt: stream.expiresAt, port: stream.port, private: true, expiresWithSession: Boolean(record.kernel) };
+        const issued = await this.issueLiveView(userId, record, { targetUrl: stream.url, startedAt: stream.startedAt, expiresAt: stream.expiresAt, port: stream.port, mode });
+        await this.save(userId, { ...record, stream: issued.stream, updatedAt: Date.now() });
+        return { provider: record.kernel ? "kernel" : "e2b", sandboxId: record.sandboxId, action, url: issued.url, delivery: issued.delivery, mode, startedAt: stream.startedAt, expiresAt: stream.expiresAt, port: stream.port, private: true, expiresWithSession: Boolean(record.kernel) };
       }
       if (action === "stream_status") {
         const record = await this.record(userId);
@@ -785,12 +857,18 @@ export class E2BBrowserEngine {
         try {
           if (record.kernel) {
             await kernelClient().browsers.retrieve(record.kernel.sessionId);
-            return { provider: "kernel", action, active: true, expiresAt: record.expiresAt, private: true };
+            const storedTicket = record.stream.ticketCiphertext ? openBrowserLiveViewTicketFromStorage(record.stream.ticketCiphertext) : undefined;
+            const ticket = storedTicket ? verifyBrowserLiveViewTicket(storedTicket) : undefined;
+            const watchUrl = storedTicket ? browserLiveViewUrl(storedTicket) : undefined;
+            return { provider: "kernel", action, active: true, ...(ticket ? { url: watchUrl ?? ticket, delivery: watchUrl ? "chusky" : "provider", mode: ticket.mode } : {}), expiresAt: record.expiresAt, private: true };
           }
           const { sandbox } = await this.sandbox(userId, false);
           const probe = await sandbox.commands.run(`node -e \"fetch('http://127.0.0.1:${BROWSER_STREAM_PORT}/vnc.html').then(async r=>{console.log(JSON.stringify({ready:r.ok}));await r.arrayBuffer()}).catch(()=>console.log(JSON.stringify({ready:false})))\"`, { timeoutMs: 2_000, requestTimeoutMs: config.e2bRequestTimeoutMs });
           const payload = JSON.parse(probe.stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) || "{}");
-          return { provider: "e2b", action, active: payload.ready === true, startedAt: record.stream.startedAt, expiresAt: record.stream.expiresAt, port: record.stream.port, private: true };
+          const storedTicket = record.stream.ticketCiphertext ? openBrowserLiveViewTicketFromStorage(record.stream.ticketCiphertext) : undefined;
+          const ticket = storedTicket ? verifyBrowserLiveViewTicket(storedTicket) : undefined;
+          const watchUrl = storedTicket ? browserLiveViewUrl(storedTicket) : undefined;
+          return { provider: "e2b", action, active: payload.ready === true, ...(ticket ? { url: watchUrl ?? ticket, delivery: watchUrl ? "chusky" : "provider", mode: ticket.mode } : {}), startedAt: record.stream.startedAt, expiresAt: record.stream.expiresAt, port: record.stream.port, private: true };
         } catch (error) {
           return { provider: "e2b", action, active: false, startedAt: record.stream.startedAt, expiresAt: record.stream.expiresAt, port: record.stream.port, error: redactBrowserText(error instanceof Error ? error.message : String(error), 300) };
         }
@@ -798,7 +876,10 @@ export class E2BBrowserEngine {
       if (action === "stream_stop") {
         const record = await this.record(userId);
         if (!record?.sandboxId) return { provider: "e2b", action, stopped: false, active: false };
-        if (record.kernel) throw new E2BBrowserError("Kernel live view lasts for the browser session. Use stop to revoke the viewer and end this browser; hiding the viewer does not revoke its URL.");
+        if (record.kernel) {
+          await this.save(userId, { ...record, stream: undefined, updatedAt: Date.now() });
+          return { provider: "kernel", action, stopped: false, active: false, revoked: true, providerRevocation: "browser_stop_required", message: "The Chusky viewer URL is revoked. Kernel keeps the browser live view until the browser session is stopped; a copied provider URL cannot be revoked by Chusky." };
+        }
         try {
           const { sandbox } = await this.sandbox(userId, false);
           await this.stopBrowserStream(sandbox);
@@ -819,12 +900,14 @@ export class E2BBrowserEngine {
         const sessionId = requestedSessionId || `br_${randomUUID()}`;
         const next = { ...record, sessionId, updatedAt: Date.now(), expiresAt: Date.now() + ttlSeconds * 1000 };
         await this.save(userId, next);
+        browserSessionManager.adoptExternalLease({ ownerId: userId, leaseId: sessionId, provider: next.kernel ? "kernel" : "e2b", backendId: next.sandboxId, region: "default", profileId: next.kernel?.profileId ?? `sandbox_${next.sandboxId}`, expiresAt: next.expiresAt });
         return { provider: next.kernel ? "kernel" : "e2b", sandboxId: next.sandboxId, sessionId, action, expiresAt: next.expiresAt };
       }
       if (action === "session_release") {
         const record = await this.record(userId);
         if (!record?.sessionId || record.sessionId !== args.sessionId) throw new E2BBrowserError("E2B browser session lease not found or already expired");
         await this.save(userId, { ...record, sessionId: undefined, updatedAt: Date.now() });
+        browserSessionManager.unadoptExternalLease(userId, record.sessionId);
         return { provider: record.kernel ? "kernel" : "e2b", sandboxId: record.sandboxId, sessionId: record.sessionId, released: true };
       }
       if (action === "pause") {
@@ -862,7 +945,7 @@ export class E2BBrowserEngine {
         try {
           const { sandbox } = await this.sandbox(userId, false);
           const health = await this.run(sandbox, { action: "health" }, commandTimeoutMs);
-          return { provider: record.kernel ? "kernel" : "e2b", sandboxId: record.sandboxId, lastUrl: record.lastUrl, title: record.title, sessionId: record.sessionId, expiresAt: record.expiresAt, health: health.health ?? health };
+          return { provider: record.kernel ? "kernel" : "e2b", sandboxId: record.sandboxId, lastUrl: record.lastUrl, title: record.title, sessionId: record.sessionId, expiresAt: record.expiresAt, health: health.health ?? health, metrics: browserMetrics.snapshot() };
         } catch (error) {
           return { provider: record.kernel ? "kernel" : "e2b", sandboxId: record.sandboxId, lastUrl: record.lastUrl, title: record.title, sessionId: record.sessionId, expiresAt: record.expiresAt, health: { status: "unhealthy", error: redactBrowserText(error instanceof Error ? error.message : String(error), 400) } };
         }
@@ -929,6 +1012,7 @@ export class E2BBrowserEngine {
         throw new E2BBrowserError("Screenshots and browser recordings are available only in the owner's private conversation");
       }
       if (record.sessionId && !["state", "snapshot", "find", "form_inspect", "form_plan"].includes(action) && args.sessionId !== record.sessionId) throw new E2BBrowserError("Acquire the active E2B browser session lease before steering this browser");
+      if (record.sessionId && args.sessionId === record.sessionId && browserSessionManager.isTracked(userId, record.sessionId)) browserSessionManager.assertLease(userId, record.sessionId);
       if (!internal.vaultLoginFlow) assertE2BBrowserHandoffAllowsAction(action, (await getSession(userId)).browserHandoffs ?? [], record.lastUrl, record.sandboxId);
       if (!internal.vaultLoginFlow) {
         if (action === "act" || action === "agent") {
@@ -1006,7 +1090,7 @@ export class E2BBrowserEngine {
         request.target = { role: target.role, name: target.name, index: target.index, frameIndex: target.frameIndex, frameUrl: target.frameUrl, observationId: target.observationId, pageGeneration: target.pageGeneration };
       }
       if (action === "scroll") Object.assign(request, { direction: args.direction === "up" ? "up" : "down", amount: Math.max(1, Math.min(10, Number(args.amount ?? 3))) });
-      if (action === "wait") Object.assign(request, { timeoutMs: Math.max(50, Math.min(30_000, Number(args.timeoutSeconds ?? args.timeoutMs ?? 1_000) * (args.timeoutSeconds ? 1_000 : 1))), ...(args.role ? { role: args.role } : {}), ...(args.name ? { name: args.name, nameMatch: args.nameMatch } : {}) });
+      if (action === "wait") Object.assign(request, normalizeBrowserWaitRequest(args));
       if (action === "tab_focus") request.index = Number(args.index ?? 0);
       if (action === "screenshot_region") Object.assign(request, { x: args.x, y: args.y, width: args.width, height: args.height });
       if (action === "screenshot_region_full") Object.assign(request, { x: args.x, y: args.y, width: args.width, height: args.height });
@@ -1022,9 +1106,12 @@ export class E2BBrowserEngine {
         }
       }
       let result: E2BCommandResult;
+      const actionStartedAt = Date.now();
       try {
         result = await this.run(sandbox, request, commandTimeoutMs, internal.signal);
+        browserMetrics.record({ kind: "action", provider: record.kernel ? "kernel" : "e2b", status: "success", action, durationMs: Date.now() - actionStartedAt, ownerId: userId });
       } catch (error) {
+        browserMetrics.record({ kind: "action", provider: record.kernel ? "kernel" : "e2b", status: "failure", action, durationMs: Date.now() - actionStartedAt, ownerId: userId });
         // Only replay idempotent control operations. A click, keypress, type,
         // submit, or coordinate action may already have caused an external
         // effect and must be re-inspected by the agent instead.
@@ -1037,6 +1124,7 @@ export class E2BBrowserEngine {
         Object.assign(request, { selector: replanned.selector });
         result = await this.run(sandbox, request, commandTimeoutMs);
       }
+      if (result.challenge?.detected) browserMetrics.record({ kind: "challenge", provider: record.kernel ? "kernel" : "e2b", status: result.needsUserInteraction ? "handoff" : "failure", action, challengeType: result.challenge.type, ownerId: userId });
       let importedFiles: E2BBrowserFileRecord[] = [];
       if (["wait_download"].includes(action)) importedFiles = await this.syncRuntimeFiles(userId, sandbox, record, "download");
       if (action === "pdf" && result.pdf?.filePath && result.pdf.size) {
@@ -1084,6 +1172,7 @@ export class E2BBrowserEngine {
         ...(result.url ? { observedUrl: result.url, observationMethod: "playwright_page_url" } : {}),
         ...(result.title ? { title: redactBrowserText(result.title, 160) } : {}),
         ...(result.loadState ? { loadState: result.loadState } : {}),
+        ...(result.wait ? { wait: result.wait } : {}),
         ...(nodes.length ? { matches: nodes } : {}),
         ...(result.formState ? { formState: result.formState } : {}),
         ...(result.actionVerification ? { actionVerification: result.actionVerification } : {}),
@@ -1266,8 +1355,9 @@ export class E2BBrowserEngine {
     const stream = record.kernel
       ? { url: kernelLiveViewUrl((await kernelClient().browsers.retrieve(record.kernel.sessionId)).browser_live_view_url), startedAt: Date.now(), expiresAt: record.expiresAt, port: 443 }
       : await this.startBrowserStream(sandbox, ttlSeconds);
-    await this.save(userId, { ...record, stream: { startedAt: stream.startedAt, expiresAt: stream.expiresAt, port: stream.port }, updatedAt: Date.now() });
-    return { sandboxId: record.sandboxId, url: stream.url, expiresAt: stream.expiresAt, message: `Open this private browser session to complete ${reason || "the website step"}. It expires soon. When you are done, return here and say continue; Chusky will inspect the same retained browser before it does anything else.` };
+    const issued = await this.issueLiveView(userId, record, { targetUrl: stream.url, startedAt: stream.startedAt, expiresAt: stream.expiresAt, port: stream.port, mode: "interactive" });
+    await this.save(userId, { ...record, stream: issued.stream, updatedAt: Date.now() });
+    return { sandboxId: record.sandboxId, url: issued.url, expiresAt: stream.expiresAt, message: `Open this private browser session to complete ${reason || "the website step"}. It expires soon. When you are done, return here and say continue; Chusky will inspect the same retained browser before it does anything else.` };
     });
   }
 

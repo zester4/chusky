@@ -5,7 +5,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { createKernelController } from "./kernel-controller.mjs";
+import { createKernelController, shouldAttemptAutomaticCaptchaWait } from "./kernel-controller.mjs";
+import { waitForBrowserConditions } from "./browser-conditions.mjs";
 
 process.env.PLAYWRIGHT_BROWSERS_PATH ||= "/opt/ms-playwright";
 const { chromium } = await import("playwright");
@@ -18,6 +19,15 @@ const PROFILE = "/home/chusky/.cache/chusky-browser";
 const DISPLAY = process.env.DISPLAY || ":99";
 const DOWNLOAD_ROOT = "/tmp/chusky-browser-downloads";
 const RECORDING_ROOT = "/tmp/chusky-browser-recordings";
+const BROWSER_HARNESS = String(process.env.CHUSKY_BROWSER_HARNESS || "playwright").trim().toLowerCase();
+const BROWSER_ENGINE = String(process.env.CHUSKY_BROWSER_ENGINE || "chrome").trim().toLowerCase();
+const BROWSER_EXECUTABLE = String(process.env.CHUSKY_BROWSER_EXECUTABLE_PATH || "").trim();
+const BROWSER_CDP_PORT = (() => {
+  const value = Number(process.env.CHUSKY_BROWSER_CDP_PORT || 9222);
+  return Number.isInteger(value) && value >= 1024 && value <= 65535 ? value : 9222;
+})();
+const AGENT_BROWSER_CLI = "/app/node_modules/agent-browser/bin/agent-browser.js";
+const AGENT_BROWSER_SESSION = `chusky-e2b-${process.pid}`;
 const MAX_PAGE_TEXT = 12_000;
 const MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024;
 const clean = (value, max = 180) => String(value ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
@@ -34,9 +44,127 @@ function recordEvent(type, data = {}) {
   if (eventLog.length > 200) eventLog.shift();
 }
 let kernelController;
+// WeakMap keeps challenge state tied to the retained Playwright page without
+// retaining closed pages or leaking challenge metadata between browser tabs.
+const heldChallenges = new WeakMap();
+let selectedBrowserExecutable;
 function boundedRecords(items, limit = 50) { return items.slice(-limit).map((item) => ({ ...item })); }
 let webBotAuthActive = Boolean(signatureDirectory && signingKeyB64);
 let webBotAuthSigner;
+
+async function executableFile(candidate) {
+  if (!candidate) return false;
+  try {
+    const stat = await fs.stat(candidate);
+    return stat.isFile() && (stat.mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveLocalBrowserExecutable() {
+  if (BROWSER_ENGINE === "chromium") return undefined;
+  if (BROWSER_ENGINE !== "chrome") throw new Error("CHUSKY_BROWSER_ENGINE must be chrome or chromium");
+  const candidates = [BROWSER_EXECUTABLE, "/usr/local/bin/chrome-for-testing"];
+  for (const candidate of candidates) if (await executableFile(candidate)) return candidate;
+  try {
+    const browserRoot = "/home/chusky/.agent-browser/browsers";
+    const entries = (await fs.readdir(browserRoot, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith("chrome-"))
+      .map((entry) => entry.name)
+      .sort()
+      .reverse();
+    for (const entry of entries) {
+      for (const suffix of ["chrome-linux64/chrome", "chrome-linux/chrome"]) {
+        const candidate = path.join(browserRoot, entry, suffix);
+        if (await executableFile(candidate)) return candidate;
+      }
+    }
+  } catch {
+    // The final error below is intentionally actionable and bounded.
+  }
+  throw new Error("Chrome for Testing is unavailable in this E2B template; rebuild the template or set E2B_BROWSER_ENGINE=chromium for the explicit compatibility fallback");
+}
+
+function browserRuntimeSnapshot() {
+  const kernel = Boolean(process.env.CHUSKY_KERNEL_CDP_URL);
+  return {
+    engine: kernel ? "kernel-managed-headed" : (BROWSER_ENGINE === "chrome" ? "chrome-for-testing" : "playwright-chromium"),
+    headless: false,
+    executable: kernel ? "kernel-remote" : (BROWSER_ENGINE === "chrome" ? clean(selectedBrowserExecutable || BROWSER_EXECUTABLE || "/usr/local/bin/chrome-for-testing", 240) : "playwright-managed"),
+  };
+}
+
+function harnessSnapshotText(value, max = 18_000) {
+  return String(value ?? "").replace(/[\u0000\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").slice(0, max);
+}
+
+function harnessFailure(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  if (message.includes("timed out") || message.includes("timeout")) return "timeout";
+  if (message.includes("cdp") || message.includes("connect") || message.includes("target")) return "cdp_attach_failed";
+  if (message.includes("no such file") || message.includes("enoent")) return "binary_unavailable";
+  return "command_failed";
+}
+
+async function agentBrowserCommand(args, timeoutMs = 20_000) {
+  if (BROWSER_HARNESS !== "agent-browser") return undefined;
+  const cdp = process.env.CHUSKY_KERNEL_CDP_URL || `http://127.0.0.1:${BROWSER_CDP_PORT}`;
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [AGENT_BROWSER_CLI, "--session", AGENT_BROWSER_SESSION, "--json", "--max-output", "18000", ...args], {
+      env: { ...process.env, AGENT_BROWSER_CDP: cdp, AGENT_BROWSER_NO_WEBMCP: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => { child.kill("SIGTERM"); reject(new Error("agent-browser command timed out")); }, timeoutMs);
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); if (stdout.length > 32_000) stdout = stdout.slice(-32_000); });
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); if (stderr.length > 4_000) stderr = stderr.slice(-4_000); });
+    child.once("error", (error) => { clearTimeout(timer); reject(error); });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      const line = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1);
+      if (!line) return reject(new Error(code === 0 ? "agent-browser returned no result" : "agent-browser command failed"));
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed?.success !== true) return reject(new Error("agent-browser command failed"));
+        resolve(parsed.data ?? {});
+      } catch {
+        reject(new Error(stderr ? "agent-browser returned invalid JSON" : "agent-browser returned no result"));
+      }
+    });
+  });
+}
+
+async function agentBrowserSnapshot(page) {
+  if (BROWSER_HARNESS !== "agent-browser") return undefined;
+  // agent-browser is an optional observation enrichment. Keep its CDP probe
+  // bounded as a whole so a stalled target cannot delay the authoritative
+  // Playwright observation or the challenge handoff protocol.
+  const deadline = Date.now() + 8_000;
+  const command = (args) => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("agent-browser snapshot timed out");
+    return agentBrowserCommand(args, Math.min(4_000, remaining));
+  };
+  try {
+    const targetUrl = page.url();
+    const tabs = await command(["tab", "list"]);
+    const match = Array.isArray(tabs?.tabs) ? tabs.tabs.find((tab) => tab?.url === targetUrl) : undefined;
+    if (match?.targetId) await command(["tab", String(match.targetId)]);
+    const snapshot = await command(["snapshot", "-i"]);
+    const refs = snapshot?.refs && typeof snapshot.refs === "object" ? snapshot.refs : {};
+    return {
+      provider: "agent-browser",
+      available: true,
+      snapshot: harnessSnapshotText(snapshot?.snapshot),
+      refCount: Object.keys(refs).length,
+      activeUrl: clean(targetUrl, 1_000),
+    };
+  } catch (error) {
+    return { provider: "agent-browser", available: false, error: harnessFailure(error) };
+  }
+}
 
 function ensurePageTracking(page) {
   if (page.__chuskyTracking) return page.__chuskyTracking;
@@ -651,6 +779,11 @@ async function inspectForms(page) {
         const validationMessage = cleanText(describedBy.split(/\\s+/).map((id) => document.getElementById(id)?.innerText || "").join(" ") || (invalid && typeof input.validationMessage === "string" ? input.validationMessage : ""), 300);
         return {
           ...(element.id ? { id: cleanText(element.id, 160) } : {}),
+          ...(element.getAttribute("name") ? { nameAttr: cleanText(element.getAttribute("name"), 160) } : {}),
+          ...(element.getAttribute("placeholder") ? { placeholder: cleanText(element.getAttribute("placeholder"), 200) } : {}),
+          ...(element.getAttribute("autocomplete") ? { autocomplete: cleanText(element.getAttribute("autocomplete"), 80) } : {}),
+          ...(element.getAttribute("type") ? { inputType: cleanText(element.getAttribute("type"), 40) } : {}),
+          tagName: tag,
           role: cleanText(role, 40), type: cleanText(type, 40), name: labelFor(element), required: element.required === true || element.getAttribute("aria-required") === "true", disabled: element.disabled === true || element.getAttribute("aria-disabled") === "true",
           ...(rawValue ? { valuePresent: true, valueLength: rawValue.length } : { valuePresent: false, valueLength: 0 }),
           ...(typeof input.checked === "boolean" ? { checked: input.checked } : {}), ...(selected ? { selectedText: cleanText(selected, 300) } : {}),
@@ -662,7 +795,7 @@ async function inspectForms(page) {
       const roots = Array.from(document.querySelectorAll("form"));
       const groups = roots.length ? roots : [document.body];
       return groups.slice(0, 40).map((root, index) => {
-        const controls = Array.from(root.querySelectorAll(selector)).filter((element) => !element.closest("form") || element.closest("form") === root).map(serializeControl);
+        const controls = Array.from(root.querySelectorAll(selector)).filter((element) => !element.closest("form") || element.closest("form") === root).map((element, controlIndex) => ({ ...serializeControl(element), index: controlIndex }));
         const submitControls = Array.from(root.querySelectorAll('button,input[type="submit"],input[type="button"],[role="button"]')).slice(0, 20).map((element) => ({ role: element.getAttribute("role") || "button", name: labelFor(element) || cleanText(element.innerText || element.value || "Submit"), ...(element.id ? { id: cleanText(element.id, 160) } : {}), disabled: element.disabled === true || element.getAttribute("aria-disabled") === "true" }));
         return { formId: root.id ? cleanText(root.id, 160) : `implicit-${index}`, ...(root.getAttribute("aria-label") ? { name: cleanText(root.getAttribute("aria-label"), 180) } : {}), ...(root.getAttribute("action") ? { action: cleanText(root.getAttribute("action"), 500) } : {}), ...(root.getAttribute("method") ? { method: cleanText(root.getAttribute("method"), 20).toUpperCase() } : {}), controls, submitControls };
       }).filter((form) => form.controls.length || form.submitControls.length);
@@ -670,6 +803,65 @@ async function inspectForms(page) {
     for (const form of frameForms) forms.push({ ...form, controls: form.controls.map((control) => ({ ...control, frameIndex: page.frames().indexOf(frame), frameUrl: clean(frame.url(), 1_000) })), submitControls: form.submitControls.map((control) => ({ ...control, frameIndex: page.frames().indexOf(frame), frameUrl: clean(frame.url(), 1_000) })) });
   }
   return forms;
+}
+
+/**
+ * Form inspection is the fallback candidate source for framework controls that
+ * do not expose a useful accessible role/name pair to Playwright. Only stable
+ * selector metadata is promoted; values, selected values, and validation text
+ * remain in the form channel and are never copied into matches.
+ */
+function formControlMatches(forms, request = {}) {
+  const requestedRole = typeof request.role === "string" && ROLES.includes(request.role) ? request.role : undefined;
+  const requestedName = typeof request.name === "string" ? request.name.trim().toLowerCase() : "";
+  let requestedRegex;
+  if (requestedName && request.nameMatch === "regex") {
+    try { requestedRegex = new RegExp(requestedName.slice(0, 160), "i"); } catch { requestedRegex = undefined; }
+  }
+  const matchesName = (name) => {
+    if (!requestedName) return true;
+    if (request.nameMatch === "substring") return name.toLowerCase().includes(requestedName);
+    if (requestedRegex) return requestedRegex.test(name);
+    return name.toLowerCase() === requestedName;
+  };
+  const out = [];
+  for (const form of Array.isArray(forms) ? forms.slice(0, 40) : []) {
+    for (const [controlIndex, control] of (Array.isArray(form?.controls) ? form.controls : []).entries()) {
+      const role = clean(control?.role, 40).toLowerCase();
+      const name = clean(control?.name || control?.placeholder || control?.id, 160);
+      if (!role || !name || (requestedRole && role !== requestedRole) || !matchesName(name)) continue;
+      const frameIndex = Number(control?.frameIndex);
+      const index = Number.isSafeInteger(Number(control?.index)) ? Number(control.index) : controlIndex;
+      out.push({
+        role,
+        name,
+        index: Math.max(0, index),
+        ...(control?.id ? { id: clean(control.id, 160) } : {}),
+        ...(control?.nameAttr ? { nameAttr: clean(control.nameAttr, 160) } : {}),
+        ...(control?.placeholder ? { placeholder: clean(control.placeholder, 200) } : {}),
+        ...(control?.autocomplete ? { autocomplete: clean(control.autocomplete, 80) } : {}),
+        ...(control?.inputType ? { inputType: clean(control.inputType, 40) } : {}),
+        ...(control?.tagName ? { tagName: clean(control.tagName, 40) } : {}),
+        ...(Number.isSafeInteger(frameIndex) && frameIndex >= 0 ? { frameIndex } : {}),
+        ...(control?.frameUrl ? { frameUrl: clean(control.frameUrl, 1_000) } : {}),
+      });
+      if (out.length >= MAX_MATCHES) return out;
+    }
+  }
+  return out;
+}
+
+function mergeObservationMatches(matches, forms, request = {}) {
+  const seen = new Set((Array.isArray(matches) ? matches : []).map((item) => `${item?.role || ""}\0${item?.name || ""}\0${item?.frameIndex ?? 0}\0${item?.id || ""}`));
+  const merged = Array.isArray(matches) ? [...matches] : [];
+  for (const item of formControlMatches(forms, request)) {
+    const key = `${item.role}\0${item.name}\0${item.frameIndex ?? 0}\0${item.id || ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(item);
+    if (merged.length >= MAX_MATCHES) break;
+  }
+  return merged;
 }
 
 async function detectChallenge(page) {
@@ -706,8 +898,18 @@ async function detectChallenge(page) {
 
 async function challengeFor(page) {
   const detected = await detectChallenge(page);
-  if (!kernelController || !detected.detected || detected.type !== "captcha") return detected;
+  if (!detected.detected) {
+    heldChallenges.delete(page);
+    return detected;
+  }
+  const alreadyHeld = heldChallenges.get(page) === true;
+  if (!kernelController || !shouldAttemptAutomaticCaptchaWait(detected, alreadyHeld)) {
+    if (kernelController) heldChallenges.set(page, true);
+    return detected;
+  }
   const outcome = await kernelController.wait(() => detectChallenge(page));
+  if (outcome.challenge.detected) heldChallenges.set(page, true);
+  else heldChallenges.delete(page);
   return { ...outcome.challenge, automaticAttempted: true, pageVerified: outcome.verified, ...(outcome.terminalStatus ? { terminalStatus: outcome.terminalStatus } : {}), solver: kernelController.tracker.snapshot() };
 }
 
@@ -727,6 +929,12 @@ async function healthSnapshot(context) {
     display: DISPLAY,
     pageCount: pages.length,
     activeUrl: pages[0]?.url() || "about:blank",
+    runtime: browserRuntimeSnapshot(),
+    harness: {
+      provider: BROWSER_HARNESS,
+      configured: BROWSER_HARNESS === "agent-browser" || BROWSER_HARNESS === "playwright",
+      cdpTarget: BROWSER_HARNESS === "agent-browser" ? (process.env.CHUSKY_KERNEL_CDP_URL ? "kernel-remote" : "e2b-local") : "not-required",
+    },
   };
 }
 
@@ -748,19 +956,24 @@ async function linkPayTokenFrame(page) {
   return undefined;
 }
 
-async function result(page, context, extra = {}, includePageContent = false) {
+async function result(page, context, extra = {}, includePageContent = false, knownChallenge) {
   // Allow initial hydration and observer delivery to settle before sealing an
   // observation. This remains bounded and avoids treating the same render
   // transaction as a stale page between snapshot and the next action.
   await page.waitForTimeout(50).catch(() => {});
-  const challenge = await challengeFor(page);
+  const challenge = knownChallenge ?? await challengeFor(page);
   const tracking = ensurePageTracking(page);
   const generation = await pageGeneration(page);
   const observationId = randomUUID();
   tracking.observationId = observationId;
+  // Challenge pages often keep a remote iframe busy while the owner is
+  // solving it. Do not block the handoff response on a second accessibility
+  // walk; after the challenge clears, the next fresh observation rebuilds it.
   const suppliedMatches = !challenge.automaticAttempted && Array.isArray(extra.matches) ? extra.matches : undefined;
-  const matches = suppliedMatches?.map((item) => ({ ...item, observationId, pageGeneration: generation }))
-    ?? await roleMatches(page);
+  const matches = challenge.detected
+    ? []
+    : suppliedMatches?.map((item) => ({ ...item, observationId, pageGeneration: generation }))
+      ?? await roleMatches(page);
   const accessibilityHash = createHash("sha256").update(JSON.stringify(matches.map(({ role, name, index, frameIndex, frameUrl }) => ({ role, name, index, frameIndex, frameUrl })))).digest("hex").slice(0, 24);
   return { ok: true, url: page.url(), title: clean(await page.title().catch(() => ""), 160), loadState: "settled", observationId, pageGeneration: generation, accessibilityHash, ...(challenge.detected ? { needsUserInteraction: true, challenge } : { challenge }), ...(includePageContent ? await pageText(page) : {}), ...extra, ...(matches ? { matches } : {}), tabs: await tabsFor(context, page), activeIndex: context.pages().indexOf(page) };
 }
@@ -1258,15 +1471,28 @@ async function execute(context, pageState, request) {
       input.dispatchEvent(new Event("change", { bubbles: true }));
     }, request.value);
     return result(page, context, { linkPayToken: { filled: true, merchantAccountId: match.merchantAccountId } });
-  } else if (["state", "snapshot", "find"].includes(action)) return result(page, context, { matches: await roleMatches(page, request) }, request.includePageContent === true);
+  } else if (["state", "snapshot", "find"].includes(action)) {
+    // The agent-browser subprocess can hang while a challenge page owns the
+    // CDP target. Let the page detector report the handoff state first. A
+    // cleared page takes the normal fresh harness snapshot path below.
+    const challenge = await challengeFor(page);
+    if (challenge.detected) {
+      return result(page, context, { matches: [] }, request.includePageContent === true, challenge);
+    }
+    const harness = await agentBrowserSnapshot(page);
+    return result(page, context, { matches: await roleMatches(page, request), ...(harness ? { agentBrowser: harness } : {}) }, request.includePageContent === true);
+  }
   else if (action === "observe") {
-    const observed = { matches: await roleMatches(page, request), forms: request.includeForms === false ? undefined : await inspectForms(page) };
+    const forms = request.includeForms === false ? undefined : await inspectForms(page);
+    const observed = { matches: mergeObservationMatches(await roleMatches(page, request), forms, request), forms };
     if (request.includeLinks === true) observed.links = await linkMatches(page);
     if (request.includeScreenshot === true) {
       const image = await captureBrowserScreenshot(page);
       observed.screenshot = image.toString("base64");
       observed.screenshotHash = createHash("sha256").update(image).digest("hex").slice(0, 32);
     }
+    const harness = await agentBrowserSnapshot(page);
+    if (harness) observed.agentBrowser = harness;
     return result(page, context, observed, request.includePageContent === true);
   } else if (action === "extract") {
     const extracted = await extractRequestedSchema(page, request.schema || {});
@@ -1298,9 +1524,9 @@ async function execute(context, pageState, request) {
     const afterTitle = await page.title().catch(() => "");
     const afterGeneration = await pageGeneration(page);
     const actionVerification = beforeAction ? { attempted: true, observed: true, urlChanged: beforeAction.url !== afterUrl, titleChanged: beforeAction.title !== afterTitle, pageGenerationChanged: beforeAction.generation !== afterGeneration, validationErrors: allErrors } : undefined;
-    return result(page, context, { matches: await roleMatches(page), forms, workflowCheckpoint, ...(allErrors.length ? { validationErrors: allErrors } : {}), submitted, ...(actionVerification ? { actionVerification } : {}) }, request.includePageContent === true);
+    return result(page, context, { matches: mergeObservationMatches(await roleMatches(page), forms), forms, workflowCheckpoint, ...(allErrors.length ? { validationErrors: allErrors } : {}), submitted, ...(actionVerification ? { actionVerification } : {}) }, request.includePageContent === true);
   }
-  else if (action === "health") return result(page, context, { health: { status: "ready", daemon: "ready", chromium: page.isClosed() ? "closed" : "ready", pages: context.pages().length, display: DISPLAY, profile: PROFILE } });
+  else if (action === "health") return result(page, context, { health: { status: "ready", daemon: "ready", chromium: page.isClosed() ? "closed" : "ready", pages: context.pages().length, display: DISPLAY, profile: PROFILE, runtime: browserRuntimeSnapshot() } });
   else if ((action === "click" || action === "move") && Number.isFinite(Number(request.x)) && Number.isFinite(Number(request.y))) {
     if (action === "click" && request.visualFallback === true) {
       if (typeof request.screenshotHash !== "string" || !request.screenshotHash) throw new Error("Visual coordinate clicks require a screenshotHash from a fresh screenshot");
@@ -1346,11 +1572,17 @@ async function execute(context, pageState, request) {
   else if (action === "forward") await page.goForward({ waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => {});
   else if (action === "refresh") await page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
   else if (action === "wait") {
-    const timeoutMs = Math.max(50, Math.min(30_000, Number(request.timeoutMs ?? 1_000)));
-    if (request.role || request.name) {
-      const semanticTarget = await resolveLocator(page, request);
-      await semanticTarget.waitFor({ state: "visible", timeout: timeoutMs });
-    } else await page.waitForTimeout(timeoutMs);
+    let semanticTarget;
+    const wait = await waitForBrowserConditions(page, request, {
+      visible: request.role || request.name
+        ? async () => {
+          semanticTarget ||= await resolveLocator(page, request);
+          await semanticTarget.waitFor({ state: "visible", timeout: 1_000 });
+          return true;
+        }
+        : undefined,
+    });
+    return result(page, context, { wait });
   }
   else if (["screenshot", "screenshot_full", "screenshot_region", "screenshot_region_full"].includes(action)) {
     const clipped = ["screenshot_region", "screenshot_region_full"].includes(action);
@@ -1380,11 +1612,12 @@ async function execute(context, pageState, request) {
   const formState = target && ["fill", "select_option", "check", "uncheck"].includes(action) ? await controlState(target) : undefined;
   const reportedFormState = formState ? { ...formState, ...(actionFormState || {}) } : actionFormState;
   const formMutation = ["fill", "select_option", "check", "uncheck", "click", "press"].includes(action);
+  const observedForms = formMutation ? await inspectForms(page) : undefined;
   const afterUrl = page.url();
   const afterTitle = await page.title().catch(() => "");
   const afterGeneration = await pageGeneration(page);
   const actionVerification = beforeAction ? { attempted: true, observed: true, urlChanged: beforeAction.url !== afterUrl, titleChanged: beforeAction.title !== afterTitle, pageGenerationChanged: beforeAction.generation !== afterGeneration } : undefined;
-  return result(page, context, { matches: await roleMatches(page), ...(reportedFormState ? { formState: reportedFormState } : {}), ...(formMutation ? { forms: await inspectForms(page) } : {}), ...(actionVerification ? { actionVerification } : {}) }, request.includePageContent === true);
+  return result(page, context, { matches: mergeObservationMatches(await roleMatches(page), observedForms), ...(reportedFormState ? { formState: reportedFormState } : {}), ...(formMutation ? { forms: observedForms } : {}), ...(actionVerification ? { actionVerification } : {}) }, request.includePageContent === true);
 }
 
 async function vaultLogin(context, request) {
@@ -1529,6 +1762,8 @@ async function vaultLogin(context, request) {
 }
 
 async function start() {
+  if (BROWSER_HARNESS !== "playwright" && BROWSER_HARNESS !== "agent-browser") throw new Error("CHUSKY_BROWSER_HARNESS must be playwright or agent-browser");
+  if (BROWSER_ENGINE !== "chrome" && BROWSER_ENGINE !== "chromium") throw new Error("CHUSKY_BROWSER_ENGINE must be chrome or chromium");
   const browserEnv = { ...process.env, DISPLAY };
   delete browserEnv.CHUSKY_WEB_BOT_AUTH_PRIVATE_KEY_B64;
   delete browserEnv.KERNEL_API_KEY;
@@ -1541,6 +1776,7 @@ async function start() {
   // for constrained hosts, but it must be explicit rather than silently making
   // every browser session look unusual to sites that depend on WebGL/canvas.
   if (process.env.CHUSKY_BROWSER_DISABLE_GPU === "true") browserArgs.push("--disable-gpu");
+  if (BROWSER_HARNESS === "agent-browser" && !process.env.CHUSKY_KERNEL_CDP_URL) browserArgs.push(`--remote-debugging-port=${BROWSER_CDP_PORT}`);
   let context;
   if (process.env.CHUSKY_KERNEL_CDP_URL) {
     const remote = await chromium.connectOverCDP(process.env.CHUSKY_KERNEL_CDP_URL, { timeout: 30_000 });
@@ -1548,7 +1784,10 @@ async function start() {
     if (!context) throw new Error("Kernel browser has no default context");
     kernelController = createKernelController(process.env, recordEvent);
     for (const event of ["SIGTERM", "SIGINT"]) process.once(event, () => { kernelController?.close(); process.exit(0); });
-  } else context = await chromium.launchPersistentContext(PROFILE, { headless: false, acceptDownloads: true, permissions: ["clipboard-read", "clipboard-write"], locale: process.env.CHUSKY_BROWSER_LOCALE || "en-US", timezoneId: process.env.CHUSKY_BROWSER_TIMEZONE || "America/New_York", ...(geolocation ? { geolocation } : {}), args: browserArgs, viewport: { width: 1440, height: 900 }, env: browserEnv });
+  } else {
+    selectedBrowserExecutable = await resolveLocalBrowserExecutable();
+    context = await chromium.launchPersistentContext(PROFILE, { headless: false, ...(selectedBrowserExecutable ? { executablePath: selectedBrowserExecutable } : {}), acceptDownloads: true, permissions: ["clipboard-read", "clipboard-write"], locale: process.env.CHUSKY_BROWSER_LOCALE || "en-US", timezoneId: process.env.CHUSKY_BROWSER_TIMEZONE || "America/New_York", ...(geolocation ? { geolocation } : {}), args: browserArgs, viewport: { width: 1440, height: 900 }, env: browserEnv });
+  }
   await fs.mkdir(DOWNLOAD_ROOT, { recursive: true, mode: 0o700 });
   await fs.mkdir(RECORDING_ROOT, { recursive: true, mode: 0o700 });
   context.on("page", (page) => {

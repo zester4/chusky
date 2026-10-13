@@ -862,10 +862,17 @@ hosted form. Connections are looked up from the requesting owner's saved IDs,
 never from arbitrary provider IDs. Profile changes close the previous browser.
 SSO flows requiring additional domains may need operator configuration.
 
-Live-view URLs are sensitive and last for the session, not an independently
-revocable short link. `stop` closes both remote browser and controller; Kernel
-`stream_stop`, `pause`, and `fork` fail explicitly rather than misrepresenting
-revocation or identity isolation. Remote failures preserve state and do not
+Live-view delivery is provider-neutral when `WEBHOOK_URL` is configured. A
+`stream_start` watch uses a short-lived encrypted Chusky ticket and a read-only
+viewer page; `browserHandoff` uses the same page in interactive mode. The
+ticket is bound to the owner's retained stream, and `stream_status` can return
+the current watch link without persisting the provider URL in plaintext.
+`stream_stop` revokes Chusky's viewer immediately. Kernel's underlying provider
+URL remains valid until the browser ends, so stopping the browser is required
+to revoke a provider URL that was copied outside Chusky. Without a public
+HTTPS `WEBHOOK_URL`, the runtime falls back to the provider's own bearer URL;
+configure `CHUSKY_BROWSER_LIVE_VIEW_SECRET` (or the documented secret fallback)
+for production delivery. Remote failures preserve state and do not
 automatically replay browser mutations. Local tests do not establish live
 provider readiness; build the template and run a public-page smoke test before
 production activation. Existing Daytona computer-use remains separate.
@@ -924,11 +931,32 @@ thumbprint.
 
 Build the template with `npm run e2b:template:build`, then configure
 `E2B_API_KEY`, `E2B_BROWSER_TEMPLATE`, and `E2B_ENABLED=true`. The template
-installs Chromium with Playwright into `/opt/ms-playwright`, makes it readable
-by the non-root `chusky` user, and launches with safe container flags. Run
+installs Google's Chrome for Testing through the pinned `agent-browser` release,
+exposes it at `/usr/local/bin/chrome-for-testing`, and launches it headed
+(`headless: false`) on the retained `:99` display. Playwright's bundled Chromium
+is retained only for the explicit `E2B_BROWSER_ENGINE=chromium` compatibility
+fallback. Run
 `npm run e2b:browser:live-smoke -- https://example.com` after the template is
-available. E2B is the only automated browser backend; Daytona remains responsible for
-computer, files, artifacts, terminals, and app work.
+available. E2B is the automated browser backend; Daytona remains responsible for
+computer, files, artifacts, terminals, and app work. Set
+`agent-browser` is the production default and attaches Vercel's `agent-browser` CLI to
+the same E2B Chrome for Testing process over CDP. It enriches `snapshot`, `state`, `find`, and
+`observe` results with a bounded accessibility-tree snapshot and tab-aligned
+diagnostics. The existing Playwright/Kernel controller remains the guarded
+action authority, so agent-browser refs are advisory and cannot be used as
+Chusky selectors. Set `E2B_BROWSER_HARNESS=playwright` for the lean fallback,
+or stop and restart a retained browser when changing the harness or
+`E2B_BROWSER_ENGINE`. Health output reports the engine and `headless: false` so
+deployments can verify the real runtime rather than trusting configuration alone.
+
+The provider-neutral session layer is documented in
+[`docs/browser-control-plane.md`](docs/browser-control-plane.md). It provides
+warm-session and region scheduling for registered adapters, opaque CDP broker
+tickets, encrypted profile envelopes, generation-bound refs, reconnectable
+leases, bounded browser metrics, and the shared browser action policy. The
+current retained E2B/Kernel controller adopts its durable leases into this
+layer; it does not expose raw CDP URLs or claim a warm regional fleet unless a
+provider adapter has actually registered one.
 
 ### Browser and vault operations
 
@@ -1525,6 +1553,7 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `E2B_ALLOW_INTERNET` | automated browser | `true` | Allow public web access; the browser still blocks local, metadata, private, and reserved network targets |
 | `E2B_TIMEOUT_MS` | automated browser | `900000` | Owner sandbox lifetime, bounded to 60 seconds–24 hours |
 | `E2B_REQUEST_TIMEOUT_MS` | automated browser | `120000` | E2B command/request timeout |
+| `CHUSKY_BROWSER_LIVE_VIEW_SECRET` | browser live view | — | Server-only encryption key for Chusky-hosted viewer tickets; falls back to `CHUSKY_PROJECT_KEY` or `WEBHOOK_SECRET` when blank |
 | `MAX_BROWSER_NO_PROGRESS_CALLS` | automated browser | `8` | Consecutive browser calls with no observed page-state progress before the run stops |
 | `WEB_BOT_AUTH_ENABLED` | browser identity | `false` | Publish the signed Web Bot Auth directory; does not enable request signing |
 | `WEB_BOT_AUTH_SIGN_REQUESTS` | browser identity | `false` | Sign browser requests only after Cloudflare approves the identity |

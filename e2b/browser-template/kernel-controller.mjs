@@ -6,6 +6,15 @@ const CHALLENGE_STATUSES = ["solved", "failure", "timeout", "abandoned"];
 const CAPTCHA_TYPES = ["hcaptcha", "recaptcha_v2", "recaptcha_v3", "turnstile", "geetest", "press_and_hold", "other"];
 const CAPTCHA_PROVIDERS = ["hcaptcha", "recaptcha_v2", "recaptcha_v3", "turnstile", "geetest", "arkose", "human", "other"];
 
+/**
+ * Automatic solving is a first observation aid, not a polling loop. Once a
+ * challenge has been surfaced to the owner, later observations must inspect
+ * the retained page and return promptly so a human handoff can clear it.
+ */
+export function shouldAttemptAutomaticCaptchaWait(challenge, alreadyHeld = false) {
+  return Boolean(challenge?.detected === true && challenge?.type === "captcha" && !alreadyHeld);
+}
+
 function boundedId(value) {
   return typeof value === "string" && value && value.length <= 200 ? value : undefined;
 }
