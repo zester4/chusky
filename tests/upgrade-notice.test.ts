@@ -244,13 +244,15 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces Muna accurately", async () => {
+test("current upgrade manifest announces Muna and mission runtime diagnosis accurately", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.55.0");
-  assert.equal(notice?.version, "4.55.0");
-  assert.match(notice?.bullets[0] ?? "", /Added Muna.*Monid-focused research specialist/);
-  assert.match(notice?.bullets[1] ?? "", /exact verification states.*spend/);
-  assert.match(notice?.bullets[2] ?? "", /does not buy personal contact data.*Monid remains disabled/);
+  assert.equal(notice?.id, "release-4.55.1");
+  assert.equal(notice?.version, "4.55.1");
+  assert.match(notice?.bullets[0] ?? "", /Added Muna for Monid research/);
+  assert.match(notice?.bullets[0] ?? "", /source links.*verification.*coverage.*uncertainty.*spend controls/);
+  assert.match(notice?.bullets[1] ?? "", /does not buy personal contact data.*Monid remains disabled/);
+  assert.match(notice?.bullets[2] ?? "", /diagnose an owned mission’s runtime health/);
+  assert.match(notice?.bullets[2] ?? "", /without changing mission state/);
 });
 
 test("lead campaign preset describes durable, discovery-first work and bounded enrichment", () => {

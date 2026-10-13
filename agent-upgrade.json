@@ -1,11 +1,11 @@
 {
-  "id": "release-4.55.0",
-  "version": "4.55.0",
+  "id": "release-4.55.1",
+  "version": "4.55.1",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added Muna, Chusky's Monid-focused research specialist for qualified business leads, selected contact enrichment, local prospects, company briefs, audience insights, visibility comparisons, creator and video research, and review evidence.",
-    "Muna returns source-linked findings with exact verification states, sample coverage, uncertainty, and spend under Monid approval and budget controls.",
-    "Muna does not buy personal contact data, contact prospects, write CRM records, publish content, or create recurring monitoring; Monid remains disabled until configured and its terms are cleared."
+    "Added Muna for Monid research on qualified leads, enrichment, local prospects, company briefs, audiences, visibility, creators, video, and reviews. Findings include source links, verification, coverage, uncertainty, and spend controls.",
+    "Muna does not buy personal contact data, contact prospects, write CRM records, publish content, or create recurring monitoring; Monid remains disabled until configured and its terms are cleared.",
+    "The chat agent can diagnose an owned mission’s runtime health, including stale waits, active steps, worker leases, failures, budget pressure, and safe next actions, without changing mission state."
   ],
-  "createdAt": "2026-10-13T00:00:00.000Z"
+  "createdAt": "2026-10-13T13:05:12.340Z"
 }
