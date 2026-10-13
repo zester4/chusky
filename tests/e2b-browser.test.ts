@@ -26,6 +26,7 @@ test("E2B browser template installs readable Chromium for the non-root runtime",
   assert.match(templateDockerfile, /chrome-for-testing/);
   assert.match(templateDockerfile, /chmod -R a\+rX \/opt\/ms-playwright \/app/);
   assert.match(templateDockerfile, /USER chusky/);
+  assert.match(templateDockerfile, /EXPOSE 9222 6080 8765/);
 });
 
 test("E2B browser agent uses a retained headed Playwright profile and safe Chromium flags", () => {

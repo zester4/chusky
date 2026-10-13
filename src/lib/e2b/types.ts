@@ -37,6 +37,7 @@ export type E2BBrowserNode = {
 
 export type E2BBrowserRecord = {
   sandboxId: string;
+  runtime?: "dedicated";
   /** Safe resource references only. CDP and live-view bearer URLs are never persisted in plaintext. */
   kernel?: { sessionId: string; profileId: string };
   /** Browser-side observation harness selected when this retained session was created. */
