@@ -3396,10 +3396,21 @@ export async function runAgent(
 
       if (onStatus) await onStatus(toolStatus(slug));
       const toolStartedAt = Date.now();
-      let activityMessage = toolStatus(slug).slice(0, 4000);
-      let activityPresentation: ComposioToolPresentation | undefined;
+      // Seed the durable activity row with the exact provider/action metadata
+      // already present in the exposed tool catalog. The old flow emitted a
+      // generic status first and only enriched it after argument parsing,
+      // which made clients briefly (or permanently, after a missed event)
+      // render “I’m taking care of that…” instead of the real action.
+      let activityPresentation: ComposioToolPresentation | undefined = composioToolPresentations.get(slug);
+      let activityMessage = (activityPresentation?.actionLabel ?? toolStatus(slug)).slice(0, 4000);
       let batchActivityActions: ComposioBatchAction[] = [];
-      await reportToolActivity({ toolSlug: slug, callId: call.id, status: "started", message: activityMessage });
+      await reportToolActivity({
+        toolSlug: slug,
+        callId: call.id,
+        status: "started",
+        message: activityMessage,
+        ...toolPresentationActivityFields(activityPresentation),
+      });
       let auditArgs: Record<string, unknown> | undefined;
       try { auditArgs = parseToolArguments(call.function.arguments); } catch { /* malformed provider args are logged by shape only */ }
       logger.debug(safeToolAudit({ tool: slug, args: auditArgs, userId, runId: options?.runId, startedAt: toolStartedAt, status: "started" }), "Tool call");

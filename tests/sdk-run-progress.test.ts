@@ -50,18 +50,33 @@ test("SDK progress derives human phases from statuses and tool activity", () => 
   const approval = progressFromSdkToolActivity({
     toolSlug: "GMAIL_SEND_EMAIL",
     status: "approval_required",
-    message: "Approval required.",
-    actionLabel: "Send the approved email",
+    message: "I'm taking care of that...",
+    actionLabel: "I'm taking care of that...",
     toolkitSlug: "gmail",
   }, research);
   assert.deepEqual(approval, {
     phase: "waiting",
-    title: "Send the approved email",
+    title: "Gmail · Send Email",
     detail: "Waiting for your approval before this action can continue.",
     provider: "gmail",
     requiresApproval: true,
     evidence: research.evidence,
   });
+});
+
+test("SDK progress replaces generic model filler with a provider-qualified tool action", () => {
+  const progress = progressFromSdkToolActivity({
+    toolSlug: "GOOGLEMAPS_SEARCH_BUSINESSES",
+    status: "started",
+    message: "I’m taking care of that…",
+    actionLabel: "I’m taking care of that…",
+    toolkitSlug: "google_maps",
+    toolkitName: "Google Maps",
+  });
+
+  assert.equal(progress.title, "Google Maps · Search Businesses");
+  assert.equal(progress.detail, "Running now.");
+  assert.equal(progress.provider, "google_maps");
 });
 
 test("completed SDK progress exposes generated artifacts as safe evidence", () => {

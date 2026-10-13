@@ -97,15 +97,50 @@ function isResearchActivity(toolSlug: string | undefined): boolean {
   return /(?:SEARCH|FETCH|LIST|GET|READ|LOOKUP|FIND|QUERY|BROWSE|CHECK|INSPECT|DESCRIBE|DISCOVER|AVAILABILITY|CALENDAR)/i.test(toolSlug ?? "");
 }
 
-function activityTitle(activity: { actionLabel?: unknown; message?: unknown; toolSlug?: unknown }, fallback: string): string {
-  return cleanText(activity.actionLabel ?? activity.message, MAX_TITLE_CHARS) ?? fallback;
+const GENERIC_ACTIVITY_COPY = /^(?:i['’]?m|i am)?\s*(?:taking care of (?:that|it)|working(?: through your request| on it)?|processing (?:your request|that|it)|handling (?:that|it)|running(?: now)?|one moment)[\s.!…]*$/i;
+
+function titleCaseToken(value: string): string {
+  return value
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => part.length <= 3 ? part.toUpperCase() : `${part.slice(0, 1).toUpperCase()}${part.slice(1).toLowerCase()}`)
+    .join(" ");
 }
 
-function activityEvidence(activity: { callId?: unknown; activityId?: unknown; actionLabel?: unknown; message?: unknown; summary?: unknown; status?: unknown }): SdkRunEvidence[] | undefined {
+function activityProviderName(activity: { toolkitSlug?: unknown; toolkitName?: unknown; toolSlug?: unknown }): string | undefined {
+  const supplied = cleanText(activity.toolkitName ?? activity.toolkitSlug, MAX_PROVIDER_CHARS);
+  if (supplied) return titleCaseToken(supplied);
+  const slug = cleanText(activity.toolSlug, MAX_PROVIDER_CHARS)?.replace(/^(?:CHUCK|COMPOSIO|MCP)_/i, "");
+  const provider = slug?.split("_", 1)[0];
+  return provider ? titleCaseToken(provider) : undefined;
+}
+
+function activityActionToken(activity: { toolkitSlug?: unknown; toolkitName?: unknown; toolSlug?: unknown }): string | undefined {
+  let token = cleanText(activity.toolSlug, MAX_TITLE_CHARS)?.replace(/^(?:CHUCK|COMPOSIO|MCP)_/i, "");
+  if (!token) return undefined;
+  const provider = activityProviderName(activity)?.replace(/[^a-z0-9]/gi, "").toUpperCase();
+  if (provider && token.toUpperCase().startsWith(`${provider}_`)) token = token.slice(provider.length + 1);
+  return titleCaseToken(token);
+}
+
+function meaningfulActivityText(...values: unknown[]): string | undefined {
+  return values
+    .map((value) => cleanText(value, MAX_TITLE_CHARS))
+    .find((value) => value && !GENERIC_ACTIVITY_COPY.test(value));
+}
+
+function activityTitle(activity: { actionLabel?: unknown; message?: unknown; toolSlug?: unknown; toolkitSlug?: unknown; toolkitName?: unknown }, fallback: string): string {
+  const provider = activityProviderName(activity);
+  const action = meaningfulActivityText(activity.actionLabel, activity.message) ?? activityActionToken(activity) ?? fallback;
+  if (!provider || action.toLowerCase().startsWith(`${provider.toLowerCase()} ·`)) return action;
+  return `${provider} · ${action}`.slice(0, MAX_TITLE_CHARS);
+}
+
+function activityEvidence(activity: { callId?: unknown; activityId?: unknown; actionLabel?: unknown; message?: unknown; summary?: unknown; status?: unknown; toolSlug?: unknown; toolkitSlug?: unknown; toolkitName?: unknown }): SdkRunEvidence[] | undefined {
   if (activity.status !== "completed") return undefined;
   const detail = cleanText(activity.summary, MAX_EVIDENCE_DETAIL_CHARS);
   if (!detail) return undefined;
-  const label = cleanText(activity.actionLabel ?? activity.message, MAX_EVIDENCE_LABEL_CHARS);
+  const label = cleanText(activityTitle(activity, "Completed step"), MAX_EVIDENCE_LABEL_CHARS);
   if (!label) return undefined;
   const id = cleanText(activity.callId ?? activity.activityId, MAX_EVIDENCE_ID_CHARS);
   return [{ ...(id ? { id } : {}), label, detail, kind: "step" }];
@@ -125,7 +160,7 @@ export function progressFromSdkStatus(text: string, previous?: SdkRunProgress): 
           : previous?.phase ?? "planning";
   return normalizeSdkRunProgress({
     phase,
-    title: phase === "planning" ? "Preparing your request" : phase === "researching" ? "Researching the request" : phase === "waiting" ? "Waiting for your approval" : "Working on your request",
+    title: phase === "planning" ? "Preparing your request" : phase === "researching" ? "Researching the request" : phase === "waiting" ? "Waiting for your approval" : "Executing the next action",
     detail: status,
     ...(previous?.provider ? { provider: previous.provider } : {}),
     ...(previous?.evidence ? { evidence: previous.evidence } : {}),
@@ -150,6 +185,7 @@ export function progressFromSdkToolActivity(activity: {
   const provider = providerFor(activity);
   const fallback = provider ? `Working with ${provider}` : "Working on your request";
   const title = activityTitle(activity, fallback);
+  const message = meaningfulActivityText(activity.message);
   const detail = activity.status === "approval_required"
     ? "Waiting for your approval before this action can continue."
     : activity.status === "completed"
@@ -158,7 +194,7 @@ export function progressFromSdkToolActivity(activity: {
         ? "This step needs attention; the run will report what was confirmed."
         : activity.status === "cancelled"
           ? "This step was cancelled; completed work remains available."
-          : cleanText(activity.message, MAX_DETAIL_CHARS) ?? "Chusky is working on this step.";
+          : message && message.toLowerCase() !== title.toLowerCase() ? message : "Running now.";
   return normalizeSdkRunProgress({
     phase,
     title,
@@ -183,9 +219,10 @@ export function progressFromSdkSubagentActivity(activity: {
   const phase: SdkRunProgressPhase = activity.status === "approval_required" || activity.status === "waiting" ? "waiting" : "researching";
   const provider = providerFor(activity);
   const title = activityTitle(activity, `${cleanText(activity.worker, 80) ?? "A specialist"} is working`);
+  const message = meaningfulActivityText(activity.message);
   const detail = activity.status === "waiting" || activity.status === "approval_required"
     ? "A specialist is waiting before it can continue."
-    : cleanText(activity.message, MAX_DETAIL_CHARS) ?? cleanText(activity.objective, MAX_DETAIL_CHARS) ?? "A specialist is working on this step.";
+    : message ?? cleanText(activity.objective, MAX_DETAIL_CHARS) ?? "A specialist is working on this step.";
   const evidence = activity.status === "completed" && cleanText(activity.summary, MAX_EVIDENCE_DETAIL_CHARS)
     ? [{ id: cleanText(activity.activityId, MAX_EVIDENCE_ID_CHARS), label: title, detail: cleanText(activity.summary, MAX_EVIDENCE_DETAIL_CHARS)!, kind: "step" as const }]
     : undefined;
