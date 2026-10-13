@@ -12,6 +12,26 @@ test("routes sold business skills deterministically before fuzzy discovery", () 
   assert.deepEqual(routedSkillNames("Review overdue Stripe billing and hand off the churn-risk account"), ["composio-routing", "retention-pro", "billing-ops-pro"]);
 });
 
+test("routes structured external data tasks to Monid guidance without requiring its name", () => {
+  for (const query of [
+    "Pull census demographics for Austin and Denver",
+    "Compare the London weather forecast across two providers",
+    "Get on-chain data for this wallet",
+    "Find social media data for these brands",
+    "Find verified business contacts at target companies",
+    "Find local prospects for my services",
+    "Compare AI citation visibility with competitors",
+    "Digest recent YouTube video transcripts",
+    "Compare customer reviews for these products",
+    "Which videos are outperforming for specialty coffee creators",
+    "Which SEO pages or FAQs should my store prioritize",
+    "Use Monid to search its API catalog",
+  ]) {
+    assert.ok(routedSkillNames(query).includes("monid"), `expected Monid guidance for ${query}`);
+  }
+  assert.ok(!routedSkillNames("Search the web for today's headlines").includes("monid"));
+});
+
 test("routes negotiation and pricing requests to deal-closer-pro", () => {
   for (const query of ["negotiate", "negotiation", "discount", "best price", "procurement", "close the deal", "pricing discussion", "counter offer", "renewal pricing"]) {
     assert.ok(routedSkillNames(query).includes("deal-closer-pro"), `expected deal-closer-pro for ${query}`);
@@ -96,7 +116,7 @@ test("skill coverage reports invalid bindings and distinguishes routing from pre
 });
 
 test("runtime worker manifests use the expanded shared skill bindings", () => {
-  const workers = ["lucas", "maya", "leo", "sofia", "dexter", "elena", "nora", "ivy", "quinn", "aria", "kai"] as const;
+  const workers = ["lucas", "maya", "leo", "sofia", "dexter", "elena", "nora", "ivy", "quinn", "aria", "kai", "muna"] as const;
   for (const worker of workers) assert.equal(WORKER_CAPABILITIES[worker].skills, WORKER_SKILL_BINDINGS[worker]);
 });
 
@@ -114,6 +134,15 @@ test("loads Quinn's expansion and billing references for a revenue objective", a
   assert.match(context, /Reference: references\/01-invoices\.md/);
   assert.match(context, /If blocked, route to retention\/onboarding first/);
   assert.match(context, /Prefer source system of truth/);
+});
+
+test("loads Muna's Monid workflow references before starting a data task", async () => {
+  const context = await skillContextForBinding(WORKER_SKILL_BINDINGS.muna, "Find verified business contacts and compare customer reviews");
+  assert.match(context, /Reference: references\/lead-sourcing\.md/);
+  assert.match(context, /Reference: references\/local-prospects\.md/);
+  assert.match(context, /Reference: references\/research-briefs\.md/);
+  assert.match(context, /catch-all/);
+  assert.match(context, /balance ratings and dates/);
 });
 
 async function fixture() {

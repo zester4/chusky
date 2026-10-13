@@ -216,10 +216,10 @@ test("connected-account discovery is bounded and supports optional toolkit filte
 test("delegation tools expose every business workflow specialist", () => {
   const delegate = chuckTools.find((tool) => tool.function.name === "CHUCK_DELEGATE_SUBAGENT");
   const handoff = chuckTools.find((tool) => tool.function.name === "CHUCK_HANDOFF_SUBAGENT");
-  const expected = ["nora", "lucas", "maya", "leo", "sofia", "dexter", "elena", "ivy", "quinn", "aria", "kai"];
+  const expected = ["nora", "lucas", "maya", "leo", "sofia", "dexter", "elena", "ivy", "quinn", "aria", "kai", "muna"];
   assert.deepEqual(delegate?.function.parameters.properties.worker.enum, expected);
   assert.deepEqual(handoff?.function.parameters.properties.targetWorker.enum, expected);
-  assert.match(delegate?.function.description ?? "", /Ivy.*Quinn.*Aria.*Kai/);
+  assert.match(delegate?.function.description ?? "", /Muna.*Monid-backed business data research/);
 });
 
 test("Recall meeting tools require explicit join details and expose owner-scoped controls", () => {

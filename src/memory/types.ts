@@ -105,7 +105,7 @@ export interface MemoryQueryOptions {
 
 export type CapabilityWorkerName =
   | "lucas" | "maya" | "leo" | "sofia" | "dexter" | "elena" | "nora"
-  | "ivy" | "quinn" | "aria" | "kai"
+  | "ivy" | "quinn" | "aria" | "kai" | "muna"
   | "chusky";
 
 export const CAPABILITY_MEMORY_ACCESS_MATRIX: Record<CapabilityWorkerName, MemoryCategory[]> = {
@@ -129,5 +129,8 @@ export const CAPABILITY_MEMORY_ACCESS_MATRIX: Record<CapabilityWorkerName, Memor
   // Analytics receives business/project facts and procedural reporting rules,
   // but not personal or relationship memory by default.
   kai: ["business", "project", "procedural", "asset"],
+  // Monid research may use owner-provided business and project context, but
+  // does not need private relationship history or personal memories.
+  muna: ["business", "project", "procedural"],
   chusky: ["profile", "relationship", "business", "project", "episodic", "procedural", "negative", "asset"],
 };

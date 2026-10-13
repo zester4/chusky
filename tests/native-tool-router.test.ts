@@ -20,6 +20,7 @@ function tools(): any[] {
     { type: "function", function: { name: "CHUCK_CREATE_PDF", description: "Create a verified PDF report", parameters: { type: "object", properties: {} } } },
     { type: "function", function: { name: "CHUCK_BROWSER", description: "Browse a website, inspect pages, and fill forms", parameters: { type: "object", properties: {} } } },
     { type: "function", function: { name: "CHUCK_SEARCH_MEMORY", description: "Search the owner's saved memory", parameters: { type: "object", properties: {} } } },
+    { type: "function", function: { name: "CHUCK_MONID_SEARCH", description: "Search Monid's live catalog for external structured-data/API endpoints, public datasets, census/demographic data, forecasts, social/market feeds, and on-chain data. Use only when existing Chusky tools and Treg leave a capability gap.", parameters: { type: "object", properties: {} } } },
     { type: "function", function: { name: "COMPOSIO_SEARCH_WEB", description: "Search the public web", parameters: { type: "object", properties: {} } } },
   ];
 }
@@ -96,6 +97,23 @@ test("native tool discovery returns bounded searchable metadata", () => {
   assert.ok(found.length <= 3);
   assert.ok(found.some((item) => item.slug.includes("SPREADSHEET")));
   assert.ok(found.every((item) => !Object.hasOwn(item, "parameters")));
+});
+
+test("structured data requests can discover Monid without naming the provider", () => {
+  for (const query of ["census demographics", "weather forecast", "onchain wallet data", "public dataset API", "verified business contacts", "AI citation visibility", "YouTube transcripts", "compare customer reviews", "local service prospects", "videos outperforming for creators", "SEO keyword evidence"]) {
+    const found = searchDiscoveredToolManifest(query);
+    assert.ok(found.some((item) => item.slug === "CHUCK_MONID_SEARCH"), `expected Monid discovery tool for ${query}`);
+  }
+});
+
+test("bundle fallback exposes Monid for structured data use cases", async () => {
+  const restore = withConfig({ nativeToolLoading: "bundle", jevNativeToolRouting: false });
+  try {
+    for (const query of ["Pull census demographics for Austin", "Compare weather forecasts", "Find social media data", "Get on-chain wallet data", "Find verified business contacts", "Compare customer reviews", "Find local service prospects"]) {
+      const route = await routeNativeToolsForTurn(tools(), query);
+      assert.ok(route.tools.some((tool: any) => tool.function.name === "CHUCK_MONID_SEARCH"), `expected Monid for ${query}`);
+    }
+  } finally { restore(); }
 });
 
 test("bundle mode fails closed when a Jev route would expose the full native catalog", async () => {

@@ -25,6 +25,7 @@ export type NativeToolBundle =
   | "code"
   | "autonomy"
   | "intelligence"
+  | "monid"
   | "shopping"
   | "other";
 
@@ -90,6 +91,7 @@ const BUNDLE_TERMS: Record<NativeToolBundle, string[]> = {
   artifacts: ["pdf", "document", "docx", "spreadsheet", "excel", "presentation", "slide", "artifact", "image", "video"],
   code: ["code", "file", "folder", "sandbox", "app", "build", "deploy", "terminal", "repository", "git"],
   autonomy: ["task", "mission", "reminder", "follow-up", "followup", "schedule", "delegate", "attention", "proactive", "loop", "lead", "leads", "prospect", "prospects", "campaign", "pipeline", "qualification"],
+  monid: ["monid", "dataset", "census", "demographic", "weather", "forecast", "social", "market", "onchain", "chain", "blockchain", "business", "contact", "verified", "email", "target", "company", "local", "prospect", "enrichment", "partnership", "citation", "visibility", "youtube", "transcript", "creator", "outlier", "outperforming", "performance", "review", "reviews", "content", "seo", "keyword"],
   intelligence: ["treg", "mcp", "research", "enrich", "company", "person", "seo", "search", "provider", "data"],
   shopping: ["shop", "shopping", "order", "purchase", "cart", "merchant", "payment", "stripe", "link wallet"],
   other: [],
@@ -120,6 +122,7 @@ function inferBundle(slug: string, description: string): NativeToolBundle {
   if (/^CHUCK_LEAD_CAMPAIGN$/.test(name)) return "autonomy";
   if (/^CHUCK_(?:SHOPPING_|LINK_)/.test(name)) return "shopping";
   if (/^CHUCK_(?:DAYTONA_|COMPUTER(?:_|$))/.test(name)) return "code";
+  if (/^CHUCK_MONID_/.test(name)) return "monid";
   if (/^CHUCK_TREG_/.test(name)) return "intelligence";
   if (/^CHUCK_(?:CONVERSATION_|.*TRIGGER|LIST_CONNECTED_ACCOUNTS|INTEGRATION_HEALTH)/.test(name)) return "workspace";
   const text = `${slug} ${description}`.toLowerCase();
@@ -192,6 +195,8 @@ function relevance(query: string, descriptor: NativeToolDescriptor): number {
 
 function inferredFamily(query: string): NativeToolBundle | undefined {
   const normalized = query.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (/\bmonid\b/.test(normalized)) return "monid";
+  if (/\b(?:verified (?:work )?emails?|business contacts?|target companies|local (?:service )?(?:businesses|prospects?)|company enrichment|company brief|partnership (?:brief|meeting|research)|ai citation visibility|citation counts?|youtube (?:videos?|transcripts?)|video digest|video transcript|videos? (?:are )?outperforming|creator (?:outliers?|performance|baseline)|customer reviews?|review evidence|content opportunities|content improvements?|seo (?:pages?|content|keyword)|keyword (?:evidence|research))\b/.test(normalized)) return "monid";
   if (/\btiny\s*fish\b|\btinyfish\b/.test(normalized)) return "tinyfish";
   if (/\b(?:lead|leads|prospect|prospects|campaign|pipeline|qualification)\b/.test(normalized)) return "autonomy";
   if (/\bmemories\b|\bmemory\b|\bscratchpad\b/.test(normalized)) return "memory";

@@ -96,4 +96,11 @@ export const WORKER_SKILL_BINDINGS: Record<Exclude<CapabilityWorkerName, "chusky
         "verification": ["references/evidence-checklist.md"],
       },
     },
+  muna: {
+      primary: ["monid"],
+      supporting: [],
+      requiredReferences: {
+        monid: ["references/lead-sourcing.md", "references/local-prospects.md", "references/research-briefs.md"],
+      },
+    },
 };

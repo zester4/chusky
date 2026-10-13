@@ -34,6 +34,7 @@ import {
   listVideoJobs, getVideoJob, updateVideoJob, listHandoffRecords, saveHandoffRecord, listCalendarMeetingPreparations,
   searchRecallMeetingTranscripts, deleteRecallMeetingTranscript, saveBrowserPlaybook, findBrowserPlaybook, listBrowserPlaybooks, removeBrowserPlaybook, addBrowserAudit, listBrowserAudit, saveBrowserHandoff, getBrowserHandoff, listBrowserHandoffs, updateBrowserHandoff, updateBrowserHandoffResolution,
   getTregSpend, saveTregSpend, saveTregReceipt, listTregReceipts, acquireTregSpendLock, releaseTregSpendLock, saveTregOAuthState, getTregOAuthState, removeTregOAuthState,
+  getMonidSpend, saveMonidSpend, saveMonidReceipt, listMonidReceipts, acquireMonidSpendLock, releaseMonidSpendLock,
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
 import { e2bBrowserEngine } from "./lib/e2b/index.js";
@@ -87,6 +88,8 @@ import { diagnoseMissionRepair } from "./reliability/repair.js";
 import { TregGateway } from "./treg/gateway.js";
 import { TregSpendGuard } from "./treg/spend.js";
 import { TregOAuth } from "./treg/oauth.js";
+import { MonidGateway } from "./monid/gateway.js";
+import { MonidSpendGuard } from "./monid/spend.js";
 import { decideMemoryDisposition } from "./autonomy/decisionLoop.js";
 import { routeBrowserNext } from "./decisions/browserRouter.js";
 import { buildBrowserCandidates } from "./vault/browserObservation.js";
@@ -198,6 +201,32 @@ export interface MissionWaitRequest {
 type PhoneCallLauncherForTests = (userId: number, input: Record<string, unknown>) => Promise<unknown>;
 let phoneCallLauncherForTests: PhoneCallLauncherForTests | undefined;
 let tregGatewayForTests: TregGateway | undefined;
+let monidGatewayForTests: MonidGateway | undefined;
+
+function monidGateway(): MonidGateway {
+  if (monidGatewayForTests) return monidGatewayForTests;
+  const spend = new MonidSpendGuard({
+    getSnap: getMonidSpend,
+    saveSnap: saveMonidSpend,
+    acquireLock: async (key, token, leaseSeconds) => {
+      const match = /^monid-spend:(\d+):(.+)$/.exec(key);
+      return match ? acquireMonidSpendLock(Number(match[1]), match[2], token, leaseSeconds) : false;
+    },
+    releaseLock: async (key, token) => {
+      const match = /^monid-spend:(\d+):(.+)$/.exec(key);
+      if (match) await releaseMonidSpendLock(Number(match[1]), match[2], token);
+    },
+  });
+  monidGatewayForTests = new MonidGateway({
+    spend, saveReceipt: saveMonidReceipt, listReceipts: listMonidReceipts,
+    recordMissionEvidence: async ({ userId, missionId, receipt, resultHash }) => Boolean(await recordTrustedMissionEvidence(userId, missionId, [{ id: `monid_${receipt.runId ?? receipt.id}`, kind: "tool_receipt", summary: `Monid ${receipt.provider}${receipt.endpoint} completed for $${(receipt.actualCostUsd ?? receipt.estimatedCostUsd).toFixed(4)}.`, ref: `monid://runs/${receipt.runId ?? receipt.id}`, hash: resultHash, verified: true, verifiedBy: "system" }])),
+  });
+  return monidGatewayForTests;
+}
+
+export function setMonidGatewayForTests(gateway?: MonidGateway): void {
+  monidGatewayForTests = gateway;
+}
 
 function tregGateway(): TregGateway {
   if (tregGatewayForTests) return tregGatewayForTests;
@@ -1834,6 +1863,22 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         return { monitor: await getAttentionRecord(userId, "tinyfish_monitor", monitor!.id), runId: webhookPayload.id, contentIsUntrusted: true };
       }
       throw new Error("Unsupported TinyFish monitor action.");
+    }
+    case "CHUCK_MONID_SEARCH": return monidGateway().discover(text(args.query, 500), args.limit === undefined ? 5 : Number(args.limit), runtime.organizationId);
+    case "CHUCK_MONID_INSPECT": return monidGateway().inspect(text(args.provider, 64), text(args.endpoint, 300), runtime.organizationId);
+    case "CHUCK_MONID_RUN": return monidGateway().run({
+      userId, provider: args.provider, endpoint: args.endpoint, input: args.input,
+      maxSpendUsd: args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd),
+      missionId: runtime.missionId, organizationId: runtime.organizationId,
+    });
+    case "CHUCK_MONID_RUN_GET": return monidGateway().getRun(userId, text(args.runId, 100), runtime.organizationId);
+    case "CHUCK_MONID_RUNS_LIST": return monidGateway().listRuns(userId, args.limit === undefined ? 10 : Number(args.limit), runtime.organizationId);
+    case "CHUCK_MONID_BALANCE": return monidGateway().balance(runtime.organizationId);
+    case "CHUCK_MONID_USAGE": {
+      const dayKey = args.dayKey ? text(args.dayKey, 10) : new Date().toISOString().slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dayKey)) throw new Error("dayKey must use YYYY-MM-DD");
+      const spend = await getMonidSpend(userId, dayKey);
+      return { spend: spend ?? { userId, dayKey, spentUsd: 0, reservedUsd: 0, missionSpent: {}, missionReserved: {}, rateWindowCalls: 0, reservations: {} }, receipts: await listMonidReceipts(userId, args.limit === undefined ? 25 : Number(args.limit), runtime.organizationId) };
     }
     case "CHUCK_TREG_SEARCH": return tregGateway().search(text(args.q, 500), args.limit === undefined ? 8 : Number(args.limit), runtime.organizationId);
     case "CHUCK_TREG_GET": return tregGateway().getEndpoint(text(args.endpointId, 200), runtime.organizationId);
