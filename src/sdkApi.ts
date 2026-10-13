@@ -700,11 +700,19 @@ function phoneCallingProvider(): "bland" | "twilio" | undefined {
   return isTwilioVoiceConfigured() ? "twilio" : undefined;
 }
 
-function callView(call: { id: string; provider?: string; direction?: string; phoneNumber: string; purpose: string; status: string; runtimeState?: string; error?: string; summary?: string; outcome?: unknown; outcomeStatus?: string; createdAt: number; updatedAt: number }) {
+function callView(call: { id: string; provider?: string; direction?: string; phoneNumber: string; purpose: string; status: string; runtimeState?: string; error?: string; summary?: string; outcome?: unknown; outcomeStatus?: string; timeline?: unknown; qa?: unknown; createdAt: number; updatedAt: number }) {
   const digits = call.phoneNumber.replace(/\D/g, "");
   const phoneNumber = digits.length > 4 ? `${call.phoneNumber.slice(0, Math.max(2, call.phoneNumber.length - 4)).replace(/\d/g, "•")}${digits.slice(-4)}` : "••••";
   const outcome = normalizePhoneCallOutcome(call.outcome);
-  return { id: call.id, provider: call.provider ?? "twilio", direction: call.direction ?? "outbound", phoneNumber, purpose: call.purpose, status: call.status, ...(call.runtimeState ? { runtimeState: call.runtimeState } : {}), summary: call.summary, ...(outcome ? { outcome } : {}), ...(call.outcomeStatus ? { outcomeStatus: call.outcomeStatus } : {}), error: call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
+  const timeline = Array.isArray(call.timeline) ? call.timeline.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const row = item as Record<string, unknown>;
+    return typeof row.id === "string" && typeof row.type === "string" && typeof row.at === "number" && typeof row.summary === "string"
+      ? [{ id: row.id, type: row.type, at: new Date(row.at).toISOString(), summary: row.summary, ...(typeof row.toolSlug === "string" ? { toolSlug: row.toolSlug } : {}), ...(typeof row.durationMs === "number" ? { durationMs: row.durationMs } : {}) }]
+      : [];
+  }).slice(-100) : [];
+  const qa = call.qa && typeof call.qa === "object" && !Array.isArray(call.qa) ? call.qa : undefined;
+  return { id: call.id, provider: call.provider ?? "twilio", direction: call.direction ?? "outbound", phoneNumber, purpose: call.purpose, status: call.status, ...(call.runtimeState ? { runtimeState: call.runtimeState } : {}), summary: call.summary, ...(outcome ? { outcome } : {}), ...(call.outcomeStatus ? { outcomeStatus: call.outcomeStatus } : {}), ...(timeline.length ? { timeline } : {}), ...(qa ? { qa } : {}), error: call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
 }
 
 function meetingRoomView(room: MeetingRoomRecord) {
@@ -2410,9 +2418,9 @@ export function registerSdkApi(app: Hono): void {
       const continuityFromCallId = body.continuityFromCallId === undefined ? undefined : String(body.continuityFromCallId).trim();
       const call = await nativeTool(owner.userId, "CHUCK_START_PHONE_CALL", { phoneNumber, purpose, callProfile, ...(body.profile ? { profile: body.profile as VoiceCallProfileInput } : {}), ...(continuityFromCallId ? { continuityFromCallId } : {}) });
       if (!call || typeof call !== "object") throw new Error("Phone call did not return a call record");
-      const record = call as { id?: unknown; provider?: unknown; direction?: unknown; phoneNumber?: unknown; purpose?: unknown; status?: unknown; runtimeState?: unknown; error?: unknown; summary?: unknown; outcome?: unknown; outcomeStatus?: unknown; createdAt?: unknown; updatedAt?: unknown };
+      const record = call as { id?: unknown; provider?: unknown; direction?: unknown; phoneNumber?: unknown; purpose?: unknown; status?: unknown; runtimeState?: unknown; error?: unknown; summary?: unknown; outcome?: unknown; outcomeStatus?: unknown; timeline?: unknown; qa?: unknown; createdAt?: unknown; updatedAt?: unknown };
       if (typeof record.id !== "string" || typeof record.phoneNumber !== "string" || typeof record.purpose !== "string" || typeof record.status !== "string" || typeof record.createdAt !== "number" || typeof record.updatedAt !== "number") throw new Error("Phone call returned an invalid record");
-      const response = callView({ id: record.id, provider: typeof record.provider === "string" ? record.provider : undefined, direction: typeof record.direction === "string" ? record.direction : undefined, phoneNumber: record.phoneNumber, purpose: record.purpose, status: record.status, runtimeState: typeof record.runtimeState === "string" ? record.runtimeState : undefined, error: typeof record.error === "string" ? record.error : undefined, summary: typeof record.summary === "string" ? record.summary : undefined, outcome: record.outcome, outcomeStatus: typeof record.outcomeStatus === "string" ? record.outcomeStatus : undefined, createdAt: record.createdAt, updatedAt: record.updatedAt });
+      const response = callView({ id: record.id, provider: typeof record.provider === "string" ? record.provider : undefined, direction: typeof record.direction === "string" ? record.direction : undefined, phoneNumber: record.phoneNumber, purpose: record.purpose, status: record.status, runtimeState: typeof record.runtimeState === "string" ? record.runtimeState : undefined, error: typeof record.error === "string" ? record.error : undefined, summary: typeof record.summary === "string" ? record.summary : undefined, outcome: record.outcome, outcomeStatus: typeof record.outcomeStatus === "string" ? record.outcomeStatus : undefined, timeline: record.timeline, qa: record.qa, createdAt: record.createdAt, updatedAt: record.updatedAt });
       if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, response);
       return c.json(response, 201);
     } catch (error) {

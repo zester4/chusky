@@ -5,6 +5,25 @@ export type VoiceCallCapability = "memory_lookup" | "scratchpad_lookup" | "sched
 export type VoiceCallTone = "professional" | "warm" | "direct" | "consultative";
 export type VoiceCallMode = "general" | "sales" | "onboarding" | "support" | "scheduling";
 export type CallProfile = "personal" | "business";
+export type VoiceGreetingMode = "dynamic" | "static" | "human_first";
+export type VoiceRecordingPolicy = "disabled" | "announce" | "enabled";
+
+export interface VoiceQuietHours {
+  timezone: string;
+  start: string;
+  end: string;
+  days?: number[];
+}
+
+export interface VoiceCallControls {
+  greetingMode: VoiceGreetingMode;
+  allowVoicemail: boolean;
+  allowHumanHandoff: boolean;
+  optOutEnabled: boolean;
+  recording: VoiceRecordingPolicy;
+  retentionDays: 1 | 7 | 30;
+  quietHours?: VoiceQuietHours;
+}
 
 export interface VoiceCallProfile {
   identity: string;
@@ -15,11 +34,12 @@ export interface VoiceCallProfile {
   facts: string[];
   guardrails: string[];
   capabilities: VoiceCallCapability[];
+  controls?: VoiceCallControls;
 }
 
 export interface VoiceCallProfileInput {
   identity?: unknown; organization?: unknown; mode?: unknown; tone?: unknown; opening?: unknown;
-  facts?: unknown; guardrails?: unknown; capabilities?: unknown;
+  facts?: unknown; guardrails?: unknown; capabilities?: unknown; controls?: unknown;
 }
 
 const CAPABILITIES: VoiceCallCapability[] = ["memory_lookup", "scratchpad_lookup", "schedule_lookup", "task_lookup", "call_history"];
@@ -36,6 +56,49 @@ function list(value: unknown, maximumItems: number, maximumItemLength: number): 
   return [...new Set(value.map((item) => clean(item, maximumItemLength)).filter((item): item is string => Boolean(item)))].slice(0, maximumItems);
 }
 
+function clock(value: unknown): string | undefined {
+  return typeof value === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(value) ? value : undefined;
+}
+
+export function normalizeVoiceCallControls(value: unknown): VoiceCallControls | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const timezone = clean(input.timezone, 80);
+  const start = clock(input.start);
+  const end = clock(input.end);
+  let quietHours: VoiceQuietHours | undefined;
+  if (timezone && start && end) {
+    let validTimezone = true;
+    try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(); } catch { validTimezone = false; }
+    if (validTimezone) quietHours = { timezone, start, end, ...(Array.isArray(input.days) ? { days: input.days.filter((day): day is number => Number.isInteger(day) && day >= 0 && day <= 6).slice(0, 7) } : {}) };
+  }
+  return {
+    greetingMode: input.greetingMode === "static" || input.greetingMode === "human_first" ? input.greetingMode : "dynamic",
+    allowVoicemail: input.allowVoicemail !== false,
+    allowHumanHandoff: input.allowHumanHandoff !== false,
+    optOutEnabled: input.optOutEnabled !== false,
+    recording: input.recording === "announce" || input.recording === "enabled" ? input.recording : "disabled",
+    retentionDays: input.retentionDays === 1 || input.retentionDays === 7 ? input.retentionDays : 30,
+    ...(quietHours ? { quietHours } : {}),
+  };
+}
+
+/** Returns a reason when a new outbound call must not be dialled now. */
+export function voiceCallDialBlockReason(profile: VoiceCallProfile, now = new Date()): string | undefined {
+  const quietHours = profile.controls?.quietHours;
+  if (!quietHours) return undefined;
+  const formatter = new Intl.DateTimeFormat("en-US", { timeZone: quietHours.timezone, hour: "2-digit", minute: "2-digit", weekday: "short", hourCycle: "h23" });
+  const parts = Object.fromEntries(formatter.formatToParts(now).map((part) => [part.type, part.value]));
+  const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(parts.weekday ?? "");
+  if (quietHours.days?.length && !quietHours.days.includes(weekday)) return undefined;
+  const minutes = Number(parts.hour) * 60 + Number(parts.minute);
+  const parse = (value: string) => Number(value.slice(0, 2)) * 60 + Number(value.slice(3));
+  const start = parse(quietHours.start);
+  const end = parse(quietHours.end);
+  const blocked = start <= end ? minutes >= start && minutes < end : minutes >= start || minutes < end;
+  return blocked ? `Outbound calling is paused during the configured quiet hours (${quietHours.timezone}).` : undefined;
+}
+
 /** Normalize before persistence; capability selections are retained as profile hints. */
 export function normalizeVoiceCallProfile(value: unknown): VoiceCallProfile {
   const input = value && typeof value === "object" && !Array.isArray(value) ? value as VoiceCallProfileInput : {};
@@ -44,6 +107,7 @@ export function normalizeVoiceCallProfile(value: unknown): VoiceCallProfile {
     : CAPABILITIES;
   const organization = clean(input.organization, 180);
   const opening = clean(input.opening, 500);
+  const controls = normalizeVoiceCallControls(input.controls);
   return {
     identity: clean(input.identity, 180) ?? "Chusky",
     ...(organization ? { organization } : {}),
@@ -53,6 +117,7 @@ export function normalizeVoiceCallProfile(value: unknown): VoiceCallProfile {
     facts: list(input.facts, 12, 320),
     guardrails: list(input.guardrails, 8, 280),
     capabilities: [...new Set(requested)],
+    ...(controls ? { controls } : {}),
   };
 }
 
@@ -77,6 +142,7 @@ export function voiceProfileInstructions(profile: VoiceCallProfile | undefined, 
   const facts = safe.facts.length ? `LEAD AND CALL CONTEXT — approved facts only: ${safe.facts.join("; ")}.` : "LEAD AND CALL CONTEXT — no additional approved facts were supplied.";
   const guardrails = safe.guardrails.length ? `Owner communication preferences: ${safe.guardrails.join("; ")}.` : "";
   const opening = safe.opening ? `Optional caller-facing opening guidance; use only if it fits naturally and never read private instructions: ${safe.opening}` : "";
+  const controls = safe.controls ? `CALL CONTROLS — greeting mode ${safe.controls.greetingMode}; voicemail ${safe.controls.allowVoicemail ? "allowed" : "disabled"}; human handoff ${safe.controls.allowHumanHandoff ? "allowed" : "disabled"}; opt-out handling ${safe.controls.optOutEnabled ? "required" : "not configured"}; recording policy ${safe.controls.recording}; retention ${safe.controls.retentionDays} days. ${safe.controls.quietHours ? `Quiet hours are enforced before outbound dialing in ${safe.controls.quietHours.timezone}.` : ""}` : "";
   const playbook: Record<VoiceCallMode, string> = {
     general: "Listen first, answer directly, and ask one useful follow-up question when it would move the conversation forward.",
     sales: "Establish relevance, understand the caller's needs and constraints, explain only approved value, handle questions honestly, and agree a concrete next step without pressure.",
@@ -111,5 +177,6 @@ export function voiceProfileInstructions(profile: VoiceCallProfile | undefined, 
     "10. CONFIRM-THEN-ACT: Present returned options naturally. Let the person choose. Repeat the selected option once. Then perform the state-changing action. Do not act on a hypothetical 'if they agree' rule, an ambiguous reply, or an unverified provider result.",
     "11. STYLE AND CLOSING: Be professional, warm, direct, and efficient. Do not sound like a checklist. Redirect gently when needed. Keep the call focused and reasonably brief. When finished, give a concise verified recap, thank the person, say goodbye, and let the transport end the call.",
     opening, guardrails,
+    controls,
   ].filter(Boolean).join(" ");
 }
