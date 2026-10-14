@@ -507,7 +507,7 @@ export class E2BBrowserEngine {
       return { provider: "dedicated", action, ...result, sessionId };
     }
     if (action === "status") return { provider: "dedicated", action, ...(await client.session(ownerScope, sessionId)), sessionId };
-    if (action === "stream_start" || action === "stream_status") return { provider: "dedicated", action, ...(await client.liveView(ownerScope, sessionId)), sessionId, private: true };
+    if (action === "stream_start" || action === "stream_status") return { provider: "dedicated", action, ...(await client.liveView(ownerScope, sessionId, action === "stream_start" && args.mode === "interactive" ? "interactive" : "read-only")), sessionId, private: true };
     if (action === "state" || action === "snapshot" || action === "observe" || action === "find" || action === "screenshot" || action === "screenshot_full") {
       const visual = action === "screenshot" || action === "screenshot_full";
       const observation = await client.observe(ownerScope, sessionId, { screenshot: action === "screenshot_full" ? "full-page" : visual || (action === "observe" && args.includeScreenshot === true) ? "viewport" : "thumbnail", screenshotReason: visual ? "user-request" : "changed", includeFrames: true });

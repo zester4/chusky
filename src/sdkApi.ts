@@ -22,7 +22,7 @@ import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
 import { getSdkRunUsage } from "./store.js";
 import { listJobOccurrences } from "./store.js";
-import { appendSdkRunHistoryToSession, mutateSession } from "./store.js";
+import { appendSdkRunHistory, appendSdkRunHistoryToSession, mutateSession } from "./store.js";
 import { updateTriggerEvent } from "./store.js";
 import { markTriggerWebApprovalResuming } from "./store.js";
 import { ensureMissionWebProjection } from "./store.js";
@@ -937,6 +937,39 @@ async function persistSdkRunSnapshot(
   historyAppend: SdkThreadRecord["history"] = [],
   costIncrement = 0,
 ): Promise<void> {
+  const storedDirect = await getSdkRun(userId, threadId, run.id);
+  if (storedDirect) {
+    const mergedEvents = new Map<string, SdkRunRecord["events"][number]>();
+    for (const item of [...storedDirect.events, ...run.events]) mergedEvents.set(item.id, item);
+    const events = [...mergedEvents.values()].sort((left, right) => left.at - right.at).slice(-700);
+    const preserveCancellation = storedDirect.status === "cancelled" && run.status !== "cancelled";
+    const nextRun: SdkRunRecord = {
+      ...run,
+      events,
+      status: preserveCancellation ? "cancelled" : run.status,
+      approvalId: preserveCancellation ? undefined : run.approvalId,
+      durableVersion: storedDirect.durableVersion,
+    };
+    try {
+      if (await saveSdkRun(userId, threadId, nextRun)) {
+        Object.assign(run, nextRun, { durableVersion: (storedDirect.durableVersion ?? 0) + 1 });
+        if (run.status === "completed" || run.status === "failed") {
+          const settledHistory = historyAppend.length ? historyAppend : run.status === "completed" ? [
+            { role: "user" as const, content: `${run.input || "Attached file(s)"}${run.attachments?.length ? `\n[Attachments: ${run.attachments.map((file) => file.name).join(", ")}]` : ""}`, createdAt: run.createdAt },
+            { role: "assistant" as const, content: run.output ?? "", createdAt: run.updatedAt },
+          ] : failedSdkRunHistory(run);
+          await appendSdkRunHistory(userId, threadId, run.id, settledHistory);
+          if (run.status === "completed" && storedDirect.status !== "completed" && costIncrement) {
+            await mutateSession(userId, (session) => { session.totalCost = (session.totalCost ?? 0) + costIncrement; });
+          }
+        }
+        await persistSdkCompanyRun(run);
+        return;
+      }
+    } catch (error) {
+      logger.warn({ userId, threadId, runId: run.id, err: error }, "Direct SDK run write conflicted; falling back to session reconciliation");
+    }
+  }
   // Progress and approval snapshots are hot writes. Keep them on the bounded
   // run row so a long run does not repeatedly load and rewrite the account's
   // session domains. Terminal closeout still uses the session projection once
@@ -1351,6 +1384,11 @@ function decodeConversationHistoryCursor(value: string): ConversationHistoryCurs
 
 function dashboardRequest(c: any): boolean {
   return Boolean(c.get("webAuthUserId"));
+}
+
+async function notifyOwnerSdkWebhooks(userId: number, hooks: Array<{ id: string; url: string; secretCiphertext: string; disabledAt?: number }> | undefined, type: string, data: unknown): Promise<void> {
+  const resolvedHooks = hooks ?? (await getSessionWithSdkTables(userId)).sdkWebhooks;
+  await notifyWebhooks(userId, resolvedHooks ?? [], type, data);
 }
 
 /**
@@ -3079,12 +3117,28 @@ export function registerSdkApi(app: Hono): void {
     if (!quota.allowed) return apiError(c, 429, "execution_quota_exceeded", quota.reason ?? "Execution quota exceeded.");
     if (!(await checkRateLimit(owner.userId))) { c.header("Retry-After", "60"); return apiError(c, 429, "rate_limited", "Rate limit exceeded."); }
     if (!(await canSpend(owner.userId))) return apiError(c, 402, "spend_limit", "Usage cap reached.");
-    const session = await getSessionWithSdkTables(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); let thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
+    let executionContext: Awaited<ReturnType<typeof loadSdkExecutionContext>>;
+    try { executionContext = await loadSdkExecutionContext(owner.userId, c.req.param("threadId")); }
+    catch (error) { if (error instanceof Error && error.message === "sdk_thread_not_found") return apiError(c, 404, "not_found", "Thread not found."); throw error; }
+    let { session, thread } = executionContext;
+    let legacyProjection = executionContext.legacyProjection;
+    const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
+    const prior = await sdkIdempotency(c, owner.userId, fingerprint);
+    if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
+    if (prior.replay) return c.json(prior.replay, 201);
     let resolved: Awaited<ReturnType<typeof resolveRunInput>>; try { resolved = await resolveRunInput(session, body); } catch (error) { return apiError(c, 400, error instanceof Error && error.message === "invalid_attachment" ? "invalid_attachment" : "invalid_input", error instanceof Error && error.message === "invalid_attachment" ? "Each attachment must be a verified upload owned by this account." : "Provide 1–30000 characters or up to five verified attachments."); }
     if (dashboardRequest(c)) {
       const sharedHistory = dashboardAgentHistory(c, session, thread.history);
       thread.history = sharedHistory;
       session.history = sharedHistory;
+      if (!legacyProjection && !(await saveSdkThread(owner.userId, thread))) {
+        const legacySession = await getSessionWithSdkRuns(owner.userId, thread.id);
+        const legacyThread = legacySession.sdkThreads?.find((item) => item.id === thread.id);
+        if (!legacyThread) return apiError(c, 404, "not_found", "Thread not found.");
+        session = legacySession;
+        thread = legacyThread;
+        legacyProjection = true;
+      }
     }
     const lockToken = randomUUID();
     if (!(await acquireUserLock(owner.userId, lockToken))) return apiError(c, 409, "run_in_progress", "Another Chusky request is already running for this user.");
@@ -3107,7 +3161,7 @@ export function registerSdkApi(app: Hono): void {
         return apiError(c, 503, "quota_unavailable", error instanceof Error ? error.message : "Execution quota is temporarily unavailable.");
       }
     }
-    thread.runs.push(run);
+    if (legacyProjection) thread.runs.push(run);
     if (body.wait === false) {
       let task: Awaited<ReturnType<typeof createTask>>;
       try {
@@ -3115,12 +3169,11 @@ export function registerSdkApi(app: Hono): void {
         const workflowRunId = await enqueueTaskWithClaim(owner.userId, task.id, task.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer);
         if (!workflowRunId) throw new Error("A task enqueue is already in progress; retry the request shortly.");
         await acceptAttentionCandidateForRun(owner.userId, attentionContext);
-        run.taskId = task.id; run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, "run.queued", { threadId: thread.id, runId: run.id, taskId: task.id, status: run.status }); return c.json(response, 202);
+        run.taskId = task.id; run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; const response = runView(thread.id, run); if (legacyProjection) { if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); } else { if (!(await saveSdkRun(owner.userId, thread.id, run))) throw new Error("The SDK run could not be durably queued."); if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, response); } await persistSdkCompanyRun(run); await notifyOwnerSdkWebhooks(owner.userId, session.sdkWebhooks, "run.queued", { threadId: thread.id, runId: run.id, taskId: task.id, status: run.status }); return c.json(response, 202);
       } catch (error) {
         if (task!) await cancelTask(owner.userId, task.id);
         if (quotaReservationId) await releaseExecutionQuota(owner.userId, quotaReservationId).catch(() => undefined);
-        thread.runs = thread.runs.filter((item) => item.id !== run.id);
-        await saveSession(owner.userId, session);
+        if (legacyProjection) { thread.runs = thread.runs.filter((item) => item.id !== run.id); await saveSession(owner.userId, session); }
         await deleteSdkRun(owner.userId, thread.id, run.id);
         const detail = runContextError(error);
         if (detail) return apiError(c, 409, detail.code, detail.message);
@@ -3128,19 +3181,20 @@ export function registerSdkApi(app: Hono): void {
       }
     }
     try {
-      await saveSession(owner.userId, session);
-      // saveSession compacts SDK threads into bounded clones. Rebind the
-      // local references before the synchronous run so settled history is
-      // applied to the same run record that will be persisted.
-      const persistedThread = session.sdkThreads?.find((item) => item.id === c.req.param("threadId"));
-      const persistedRun = persistedThread?.runs.find((item) => item.id === run.id);
-      if (!persistedThread || !persistedRun) throw new Error("The SDK run disappeared while it was being admitted.");
-      thread = persistedThread;
-      run = persistedRun;
+      if (legacyProjection) {
+        await saveSession(owner.userId, session);
+        const persistedThread = session.sdkThreads?.find((item) => item.id === c.req.param("threadId"));
+        const persistedRun = persistedThread?.runs.find((item) => item.id === run.id);
+        if (!persistedThread || !persistedRun) throw new Error("The SDK run disappeared while it was being admitted.");
+        thread = persistedThread;
+        run = persistedRun;
+      } else if (!(await saveSdkRun(owner.userId, thread.id, run))) {
+        throw new Error("The SDK run could not be durably admitted.");
+      }
       await acceptAttentionCandidateForRun(owner.userId, attentionContext);
     } catch (error) {
-      thread.runs = thread.runs.filter((item) => item.id !== run.id);
-      await saveSession(owner.userId, session).catch((cleanupError) => logger.error({ err: cleanupError, runId: run.id }, "Could not roll back an unaccepted attention candidate run"));
+      if (legacyProjection) { thread.runs = thread.runs.filter((item) => item.id !== run.id); await saveSession(owner.userId, session).catch((cleanupError) => logger.error({ err: cleanupError, runId: run.id }, "Could not roll back an unaccepted attention candidate run")); }
+      else await deleteSdkRun(owner.userId, thread.id, run.id).catch((cleanupError) => logger.error({ err: cleanupError, runId: run.id }, "Could not roll back an unaccepted SDK run"));
       const detail = runContextError(error);
       if (detail) return apiError(c, 409, detail.code, detail.message);
       throw error;
@@ -3151,8 +3205,8 @@ export function registerSdkApi(app: Hono): void {
       { role: "assistant", content: result.text, createdAt: Date.now() },
     ]); }
     catch (error) { if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; appendSdkRunProgress(run, { phase: "waiting", title: "Approval needed to continue", detail: "Review the requested action and approve it before Chusky continues.", provider: run.progress?.provider, requiresApproval: true, evidence: run.progress?.evidence }); run.events.push(event("run.approval_required")); } else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; appendSdkRunProgress(run, terminalSdkRunProgress("failed", { previous: run.progress, error: run.error.message })); run.events.push(event("run.failed", run.error.message)); } }
-    if (run.status === "failed") appendSdkRunHistoryToSession(session, thread.id, run.id, failedSdkRunHistory(run));
-    run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await appendReliabilitySample({ ownerId: owner.userId, operation: "sdk.run", status: run.status === "completed" ? "success" : run.status === "requires_approval" ? "uncertain" : "failure", costUsd: run.cost, latencyMs: run.updatedAt - run.createdAt, at: run.updatedAt }); const response = runView(thread.id, run, privateLinks); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response: runView(thread.id, run), createdAt: Date.now() }; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status }); return c.json(response, 201);
+    if (run.status === "failed" && legacyProjection) appendSdkRunHistoryToSession(session, thread.id, run.id, failedSdkRunHistory(run));
+    run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await appendReliabilitySample({ ownerId: owner.userId, operation: "sdk.run", status: run.status === "completed" ? "success" : run.status === "requires_approval" ? "uncertain" : "failure", costUsd: run.cost, latencyMs: run.updatedAt - run.createdAt, at: run.updatedAt }); const response = runView(thread.id, run, privateLinks); if (legacyProjection) { if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response: runView(thread.id, run), createdAt: Date.now() }; await saveSession(owner.userId, session); } else { const settledHistory = run.status === "completed" ? [{ role: "user" as const, content: `${run.input || "Attached file(s)"}${run.attachments?.length ? `\n[Attachments: ${run.attachments.map((file) => file.name).join(", ")}]` : ""}`, createdAt: run.createdAt }, { role: "assistant" as const, content: run.output ?? "", createdAt: run.updatedAt }] : run.status === "failed" ? failedSdkRunHistory(run) : []; await persistSdkRunSnapshot(owner.userId, thread.id, run, settledHistory, run.cost ?? 0); if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, response); } await persistSdkCompanyRun(run); await notifyOwnerSdkWebhooks(owner.userId, session.sdkWebhooks, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status }); return c.json(response, 201);
     } finally { await releaseUserLock(owner.userId, lockToken); }
   });
   app.post("/v1/threads/:threadId/runs/stream", async (c) => {

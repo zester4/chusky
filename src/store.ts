@@ -1803,12 +1803,14 @@ interface Backend {
   saveSession(userId: number, s: UserSession): Promise<void>;
   readConversationBefore(userId: number, before: { createdAt: number; id: string }, limit: number): Promise<DurableConversationMessage[] | undefined>;
   getSdkRun(userId: number, threadId: string, runId: string): Promise<SdkRunRecord | undefined>;
+  getSdkRunById(userId: number, runId: string): Promise<{ threadId: string; run: SdkRunRecord } | undefined>;
   getSdkRunUsage?(userId: number): Promise<{ count: number; active: number }>;
   getSdkThread(userId: number, threadId: string): Promise<SdkThreadRecord | undefined>;
   listSdkThreads(userId: number): Promise<SdkThreadRecord[]>;
   saveSdkThread(userId: number, thread: SdkThreadRecord, idempotency?: { key: string; fingerprint: string; response: unknown }): Promise<boolean>;
   deleteSdkThread(userId: number, threadId: string): Promise<boolean>;
   listSdkRuns(userId: number, threadId: string): Promise<SdkRunRecord[]>;
+  listSdkRunsForUser(userId: number, afterMs?: number, limit?: number, status?: string): Promise<Array<{ threadId: string; run: SdkRunRecord }>>;
   saveSdkRun(userId: number, threadId: string, run: SdkRunRecord): Promise<boolean>;
   getSdkIdempotency(userId: number, key: string): Promise<{ fingerprint: string; response: unknown; createdAt: number } | undefined>;
   saveSdkIdempotency(userId: number, key: string, fingerprint: string, response: unknown): Promise<void>;
@@ -2834,6 +2836,20 @@ class RedisBackend implements Backend {
     return (await this.getSession(userId)).sdkThreads?.find((thread) => thread.id === threadId)?.runs.find((run) => run.id === runId);
   }
 
+  async getSdkRunById(userId: number, runId: string): Promise<{ threadId: string; run: SdkRunRecord } | undefined> {
+    await this.ensureSdkTablesMigrated(userId);
+    if (this.durableState && this.durableSdkRunsEnabled) {
+      const durable = await this.durableState.readSdkRunById(userId, runId);
+      return durable ? { threadId: durable.threadId, run: durable.payload as SdkRunRecord } : undefined;
+    }
+    const session = await this.getSession(userId, true);
+    for (const thread of session.sdkThreads ?? []) {
+      const run = thread.runs.find((item) => item.id === runId);
+      if (run) return { threadId: thread.id, run };
+    }
+    return undefined;
+  }
+
   async listSdkRuns(userId: number, threadId: string): Promise<SdkRunRecord[]> {
     await this.ensureSdkTablesMigrated(userId);
     if (!this.durableState || !this.durableSdkRunsEnabled) return (await this.getSession(userId)).sdkThreads?.find((thread) => thread.id === threadId)?.runs ?? [];
@@ -2849,6 +2865,19 @@ class RedisBackend implements Backend {
     const runs = durable.map((record) => record.payload as SdkRunRecord);
     await this.r.setex(key, 1, JSON.stringify(runs));
     return runs;
+  }
+
+  async listSdkRunsForUser(userId: number, afterMs = 0, limit = 100, status?: string): Promise<Array<{ threadId: string; run: SdkRunRecord }>> {
+    await this.ensureSdkTablesMigrated(userId);
+    if (this.durableState && this.durableSdkRunsEnabled) {
+      return (await this.durableState.listSdkRunsForUser(userId, afterMs, limit, status)).map((record) => ({ threadId: record.threadId, run: record.payload as SdkRunRecord }));
+    }
+    const session = await this.getSession(userId, true);
+    return (session.sdkThreads ?? []).flatMap((thread) => thread.runs
+      .filter((run) => run.updatedAt > afterMs && (!status || run.status === status))
+      .map((run) => ({ threadId: thread.id, run })))
+      .sort((left, right) => right.run.updatedAt - left.run.updatedAt || right.run.id.localeCompare(left.run.id))
+      .slice(0, Math.max(1, Math.min(200, limit)));
   }
 
   async saveSdkRun(userId: number, threadId: string, run: SdkRunRecord): Promise<boolean> {
@@ -4436,8 +4465,23 @@ class MemoryBackend implements Backend {
     const run = session?.sdkThreads?.find((thread) => thread.id === threadId)?.runs.find((item) => item.id === runId);
     return run ? structuredClone(run) : undefined;
   }
+  async getSdkRunById(userId: number, runId: string) {
+    const session = this.sessions.get(userId);
+    for (const thread of session?.sdkThreads ?? []) {
+      const run = thread.runs.find((item) => item.id === runId);
+      if (run) return { threadId: thread.id, run: structuredClone(run) };
+    }
+    return undefined;
+  }
   async listSdkRuns(userId: number, threadId: string) {
     return structuredClone(this.sessions.get(userId)?.sdkThreads?.find((thread) => thread.id === threadId)?.runs ?? []);
+  }
+  async listSdkRunsForUser(userId: number, afterMs = 0, limit = 100, status?: string) {
+    return structuredClone((this.sessions.get(userId)?.sdkThreads ?? []).flatMap((thread) => thread.runs
+      .filter((run) => run.updatedAt > afterMs && (!status || run.status === status))
+      .map((run) => ({ threadId: thread.id, run })))
+      .sort((left, right) => right.run.updatedAt - left.run.updatedAt || right.run.id.localeCompare(left.run.id))
+      .slice(0, Math.max(1, Math.min(200, limit))));
   }
   async saveSdkRun(_userId: number, _threadId: string, _run: SdkRunRecord) { return false; }
   async getSdkIdempotency(userId: number, key: string) {
@@ -6094,6 +6138,11 @@ export async function getSdkRun(uid: number, threadId: string, runId: string): P
   return backend.getSdkRun(uid, threadId, runId);
 }
 
+export async function getSdkRunById(uid: number, runId: string): Promise<{ threadId: string; run: SdkRunRecord } | undefined> {
+  if (!/^run_[A-Za-z0-9_-]{1,120}$/.test(runId)) return undefined;
+  return backend.getSdkRunById(uid, runId);
+}
+
 export async function getSdkThread(uid: number, threadId: string): Promise<SdkThreadRecord | undefined> {
   if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId)) return undefined;
   return backend.getSdkThread(uid, threadId);
@@ -6118,6 +6167,10 @@ export async function listSdkRuns(uid: number, threadId: string): Promise<SdkRun
   return backend.listSdkRuns(uid, threadId);
 }
 
+export async function listSdkRunsForUser(uid: number, afterMs = 0, limit = 100, status?: string): Promise<Array<{ threadId: string; run: SdkRunRecord }>> {
+  return backend.listSdkRunsForUser(uid, Math.max(0, Number.isSafeInteger(afterMs) ? afterMs : 0), Math.max(1, Math.min(200, Math.floor(limit))), status);
+}
+
 export async function getSdkRunUsage(uid: number): Promise<{ count: number; active: number }> {
   if (backend.getSdkRunUsage) return backend.getSdkRunUsage(uid);
   const runs = (await backend.getSession(uid)).sdkThreads?.flatMap((thread) => thread.runs) ?? [];
@@ -6127,6 +6180,30 @@ export async function getSdkRunUsage(uid: number): Promise<{ count: number; acti
 export async function saveSdkRun(uid: number, threadId: string, run: SdkRunRecord): Promise<boolean> {
   if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId) || !/^run_[A-Za-z0-9_-]{1,120}$/.test(run.id)) throw new Error("SDK run identity is invalid.");
   return backend.saveSdkRun(uid, threadId, run);
+}
+
+/** Append settled SDK history through the thread table without materializing every SDK run. */
+export async function appendSdkRunHistory(uid: number, threadId: string, runId: string, messages: Message[]): Promise<boolean> {
+  if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId) || !/^run_[A-Za-z0-9_-]{1,120}$/.test(runId) || !messages.length) return false;
+  const thread = await backend.getSdkThread(uid, threadId);
+  const run = await backend.getSdkRun(uid, threadId, runId);
+  if (!thread || !run || !["completed", "failed"].includes(run.status)) return false;
+  const tagged = messages.slice(0, 10).map((message, index) => ({
+    ...message,
+    sourceId: `sdk-run:${runId}:${index}`,
+    createdAt: typeof message.createdAt === "number" && Number.isFinite(message.createdAt) ? message.createdAt : run.updatedAt,
+  }));
+  const sourceIds = new Set(thread.history.map((message) => message.sourceId).filter((value): value is string => typeof value === "string"));
+  thread.history = fitPersistedHistory([...thread.history, ...tagged.filter((message) => !sourceIds.has(message.sourceId!))], Math.min(80, Math.max(2, config.maxHistory * 2))).history;
+  thread.updatedAt = Math.max(thread.updatedAt, run.updatedAt);
+  if (!(await backend.saveSdkThread(uid, thread))) return false;
+  if (run.ownerPrivateRun && !run.companyProjectId) {
+    await mutateSession(uid, (session) => {
+      const accountSourceIds = new Set(session.history.map((message) => message.sourceId).filter((value): value is string => typeof value === "string"));
+      appendSessionHistory(session, tagged.filter((message) => !accountSourceIds.has(message.sourceId!)));
+    });
+  }
+  return true;
 }
 
 export async function getSdkIdempotency(uid: number, key: string): Promise<{ fingerprint: string; response: unknown; createdAt: number } | undefined> {

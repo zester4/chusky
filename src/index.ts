@@ -14,7 +14,7 @@ import { listAttentionRecords } from "./store.js";
 import { updateAttentionRecord } from "./store.js";
 import type { AttentionCandidateRecord, AutonomyProfileRecord, DeliveryPreferenceRecord, ObservationRecord, AutonomyWatchRecord } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
-import { initStore, getTelegramChatId, createTriggerEventIfAbsent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, appendPhoneCallEvent, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, saveRecallMeetingMissionState, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
+import { initStore, getTelegramChatId, createTriggerEventIfAbsent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkRunById, listSdkRunsForUser, saveSdkRun, saveSdkThread, deleteSdkThread, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, appendPhoneCallEvent, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, saveRecallMeetingMissionState, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcriptionFormatForMimeType, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -1867,8 +1867,7 @@ async function main(): Promise<void> {
     app.get("/cli/runs", async (c) => {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
       const status = String(c.req.query("status") ?? "").trim();
-      const session = await getSessionWithSdkRuns(device.userId);
-      const runs = session.sdkThreads!.flatMap((thread) => thread.runs.map((run) => cliRunView(run, thread.id))).filter((run: any) => Boolean(run) && (!status || run.status === status)).sort((a: any, b: any) => String(b.updatedAt).localeCompare(String(a.updatedAt))).slice(0, 100);
+      const runs = (await listSdkRunsForUser(device.userId, 0, 100, status || undefined)).map(({ threadId, run }) => cliRunView(run, threadId)).filter(Boolean);
       return c.json({ ok: true, runs });
     });
     app.post("/cli/runs", async (c) => {
@@ -1883,50 +1882,90 @@ async function main(): Promise<void> {
       const maxCost = body.maxCost === undefined ? undefined : Number(body.maxCost);
       if (maxToolCalls !== undefined && (!Number.isSafeInteger(maxToolCalls) || maxToolCalls < 1 || maxToolCalls > 1000)) return c.json({ ok: false, error: "maxToolCalls must be an integer from 1 to 1000" }, 400);
       if (maxCost !== undefined && (!Number.isFinite(maxCost) || maxCost <= 0 || maxCost > 1000)) return c.json({ ok: false, error: "maxCost must be a number greater than 0 and no more than 1000" }, 400);
-      const session = await getSessionWithSdkTables(device.userId); const now = Date.now();
+      const ownerSession = await getSession(device.userId); const now = Date.now();
       const threadId = `thr_cli_${randomUUID()}`; const runId = `run_cli_${randomUUID()}`;
       const thread = { id: threadId, externalId: `cli-${device.name}-${now}`, metadata: { source: "cli", title: input.slice(0, 120) }, history: [], runs: [] as any[], createdAt: now, updatedAt: now };
-      const run: any = { id: runId, status: "queued", input, model: typeof body.model === "string" && body.model.trim() ? body.model.trim() : session.model, budget: { duration, ...(maxToolCalls !== undefined ? { maxToolCalls } : {}), ...(maxCost !== undefined ? { maxCost } : {}) }, events: [{ id: `evt_${randomUUID()}`, type: "run.queued", at: now }], createdAt: now, updatedAt: now };
-      thread.runs.push(run); session.sdkThreads = [thread, ...(session.sdkThreads ?? [])].slice(0, 100); await saveSession(device.userId, session);
+      const run: any = { id: runId, status: "queued", input, model: typeof body.model === "string" && body.model.trim() ? body.model.trim() : ownerSession.model, budget: { duration, ...(maxToolCalls !== undefined ? { maxToolCalls } : {}), ...(maxCost !== undefined ? { maxCost } : {}) }, events: [{ id: `evt_${randomUUID()}`, type: "run.queued", at: now }], createdAt: now, updatedAt: now };
+      let legacySession: Awaited<ReturnType<typeof getSessionWithSdkTables>> | undefined;
+      let directProjection = await saveSdkThread(device.userId, thread);
+      if (directProjection) {
+        directProjection = await saveSdkRun(device.userId, threadId, run);
+        if (!directProjection) await deleteSdkThread(device.userId, threadId);
+      }
+      if (!directProjection) {
+        legacySession = await getSessionWithSdkTables(device.userId);
+        thread.runs.push(run); legacySession.sdkThreads = [thread, ...(legacySession.sdkThreads ?? [])].slice(0, 100); await saveSession(device.userId, legacySession);
+      }
+      const persistRun = async () => {
+        if (legacySession) {
+          const legacyThread = legacySession.sdkThreads?.find((item) => item.id === threadId);
+          if (legacyThread) { legacyThread.runs = [run]; legacyThread.updatedAt = run.updatedAt; }
+          await saveSession(device.userId, legacySession);
+        } else if (!(await saveSdkRun(device.userId, threadId, run))) {
+          throw new Error("SDK run persistence is unavailable");
+        }
+      };
       try {
         const task = await createTask(device.userId, { title: input.slice(0, 120), objective: input, runAt: now, maxAttempts: 10, sdkRunId: runId, sdkThreadId: threadId, sdkInput: input, sdkModel: run.model, sdkBudget: run.budget, sdkStartedAt: now });
-        run.taskId = task.id; run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(device.userId, session);
+        run.taskId = task.id; run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await persistRun();
         const workflowRunId = await enqueueTaskWithClaim(device.userId, task.id, now); if (!workflowRunId) throw new Error("This run is already being queued");
-        run.events.push({ id: `evt_${randomUUID()}`, type: "run.scheduled", at: Date.now(), text: workflowRunId }); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(device.userId, session);
+        run.events.push({ id: `evt_${randomUUID()}`, type: "run.scheduled", at: Date.now(), text: workflowRunId }); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await persistRun();
         return c.json({ ok: true, run: cliRunView(run, threadId, task.id) }, 202);
       } catch (error) {
-        run.status = "failed"; run.error = { code: "enqueue_failed", message: error instanceof Error ? error.message : String(error) }; run.events.push({ id: `evt_${randomUUID()}`, type: "run.failed", at: Date.now(), text: run.error.message }); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(device.userId, session);
+        run.status = "failed"; run.error = { code: "enqueue_failed", message: error instanceof Error ? error.message : String(error) }; run.events.push({ id: `evt_${randomUUID()}`, type: "run.failed", at: Date.now(), text: run.error.message }); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt;
+        await persistRun().catch(() => undefined);
         return c.json({ ok: false, error: run.error.message, run: cliRunView(run, threadId) }, 503);
       }
     });
     app.get("/cli/runs/:id", async (c) => {
-      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const session = await getSessionWithSdkRuns(device.userId);
-      for (const thread of session.sdkThreads ?? []) { const run = thread.runs.find((item) => item.id === c.req.param("id")); if (run) return c.json({ ok: true, run: cliRunView(run, thread.id) }); }
-      return c.json({ ok: false, error: "run not found" }, 404);
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const located = await getSdkRunById(device.userId, c.req.param("id"));
+      return located ? c.json({ ok: true, run: cliRunView(located.run, located.threadId) }) : c.json({ ok: false, error: "run not found" }, 404);
     });
     app.get("/cli/runs/:id/events", async (c) => {
-      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const after = Number(c.req.query("after") ?? 0) || 0; const session = await getSessionWithSdkRuns(device.userId);
-      for (const thread of session.sdkThreads ?? []) { const run = thread.runs.find((item) => item.id === c.req.param("id")); if (run) return c.json({ ok: true, events: run.events.filter((item) => item.at > after), now: Date.now() }); }
-      return c.json({ ok: false, error: "run not found" }, 404);
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const after = Number(c.req.query("after") ?? 0) || 0;
+      const located = await getSdkRunById(device.userId, c.req.param("id"));
+      return located ? c.json({ ok: true, events: located.run.events.filter((item) => item.at > after), now: Date.now() }) : c.json({ ok: false, error: "run not found" }, 404);
     });
     app.post("/cli/runs/:id/cancel", async (c) => {
-      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const session = await getSessionWithSdkRuns(device.userId);
-      for (const thread of session.sdkThreads ?? []) { const run = thread.runs.find((item) => item.id === c.req.param("id")); if (!run) continue; if (["completed", "cancelled"].includes(run.status)) return c.json({ ok: false, error: "run is already finished" }, 409); if (run.taskId) await cancelTask(device.userId, run.taskId); run.status = "cancelled"; run.events.push({ id: `evt_${randomUUID()}`, type: "run.cancelled", at: Date.now() }); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(device.userId, session); return c.json({ ok: true, run: cliRunView(run, thread.id) }); }
-      return c.json({ ok: false, error: "run not found" }, 404);
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const located = await getSdkRunById(device.userId, c.req.param("id"));
+      if (!located) return c.json({ ok: false, error: "run not found" }, 404);
+      const { threadId, run } = located;
+      if (["completed", "cancelled"].includes(run.status)) return c.json({ ok: false, error: "run is already finished" }, 409);
+      if (run.taskId) await cancelTask(device.userId, run.taskId);
+      run.status = "cancelled"; run.events.push({ id: `evt_${randomUUID()}`, type: "run.cancelled", at: Date.now() }); run.updatedAt = Date.now();
+      if (!(await saveSdkRun(device.userId, threadId, run))) {
+        const session = await getSessionWithSdkRuns(device.userId, threadId); const thread = session.sdkThreads?.find((item) => item.id === threadId); const legacyRun = thread?.runs.find((item) => item.id === run.id);
+        if (!thread || !legacyRun) return c.json({ ok: false, error: "run could not be persisted" }, 503);
+        thread.runs = [run]; thread.updatedAt = run.updatedAt; await saveSession(device.userId, session);
+      }
+      return c.json({ ok: true, run: cliRunView(run, threadId) });
     });
     app.post("/cli/runs/:id/resume", async (c) => {
-      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const session = await getSessionWithSdkRuns(device.userId);
-      for (const thread of session.sdkThreads ?? []) { const run = thread.runs.find((item) => item.id === c.req.param("id")); if (!run) continue; if (!["failed", "cancelled", "requires_approval"].includes(run.status)) return c.json({ ok: false, error: "only failed, cancelled, or approval-paused runs can be resumed" }, 409); if (!run.taskId) return c.json({ ok: false, error: "run has no durable task" }, 409); const task = await retryTask(device.userId, run.taskId); if (!task) return c.json({ ok: false, error: "run task is not retryable" }, 409); run.status = "queued"; run.error = undefined; run.events.push({ id: `evt_${randomUUID()}`, type: "run.resumed", at: Date.now() }); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(device.userId, session); try { const workflowRunId = await enqueueTaskWithClaim(device.userId, task.id, task.runAt ?? Date.now()); if (!workflowRunId) return c.json({ ok: false, error: "run is already being queued" }, 409); return c.json({ ok: true, run: cliRunView(run, thread.id, task.id) }, 202); } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "run could not be resumed" }, 503); } }
-      return c.json({ ok: false, error: "run not found" }, 404);
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const located = await getSdkRunById(device.userId, c.req.param("id"));
+      if (!located) return c.json({ ok: false, error: "run not found" }, 404);
+      const { threadId, run } = located;
+      if (!["failed", "cancelled", "requires_approval"].includes(run.status)) return c.json({ ok: false, error: "only failed, cancelled, or approval-paused runs can be resumed" }, 409);
+      if (!run.taskId) return c.json({ ok: false, error: "run has no durable task" }, 409);
+      const task = await retryTask(device.userId, run.taskId); if (!task) return c.json({ ok: false, error: "run task is not retryable" }, 409);
+      run.status = "queued"; run.error = undefined; run.events.push({ id: `evt_${randomUUID()}`, type: "run.resumed", at: Date.now() }); run.updatedAt = Date.now();
+      if (!(await saveSdkRun(device.userId, threadId, run))) {
+        const session = await getSessionWithSdkRuns(device.userId, threadId); const thread = session.sdkThreads?.find((item) => item.id === threadId); const legacyRun = thread?.runs.find((item) => item.id === run.id);
+        if (!thread || !legacyRun) return c.json({ ok: false, error: "run could not be persisted" }, 503);
+        thread.runs = [run]; thread.updatedAt = run.updatedAt; await saveSession(device.userId, session);
+      }
+      try { const workflowRunId = await enqueueTaskWithClaim(device.userId, task.id, task.runAt ?? Date.now()); if (!workflowRunId) return c.json({ ok: false, error: "run is already being queued" }, 409); return c.json({ ok: true, run: cliRunView(run, threadId, task.id) }, 202); } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "run could not be resumed" }, 503); }
     });
 
     app.get("/cli/events", async (c) => {
       const device = await cliAuth(c);
       if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
       const since = Math.max(0, Number(c.req.query("since") ?? "0") || 0);
-      const session = await getSessionWithSdkRuns(device.userId);
+      const session = await getSession(device.userId);
       const tasks = (await listTasks(device.userId)).filter((task) => task.updatedAt > since).slice(0, 20);
-      const runs = session.sdkThreads!.flatMap((thread) => thread.runs.filter((run) => run.updatedAt > since).map((run) => cliRunView(run, thread.id))).filter(Boolean).slice(0, 20);
+      const runs = (await listSdkRunsForUser(device.userId, since, 20)).map(({ threadId, run }) => cliRunView(run, threadId)).filter(Boolean);
       const approvals = session.approvals.filter((approval) => approval.status === "pending" && approval.expiresAt > Date.now() && approval.createdAt > since).slice(-20);
       const [storedReminders, storedJobs] = await Promise.all([listReminders(device.userId), listJobs(device.userId)]);
       const reminders = storedReminders.filter((reminder) => reminder.createdAt > since).slice(-20).map((reminder) => ({ id: reminder.id, text: reminder.text, runAt: reminder.runAt, status: reminder.status }));
@@ -1940,9 +1979,9 @@ async function main(): Promise<void> {
       let cursor = Math.max(0, Number(c.req.query("since") ?? "0") || 0);
       return streamSSE(c, async (stream) => {
         for (let attempt = 0; attempt < 900 && !c.req.raw.signal.aborted; attempt++) {
-          const session = await getSessionWithSdkRuns(device.userId);
+          const session = await getSession(device.userId);
           const tasks = (await listTasks(device.userId)).filter((task) => task.updatedAt > cursor).slice(0, 20);
-          const runs = session.sdkThreads!.flatMap((thread) => thread.runs.filter((run) => run.updatedAt > cursor).map((run) => cliRunView(run, thread.id))).filter(Boolean).slice(0, 20);
+          const runs = (await listSdkRunsForUser(device.userId, cursor, 20)).map(({ threadId, run }) => cliRunView(run, threadId)).filter(Boolean);
           const approvals = session.approvals.filter((approval) => approval.status === "pending" && approval.expiresAt > Date.now() && approval.createdAt > cursor).slice(-20);
           const [storedReminders, storedJobs] = await Promise.all([listReminders(device.userId), listJobs(device.userId)]);
           const reminders = storedReminders.filter((reminder) => reminder.createdAt > cursor).slice(-20).map((reminder) => ({ id: reminder.id, text: reminder.text, runAt: reminder.runAt, status: reminder.status }));

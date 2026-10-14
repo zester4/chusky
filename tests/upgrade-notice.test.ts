@@ -278,13 +278,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the Monid and Treg engines accurately", async () => {
+test("current upgrade manifest announces the browser platform accurately", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.58.0");
-  assert.equal(notice?.version, "4.58.0");
-  assert.match(notice?.bullets[0] ?? "", /Monid and Treg research planners.*SEO.*ads.*company\/account research.*lead enrichment\/discovery.*buying signals/);
-  assert.match(notice?.bullets[1] ?? "", /Muna.*approval, spend-reservation, account-scope, and async\/pending-call controls/);
-  assert.match(notice?.bullets[2] ?? "", /Both planners make no provider calls/);
+  assert.equal(notice?.id, "release-4.59.0");
+  assert.equal(notice?.version, "4.59.0");
+  assert.match(notice?.bullets[0] ?? "", /real local Chromium.*without Kernel or E2B.*owner-bound live viewport/);
+  assert.match(notice?.bullets[1] ?? "", /Live URLs can be delivered during the active private run/);
+  assert.match(notice?.bullets[2] ?? "", /Provider failover never replays page actions/);
 });
 
 test("lead campaign preset describes durable, discovery-first work and bounded enrichment", () => {

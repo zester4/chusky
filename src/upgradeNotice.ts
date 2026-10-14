@@ -202,6 +202,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Provider CDP endpoints stay inside trusted adapters behind opaque owner-bound broker tickets; encrypted profile envelopes and generation-bound refs prevent cross-account state leakage and stale DOM actions.",
     "Browser telemetry reports bounded latency percentiles, failures, and challenge outcomes; BrowserTrustRouter selects verified routes, keeps owner/origin identity stable, and hands repeated challenges to the owner instead of blindly retrying.",
   ],
+  browserPlatform: [
+    "The dedicated browser runtime now supports real local Chromium without Kernel or E2B, owner-bound live viewport delivery, durable last-URL recovery, and explicit provider failover for provider-availability failures.",
+    "Live URLs can be delivered during the active private run, while the browser keeps semantic observation, stale-reference invalidation, challenge handoff, profile isolation, and consequential-action approvals in the trusted runtime.",
+    "Provider failover never replays page actions or uncertain writes; production readiness still depends on durable storage, HTTPS live-view configuration, real provider capacity, and measured site benchmarks.",
+  ],
   browserDomainWorkflows: [
     "Added owner-scoped browser planning for flights, stays, telecom services, and streaming accounts with structured route, date, guest, plan, title, and profile constraints.",
     "Public search, comparison, itinerary or plan review, cart preparation, and watchlist work remain autonomous; bookings, plan changes, cancellations, purchases, payments, and final confirmations retain approval gates.",

@@ -432,6 +432,25 @@ test("Neon SDK run reads are owner- and thread-scoped and listing is bounded", a
   await assert.rejects(() => state.listSdkRuns(42, "bad", 50), /identity is invalid/);
 });
 
+test("Neon owner run polling is bounded, status-filterable, and does not require a thread projection", async () => {
+  const pool = new FakePool();
+  const at = new Date("2026-10-03T00:00:00.000Z");
+  pool.reads = [{ user_id: "42", thread_id: "thr_test", run_id: "run_test", payload: { id: "run_test", status: "running", events: [] }, created_at: at, updated_at: at, version: "3" }];
+  const state = new NeonDurableState(pool as never);
+
+  const located = await state.readSdkRunById(42, "run_test");
+  assert.equal(located?.threadId, "thr_test");
+  assert.match(pool.calls[0]?.text ?? "", /WHERE user_id = \$1 AND run_id = \$2/);
+  assert.deepEqual(pool.calls[0]?.values, [42, "run_test"]);
+
+  const listed = await state.listSdkRunsForUser(42, 1, 50, "running");
+  assert.equal(listed[0]?.runId, "run_test");
+  assert.match(pool.calls[1]?.text ?? "", /payload->>'status' = \$3/);
+  assert.match(pool.calls[1]?.text ?? "", /ORDER BY updated_at DESC, run_id DESC LIMIT \$4/);
+  assert.deepEqual(pool.calls[1]?.values, [42, 1, "running", 50]);
+  await assert.rejects(() => state.listSdkRunsForUser(42, -1), /cursor is invalid/);
+});
+
 test("Neon SDK run writes validate identity and use version-guarded updates", async () => {
   const pool = new FakePool();
   pool.reads = [{ run_id: "run_test" }];

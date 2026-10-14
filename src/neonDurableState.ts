@@ -1329,6 +1329,17 @@ export class NeonDurableState {
     return result.rows[0] ? toSdkRun(result.rows[0]) : undefined;
   }
 
+  /** Read one owner-scoped run without first loading its thread projection. */
+  async readSdkRunById(userId: number, runId: string): Promise<DurableSdkRun | undefined> {
+    assertUserId(userId);
+    if (!/^run_[A-Za-z0-9_-]{1,120}$/.test(runId)) throw new Error("Durable SDK run identity is invalid.");
+    const result = await this.measuredQuery<SdkRunRow>(this.database,
+      "SELECT user_id, thread_id, run_id, payload, created_at, updated_at, version FROM chusky_sdk_run WHERE user_id = $1 AND run_id = $2 ORDER BY updated_at DESC, thread_id ASC LIMIT 1",
+      [userId, runId],
+    );
+    return result.rows[0] ? toSdkRun(result.rows[0]) : undefined;
+  }
+
   /** Dashboard counters never need run inputs, outputs, events, or artifacts. */
   async readSdkRunUsage(userId: number): Promise<{ count: number; active: number }> {
     assertUserId(userId);
@@ -1351,6 +1362,23 @@ export class NeonDurableState {
     const result = await this.measuredQuery<SdkRunRow>(this.database,
       "SELECT user_id, thread_id, run_id, payload, created_at, updated_at, version FROM chusky_sdk_run WHERE user_id = $1 AND thread_id = $2 ORDER BY created_at ASC, run_id ASC LIMIT $3",
       [userId, threadId, boundedLimit],
+    );
+    return result.rows.map(toSdkRun);
+  }
+
+  /** List only the bounded run rows needed by owner dashboards and CLI polling. */
+  async listSdkRunsForUser(userId: number, afterMs = 0, limit = 100, status?: string): Promise<DurableSdkRun[]> {
+    assertUserId(userId);
+    if (!Number.isSafeInteger(afterMs) || afterMs < 0) throw new Error("SDK run cursor is invalid.");
+    const boundedLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(200, limit)) : 100;
+    const normalizedStatus = status && ["queued", "running", "requires_approval", "completed", "failed", "cancelled"].includes(status) ? status : undefined;
+    const result = await this.measuredQuery<SdkRunRow>(this.database,
+      `SELECT user_id, thread_id, run_id, payload, created_at, updated_at, version
+       FROM chusky_sdk_run
+       WHERE user_id = $1 AND updated_at > to_timestamp($2 / 1000.0)
+         AND ($3::text IS NULL OR payload->>'status' = $3)
+       ORDER BY updated_at DESC, run_id DESC LIMIT $4`,
+      [userId, afterMs, normalizedStatus ?? null, boundedLimit],
     );
     return result.rows.map(toSdkRun);
   }

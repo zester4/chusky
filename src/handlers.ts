@@ -817,22 +817,25 @@ async function saveTelegramConversation(ctx: Context, userId: number, text: stri
 }
 
 /** Send expiring private browser and vault URLs outside saved conversational history. */
-async function sendPrivateBrowserLinks(ctx: Context, links: Awaited<ReturnType<typeof runAgent>>["privateLinks"]): Promise<void> {
+async function sendPrivateBrowserLinks(ctx: Context, links: Awaited<ReturnType<typeof runAgent>>["privateLinks"], delivered = new Set<string>()): Promise<void> {
   for (const link of links ?? []) {
+    if (delivered.has(link.url)) continue;
     await ctx.reply(`${link.label}\n\nThis private link expires soon. Complete the website step there, then return here and say continue.`, {
       link_preview_options: { is_disabled: true },
       reply_markup: {
         inline_keyboard: [[{ text: link.label, url: link.url }]],
       },
     });
+    delivered.add(link.url);
   }
 }
 
-function telegramAgentOptions(ctx: Context, receivedAt: number) {
+function telegramAgentOptions(ctx: Context, receivedAt: number, deliveredPrivateLinks = new Set<string>()) {
   const shared = isTelegramShared(ctx);
   return {
     ...(!shared ? { ownerPrivateRun: true } : {}),
     ...(shared ? { instructions: sharedGroupInstructions("Telegram"), toolDeny: [...SHARED_GROUP_TOOL_DENY] } : {}),
+    ...(!shared ? { onPrivateLink: async (link: { url: string; expiresAt?: number; label: string }) => { await sendPrivateBrowserLinks(ctx, [link], deliveredPrivateLinks); } } : {}),
     temporalContext: { messageReceivedAt: receivedAt, timezone: config.timezone },
   };
 }
@@ -927,11 +930,12 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
   try {
     const s = await getSession(userId);
     const receivedAt = telegramMessageReceivedAt(ctx);
-    const result = await runAgent(userId, parts, await telegramConversationHistory(ctx, s.history), await telegramGroupModel(ctx, s.model), undefined, controller.signal, undefined, undefined, telegramAgentChannelContext(ctx, userId), telegramAgentOptions(ctx, receivedAt));
+    const deliveredPrivateLinks = new Set<string>();
+    const result = await runAgent(userId, parts, await telegramConversationHistory(ctx, s.history), await telegramGroupModel(ctx, s.model), undefined, controller.signal, undefined, undefined, telegramAgentChannelContext(ctx, userId), telegramAgentOptions(ctx, receivedAt, deliveredPrivateLinks));
     await saveTelegramConversation(ctx, userId, historyLabel, result.text, receivedAt);
     if (result.cost) await addUsage(userId, result.cost);
     await editMarkdown(ctx, status.message_id, result.text);
-    await sendPrivateBrowserLinks(ctx, result.privateLinks);
+    await sendPrivateBrowserLinks(ctx, result.privateLinks, deliveredPrivateLinks);
     await sendVoiceReply(ctx, result.text, s.voiceReplies === true);
     // Media-originated requests can also create verified Daytona artifacts.
     // ctx.replyWithDocument preserves the current Telegram group/thread, just
@@ -2892,6 +2896,7 @@ export function registerHandlers(bot: Bot): void {
 
     try {
       const receivedAt = telegramMessageReceivedAt(ctx);
+      const deliveredPrivateLinks = new Set<string>();
       const result = await runAgent(
         userId, text, await telegramConversationHistory(ctx, s.history), model, updateStatus, controller.signal,
         async (delta) => {
@@ -2901,7 +2906,7 @@ export function registerHandlers(bot: Bot): void {
             await editHtml(ctx, statusMsg.message_id, mdToTelegramHtml(streamedText));
           }
         },
-        undefined, telegramAgentChannelContext(ctx, userId), telegramAgentOptions(ctx, receivedAt)
+        undefined, telegramAgentChannelContext(ctx, userId), telegramAgentOptions(ctx, receivedAt, deliveredPrivateLinks)
       );
       clearInterval(typingInterval);
 
@@ -2917,7 +2922,7 @@ export function registerHandlers(bot: Bot): void {
       }
 
       await editMarkdown(ctx, statusMsg.message_id, result.text, html);
-      await sendPrivateBrowserLinks(ctx, result.privateLinks);
+      await sendPrivateBrowserLinks(ctx, result.privateLinks, deliveredPrivateLinks);
       await sendVoiceReply(ctx, result.text, s.voiceReplies === true);
       await sendGeneratedArtifacts(ctx, result.generatedFiles);
       const generatedImages = result.generatedImages ?? [];

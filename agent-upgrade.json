@@ -1,11 +1,11 @@
 {
-  "id": "release-4.58.0",
-  "version": "4.58.0",
+  "id": "release-4.59.0",
+  "version": "4.59.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added Monid and Treg research planners: reusable SEO, ads, extraction, company/account research, people and lead enrichment/discovery, buying signals, hiring, technology, market maps, and general research; endpoints stay live-discovered.",
-    "Muna uses the matching research playbook and executes through existing approval, spend-reservation, account-scope, and async/pending-call controls; campaigns and recurring watches use Chusky's durable workflows.",
-    "Both planners make no provider calls and cannot authorize spend; data-quality, privacy, and Treg/Monid configuration boundaries remain active."
+    "The dedicated browser runtime now supports real local Chromium without Kernel or E2B, owner-bound live viewport delivery, durable last-URL recovery, and explicit provider failover for provider-availability failures.",
+    "Live URLs can be delivered during the active private run, while the browser keeps semantic observation, stale-reference invalidation, challenge handoff, profile isolation, and consequential-action approvals in the trusted runtime.",
+    "Provider failover never replays page actions or uncertain writes; production readiness still depends on durable storage, HTTPS live-view configuration, real provider capacity, and measured site benchmarks."
   ],
-  "createdAt": "2026-10-14T01:14:17.171Z"
+  "createdAt": "2026-10-14T18:31:55.997Z"
 }

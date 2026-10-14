@@ -30,8 +30,9 @@ export class DedicatedBrowserRuntimeClient {
     return this.request(ownerScope, `/v1/sessions/${encodeURIComponent(sessionId)}`, { method: "GET" });
   }
 
-  async liveView(ownerScope: string, sessionId: string): Promise<Record<string, unknown>> {
-    return this.request(ownerScope, `/v1/sessions/${encodeURIComponent(sessionId)}/live-view`, { method: "GET" });
+  async liveView(ownerScope: string, sessionId: string, mode: "read-only" | "interactive" = "read-only"): Promise<Record<string, unknown>> {
+    const query = mode === "interactive" ? "?mode=interactive" : "";
+    return this.request(ownerScope, `/v1/sessions/${encodeURIComponent(sessionId)}/live-view${query}`, { method: "GET" });
   }
 
   async artifact(ownerScope: string, sessionId: string, artifactId: string): Promise<{ name: string; contentType: string; bytes: Buffer }> {

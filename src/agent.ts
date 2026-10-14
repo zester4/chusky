@@ -2195,6 +2195,8 @@ export interface AgentRunOptions {
   onToolActivity?: (activity: AgentToolActivity) => void | Promise<void>;
   /** Report safe specialist lifecycle metadata in the same durable chat run. */
   onSubagentActivity?: (activity: SubagentActivityUpdate & { parentToolCallId: string }) => void | Promise<void>;
+  /** Deliver an owner-private browser/vault link as soon as the tool creates it. */
+  onPrivateLink?: (link: { url: string; expiresAt?: number; label: string }) => void | Promise<void>;
   /** Bind the internal task-wait tool to the task currently being executed. */
   taskId?: string;
   /** Bind mission controls and accounting to the autonomous slice currently executing. */
@@ -3113,6 +3115,14 @@ export async function runAgent(
   const retrievedImages: AgentResult["retrievedImages"] = [];
   const generatedFiles: AgentResult["generatedFiles"] = [];
   const privateLinks: NonNullable<AgentResult["privateLinks"]> = [];
+  const reportPrivateLink = async (link: { url: string; expiresAt?: number; label: string }): Promise<void> => {
+    privateLinks.push(link);
+    try {
+      await options?.onPrivateLink?.(link);
+    } catch (error) {
+      logger.debug({ err: error }, "Could not deliver browser link during the active run");
+    }
+  };
   let modelTextStreamed = false;
   const streamModelText = onDelta
     ? async (text: string) => { modelTextStreamed = true; await onDelta(text); }
@@ -3873,7 +3883,7 @@ export async function runAgent(
           }
           if (slug === "CHUCK_VAULT_SAVE") {
             const delivery = prepareVaultSetupDelivery(execResult);
-            privateLinks.push(delivery.privateLink);
+            await reportPrivateLink(delivery.privateLink);
             execResult = delivery.modelResult;
           }
           if ((slug === "CHUCK_BROWSER_HANDOFF" || slug === "CHUCK_VAULT_LOGIN" || slug === "CHUCK_BROWSER") && execResult && typeof execResult === "object") {
@@ -3883,7 +3893,7 @@ export async function runAgent(
               : execResult) as { url?: unknown; handoffId?: unknown; status?: unknown; expiresAt?: unknown; message?: unknown; sandboxId?: unknown; shoppingPlan?: unknown };
             const url = typeof handoff.url === "string" ? handoff.url.trim() : "";
             if ((slug === "CHUCK_BROWSER_HANDOFF" || (slug === "CHUCK_BROWSER" && vaultResult.browserHandoff)) && !/^https:\/\//i.test(url)) throw new Error("Browser backend did not return a valid private browser handoff link");
-            if (url) privateLinks.push({ url, expiresAt: typeof handoff.expiresAt === "number" ? handoff.expiresAt : undefined, label: "Open your private browser session" });
+            if (url) await reportPrivateLink({ url, expiresAt: typeof handoff.expiresAt === "number" ? handoff.expiresAt : undefined, label: "Open your private browser session" });
             // The model only needs confirmation that delivery will occur. Do
             // not put a short-lived bearer URL into model context, run state,
             // logs, or the saved conversation history.
