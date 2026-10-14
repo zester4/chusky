@@ -82,12 +82,17 @@ A stale, ambiguous, missing, or timed-out step returns a fresh observation for
 replanning. Do not replay the same step after a `no_progress` stop; inspect and
 choose a different action.
 
-## E2B-only live browser
+## Provider-aware live browser
 
-Chusky’s browser execution backend is E2B. The retained Chromium display can be
-exposed with `stream_start`, `stream_status`, and `stream_stop`, or through the
-private handoff. The stream URL/password is owner-private, short-lived, and must
-never be persisted in a playbook or sent to a shared conversation.
+When `CHUSKY_BROWSER_RUNTIME_MODE=dedicated`, Chusky’s browser execution backend
+is the dedicated Kernel headed-Chromium service; otherwise it is E2B. The
+retained Chromium display can be exposed through the selected provider's live
+view or private handoff. The URL/password is owner-private, short-lived, and
+must never be persisted in a playbook or sent to a shared conversation. The
+dedicated runtime now maps the common sequence, tab, form, download/upload,
+dialog, clipboard, PDF, trace/recording, display, and guarded native-input
+helpers. Pause/fork and managed-auth lifecycle remain explicitly provider
+specific.
 
 ## Official documentation
 

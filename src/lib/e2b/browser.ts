@@ -39,7 +39,7 @@ const OWNER_PRIVATE_VISUAL_ACTIONS = new Set([
 const locks = new Map<number, Promise<void>>();
 
 const DEDICATED_RUNTIME_ACTIONS = new Set<E2BBrowserAction>([
-  "start", "stop", "status", "open", "state", "snapshot", "find", "observe", "screenshot", "screenshot_full", "click", "invoke", "fill", "type", "press", "scroll", "select_option", "check", "uncheck", "wait", "stream_start", "stream_status",
+  "start", "stop", "status", "open", "state", "snapshot", "find", "form_inspect", "form_plan", "form_fill", "observe", "screenshot", "screenshot_full", "screenshot_region", "screenshot_region_full", "windows", "display_info", "click", "invoke", "fill", "type", "press", "scroll", "select_option", "check", "uncheck", "focus", "hover", "drag", "move", "desktop_click", "desktop_type", "desktop_press", "wait", "act", "extract", "agent", "back", "forward", "refresh", "tabs", "tab_open", "tab_focus", "tab_close", "upload", "upload_files", "downloads", "download_register", "wait_download", "download_get", "download_delete", "dialog_list", "dialog_dismiss", "clipboard_read", "clipboard_write", "pdf", "diagnostics", "events", "recording_start", "recording_stop", "recording_list", "recording_get", "recording_delete", "recording_download", "stream_start", "stream_status", "stream_stop",
 ]);
 
 function dedicatedBrowserRuntime(): DedicatedBrowserRuntimeClient | undefined {
@@ -51,14 +51,47 @@ function dedicatedBrowserRuntime(): DedicatedBrowserRuntimeClient | undefined {
 function dedicatedActionKind(action: E2BBrowserAction): string {
   if (action === "invoke") return "click";
   if (action === "select_option") return "select";
-  if (action === "uncheck") return "check";
   if (action === "type") return "fill";
-  if (["click", "fill", "press", "scroll", "check", "wait", "open"].includes(action)) return action;
+  if (action === "refresh") return "reload";
+  if (action === "tabs") return "tab-list";
+  if (action === "tab_open") return "tab-new";
+  if (action === "tab_focus") return "tab-focus";
+  if (action === "tab_close") return "tab-close";
+  if (action === "screenshot") return "screenshot";
+  if (action === "screenshot_full") return "screenshot-full";
+  if (action === "screenshot_region") return "screenshot-region";
+  if (action === "screenshot_region_full") return "screenshot-region-full";
+  if (action === "windows") return "windows";
+  if (action === "display_info") return "display-info";
+  if (action === "form_inspect") return "diagnostics";
+  if (action === "form_plan") return "diagnostics";
+  if (action === "form_fill") return "agent";
+  if (action === "wait_download") return "download-wait";
+  if (action === "downloads") return "download-list";
+  if (action === "download_register") return "download-list";
+  if (action === "download_get") return "download-get";
+  if (action === "download_delete") return "download-delete";
+  if (action === "dialog_list") return "dialog-list";
+  if (action === "dialog_dismiss") return "dialog-dismiss";
+  if (action === "clipboard_read") return "clipboard-read";
+  if (action === "clipboard_write") return "clipboard-write";
+  if (action === "pdf") return "pdf";
+  if (action === "recording_start") return "recording-start";
+  if (action === "recording_stop") return "recording-stop";
+  if (action === "recording_list") return "recording-list";
+  if (action === "recording_get") return "recording-get";
+  if (action === "recording_delete") return "recording-delete";
+  if (action === "recording_download") return "recording-download";
+  if (action === "desktop_click") return "mouse-click";
+  if (action === "desktop_type") return "keyboard-type";
+  if (action === "desktop_press") return "keyboard-press";
+  if (action === "move") return "mouse-move";
+  if (["click", "fill", "press", "scroll", "check", "uncheck", "focus", "hover", "drag", "wait", "open", "back", "forward", "extract", "agent", "upload", "upload_files", "recording_start", "recording_stop", "diagnostics", "events"].includes(action)) return action === "upload_files" ? "upload" : action;
   throw new E2BBrowserError(`Dedicated runtime does not support ${action}`);
 }
 
 function dedicatedTarget(observation: Record<string, unknown>, args: Record<string, unknown>): Record<string, unknown> | undefined {
-  if (["open", "scroll", "wait"].includes(String(args.action))) return undefined;
+  if (["open", "scroll", "wait", "back", "forward", "refresh", "tabs", "tab_open", "tab_focus", "tab_close", "screenshot", "screenshot_full", "screenshot_region", "screenshot_region_full", "windows", "display_info", "form_inspect", "form_plan", "downloads", "download_register", "wait_download", "download_get", "download_delete", "dialog_list", "dialog_dismiss", "clipboard_read", "clipboard_write", "pdf", "diagnostics", "events", "recording_start", "recording_stop", "recording_list", "recording_get", "recording_delete", "recording_download", "desktop_click", "desktop_type", "desktop_press", "move", "agent", "extract"].includes(String(args.action))) return undefined;
   const controls = Array.isArray(observation.controls) ? observation.controls as Array<Record<string, unknown>> : [];
   const nodeId = typeof args.nodeId === "string" ? args.nodeId : undefined;
   const role = typeof args.role === "string" ? args.role : undefined;
@@ -405,6 +438,8 @@ export class E2BBrowserEngine {
     const client = dedicatedBrowserRuntime();
     if (!client) throw new E2BBrowserError("Dedicated browser runtime is not fully configured");
     if (!internal.ownerPrivateRun) throw new E2BBrowserError("The dedicated browser runtime is available only in the owner's private conversation");
+    if (["clipboard_read", "clipboard_write"].includes(action) && !internal.ownerApprovedAction) throw new E2BBrowserError("Clipboard access requires owner approval");
+    if (["download_delete", "recording_delete"].includes(action) && !internal.ownerApprovedAction) throw new E2BBrowserError("Deleting a dedicated browser artifact requires owner approval");
     const highImpact = typeof args.vaultAction === "string" && !["browse", "search"].includes(args.vaultAction);
     if (highImpact && !internal.ownerApprovedAction) throw new E2BBrowserError("This dedicated browser action requires exact owner approval");
     const ownerScope = String(userId);
@@ -431,7 +466,7 @@ export class E2BBrowserEngine {
     if (action === "stream_start" || action === "stream_status") return { provider: "dedicated", action, ...(await client.liveView(ownerScope, sessionId)), sessionId, private: true };
     if (action === "state" || action === "snapshot" || action === "observe" || action === "find" || action === "screenshot" || action === "screenshot_full") {
       const visual = action === "screenshot" || action === "screenshot_full";
-      const observation = await client.observe(ownerScope, sessionId, { screenshot: action === "screenshot_full" ? "full-page" : visual ? "viewport" : "thumbnail", screenshotReason: visual ? "user-request" : "changed", includeFrames: true });
+      const observation = await client.observe(ownerScope, sessionId, { screenshot: action === "screenshot_full" ? "full-page" : visual || (action === "observe" && args.includeScreenshot === true) ? "viewport" : "thumbnail", screenshotReason: visual ? "user-request" : "changed", includeFrames: true });
       if (action === "find") {
         const role = typeof args.role === "string" ? args.role : undefined;
         const name = typeof args.name === "string" ? args.name.toLowerCase() : undefined;
@@ -440,6 +475,80 @@ export class E2BBrowserEngine {
       }
       return { provider: "dedicated", action, sessionId, ...observation };
     }
+    if (action === "screenshot_region" || action === "screenshot_region_full") {
+      const region = { x: Number(args.x), y: Number(args.y), width: Number(args.width), height: Number(args.height) };
+      if (![region.x, region.y, region.width, region.height].every(Number.isFinite) || region.width <= 0 || region.height <= 0) throw new E2BBrowserError("screenshot_region requires a positive region");
+      const observation = await client.observe(ownerScope, sessionId, { screenshot: "region", screenshotReason: "coordinate-action", includeFrames: true, region });
+      return { provider: "dedicated", action, sessionId, ...observation };
+    }
+    if (action === "form_inspect" || action === "form_plan" || action === "form_fill") {
+      const observation = await client.observe(ownerScope, sessionId, { screenshot: "thumbnail", screenshotReason: "changed", includeFrames: true, includeForms: true });
+      const forms = Array.isArray(observation.forms) ? observation.forms as import("./types.js").E2BBrowserForm[] : [];
+      if (action === "form_inspect") return { provider: "dedicated", action, sessionId, ...observation, forms };
+      const plan = planFormSubmission(forms, requestedFormFields(args.fields), typeof args.formId === "string" ? args.formId : undefined);
+      if (action === "form_plan" || plan.missing.length) return { provider: "dedicated", action, sessionId, plan, ...(action === "form_fill" ? { submitted: false } : {}) };
+      const steps: Array<Record<string, unknown>> = plan.controls.map((control, index) => ({ id: `form_${index + 1}`, action: control.action, role: control.role, name: control.name, ...(control.value !== undefined ? { value: control.value } : {}), ...(control.checked !== undefined ? { checked: control.checked } : {}) }));
+      if (args.submit === true && plan.submit) steps.push({ id: "form_submit", action: "click", role: plan.submit.role, name: plan.submit.name });
+      const result = await client.action(ownerScope, sessionId, { id: `form_fill_${randomUUID()}`, kind: "agent", mutation: "read-only", retry: "reobserve-only", steps, maxSteps: steps.length, maxActions: steps.length, maxDurationMs: 120_000, completionAssertions: [] });
+      await this.saveDedicatedRecord(userId, sessionId, result);
+      return { provider: "dedicated", action, sessionId, plan, submitted: args.submit === true, ...result };
+    }
+    if (action === "stream_stop") {
+      return { provider: "dedicated", action, sessionId, stopped: false, active: false, revoked: true, providerRevocation: "browser_stop_required", message: "The Chusky viewer reference is revoked. The provider live-view URL remains valid until the browser session is stopped." };
+    }
+    if (["pdf", "download_get", "recording_get", "recording_download"].includes(action)) {
+      const requestedId = action === "download_get" ? args.downloadId : args.recordingId ?? args.fileId;
+      const result = await client.action(ownerScope, sessionId, { id: `${action}_${randomUUID()}`, kind: dedicatedActionKind(action), mutation: "read-only", retry: "never", ...(action === "pdf" ? {} : action === "download_get" ? { downloadId: requestedId } : { recordingId: requestedId }) });
+      const payload = result.data && typeof result.data === "object" ? result.data as Record<string, unknown> : {};
+      const rawItem = payload.download ?? payload.recording ?? result.artifact;
+      const item = rawItem && typeof rawItem === "object" && !Array.isArray(rawItem) ? rawItem as Record<string, unknown> : undefined;
+      const sourceId = typeof item?.id === "string" ? item.id : undefined;
+      if (!sourceId || typeof item?.name !== "string") throw new E2BBrowserError("Dedicated browser artifact metadata is incomplete");
+      const artifact = await client.artifact(ownerScope, sessionId, sourceId);
+      const kind = ["recording_get", "recording_download"].includes(action) ? "recording" : "download";
+      const file = await this.persistDedicatedFile(userId, { sourceId, kind, name: item.name, contentType: artifact.contentType, bytes: artifact.bytes });
+      await this.saveDedicatedRecord(userId, sessionId, result);
+      const metadata = { provider: "dedicated", action, sessionId, fileId: file.id, name: file.name, size: file.size, contentType: file.contentType, kind: file.kind, createdAt: file.createdAt, expiresAt: file.expiresAt };
+      return action === "recording_get" ? metadata : { ...metadata, __browserFileId: file.id };
+    }
+    if (action === "upload" || action === "upload_files") {
+      if (!internal.ownerApprovedAction) throw new E2BBrowserError("Uploading a file to a website requires owner approval");
+      const fileId = boundedText(args.fileId, "fileId", 128);
+      const file = (await getSession(userId)).sdkFiles?.find((item) => item.id === fileId && item.status === "available");
+      if (!file) throw new E2BBrowserError("Upload file not found or not owned by this account");
+      if (file.size < 1 || file.size > MAX_BROWSER_DOWNLOAD_BYTES) throw new E2BBrowserError("The selected upload exceeds the 25 MB browser transfer limit");
+      const before = await client.observe(ownerScope, sessionId, { screenshot: "thumbnail", screenshotReason: "changed", includeFrames: true });
+      const target = dedicatedTarget(before, args);
+      const bytes = await readR2Object(file.key);
+      if (bytes.length !== file.size) throw new E2BBrowserError("The stored upload size no longer matches its verified file record");
+      const result = await client.upload(ownerScope, sessionId, { id: `upload_${randomUUID()}`, fileName: normalizeE2BPageContent(file.name).text.slice(0, 180) || "upload.bin", fileId, contentBase64: Buffer.from(bytes).toString("base64"), mutation: "consequential", retry: "never", ...(target ? { target } : {}) });
+      await this.saveDedicatedRecord(userId, sessionId, result);
+      return { provider: "dedicated", action, sessionId, ...result };
+    }
+    if (action === "act") {
+      const step = browserStepRecord(args.step);
+      const nestedAction = typeof step?.action === "string" ? safeAction(step.action) : undefined;
+      if (!step || !nestedAction) throw new E2BBrowserError("Dedicated browser act requires one bounded browser step");
+      if (["act", "agent", "observe"].includes(nestedAction)) throw new E2BBrowserError(`Dedicated runtime does not support ${nestedAction} through CHUCK_BROWSER_ACT yet`);
+      const before = await client.observe(ownerScope, sessionId, { screenshot: "thumbnail", screenshotReason: "changed", includeFrames: true });
+      const selector = browserStepRecord(step.selector);
+      const stepArgs: Record<string, unknown> = { ...args, ...step, ...(selector ?? {}), action: nestedAction };
+      const target = dedicatedTarget(before, stepArgs);
+      const request: Record<string, unknown> = { id: String(step.id ?? args.actionId ?? `${nestedAction}_${randomUUID()}`), kind: dedicatedActionKind(nestedAction), mutation: highImpact ? "consequential" : "read-only", retry: "reobserve-only", ...(target ? { target } : {}) };
+      if (nestedAction === "open") Object.assign(request, { kind: "navigate", url: step.url });
+      if (["fill", "select_option"].includes(nestedAction)) request.value = step.value ?? step.text;
+      if (nestedAction === "press") request.key = step.key ?? step.keys;
+      if (nestedAction === "scroll") request.delta = { y: step.direction === "up" ? -Math.abs(Number(step.amount ?? 600)) : Math.abs(Number(step.amount ?? 600)) };
+      if (nestedAction === "drag") request.drag = step.drag ?? { startX: Number(step.startX), startY: Number(step.startY), endX: Number(step.endX), endY: Number(step.endY) };
+      if (["desktop_click", "move"].includes(nestedAction)) request.coordinates = { x: Number(step.x), y: Number(step.y), ...(typeof step.button === "string" ? { button: step.button } : {}), ...(step.double === true ? { clickCount: 2 } : {}) };
+      if (nestedAction === "desktop_type") request.text = step.text;
+      if (nestedAction === "desktop_press") request.key = step.key ?? step.keys;
+      if (typeof step.timeoutMs === "number") request.timeoutMs = step.timeoutMs;
+      const result = await client.action(ownerScope, sessionId, request);
+      const observation = result.observation && typeof result.observation === "object" ? result.observation as Record<string, unknown> : undefined;
+      await this.saveDedicatedRecord(userId, sessionId, { ...result, ...(observation ? { url: observation.url, title: observation.title } : {}) });
+      return { provider: "dedicated", action, sessionId, ...result };
+    }
     const before = await client.observe(ownerScope, sessionId, { screenshot: "thumbnail", screenshotReason: "changed", includeFrames: true });
     const target = dedicatedTarget(before, args);
     const request: Record<string, unknown> = { id: String(args.actionId ?? `${action}_${randomUUID()}`), kind: dedicatedActionKind(action), mutation: highImpact ? "consequential" : "read-only", retry: "reobserve-only", ...(target ? { target } : {}) };
@@ -447,6 +556,17 @@ export class E2BBrowserEngine {
     if (["fill", "select_option"].includes(action)) request.value = args.value ?? args.text;
     if (action === "press") request.key = args.key ?? args.keys;
     if (action === "scroll") request.delta = { y: args.direction === "up" ? -Math.abs(Number(args.amount ?? 600)) : Math.abs(Number(args.amount ?? 600)) };
+    if (action === "drag") request.drag = { startX: Number(args.startX), startY: Number(args.startY), endX: Number(args.endX), endY: Number(args.endY) };
+    if (["desktop_click", "move"].includes(action)) request.coordinates = { x: Number(args.x), y: Number(args.y), ...(typeof args.button === "string" ? { button: args.button } : {}), ...(args.double === true ? { clickCount: 2 } : {}) };
+    if (action === "desktop_type") request.text = args.text;
+    if (action === "desktop_press") request.key = args.key ?? args.keys;
+    if (action === "tab_open") request.tabUrl = args.url;
+    if (action === "tab_focus" || action === "tab_close") request.tabIndex = Number(args.index ?? 0);
+    if (action === "download_get" || action === "download_delete") request.downloadId = args.downloadId;
+    if (["recording_get", "recording_delete", "recording_download"].includes(action)) request.recordingId = args.recordingId ?? args.fileId;
+    if (action === "clipboard_write") request.text = args.text;
+    if (action === "extract") request.schema = args.schema;
+    if (action === "agent") Object.assign(request, { steps: args.steps, maxSteps: args.maxSteps, maxActions: args.maxActions, maxDurationMs: args.maxDurationMs, noProgressLimit: args.noProgressLimit, completionAssertions: args.completionAssertions });
     const result = await client.action(ownerScope, sessionId, request);
     await this.saveDedicatedRecord(userId, sessionId, result);
     return { provider: "dedicated", action, sessionId, ...result };
@@ -789,6 +909,37 @@ export class E2BBrowserEngine {
     return file;
   }
 
+  private async persistDedicatedFile(userId: number, input: { sourceId: string; kind: "download" | "recording"; name: string; contentType: string; bytes: Buffer }): Promise<E2BBrowserFileRecord> {
+    if (!r2Configured()) throw new E2BBrowserError("Cloudflare R2 is required to keep dedicated browser artifacts private and available after the runtime session closes.");
+    const maxBytes = input.kind === "recording" ? MAX_BROWSER_RECORDING_BYTES : MAX_BROWSER_DOWNLOAD_BYTES;
+    if (input.bytes.length < 1 || input.bytes.length > maxBytes) throw new E2BBrowserError(`Browser ${input.kind} exceeds the ${maxBytes} byte file limit`);
+    const session = await getSession(userId);
+    const existing = (session.browserFiles ?? []).find((file) => file.sandboxId === "dedicated-runtime" && file.kind === input.kind && file.sourceId === input.sourceId && file.expiresAt > Date.now());
+    if (existing) return existing;
+    const name = normalizeE2BBrowserFileName(input.name);
+    const file: E2BBrowserFileRecord = {
+      id: `bf_${randomUUID()}`,
+      key: `browser/${userId}/${randomUUID()}-${name}`,
+      name,
+      contentType: input.contentType || browserContentType(name, input.kind),
+      size: input.bytes.length,
+      kind: input.kind,
+      sourceId: input.sourceId,
+      sandboxId: "dedicated-runtime",
+      createdAt: Date.now(),
+      expiresAt: Date.now() + BROWSER_FILE_TTL_MS,
+    };
+    await putR2Object(file.key, input.bytes, file.contentType);
+    session.browserFiles ??= [];
+    if (session.browserFiles.length >= 100) {
+      await deleteR2Object(file.key).catch(() => undefined);
+      throw new E2BBrowserError("The private browser file library has reached its 100-file limit. Delete older browser files before saving another.");
+    }
+    session.browserFiles.push(file);
+    await saveSession(userId, session);
+    return file;
+  }
+
   private async syncRuntimeFiles(userId: number, sandbox: Sandbox, record: E2BBrowserRecord, kind: "download" | "recording"): Promise<E2BBrowserFileRecord[]> {
     const listed = await this.run(sandbox, { action: kind === "download" ? "downloads" : "recording_list" });
     const entries = kind === "download" ? listed.downloads : listed.recordings;
@@ -924,6 +1075,16 @@ export class E2BBrowserEngine {
       if (action.startsWith("auth_")) return this.managedAuth(userId, action, args, internal.ownerPrivateRun === true);
       const dedicated = dedicatedBrowserRuntime();
       if (dedicated) {
+        const dedicatedRecord = (await getSession(userId)).e2bBrowser;
+        const workspaceId = dedicatedRecord?.sandboxId ?? "dedicated-runtime";
+        if (!internal.vaultLoginFlow) {
+          assertE2BBrowserHandoffAllowsAction(action, (await getSession(userId)).browserHandoffs ?? [], dedicatedRecord?.lastUrl, workspaceId);
+          if (action === "act" || action === "agent") {
+            await guardNestedVaultBrowserActions(userId, workspaceId, action, args, dedicatedRecord?.lastUrl, internal.ownerPrivateRun === true, internal.ownerApprovedAction === true);
+          } else {
+            await guardVaultBrowserAction(userId, workspaceId, { ...args, currentUrl: dedicatedRecord?.lastUrl }, internal.ownerPrivateRun === true, internal.ownerApprovedAction === true);
+          }
+        }
         if (!DEDICATED_RUNTIME_ACTIONS.has(action)) throw new E2BBrowserError(`Dedicated runtime does not support ${action} through CHUCK_BROWSER yet`);
         return this.dedicatedBrowser(userId, action, args, internal);
       }

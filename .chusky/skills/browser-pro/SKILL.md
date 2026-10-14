@@ -20,6 +20,16 @@ reservations, or checkout, also read [references/retailer-playbook.md](reference
 These references describe the current implementation;
 do not invent tool names or bypass the native browser boundary.
 
+Provider selection is runtime-configured. When `CHUSKY_BROWSER_RUNTIME_MODE=dedicated`
+and its three runtime credentials are present, `CHUCK_BROWSER` uses the dedicated
+Kernel headed-Chromium service; otherwise it uses the E2B controller. The common
+browser contract is provider-neutral: dedicated mode supports semantic controls,
+forms, bounded agent runs, tabs/popups, waits, screenshots, downloads/uploads,
+dialogs, clipboard, PDF, tracing, recordings, display metadata, and guarded
+mouse/keyboard input. Pause/fork semantics and Kernel managed-auth lifecycle
+remain provider-specific; inspect the returned capability/error rather than
+guessing that one provider has the other provider's lifecycle API.
+
 ## 1. Classify the requested outcome
 
 Before opening a website, identify:
@@ -92,6 +102,12 @@ steps without asking the model to re-decide between each one and returns a fresh
 final screenshot; for unfamiliar or dynamic pages, use one `CHUCK_BROWSER_ACT`
 at a time so the model can inspect the new visual and structured state before
 the next action.
+
+When the dedicated Kernel runtime is selected, prefer `CHUCK_BROWSER_OBSERVE`
+followed by one `CHUCK_BROWSER_ACT` per model decision. `CHUCK_BROWSER_AGENT`,
+`form_plan`, `form_fill`, tab actions, and file/recording actions are mapped to
+the same authenticated runtime; still re-observe after navigation or DOM
+replacement because observation-scoped refs are intentionally invalidated.
 
 ## 4. Universal form-completion procedure
 

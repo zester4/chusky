@@ -10,8 +10,9 @@ Chusky has two separate execution paths:
 
 ```text
 CHUCK_BROWSER
-  └─ E2B trusted Playwright controller
-       └─ local Chromium, or opt-in Kernel remote Chromium
+  └─ provider-neutral trusted browser controller
+       ├─ dedicated Kernel headed Chromium when CHUSKY_BROWSER_RUNTIME_MODE=dedicated
+       └─ E2B Playwright controller otherwise
 
 CHUCK_DAYTONA_COMPUTER
   └─ Daytona desktop Computer Use for desktop, file, artifact, and app work
@@ -54,7 +55,8 @@ or deployment is implied by local tests.
 
 ## Browser operating loop
 
-1. Confirm the E2B browser provider is available. Daytona remains the
+1. Confirm the configured browser provider is available. Dedicated mode uses
+   the deployed Kernel Chromium runtime; fallback mode uses E2B. Daytona remains the
    computer, file/artifact, terminal, and app backend; it is never an automated
    web-browser provider.
 2. Open any public `http://` or `https://` site. There is no site-domain
