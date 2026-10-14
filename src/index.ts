@@ -14,7 +14,7 @@ import { listAttentionRecords } from "./store.js";
 import { updateAttentionRecord } from "./store.js";
 import type { AttentionCandidateRecord, AutonomyProfileRecord, DeliveryPreferenceRecord, ObservationRecord, AutonomyWatchRecord } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
-import { initStore, getTelegramChatId, createTriggerEventIfAbsent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, appendPhoneCallEvent, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, saveRecallMeetingMissionState, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
+import { initStore, getTelegramChatId, createTriggerEventIfAbsent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, appendPhoneCallEvent, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, saveRecallMeetingMissionState, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcriptionFormatForMimeType, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -629,9 +629,9 @@ async function main(): Promise<void> {
       return device;
     };
 
-    const withUserLock = async <T>(userId: number, signal: AbortSignal | undefined, work: () => Promise<T>): Promise<T> => {
+    const withUserLock = async <T>(userId: number, signal: AbortSignal | undefined, work: () => Promise<T>, waitTimeoutMs = 120000): Promise<T> => {
       const token = randomUUID();
-      const deadline = Date.now() + 120000;
+      const deadline = Date.now() + waitTimeoutMs;
       while (!(await acquireUserLock(userId, token))) {
         if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
         if (Date.now() >= deadline) throw new Error("Timed out waiting for another Chusky request to finish");
@@ -1883,7 +1883,7 @@ async function main(): Promise<void> {
       const maxCost = body.maxCost === undefined ? undefined : Number(body.maxCost);
       if (maxToolCalls !== undefined && (!Number.isSafeInteger(maxToolCalls) || maxToolCalls < 1 || maxToolCalls > 1000)) return c.json({ ok: false, error: "maxToolCalls must be an integer from 1 to 1000" }, 400);
       if (maxCost !== undefined && (!Number.isFinite(maxCost) || maxCost <= 0 || maxCost > 1000)) return c.json({ ok: false, error: "maxCost must be a number greater than 0 and no more than 1000" }, 400);
-      const session = await getSession(device.userId); const now = Date.now();
+      const session = await getSessionWithSdkTables(device.userId); const now = Date.now();
       const threadId = `thr_cli_${randomUUID()}`; const runId = `run_cli_${randomUUID()}`;
       const thread = { id: threadId, externalId: `cli-${device.name}-${now}`, metadata: { source: "cli", title: input.slice(0, 120) }, history: [], runs: [] as any[], createdAt: now, updatedAt: now };
       const run: any = { id: runId, status: "queued", input, model: typeof body.model === "string" && body.model.trim() ? body.model.trim() : session.model, budget: { duration, ...(maxToolCalls !== undefined ? { maxToolCalls } : {}), ...(maxCost !== undefined ? { maxCost } : {}) }, events: [{ id: `evt_${randomUUID()}`, type: "run.queued", at: now }], createdAt: now, updatedAt: now };
@@ -3193,7 +3193,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             undefined,
             { accountId: `account_${event.userId}`, provider: "telegram", conversationId: String(event.userId), triggerEventId: event.eventId, ...(event.connectionId ? { triggerConnectionId: event.connectionId } : {}), ...(event.toolkit ? { triggerToolkit: event.toolkit } : event.eventType === "composio.trigger.message" ? { triggerToolkit: event.triggerSlug.split("_", 1)[0] } : {}) },
             { instructions: triggerInstructions },
-          ));
+          ), 30000);
         };
         const workflowResult = await workflow.run("run-trigger-agent", async () => {
           if (workflowVersion === "legacy") return executeTriggerAgent();
@@ -3282,7 +3282,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
               event.userId, eventPrompt, [], session.model, undefined, undefined, undefined, error.approvalId,
               { accountId: `account_${event.userId}`, provider: "telegram", conversationId: String(event.userId), triggerEventId: event.eventId, ...(event.connectionId ? { triggerConnectionId: event.connectionId } : {}), ...(event.toolkit ? { triggerToolkit: event.toolkit } : event.eventType === "composio.trigger.message" ? { triggerToolkit: event.triggerSlug.split("_", 1)[0] } : {}) },
               { instructions: triggerInstructions },
-            ));
+            ), 30000);
           });
           const resumedCloseout = ensureTriggerCloseout({ triggerSlug: event.triggerSlug, summary: event.summary, text: redactMeetingLinks(resumed.text), toolsUsed: resumed.toolsUsed, toolsSucceeded: resumed.toolsSucceeded });
           const resumedActionPlan = parseTriggerSuggestedActions(resumedCloseout.text);
@@ -3890,7 +3890,15 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           });
           try {
             const resumedMissions = await resumeMissionsFromComposioEvent(numericUserId, event.eventId);
-            const queued = await workflowClient().trigger({ url: triggerWorkflowUrl(), body: { eventId: event.eventId, userId: numericUserId, workflowVersion: TRIGGER_WORKFLOW_VERSION }, workflowRunId: `trigger-${event.eventId}`, retries: 3, ...(workflowFailureUrl() ? { failureUrl: workflowFailureUrl() } : {}) });
+            const queued = await workflowClient().trigger({
+              url: triggerWorkflowUrl(),
+              body: { eventId: event.eventId, userId: numericUserId, workflowVersion: TRIGGER_WORKFLOW_VERSION },
+              workflowRunId: `trigger-${event.eventId}`,
+              retries: 3,
+              retryDelay: "1000 * (1 + retried)",
+              flowControl: { key: `chusky-trigger-user-${numericUserId}`, parallelism: 1, rate: 1, period: "1s" },
+              ...(workflowFailureUrl() ? { failureUrl: workflowFailureUrl() } : {}),
+            });
             await updateTriggerEvent(event.eventId, { workflowRunId: queued.workflowRunId });
             logger.info({ triggerSlug: event.triggerSlug, userId: numericUserId, workflowRunId: queued.workflowRunId, resumedMissions }, "Trigger queued");
             return c.json({ ok: true, queued: true, eventId: event.eventId, workflowRunId: queued.workflowRunId, ...(resumedMissions ? { resumedMissions } : {}) }, 202);

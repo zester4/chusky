@@ -1799,7 +1799,7 @@ export interface ChannelInboundEventRecord {
 interface Backend {
   close(): Promise<void>;
   flushStorageMetrics?(): Promise<void>;
-  getSession(userId: number): Promise<UserSession>;
+  getSession(userId: number, includeSdkTables?: boolean): Promise<UserSession>;
   saveSession(userId: number, s: UserSession): Promise<void>;
   readConversationBefore(userId: number, before: { createdAt: number; id: string }, limit: number): Promise<DurableConversationMessage[] | undefined>;
   getSdkRun(userId: number, threadId: string, runId: string): Promise<SdkRunRecord | undefined>;
@@ -2400,6 +2400,7 @@ class RedisBackend implements Backend {
     if (!this.durableState || !this.durableSdkTablesEnabled || userId === 0) return session;
     const state = await this.readSdkTables(userId);
     mergeDurableSdkTableState(session, state);
+    (session as UserSession & DurableSessionMetadata).durableSdkTablesLoaded = true;
     return session;
   }
 
@@ -2435,7 +2436,7 @@ class RedisBackend implements Backend {
     });
   }
 
-  async getSession(userId: number): Promise<UserSession> {
+  async getSession(userId: number, includeSdkTables = false): Promise<UserSession> {
     this.durableStorageMetrics.redisSessionCommands += 1;
     const raw = await this.r.get(this.sk(userId));
     if (raw) this.durableStorageMetrics.redisSessionBytesRead += Buffer.byteLength(raw, "utf8");
@@ -2445,8 +2446,9 @@ class RedisBackend implements Backend {
         const migrated = sessionUsesNeonDomains(session);
         if (migrated) {
           if (!this.durableState) throw new Error("This session has migrated to Neon durable state, but DURABLE_STATE_ENABLED is not configured.");
-          let documents = await this.readSessionDomains(userId);
-          if (documents.size < DURABLE_SESSION_DOMAINS.length) {
+          let documents = await this.readSessionDomains(userId, includeSdkTables);
+          const requiredDomainCount = includeSdkTables ? DURABLE_SESSION_DOMAINS.length : DURABLE_SESSION_DOMAINS.length - 1;
+          if (documents.size < requiredDomainCount) {
             documents = await this.repairIncompleteSessionDomains(userId, session);
           }
           const hadProfileDomain = documents.has("profile");
@@ -2467,7 +2469,7 @@ class RedisBackend implements Backend {
           }
           const payloads = new Map([...documents].map(([domain, document]) => [domain, document.payload] as const));
           if (conversation?.history) payloads.set("conversation", { ...conversation, history: undefined });
-          session = joinSessionDomains(session, payloads);
+          session = joinSessionDomains(session, payloads, includeSdkTables);
           const metadata = session as UserSession & DurableSessionMetadata;
           metadata.durableDomainVersions = Object.fromEntries([...documents].flatMap(([domain, document]) => document.version > 0 ? [[domain, document.version]] : [])) as DurableSessionMetadata["durableDomainVersions"];
           metadata.durableDomainHashes = Object.fromEntries([...documents].map(([domain, document]) => [domain, durableDomainHash(payloads.get(domain))])) as DurableSessionMetadata["durableDomainHashes"];
@@ -2480,7 +2482,7 @@ class RedisBackend implements Backend {
             [...splitSessionDomains(session).domains].map(([domain, payload]) => [domain, structuredClone(payload)]),
           ) as DurableSessionMetadata["durableDomainSnapshots"];
         }
-        session = await this.attachSdkTables(userId, session);
+        if (includeSdkTables) session = await this.attachSdkTables(userId, session);
         session.approvals = await this.listApprovals(userId, 20);
         return session;
       } catch (error) {
@@ -2490,8 +2492,9 @@ class RedisBackend implements Backend {
       }
     }
     if (this.durableState && userId !== 0) {
-      let documents = await this.readSessionDomains(userId);
-      if (documents.size > 0 && documents.size < DURABLE_SESSION_DOMAINS.length) {
+      let documents = await this.readSessionDomains(userId, includeSdkTables);
+      const requiredDomainCount = includeSdkTables ? DURABLE_SESSION_DOMAINS.length : DURABLE_SESSION_DOMAINS.length - 1;
+      if (documents.size > 0 && documents.size < requiredDomainCount) {
         documents = await this.repairIncompleteSessionDomains(userId, fresh());
       }
       if (documents.size) {
@@ -2516,13 +2519,13 @@ class RedisBackend implements Backend {
         } else {
           recovered.history = (await this.durableState.readRecentConversation(userId, HOT_CONVERSATION_MESSAGES)).map((message) => ({ ...message }));
         }
-        const session = joinSessionDomains(recovered, payloads) as UserSession & DurableSessionMetadata;
+        const session = joinSessionDomains(recovered, payloads, includeSdkTables) as UserSession & DurableSessionMetadata;
         session.durableDomainVersions = Object.fromEntries([...documents].flatMap(([domain, document]) => document.version > 0 ? [[domain, document.version]] : [])) as DurableSessionMetadata["durableDomainVersions"];
         session.durableDomainHashes = Object.fromEntries([...documents].map(([domain, document]) => [domain, durableDomainHash(payloads.get(domain))])) as DurableSessionMetadata["durableDomainHashes"];
         session.durableDomainSnapshots = Object.fromEntries([...payloads].map(([domain, payload]) => [domain, structuredClone(payload)])) as DurableSessionMetadata["durableDomainSnapshots"];
         if (!hadProfileDomain) session.durableDomainHashes = { ...session.durableDomainHashes, profile: "profile-needs-backfill" };
         if (Array.isArray(conversation?.history) && conversation.history.length) session.durableDomainHashes = { ...session.durableDomainHashes, conversation: "legacy-history-needs-compaction" };
-        const attached = await this.attachSdkTables(userId, session);
+        const attached = includeSdkTables ? await this.attachSdkTables(userId, session) : session;
         attached.approvals = await this.listApprovals(userId, 20);
         return attached;
       }
@@ -2533,7 +2536,7 @@ class RedisBackend implements Backend {
         [...splitSessionDomains(session).domains].map(([domain, payload]) => [domain, structuredClone(payload)]),
       ) as DurableSessionMetadata["durableDomainSnapshots"];
     }
-    const attached = await this.attachSdkTables(userId, session);
+    const attached = includeSdkTables ? await this.attachSdkTables(userId, session) : session;
     attached.approvals = await this.listApprovals(userId, 20);
     return attached;
   }
@@ -2570,8 +2573,10 @@ class RedisBackend implements Backend {
         return compacted ? [{ id: compacted.id!, role: compacted.role, content: compacted.content, createdAt: compacted.createdAt ?? Date.now(), ...(compacted.sourceId ? { sourceId: compacted.sourceId } : {}) }] : [];
       });
       if (pendingMessages.length) await this.durableState.appendConversationMessages(userId, pendingMessages);
-      let { core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled || this.durableSdkTablesEnabled, this.durableSdkTablesEnabled);
       const metadata = withMessageIds as UserSession & DurableSessionMetadata;
+      const sdkTablesLoaded = !this.durableSdkTablesEnabled || metadata.durableSdkTablesLoaded === true;
+      let { core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled || this.durableSdkTablesEnabled, this.durableSdkTablesEnabled);
+      if (!sdkTablesLoaded) domains.delete("sdk");
       let oldHashes = metadata.durableDomainHashes ?? {};
       let oldSnapshots = metadata.durableDomainSnapshots;
       const changedDomains = new Map([...domains].filter(([domain, payload]) => oldHashes[domain] !== durableDomainHash(payload)));
@@ -2632,6 +2637,7 @@ class RedisBackend implements Backend {
             durableDomainSnapshots: oldSnapshots,
           });
           ({ core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled || this.durableSdkTablesEnabled, this.durableSdkTablesEnabled));
+          if (!sdkTablesLoaded) domains.delete("sdk");
           sdkTableChanges = this.durableSdkTablesEnabled ? durableSdkTableChanges(userId, withMessageIds, metadata.durableSdkTablesSnapshot) : undefined;
         }
       }
@@ -2659,6 +2665,7 @@ class RedisBackend implements Backend {
           const sdkState = { sdkThreads: withMessageIds.sdkThreads, sdkIdempotency: withMessageIds.sdkIdempotency, sdkAudit: withMessageIds.sdkAudit };
           Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads), sdkState);
           ({ core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled || this.durableSdkTablesEnabled, this.durableSdkTablesEnabled));
+          if (!sdkTablesLoaded) domains.delete("sdk");
           sdkTableChanges = this.durableSdkTablesEnabled ? durableSdkTableChanges(userId, withMessageIds, metadata.durableSdkTablesSnapshot) : undefined;
           writeExpectedVersions = new Map([...changedDomains.keys()].map((domain) => [domain, latest.get(domain)?.version] as const));
         }
@@ -2671,7 +2678,7 @@ class RedisBackend implements Backend {
       const nextHashes = { ...oldHashes, ...Object.fromEntries([...changedDomains].map(([domain, payload]) => [domain, durableDomainHash(payload)])) };
       const nextSnapshots = { ...oldSnapshots, ...Object.fromEntries([...changedDomains].map(([domain, payload]) => [domain, structuredClone(payload)])) };
       const nextHeadId = withMessageIds.history.at(-1)?.id;
-      const nextSdkTablesSnapshot = this.durableSdkTablesEnabled ? durableSdkTablesSnapshot(withMessageIds) : metadata.durableSdkTablesSnapshot;
+      const nextSdkTablesSnapshot = this.durableSdkTablesEnabled && sdkTablesLoaded ? durableSdkTablesSnapshot(withMessageIds) : metadata.durableSdkTablesSnapshot;
       Object.assign(core as UserSession & DurableSessionMetadata, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableDomainSnapshots: nextSnapshots, durableSdkTablesSnapshot: nextSdkTablesSnapshot, durableConversationHeadId: nextHeadId });
       Object.assign(s as UserSession & DurableSessionMetadata, withMessageIds, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableDomainSnapshots: nextSnapshots, durableSdkTablesSnapshot: nextSdkTablesSnapshot, durableConversationHeadId: nextHeadId });
       await this.writeSessionDomainCache(userId, domains, nextVersions, changedDomains.keys());
@@ -2692,8 +2699,9 @@ class RedisBackend implements Backend {
     await this.r.setex(this.sk(userId), config.sessionTtl, encoded);
   }
 
-  private async readSessionDomains(userId: number): Promise<Map<DurableSessionDomain, DurableSessionDocument>> {
-    const domains = [...DURABLE_SESSION_DOMAINS];
+  private async readSessionDomains(userId: number, includeSdkTables = false): Promise<Map<DurableSessionDomain, DurableSessionDocument>> {
+    if (!this.durableState) throw new Error("Durable session domains require Neon durable state.");
+    const domains = DURABLE_SESSION_DOMAINS.filter((domain) => includeSdkTables || domain !== "sdk");
     const keys = domains.map((domain) => this.sessionDomainKey(userId, domain));
     this.durableStorageMetrics.redisSessionCommands += 1;
     const cached = await this.r.mget(...keys);
@@ -2718,10 +2726,10 @@ class RedisBackend implements Backend {
     for (const [domain, document] of legacy) if (!documents.has(domain)) documents.set(domain, document);
     const missing = domains.filter((domain) => !documents.has(domain));
     if (missing.length === domains.length) {
-      const durable = await this.durableState!.readSessionDomains(userId);
+       const durable = await this.durableState.readSessionDomains(userId, missing);
       for (const [domain, document] of durable) documents.set(domain, document);
     } else if (missing.length) {
-      const loaded = await Promise.all(missing.map(async (domain) => [domain, await this.durableState!.readSessionDomain(userId, domain)] as const));
+       const loaded = await Promise.all(missing.map(async (domain) => [domain, await this.durableState!.readSessionDomain(userId, domain)] as const));
       for (const [domain, document] of loaded) if (document) documents.set(domain, document);
     }
     if (documents.size) await this.writeSessionDomainCache(userId, new Map([...documents].map(([domain, document]) => [domain, document.payload] as const)), Object.fromEntries([...documents].map(([domain, document]) => [domain, document.version])), documents.keys());
@@ -4394,7 +4402,7 @@ class MemoryBackend implements Backend {
 
   async close(): Promise<void> {}
 
-  async getSession(userId: number) {
+  async getSession(userId: number, _includeSdkTables = false) {
     const session = this.sessions.get(userId);
     return session ? structuredClone(session) : fresh();
   }
@@ -5828,8 +5836,8 @@ function normalizeE2BBrowserStream(value: unknown): E2BBrowserRecord["stream"] |
   return { startedAt: Number(item.startedAt), expiresAt: Number(item.expiresAt), port: Number(item.port), ...(provider ? { provider } : {}), ...(mode ? { mode } : {}), ...(viewerId ? { viewerId } : {}), ...(ticketCiphertext ? { ticketCiphertext } : {}) };
 }
 
-export async function getSession(uid: number): Promise<UserSession> {
-  const raw = await backend.getSession(uid) as UserSession & { faceTimeCalls?: Array<Record<string, unknown>> };
+export async function getSession(uid: number, includeSdkTables = false): Promise<UserSession> {
+  const raw = await backend.getSession(uid, includeSdkTables) as UserSession & { faceTimeCalls?: Array<Record<string, unknown>> };
   // Read and migrate the old persisted field once, without carrying the obsolete
   // key or provider secrets/bridge session identifiers into the current model.
   const { faceTimeCalls: legacyCalls, ...s } = raw;
@@ -6004,7 +6012,7 @@ export async function getSession(uid: number): Promise<UserSession> {
 }
 
 type DurableSdkTableSnapshot = { threads: Record<string, string>; audit: Record<string, string>; idempotency: Record<string, string> };
-type DurableSessionMetadata = { durableDomainVersions?: Partial<Record<DurableSessionDomain, number>>; durableDomainHashes?: Partial<Record<DurableSessionDomain, string>>; durableDomainSnapshots?: Partial<Record<DurableSessionDomain, unknown>>; durableSdkTablesSnapshot?: DurableSdkTableSnapshot; durableConversationHeadId?: string };
+type DurableSessionMetadata = { durableDomainVersions?: Partial<Record<DurableSessionDomain, number>>; durableDomainHashes?: Partial<Record<DurableSessionDomain, string>>; durableDomainSnapshots?: Partial<Record<DurableSessionDomain, unknown>>; durableSdkTablesSnapshot?: DurableSdkTableSnapshot; durableSdkTablesLoaded?: boolean; durableConversationHeadId?: string };
 
 function durableDomainHash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -6066,7 +6074,7 @@ export async function readConversationHistoryBefore(uid: number, before: { creat
 }
 
 export async function getSessionWithSdkRuns(uid: number, threadId?: string): Promise<UserSession> {
-  const session = await getSession(uid);
+  const session = await getSessionWithSdkTables(uid);
   for (const thread of session.sdkThreads ?? []) {
     if (threadId && thread.id !== threadId) continue;
     const runs = new Map(thread.runs.map((run) => [run.id, run]));
@@ -6074,6 +6082,11 @@ export async function getSessionWithSdkRuns(uid: number, threadId?: string): Pro
     thread.runs = [...runs.values()].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
   }
   return session;
+}
+
+/** Load the owner session plus the SDK thread projection for legacy SDK paths. */
+export async function getSessionWithSdkTables(uid: number): Promise<UserSession> {
+  return getSession(uid, true);
 }
 
 export async function getSdkRun(uid: number, threadId: string, runId: string): Promise<SdkRunRecord | undefined> {

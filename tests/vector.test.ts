@@ -75,3 +75,29 @@ test("honors a long Retry-After by opening the outage circuit without hammering 
     globalThis.fetch = originalFetch;
   }
 });
+
+test("opens the Vector circuit before an inline retry so concurrent callers fail fast", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  let releaseFirst: (() => void) | undefined;
+  const firstRequest = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      releaseFirst?.();
+      return new Response("temporarily unavailable", { status: 503 });
+    }
+    return new Response("temporarily unavailable", { status: 503 });
+  };
+  try {
+    const store = new UpstashKnowledgeStore("https://vector-concurrent-circuit.test", "token");
+    const first = store.upsert([chunk]);
+    await firstRequest;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await assert.rejects(() => store.query("7906015891", "timezone"), /temporarily unavailable/);
+    await assert.rejects(() => first, /Upstash Vector request failed \(503\)/);
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

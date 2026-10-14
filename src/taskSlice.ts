@@ -21,9 +21,10 @@ import type { MissionTaskEnqueuer } from "./missionScheduler.js";
 /** The mission-step lease must outlive a slow model turn and provider read-back. */
 export const MISSION_STEP_LEASE_MS = 3 * 60_000;
 export const MISSION_STEP_LEASE_RENEWAL_MS = 30_000;
-// A small cancellation-marker read bounds cancellation latency without the
-// former high-frequency Redis command volume.
-const TASK_CANCELLATION_CHECK_MS = 30_000;
+// A bounded cancellation read keeps long-running workers cancellable without
+// turning every active worker into a fixed-rate Redis traffic source. The
+// workflow lease and task state remain the durable stop authorities.
+const TASK_CANCELLATION_CHECK_MS = 60_000;
 
 export interface TaskSliceContext {
   workflowRunId?: string;

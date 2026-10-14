@@ -16,7 +16,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, appendSdkAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createCliDevice, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, deleteSdkThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getSdkIdempotency, getSdkRun, getSdkThread, listSdkAuditEvents, listSdkRuns, listSdkThreads, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, saveSdkIdempotency, saveSdkRun, saveSdkThread, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type TriggerEventRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, appendSdkAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createCliDevice, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, deleteSdkThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkIdempotency, getSdkRun, getSdkThread, listSdkAuditEvents, listSdkRuns, listSdkThreads, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, saveSdkIdempotency, saveSdkRun, saveSdkThread, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type TriggerEventRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
@@ -1353,6 +1353,29 @@ function dashboardRequest(c: any): boolean {
   return Boolean(c.get("webAuthUserId"));
 }
 
+/**
+ * Load only the account core plus the requested SDK thread for a run.
+ *
+ * The old path used getSessionWithSdkTables(), which materializes every SDK
+ * thread, audit row, and idempotency record before a single run can start.
+ * Durable SDK tables already provide an exact-thread read, so use it as the
+ * primary path and retain the full projection only for legacy/memory stores.
+ */
+async function loadSdkExecutionContext(userId: number, threadId: string): Promise<{
+  session: Awaited<ReturnType<typeof getSession>>;
+  thread: SdkThreadRecord;
+  legacyProjection: boolean;
+}> {
+  const [session, directThread] = await Promise.all([getSession(userId), getSdkThread(userId, threadId)]);
+  if (directThread) {
+    return { session, thread: directThread, legacyProjection: false };
+  }
+  const legacySession = await getSessionWithSdkRuns(userId, threadId);
+  const legacyThread = legacySession.sdkThreads?.find((item) => item.id === threadId);
+  if (!legacyThread) throw new Error("sdk_thread_not_found");
+  return { session: legacySession, thread: legacyThread, legacyProjection: true };
+}
+
 function dashboardAgentHistory(c: any, session: Awaited<ReturnType<typeof getSession>>, threadHistory: AccountHistoryMessage[]): AccountHistoryMessage[] {
   if (!dashboardRequest(c) || !session.history.length) return threadHistory;
   // Keep the SDK thread as a UI projection while the account session remains
@@ -2430,9 +2453,8 @@ export function registerSdkApi(app: Hono): void {
     const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; purpose?: unknown; callProfile?: unknown; profile?: unknown; continuityFromCallId?: unknown };
     if (body.profile !== undefined && (!body.profile || typeof body.profile !== "object" || Array.isArray(body.profile))) return apiError(c, 400, "invalid_call_profile", "profile must be an object.");
     if (body.callProfile !== undefined && body.callProfile !== "personal" && body.callProfile !== "business") return apiError(c, 400, "invalid_call_profile", "callProfile must be personal or business.");
-    const session = await getSession(owner.userId);
     const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
-    const prior = idempotency(c, session, fingerprint);
+    const prior = await sdkIdempotency(c, owner.userId, fingerprint);
     if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
     if (prior.replay) return c.json(prior.replay, 201);
     if (!(await checkRateLimit(owner.userId))) return apiError(c, 429, "rate_limit_exceeded", "Too many requests. Try again shortly.");
@@ -2479,17 +2501,13 @@ export function registerSdkApi(app: Hono): void {
     } else if (body.organizationId !== undefined) {
       return apiError(c, 400, "meeting_room_required", "Select a meeting room when starting an organization-scoped meeting.");
     }
-    const session = await getSession(owner.userId);
     const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
-    const prior = idempotency(c, session, fingerprint);
+    const prior = await sdkIdempotency(c, owner.userId, fingerprint);
     if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
     if (prior.replay) return c.json(prior.replay, 201);
     try {
       const result = await joinRecallMeeting(owner.userId, { ...body, ...(room ? { meetingRoom: { roomId: room.id, organizationId: room.organizationId, ...(room.teamId ? { teamId: room.teamId } : {}), ...(room.projectId ? { projectId: room.projectId } : {}), visibility: room.policy.visibility, policy: room.policy } } : {}) } as { meetingUrl: unknown; title?: unknown; joinAt?: unknown; interactionMode?: unknown; languageMode?: unknown; languageHints?: unknown; keyterms?: unknown; liveCaptions?: unknown; analyzeScreenShare?: unknown; transcriptRetentionDays?: unknown; clientName?: unknown; objective?: unknown; clientContext?: unknown; inheritMeetingId?: string; calendarPreparationId?: string; meetingRoom?: { roomId: string; organizationId: string; teamId?: string; projectId?: string; visibility: "private" | "team" | "organization"; policy: MeetingRoomPolicy } });
-      if (prior.key) {
-        session.sdkIdempotency![prior.key] = { fingerprint, response: result, createdAt: Date.now() };
-        await saveSession(owner.userId, session);
-      }
+      if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, result);
       return c.json(result, 201);
     } catch (error) {
       return apiError(c, 400, "meeting_join_failed", error instanceof Error ? error.message : "Could not join the meeting.");
@@ -2499,17 +2517,13 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/meetings/preparations/:preparationId/join", async (c) => {
     const owner = sdkUser(c)!;
     const body = await c.req.json().catch(() => ({})) as { clientName?: unknown; objective?: unknown; clientContext?: unknown };
-    const session = await getSession(owner.userId);
     const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
-    const prior = idempotency(c, session, fingerprint);
+    const prior = await sdkIdempotency(c, owner.userId, fingerprint);
     if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
     if (prior.replay) return c.json(prior.replay, 201);
     try {
       const result = await joinPreparedCalendarMeeting(owner.userId, c.req.param("preparationId"), body);
-      if (prior.key) {
-        session.sdkIdempotency![prior.key] = { fingerprint, response: result, createdAt: Date.now() };
-        await saveSession(owner.userId, session);
-      }
+      if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, result);
       return c.json(result, 201);
     } catch (error) {
       return apiError(c, 400, "meeting_join_failed", error instanceof Error ? error.message : "Could not join the prepared calendar meeting.");
@@ -2519,17 +2533,13 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/meetings/:meetingId/participants/:participantId/confirm", async (c) => {
     const owner = sdkUser(c)!;
     const body = await c.req.json().catch(() => ({})) as { email?: unknown };
-    const session = await getSession(owner.userId);
     const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
-    const prior = idempotency(c, session, fingerprint);
+    const prior = await sdkIdempotency(c, owner.userId, fingerprint);
     if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
     if (prior.replay) return c.json(prior.replay);
     try {
       const result = await confirmRecallMeetingParticipant(owner.userId, c.req.param("meetingId"), c.req.param("participantId"), body.email);
-      if (prior.key) {
-        session.sdkIdempotency![prior.key] = { fingerprint, response: result, createdAt: Date.now() };
-        await saveSession(owner.userId, session);
-      }
+      if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, result);
       return c.json(result);
     } catch (error) { return apiError(c, 400, "meeting_participant_confirmation_failed", error instanceof Error ? error.message : "Participant identity could not be confirmed."); }
   });
@@ -2541,17 +2551,13 @@ export function registerSdkApi(app: Hono): void {
 
   app.post("/v1/meetings/:meetingId/leave", async (c) => {
     const owner = sdkUser(c)!;
-    const session = await getSession(owner.userId);
     const fingerprint = createHash("sha256").update(`POST:${c.req.path}:{}`).digest("hex");
-    const prior = idempotency(c, session, fingerprint);
+    const prior = await sdkIdempotency(c, owner.userId, fingerprint);
     if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
     if (prior.replay) return c.json(prior.replay);
     try {
       const result = await leaveRecallMeeting(owner.userId, c.req.param("meetingId"));
-      if (prior.key) {
-        session.sdkIdempotency![prior.key] = { fingerprint, response: result, createdAt: Date.now() };
-        await saveSession(owner.userId, session);
-      }
+      if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, result);
       return c.json(result);
     } catch (error) {
       return apiError(c, 400, "meeting_leave_failed", error instanceof Error ? error.message : "Could not leave the meeting.");
@@ -3054,7 +3060,7 @@ export function registerSdkApi(app: Hono): void {
     const thread: SdkThreadRecord = { id: `thr_${randomUUID()}`, externalId: owner.externalId, metadata: body.metadata && typeof body.metadata === "object" ? body.metadata : {}, history: [], runs: [], createdAt: now, updatedAt: now };
     const response = threadView(thread);
     if (await saveSdkThread(owner.userId, thread, prior.key ? { key: prior.key, fingerprint, response } : undefined)) return c.json(response, 201);
-    const session = await getSession(owner.userId); const legacyPrior = idempotency(c, session, fingerprint); if (legacyPrior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (legacyPrior.replay) return c.json(legacyPrior.replay, 201); session.sdkThreads!.push(thread); if (legacyPrior.key) session.sdkIdempotency![legacyPrior.key] = { fingerprint, response, createdAt: now }; await saveSession(owner.userId, session); return c.json(response, 201);
+    const session = await getSessionWithSdkTables(owner.userId); const legacyPrior = idempotency(c, session, fingerprint); if (legacyPrior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (legacyPrior.replay) return c.json(legacyPrior.replay, 201); session.sdkThreads!.push(thread); if (legacyPrior.key) session.sdkIdempotency![legacyPrior.key] = { fingerprint, response, createdAt: now }; await saveSession(owner.userId, session); return c.json(response, 201);
   });
   app.get("/v1/threads", async (c) => {
     const owner = sdkUser(c)!; const includeArchived = c.req.query("includeArchived") === "true"; const threads = (await listSdkThreads(owner.userId)).filter((item) => includeArchived || item.metadata.archived !== true); const result = page(threads, c.req.query("cursor"), c.req.query("limit")); c.header("Cache-Control", "private, max-age=1, stale-while-revalidate=4"); return c.json({ data: result.data.map(threadView), ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) });
@@ -3062,7 +3068,7 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/threads/:threadId", async (c) => {
     const thread = await getSdkThread(sdkUser(c)!.userId, c.req.param("threadId")); return thread ? c.json(threadView(thread)) : apiError(c, 404, "not_found", "Thread not found.");
   });
-  app.patch("/v1/threads/:threadId", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { title?: unknown; archived?: unknown }; const thread = await getSdkThread(owner.userId, c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found."); if (body.title !== undefined) { const title = String(body.title).trim(); if (title.length > 120) return apiError(c, 400, "invalid_title", "Conversation title must be 120 characters or fewer."); if (title) thread.metadata.title = title; else delete thread.metadata.title; } if (body.archived !== undefined) { if (typeof body.archived !== "boolean") return apiError(c, 400, "invalid_archived", "archived must be a boolean."); thread.metadata.archived = body.archived; } thread.updatedAt = Date.now(); if (await saveSdkThread(owner.userId, thread)) return c.json(threadView(thread)); const session = await getSession(owner.userId); const legacyThread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!legacyThread) return apiError(c, 404, "not_found", "Thread not found."); if (body.title !== undefined) { const title = String(body.title).trim(); if (title) legacyThread.metadata.title = title; else delete legacyThread.metadata.title; } if (body.archived !== undefined) legacyThread.metadata.archived = body.archived as boolean; legacyThread.updatedAt = Date.now(); await saveSession(owner.userId, session); return c.json(threadView(legacyThread)); });
+  app.patch("/v1/threads/:threadId", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { title?: unknown; archived?: unknown }; const thread = await getSdkThread(owner.userId, c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found."); if (body.title !== undefined) { const title = String(body.title).trim(); if (title.length > 120) return apiError(c, 400, "invalid_title", "Conversation title must be 120 characters or fewer."); if (title) thread.metadata.title = title; else delete thread.metadata.title; } if (body.archived !== undefined) { if (typeof body.archived !== "boolean") return apiError(c, 400, "invalid_archived", "archived must be a boolean."); thread.metadata.archived = body.archived; } thread.updatedAt = Date.now(); if (await saveSdkThread(owner.userId, thread)) return c.json(threadView(thread)); const session = await getSessionWithSdkTables(owner.userId); const legacyThread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!legacyThread) return apiError(c, 404, "not_found", "Thread not found."); if (body.title !== undefined) { const title = String(body.title).trim(); if (title) legacyThread.metadata.title = title; else delete legacyThread.metadata.title; } if (body.archived !== undefined) legacyThread.metadata.archived = body.archived as boolean; legacyThread.updatedAt = Date.now(); await saveSession(owner.userId, session); return c.json(threadView(legacyThread)); });
   app.delete("/v1/threads/:threadId", async (c) => { const owner = sdkUser(c)!; const threadId = c.req.param("threadId"); const thread = await getSdkThread(owner.userId, threadId); if (!thread) return apiError(c, 404, "not_found", "Thread not found."); const runs = await listSdkRuns(owner.userId, threadId); if (runs.some((run) => run.status === "running" || run.status === "queued")) return apiError(c, 409, "thread_active", "A conversation with a running request cannot be deleted."); if (await deleteSdkThread(owner.userId, threadId)) { await deleteSdkRunsForThread(owner.userId, threadId); return c.body(null, 204); } const session = await getSessionWithSdkRuns(owner.userId, threadId); const index = session.sdkThreads!.findIndex((item) => item.id === threadId); if (index < 0) return apiError(c, 404, "not_found", "Thread not found."); session.sdkThreads!.splice(index, 1); await saveSession(owner.userId, session); await deleteSdkRunsForThread(owner.userId, threadId); return c.body(null, 204); });
   app.post("/v1/threads/:threadId/runs", async (c) => {
     const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as RunBody;
@@ -3073,7 +3079,7 @@ export function registerSdkApi(app: Hono): void {
     if (!quota.allowed) return apiError(c, 429, "execution_quota_exceeded", quota.reason ?? "Execution quota exceeded.");
     if (!(await checkRateLimit(owner.userId))) { c.header("Retry-After", "60"); return apiError(c, 429, "rate_limited", "Rate limit exceeded."); }
     if (!(await canSpend(owner.userId))) return apiError(c, 402, "spend_limit", "Usage cap reached.");
-    const session = await getSession(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); let thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
+    const session = await getSessionWithSdkTables(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); let thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
     let resolved: Awaited<ReturnType<typeof resolveRunInput>>; try { resolved = await resolveRunInput(session, body); } catch (error) { return apiError(c, 400, error instanceof Error && error.message === "invalid_attachment" ? "invalid_attachment" : "invalid_input", error instanceof Error && error.message === "invalid_attachment" ? "Each attachment must be a verified upload owned by this account." : "Provide 1–30000 characters or up to five verified attachments."); }
     if (dashboardRequest(c)) {
       const sharedHistory = dashboardAgentHistory(c, session, thread.history);
@@ -3158,12 +3164,24 @@ export function registerSdkApi(app: Hono): void {
     if (!quota.allowed) return apiError(c, 429, "execution_quota_exceeded", quota.reason ?? "Execution quota exceeded.");
     if (!(await checkRateLimit(owner.userId))) { c.header("Retry-After", "60"); return apiError(c, 429, "rate_limited", "Rate limit exceeded."); }
     if (!(await canSpend(owner.userId))) return apiError(c, 402, "spend_limit", "Usage cap reached.");
-    const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
+    let executionContext: Awaited<ReturnType<typeof loadSdkExecutionContext>>;
+    try { executionContext = await loadSdkExecutionContext(owner.userId, c.req.param("threadId")); }
+    catch (error) { if (error instanceof Error && error.message === "sdk_thread_not_found") return apiError(c, 404, "not_found", "Thread not found."); throw error; }
+    let { session, thread } = executionContext;
+    let legacyProjection = executionContext.legacyProjection;
     let resolved: Awaited<ReturnType<typeof resolveRunInput>>; try { resolved = await resolveRunInput(session, body); } catch (error) { return apiError(c, 400, error instanceof Error && error.message === "invalid_attachment" ? "invalid_attachment" : "invalid_input", error instanceof Error && error.message === "invalid_attachment" ? "Each attachment must be a verified upload owned by this account." : "Provide 1–30000 characters or up to five verified attachments."); }
     if (dashboardRequest(c)) {
       const sharedHistory = dashboardAgentHistory(c, session, thread.history);
       thread.history = sharedHistory;
       session.history = sharedHistory;
+      if (!legacyProjection && !(await saveSdkThread(owner.userId, thread))) {
+        const legacySession = await getSessionWithSdkRuns(owner.userId, thread.id);
+        const legacyThread = legacySession.sdkThreads?.find((item) => item.id === thread.id);
+        if (!legacyThread) return apiError(c, 404, "not_found", "Thread not found.");
+        session = legacySession;
+        thread = legacyThread;
+        legacyProjection = true;
+      }
     }
     const lockToken = randomUUID();
     if (!(await acquireUserLock(owner.userId, lockToken))) return apiError(c, 409, "run_in_progress", "Another Chusky request is already running for this user.");
@@ -3171,13 +3189,26 @@ export function registerSdkApi(app: Hono): void {
     const triggerContext = triggerEventRunContext(body);
     let triggerEvent: TriggerEventRecord | undefined;
     try { await validateAttentionCandidateForRun(owner.userId, attentionContext); triggerEvent = await validateTriggerEventForRun(owner.userId, triggerContext); } catch (error) { const detail = runContextError(error); if (detail) { await releaseUserLock(owner.userId, lockToken); return apiError(c, 409, detail.code, detail.message); } await releaseUserLock(owner.userId, lockToken); throw error; }
-    const now = Date.now(); const initialProgress = initialSdkRunProgress(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", ...(owner.organizationId ? { companyProjectId: owner.projectId } : {}), ...(body.organizationId ? { organizationId: body.organizationId } : {}), ...(dashboardRequest(c) ? { ownerPrivateRun: true } : {}), input: resolved.input, model: body.model ?? session.model, agentId: companyPolicy.agent?.id, agentName: companyPolicy.agent?.name, agentInstructions: companyPolicy.agent?.instructions, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event("run.started")], createdAt: now, updatedAt: now }; appendSdkRunProgress(run, initialProgress); thread.runs.push(run); await persistSdkCompanyRun(run);
-    await saveSession(owner.userId, session);
+    const now = Date.now(); const initialProgress = initialSdkRunProgress(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", ...(owner.organizationId ? { companyProjectId: owner.projectId } : {}), ...(body.organizationId ? { organizationId: body.organizationId } : {}), ...(dashboardRequest(c) ? { ownerPrivateRun: true } : {}), input: resolved.input, model: body.model ?? session.model, agentId: companyPolicy.agent?.id, agentName: companyPolicy.agent?.name, agentInstructions: companyPolicy.agent?.instructions, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event("run.started")], createdAt: now, updatedAt: now }; appendSdkRunProgress(run, initialProgress);
+    if (legacyProjection) {
+      thread.runs.push(run);
+      await saveSession(owner.userId, session);
+    } else if (!(await saveSdkRun(owner.userId, thread.id, run))) {
+      const legacySession = await getSessionWithSdkRuns(owner.userId, thread.id);
+      const legacyThread = legacySession.sdkThreads?.find((item) => item.id === thread.id);
+      if (!legacyThread) { await releaseUserLock(owner.userId, lockToken); return apiError(c, 404, "not_found", "Thread not found."); }
+      session = legacySession;
+      thread = legacyThread;
+      legacyProjection = true;
+      thread.runs.push(run);
+      await saveSession(owner.userId, session);
+    }
     try {
       await acceptAttentionCandidateForRun(owner.userId, attentionContext);
     } catch (error) {
       thread.runs = thread.runs.filter((item) => item.id !== run.id);
-      await saveSession(owner.userId, session).catch((cleanupError) => logger.error({ err: cleanupError, runId: run.id }, "Could not roll back an unaccepted streamed attention candidate run"));
+      if (legacyProjection) await saveSession(owner.userId, session).catch((cleanupError) => logger.error({ err: cleanupError, runId: run.id }, "Could not roll back an unaccepted streamed attention candidate run"));
+      else await deleteSdkRun(owner.userId, thread.id, run.id).catch((cleanupError) => logger.error({ err: cleanupError, runId: run.id }, "Could not roll back an unaccepted streamed SDK run"));
       const detail = runContextError(error);
       await releaseUserLock(owner.userId, lockToken);
       if (detail) return apiError(c, 409, detail.code, detail.message);
@@ -3908,7 +3939,7 @@ export function registerSdkApi(app: Hono): void {
       files: { count: files.length, declaredBytes: files.reduce((total, file) => total + file.size, 0), available: files.filter((file) => file.status === "available").length },
       runs, tasks: { count: (await listTasks(owner.userId)).length } });
   });
-  app.post("/v1/webhooks", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { url?: string }; let url: URL; try { url = new URL(String(body.url ?? "")); } catch { return apiError(c, 400, "invalid_webhook", "A valid HTTPS webhook URL is required."); } if (!isSafeWebhookUrl(url)) return apiError(c, 400, "invalid_webhook", "Webhook URLs must use public HTTPS endpoints."); const session = await getSession(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); const secret = `whsec_${randomBytes(24).toString("base64url")}`; const hook = { id: `wh_${randomUUID()}`, url: url.toString(), secretCiphertext: sealWebhookSecret(secret), createdAt: Date.now() }; const response = { id: hook.id, url: hook.url, secret, createdAt: new Date(hook.createdAt).toISOString() }; session.sdkWebhooks!.push(hook); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); return c.json(response, 201); });
+  app.post("/v1/webhooks", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { url?: string }; let url: URL; try { url = new URL(String(body.url ?? "")); } catch { return apiError(c, 400, "invalid_webhook", "A valid HTTPS webhook URL is required."); } if (!isSafeWebhookUrl(url)) return apiError(c, 400, "invalid_webhook", "Webhook URLs must use public HTTPS endpoints."); const session = await getSessionWithSdkTables(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); const secret = `whsec_${randomBytes(24).toString("base64url")}`; const hook = { id: `wh_${randomUUID()}`, url: url.toString(), secretCiphertext: sealWebhookSecret(secret), createdAt: Date.now() }; const response = { id: hook.id, url: hook.url, secret, createdAt: new Date(hook.createdAt).toISOString() }; session.sdkWebhooks!.push(hook); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); return c.json(response, 201); });
   app.get("/v1/webhooks", async (c) => { const hooks = (await getSession(sdkUser(c)!.userId)).sdkWebhooks!.filter((item) => !item.disabledAt).map(({ secretCiphertext: _secretCiphertext, ...item }) => item); return c.json({ data: hooks }); });
   app.get("/v1/webhooks/:webhookId/deliveries", async (c) => { const owner = sdkUser(c)!; const hook = (await getSession(owner.userId)).sdkWebhooks!.find((item) => item.id === c.req.param("webhookId")); if (!hook) return apiError(c, 404, "not_found", "Webhook not found."); const data = (await listOutbox(undefined, 100, owner.userId)).filter((item) => item.webhook?.webhookId === hook.id).map((item) => ({ id: item.id, status: item.status, attempts: item.attempts, lastError: item.lastError, createdAt: new Date(item.createdAt).toISOString(), deliveredAt: item.deliveredAt ? new Date(item.deliveredAt).toISOString() : undefined })); return c.json({ data }); });
   app.patch("/v1/webhooks/:webhookId", async (c) => { const owner = sdkUser(c)!; const enabled = (await c.req.json().catch(() => ({})) as { enabled?: unknown }).enabled; if (typeof enabled !== "boolean") return apiError(c, 400, "invalid_webhook_state", "enabled must be a boolean."); const session = await getSession(owner.userId); const hook = session.sdkWebhooks!.find((item) => item.id === c.req.param("webhookId")); if (!hook) return apiError(c, 404, "not_found", "Webhook not found."); hook.disabledAt = enabled ? undefined : Date.now(); await saveSession(owner.userId, session); return c.json({ id: hook.id, url: hook.url, enabled, createdAt: new Date(hook.createdAt).toISOString() }); });
@@ -3923,9 +3954,8 @@ export function registerSdkApi(app: Hono): void {
     const allowed = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf", "text/plain", "text/markdown", "application/zip", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "audio/mpeg", "audio/mp3", "audio/mp4", "audio/x-m4a", "audio/ogg", "audio/wav", "audio/x-wav", "audio/webm", "audio/aac", "audio/flac", "video/mp4", "video/webm"]);
     if (!name || !allowed.has(contentType) || !Number.isFinite(size) || size < 1 || size > config.sdkMaxFileBytes) return apiError(c, 400, "invalid_file", "File name, type, or size is invalid.");
     if (!r2Configured()) return apiError(c, 503, "storage_unavailable", "R2 storage is not configured.");
-    const session = await getSession(owner.userId);
     const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
-    const prior = idempotency(c, session, fingerprint);
+    const prior = await sdkIdempotency(c, owner.userId, fingerprint);
     if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
     if (prior.replay) return c.json(prior.replay, 201);
     const fileId = `file_${randomUUID()}`;
@@ -3948,9 +3978,10 @@ export function registerSdkApi(app: Hono): void {
       return apiError(c, 503, config.durableObjectCatalogEnabled ? "object_catalog_unavailable" : "storage_unavailable", "A durable R2 upload intent could not be prepared.");
     }
     const response = { ...publicSdkFile(file), uploadUrl, expiresAt };
+    const session = await getSession(owner.userId);
     session.sdkFiles!.push(file);
-    if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() };
     await saveSession(owner.userId, session);
+    if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, response);
     return c.json(response, 201);
   });
 

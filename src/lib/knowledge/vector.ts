@@ -89,11 +89,14 @@ export class UpstashKnowledgeStore {
         if (attempt + 1 < VECTOR_MAX_ATTEMPTS && retryableStatus(response.status)) {
           const serverDelay = retryAfterDelay(response.headers.get("retry-after"));
           const delay = Math.max(retryDelay(attempt), serverDelay ?? 0);
+          // Open the circuit before waiting for the inline retry. Other
+          // requests must fail fast while this request is in flight instead
+          // of joining the same outage and creating a retry stampede.
+          coolDown(this.url, serverDelay);
           if (delay <= VECTOR_MAX_INLINE_RETRY_DELAY_MS) {
             await wait(delay);
             continue;
           }
-          coolDown(this.url, serverDelay);
           throw new UpstashVectorRequestError(`Upstash Vector request failed (${response.status}); retry deferred by Retry-After`, response.status);
         }
         if (retryableStatus(response.status)) coolDown(this.url, retryAfterDelay(response.headers.get("retry-after")));
