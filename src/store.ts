@@ -2421,7 +2421,7 @@ class RedisBackend implements Backend {
         // from attempting to insert the same legacy runs twice.
         const session = await this.getSession(userId);
         if (document || session.sdkThreads?.length || session.sdkAudit?.length || Object.keys(session.sdkIdempotency ?? {}).length) {
-          compactSessionPersistence(session);
+          session.sdkIdempotency = compactSdkIdempotency(session.sdkIdempotency);
           await this.saveSession(userId, session);
           await this.invalidateSdkTableCaches(userId);
         }
