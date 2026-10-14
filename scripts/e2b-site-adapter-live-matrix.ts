@@ -9,6 +9,7 @@ import { classifyRetailerFailure, pageLooksUsable, phaseTimeoutMs } from "../src
 import { buildSiteEntry, SITE_ADAPTERS, type SiteEntryRequest, type SiteEntryPlan } from "../src/shopping/siteAdapters.js";
 
 type BrowserResult = Record<string, any> & { challenge?: { detected?: boolean; type?: string }; needsUserInteraction?: boolean };
+type BrowserMatch = Record<string, any>;
 
 type SmokeCase = { site: string; request: SiteEntryRequest };
 
@@ -70,7 +71,154 @@ async function saveScreenshot(root: string, site: string, name: string, value: u
 }
 
 function challengeDetected(result: BrowserResult | undefined): boolean {
-  return result?.challenge?.detected === true || result?.needsUserInteraction === true;
+  // `needsUserInteraction` is derived from a detected challenge by the E2B
+  // daemon. Do not treat it as an independent challenge signal here: the
+  // matrix must distinguish a normal page that needs ordinary interaction
+  // from a CAPTCHA/2FA handoff boundary.
+  return result?.challenge?.detected === true;
+}
+
+function selectorForMatch(match: BrowserMatch): Record<string, unknown> {
+  return {
+    role: match.role,
+    name: match.name,
+    index: match.index,
+    ...(match.id ? { id: match.id } : {}),
+    ...(match.nameAttr ? { nameAttr: match.nameAttr } : {}),
+    ...(match.placeholder ? { placeholder: match.placeholder } : {}),
+    ...(match.autocomplete ? { autocomplete: match.autocomplete } : {}),
+    ...(match.frameIndex !== undefined ? { frameIndex: match.frameIndex } : {}),
+    ...(match.frameUrl ? { frameUrl: match.frameUrl } : {}),
+  };
+}
+
+function matchLabel(match: BrowserMatch): string {
+  return `${String(match.name || "")} ${String(match.placeholder || "")} ${String(match.href || "")}`.replace(/\s+/g, " ").trim();
+}
+
+function searchControlFor(observed: BrowserResult, entry: SiteEntryPlan): BrowserMatch | undefined {
+  const terms = entry.query ? entry.query.toLowerCase().split(/\s+/).filter(Boolean) : [];
+  const matches = (Array.isArray(observed.matches) ? observed.matches : [])
+    .filter((item: BrowserMatch) => ["textbox", "combobox"].includes(String(item.role)))
+    .filter((item: BrowserMatch) => !/password|email|phone|login|sign in|account/i.test(matchLabel(item)))
+    .filter((item: BrowserMatch) => !/facet|filter|number of|brand|category|price|rating|sort|department|select .*search|mouse grip|nameattr.*url/i.test(`${matchLabel(item)} ${String(item.nameAttr || "")}`));
+  const scored = matches.map((item: BrowserMatch, index: number) => {
+    const label = matchLabel(item).toLowerCase();
+    let score = 0;
+    if (item.role === "textbox") score += 3;
+    if (/search|keyword|what are you looking for|find/i.test(label)) score += 10;
+    if (/^(?:search|site search|search this site|search products?)$/i.test(String(item.name || "").trim())) score += 8;
+    if (/facet|filter|number of|brand|category|price|rating|sort|department|select .*search/i.test(label)) score -= 12;
+    if (terms.some((term) => label.includes(term))) score += 3;
+    if (/location|where|origin|destination|from|to|pickup|delivery|postcode|zip/i.test(label)) score += entry.location || entry.origin || entry.destination ? 6 : 1;
+    if (item.placeholder) score += 1;
+    return { item, score, index };
+  }).sort((left, right) => right.score - left.score || left.index - right.index);
+  return scored[0]?.score >= 4 ? scored[0].item : undefined;
+}
+
+function safeResultLinkFor(observed: BrowserResult, entry: SiteEntryPlan): BrowserMatch | undefined {
+  const terms = intentTerms(entry);
+  const dangerous = /\b(?:sign in|log in|login|account|cart|bag|checkout|payment|order|subscribe|watch now|play now|rent|buy now|add to cart|delete|remove|skip to|header|footer|menu|filter|sort|next|previous|privacy|terms|help|support|feedback|cookie statement|app logo|select store|shop groceries|about domino)/i;
+  const usefulPath = /\/(?:p|product|products|item|dp|site|listing|listings|rooms|hotel|hotels|restaurant|restaurants|movie|movies|title|show|shows|flight|flights|catalog)\b/i;
+  let currentPath = "";
+  try { currentPath = new URL(String(observed.url || "")).pathname; } catch {}
+  const links = (Array.isArray(observed.links) ? observed.links : [])
+    .filter((item: BrowserMatch) => item.role === "link" && item.href && item.name)
+    .map((item: BrowserMatch, index: number) => {
+      let url: URL | undefined;
+      try { url = new URL(String(item.href)); } catch { return { item, score: -1, index }; }
+      if (url.origin !== entry.origin || url.hash || url.pathname === currentPath || dangerous.test(matchLabel(item))) return { item, score: -1, index };
+      const label = matchLabel(item).toLowerCase();
+      const matchesIntent = terms.length === 0 || terms.some((term) => label.includes(term) || url!.toString().toLowerCase().includes(term));
+      if (!matchesIntent) return { item, score: -1, index };
+      let score = usefulPath.test(url.pathname) ? 8 : 0;
+      if (terms.length === 0 || terms.some((term) => label.includes(term))) score += 5;
+      if (String(item.name).trim().length >= 8) score += 1;
+      return { item, score, index };
+    }).filter((candidate: { score: number }) => candidate.score >= 5)
+    .sort((left: { score: number; index: number }, right: { score: number; index: number }) => right.score - left.score || left.index - right.index);
+  return links[0]?.item;
+}
+
+function traceFromAgent(result: BrowserResult | undefined): Array<Record<string, unknown>> {
+  const agent = result?.agent && typeof result.agent === "object" ? result.agent as Record<string, unknown> : undefined;
+  return Array.isArray(agent?.steps)
+    ? (agent.steps as Array<Record<string, unknown>>).map((step) => ({ index: step.index, action: step.action, status: step.status, error: step.error, recovery: step.recovery }))
+    : [];
+}
+
+type InteractionEvidence = {
+  trace: Array<Record<string, unknown>>;
+  searchControl?: Record<string, unknown>;
+  searchSubmitted: boolean;
+  resultControl?: Record<string, unknown>;
+  resultOpened: boolean;
+  scrolled: boolean;
+  verified: boolean;
+};
+
+async function performReadOnlyInteractionProbe(
+  entry: SiteEntryPlan,
+  observed: BrowserResult,
+  requestBrowser: (request: Record<string, unknown>, phase?: "startup" | "navigation" | "action" | "handoff") => Promise<BrowserResult>,
+  capture: (name: string, result: BrowserResult) => Promise<void>,
+): Promise<{ observed: BrowserResult; evidence: InteractionEvidence }> {
+  const trace: Array<Record<string, unknown>> = [];
+  let current = observed;
+  let searchSubmitted = false;
+  let resultOpened = false;
+  let scrolled = false;
+  const searchControl = searchControlFor(current, entry);
+  let resultControl: BrowserMatch | undefined;
+
+  if (!challengeDetected(current) && searchControl && (entry.query || entry.location || entry.origin || entry.destination)) {
+    const value = entry.query || entry.location || entry.origin || entry.destination;
+    const steps = [
+      { id: "fill-search-or-location", action: "fill", selector: selectorForMatch(searchControl), value },
+      { id: "submit-search-or-location", action: "press", selector: selectorForMatch(searchControl), key: "Enter" },
+    ];
+    const filled = await requestBrowser({ action: "agent", steps, maxSteps: steps.length, maxActions: steps.length, maxDurationMs: 30_000, noProgressLimit: 1, completionAssertions: [] }, "action").catch((error) => ({ error: safeDetail(error) }));
+    trace.push(...traceFromAgent(filled));
+    if (filled.agent?.completed === true) searchSubmitted = true;
+    await capture("03-form-probe", filled);
+    current = await requestBrowser({ action: "observe", includeScreenshot: true, includePageContent: true, includeLinks: true }, "action");
+    await capture("04-after-form-probe", current);
+  }
+
+  if (!challengeDetected(current)) {
+    resultControl = safeResultLinkFor(current, entry);
+    if (resultControl) {
+      const clicked = await requestBrowser({ action: "click", selector: selectorForMatch(resultControl) }, "action").catch((error) => ({ error: safeDetail(error) }));
+      trace.push({ action: "click", target: matchLabel(resultControl), status: clicked.error ? "failed" : "succeeded", error: clicked.error });
+      await capture("05-result-click", clicked);
+      current = await requestBrowser({ action: "observe", includeScreenshot: true, includePageContent: true, includeLinks: true }, "action");
+      await capture("06-after-result-click", current);
+      resultOpened = !clicked.error && pageLooksUsable(current) && String(current.url || "") !== String(observed.url || "");
+    }
+  }
+
+  if (!challengeDetected(current)) {
+    const scrolledResult = await requestBrowser({ action: "scroll", direction: "down", amount: 3 }, "action").catch((error) => ({ error: safeDetail(error) }));
+    trace.push({ action: "scroll", status: scrolledResult.error ? "failed" : "succeeded", error: scrolledResult.error });
+    await capture("07-after-scroll", scrolledResult);
+    current = await requestBrowser({ action: "observe", includeScreenshot: true, includePageContent: true, includeLinks: true }, "action");
+    await capture("08-final-observation", current);
+    scrolled = !scrolledResult.error;
+  }
+
+  return {
+    observed: current,
+    evidence: {
+      trace,
+      ...(searchControl ? { searchControl: selectorForMatch(searchControl) } : {}),
+      searchSubmitted,
+      ...(resultControl ? { resultControl: selectorForMatch(resultControl) } : {}),
+      resultOpened,
+      scrolled,
+      verified: searchSubmitted || resultOpened || scrolled,
+    },
+  };
 }
 
 function originOf(value: unknown): string | undefined {
@@ -81,20 +229,24 @@ function intentTerms(entry: SiteEntryPlan): string[] {
   return [entry.query, entry.location].filter(Boolean).join(" ").toLowerCase().split(/[^a-z0-9]+/).filter((term) => term.length >= 3).slice(0, 8);
 }
 
-function entryEvidence(entry: SiteEntryPlan, observed: BrowserResult, bootstrap: BrowserResult | undefined): { originMatches: boolean; intentObserved: boolean; pageUsable: boolean; bootstrapCompleted: boolean; verified: boolean } {
+function renderedErrorPage(value: BrowserResult): boolean {
+  const renderedText = `${String(value.title || "")} ${String(value.pageContent || "")}`;
+  return /^error$/i.test(String(value.title || "").trim()) || /\b(?:page not found|something went wrong|failed some security checks|access denied|request blocked)\b/i.test(renderedText);
+}
+
+function entryEvidence(entry: SiteEntryPlan, observed: BrowserResult, bootstrap: BrowserResult | undefined, interaction: InteractionEvidence, additionalObservations: BrowserResult[] = []): { originMatches: boolean; intentObserved: boolean; pageUsable: boolean; bootstrapCompleted: boolean; interactionVerified: boolean; verified: boolean } {
   const url = String(observed.url || observed.observedUrl || "");
-  const text = `${url} ${String(observed.title || "")} ${String(observed.pageContent || "")}`.toLowerCase();
+  const text = [observed, ...additionalObservations].map((item) => `${String(item?.url || item?.observedUrl || "")} ${String(item?.title || "")} ${String(item?.pageContent || "")}`).join(" ").toLowerCase();
   const terms = intentTerms(entry);
   const originMatches = originOf(url) === entry.origin;
   const intentObserved = entry.strategy === "bootstrap-search"
     ? (terms.length === 0 || terms.some((term) => text.includes(term)))
     : terms.length === 0 || terms.some((term) => text.includes(term));
-  const renderedText = `${String(observed.title || "")} ${String(observed.pageContent || "")}`;
-  const errorPage = /^error$/i.test(String(observed.title || "").trim()) || /\b(?:page not found|something went wrong|failed some security checks|access denied)\b/i.test(renderedText);
-  const pageUsable = !errorPage && pageLooksUsable({ url, title: observed.title, pageContent: observed.pageContent });
+  const pageUsable = !renderedErrorPage(observed) && pageLooksUsable({ url, title: observed.title, pageContent: observed.pageContent });
   const agent = bootstrap?.agent && typeof bootstrap.agent === "object" ? bootstrap.agent as Record<string, unknown> : undefined;
-  const bootstrapCompleted = entry.steps.length === 0 || agent?.completed === true || bootstrap?.completed === true;
-  return { originMatches, intentObserved, pageUsable, bootstrapCompleted, verified: originMatches && intentObserved && pageUsable && bootstrapCompleted };
+  const bootstrapCompleted = entry.steps.length === 0 || agent?.completed === true || bootstrap?.completed === true || interaction.searchSubmitted;
+  const interactionVerified = interaction.verified;
+  return { originMatches, intentObserved, pageUsable, bootstrapCompleted, interactionVerified, verified: originMatches && intentObserved && pageUsable && bootstrapCompleted && interactionVerified };
 }
 
 async function main(): Promise<void> {
@@ -108,6 +260,7 @@ async function main(): Promise<void> {
     let requestBrowser: ((request: Record<string, unknown>, phase?: "startup" | "navigation" | "action" | "handoff") => Promise<BrowserResult>) | undefined;
     let openedScreenshot: string | undefined;
     let finalScreenshot: string | undefined;
+    const interactionScreenshotPaths: string[] = [];
     try {
       const entry = buildSiteEntry(testCase.request);
       console.log(JSON.stringify({ site: testCase.site, phase: "sandbox_create", strategy: entry.strategy, url: entry.url }));
@@ -150,23 +303,55 @@ async function main(): Promise<void> {
         return parsed;
       };
 
+      const capture = async (name: string, result: BrowserResult): Promise<void> => {
+        const screenshot = await saveScreenshot(artifactDir, testCase.site, name, result?.screenshot);
+        if (screenshot) interactionScreenshotPaths.push(screenshot);
+      };
+
       const opened = await requestBrowser({ action: "open", url: entry.url, waitUntil: "commit" }, "navigation");
       openedScreenshot = await saveScreenshot(artifactDir, testCase.site, "01-opened", opened.screenshot);
+      const openedObserved = await requestBrowser({ action: "observe", includeScreenshot: true, includePageContent: true, includeLinks: true }, "navigation");
+      await capture("02-entry-observed", openedObserved);
       let bootstrap: BrowserResult | undefined;
       if (entry.steps.length && !challengeDetected(opened)) {
         bootstrap = await requestBrowser({ action: "agent", steps: entry.steps, maxSteps: entry.steps.length, maxActions: entry.steps.length, maxDurationMs: 45_000, noProgressLimit: 1, completionAssertions: [] }, "action").catch((error) => ({ error: safeDetail(error) }));
       }
-      const observed = await requestBrowser({ action: "observe", includeScreenshot: true, includePageContent: true, includeLinks: true }, "navigation");
-      finalScreenshot = await saveScreenshot(artifactDir, testCase.site, "02-observed", observed.screenshot);
-      const challenge = challengeDetected(opened) || challengeDetected(bootstrap) || challengeDetected(observed);
-      const evidence = entryEvidence(entry, observed, bootstrap);
+      let observed = await requestBrowser({ action: "observe", includeScreenshot: true, includePageContent: true, includeLinks: true }, "navigation");
+      await capture("02-after-bootstrap", observed);
+      const observations = [openedObserved, observed];
+      let interaction: InteractionEvidence = { trace: [], searchSubmitted: false, resultOpened: false, scrolled: false, verified: false };
+
+      // A direct result URL is the fast path, not permission to skip the
+      // browser interaction. If the route renders an error, return to the
+      // public homepage and exercise its visible search control instead.
+      if (!challengeDetected(opened) && !challengeDetected(bootstrap) && !challengeDetected(observed) && entry.strategy === "direct-search" && (renderedErrorPage(observed) || !pageLooksUsable(observed))) {
+        const homepage = await requestBrowser({ action: "open", url: entry.origin, waitUntil: "commit" }, "navigation");
+        await capture("02-homepage-opened", homepage);
+        const homepageObserved = await requestBrowser({ action: "observe", includeScreenshot: true, includePageContent: true, includeLinks: true }, "navigation");
+        await capture("02-homepage-observed", homepageObserved);
+        observations.push(homepageObserved);
+        if (!challengeDetected(homepageObserved)) {
+          const fallbackProbe = await performReadOnlyInteractionProbe(entry, homepageObserved, requestBrowser, capture);
+          observed = fallbackProbe.observed;
+          interaction = fallbackProbe.evidence;
+          observations.push(observed);
+        }
+      } else if (!challengeDetected(opened) && !challengeDetected(bootstrap) && !challengeDetected(observed)) {
+        const probe = await performReadOnlyInteractionProbe(entry, observed, requestBrowser, capture);
+        observed = probe.observed;
+        interaction = probe.evidence;
+        observations.push(observed);
+      }
+      finalScreenshot = await saveScreenshot(artifactDir, testCase.site, "99-final", observed.screenshot);
+      const challenge = [opened, openedObserved, bootstrap, observed, ...observations].some((item) => challengeDetected(item));
+      const evidence = entryEvidence(entry, observed, bootstrap, interaction, observations);
       const verified = !challenge && evidence.verified;
       const outcome = challenge ? "challenge_required" : verified ? "verified" : "failed";
       const bootstrapAgent = bootstrap?.agent && typeof bootstrap.agent === "object" ? bootstrap.agent as Record<string, unknown> : undefined;
       const bootstrapTrace = Array.isArray(bootstrapAgent?.steps)
         ? (bootstrapAgent.steps as Array<Record<string, unknown>>).map((step) => ({ index: step.index, action: step.action, status: step.status, error: step.error, recovery: step.recovery }))
         : undefined;
-      const result = { site: testCase.site, adapterId: entry.adapterId, strategy: entry.strategy, outcome, verified, challengeDetected: challenge, url: observed.url || opened.url, title: observed.title, entryUrl: entry.url, steps: entry.steps.length, screenshotPaths: [openedScreenshot, finalScreenshot].filter(Boolean), evidence, bootstrapStoppedReason: bootstrapAgent?.stoppedReason, bootstrapTrace, bootstrapError: typeof bootstrap?.error === "string" ? bootstrap.error : undefined, durationMs: Date.now() - startedAt, boundary: "public_read_only_entry_and_observation; no_login_no_credentials_no_payment_no_order" };
+      const result = { site: testCase.site, adapterId: entry.adapterId, strategy: entry.strategy, outcome, verified, challengeDetected: challenge, url: observed.url || opened.url, title: observed.title, entryUrl: entry.url, steps: entry.steps.length, screenshotPaths: [openedScreenshot, ...interactionScreenshotPaths, finalScreenshot].filter(Boolean), evidence, interaction, bootstrapStoppedReason: bootstrapAgent?.stoppedReason, bootstrapTrace, bootstrapError: typeof bootstrap?.error === "string" ? bootstrap.error : undefined, durationMs: Date.now() - startedAt, boundary: "public_read_only_entry_and_observation; no_login_no_credentials_no_payment_no_order" };
       results.push(result);
       await mkdir(path.join(artifactDir, testCase.site), { recursive: true });
       await writeFile(path.join(artifactDir, testCase.site, "evidence.json"), JSON.stringify(result, null, 2));
