@@ -203,9 +203,9 @@ export const AGENT_UPGRADE_PRESETS = {
     "Browser telemetry reports bounded latency percentiles, failures, and challenge outcomes; BrowserTrustRouter selects verified routes, keeps owner/origin identity stable, and hands repeated challenges to the owner instead of blindly retrying.",
   ],
   browserPlatform: [
-    "The dedicated browser runtime now supports real local Chromium without Kernel or E2B, owner-bound live viewport delivery, durable last-URL recovery, and explicit provider failover for provider-availability failures.",
-    "Live URLs can be delivered during the active private run, while the browser keeps semantic observation, stale-reference invalidation, challenge handoff, profile isolation, and consequential-action approvals in the trusted runtime.",
-    "Provider failover never replays page actions or uncertain writes; production readiness still depends on durable storage, HTTPS live-view configuration, real provider capacity, and measured site benchmarks.",
+    "The dedicated runtime now ships a first-class local Chromium path with per-session Xvfb, x11vnc, and websockify/noVNC isolation in the production image, while retaining a secure PNG fallback for environments without a display stack.",
+    "Durable sessions restore the bounded open-tab frontier and active tab after reconnects; regional pools pin existing sessions, fail over only during initial availability failures, and expose warm readiness without leaking CDP endpoints.",
+    "The read-only benchmark exercises twenty public sites with screenshot evidence, navigation/scroll actions, challenge classification, and p50/p95 latency; payment, login, CAPTCHA, and consequential work remains gated.",
   ],
   browserDomainWorkflows: [
     "Added owner-scoped browser planning for flights, stays, telecom services, and streaming accounts with structured route, date, guest, plan, title, and profile constraints.",

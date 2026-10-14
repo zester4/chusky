@@ -117,6 +117,36 @@ function boundedOption(key: string, fallback: string, max: number): string {
   return value;
 }
 
+function browserRuntimeRegions(): Array<{ id: string; baseUrl: string }> {
+  const fallback = optional("CHUSKY_BROWSER_RUNTIME_URL", "").trim();
+  const raw = optional("CHUSKY_BROWSER_RUNTIME_REGIONS", "").trim();
+  if (!raw) return fallback ? [{ id: "default", baseUrl: fallback }] : [];
+  let entries: unknown;
+  try {
+    entries = raw.startsWith("[") || raw.startsWith("{") ? JSON.parse(raw) : raw.split(",").map((item) => {
+      const [id, ...url] = item.split("=");
+      return { id: id?.trim(), url: url.join("=").trim() };
+    });
+  } catch { throw new Error("CHUSKY_BROWSER_RUNTIME_REGIONS must be valid JSON or region=url pairs"); }
+  const values = Array.isArray(entries)
+    ? entries
+    : entries && typeof entries === "object"
+      ? Object.entries(entries).map(([id, value]) => ({ id, url: typeof value === "string" ? value : (value as Record<string, unknown>)?.url }))
+      : [];
+  const result = values.map((value) => {
+    const item = value && typeof value === "object" ? value as Record<string, unknown> : {};
+    const id = typeof item.id === "string" ? item.id.trim() : "";
+    const baseUrl = typeof item.url === "string" ? item.url.trim() : typeof item.baseUrl === "string" ? item.baseUrl.trim() : "";
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(id)) throw new Error("CHUSKY_BROWSER_RUNTIME_REGIONS contains an invalid region id");
+    const parsed = new URL(baseUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error(`CHUSKY_BROWSER_RUNTIME_REGIONS.${id} must be a clean http(s) URL`);
+    if (process.env.NODE_ENV === "production" && parsed.protocol !== "https:") throw new Error(`CHUSKY_BROWSER_RUNTIME_REGIONS.${id} must use HTTPS in production`);
+    return { id, baseUrl: parsed.toString().replace(/\/$/, "") };
+  });
+  if (!result.length) throw new Error("CHUSKY_BROWSER_RUNTIME_REGIONS must contain at least one region");
+  return result;
+}
+
 const defaultModel = optional("DEFAULT_MODEL", "minimax/minimax-m3:free");
 
 export const config = {
@@ -430,6 +460,7 @@ export const config = {
   browserRuntimeUrl: optional("CHUSKY_BROWSER_RUNTIME_URL", ""),
   browserRuntimeToken: optional("CHUSKY_BROWSER_RUNTIME_TOKEN", ""),
   browserRuntimeOwnerSigningSecret: optional("CHUSKY_BROWSER_RUNTIME_OWNER_SIGNING_SECRET", ""),
+  browserRuntimeRegions: browserRuntimeRegions(),
   browserRuntimeEnabled: optional("CHUSKY_BROWSER_RUNTIME_MODE", "off").toLowerCase() === "dedicated",
   // Trust routing keeps owner/origin identity stable and stops blind retries
   // after repeated challenges or access denials. It does not spoof a user or
@@ -565,7 +596,7 @@ MULTIPLE CONNECTED ACCOUNTS
 - For a write action, select exactly one account and show that account in the approval request. Never guess which account should send or modify something.
 
 WEBSITE ACCOUNTS AND BROWSER ROUTING
-- Browser provider selection is runtime-configured: when CHUSKY_BROWSER_RUNTIME_MODE=dedicated and all CHUSKY_BROWSER_RUNTIME_* values are present, CHUCK_BROWSER uses the dedicated real-Chromium service; otherwise it uses the E2B controller. In dedicated mode, prefer CHUCK_BROWSER_OBSERVE and CHUCK_BROWSER_ACT one bounded action at a time; do not assume E2B-only form/file helpers or CHUCK_BROWSER_AGENT are available.
+- Browser provider selection is runtime-configured: when CHUSKY_BROWSER_RUNTIME_MODE=dedicated and all CHUSKY_BROWSER_RUNTIME_* values are present, CHUCK_BROWSER uses the dedicated real-Chromium service; set CHUSKY_BROWSER_RUNTIME_REGIONS to a validated JSON region-to-URL array for multi-region placement. Existing sessions remain pinned to their recorded region; only initial provider-availability failures may fail over. Otherwise Chusky uses the E2B controller. In dedicated mode, prefer CHUCK_BROWSER_OBSERVE and CHUCK_BROWSER_ACT one bounded action at a time; do not assume E2B-only form/file helpers or CHUCK_BROWSER_AGENT are available.
 - Live watching is an intent, not a tool the owner must name: when the owner asks to watch, see, or follow the browser live, start the owner-private session and call stream_start before the first navigation or mutation. The runtime delivers the expiring URL immediately through the active private channel while the same agent run may continue; never wait until the final answer to expose it. Use read-only mode for observation and interactive mode only for an explicit human handoff. If the owner does not ask to watch, do not spend a stream lease unnecessarily.
 - A dedicated runtime may run with BROWSER_PROVIDER=local/playwright and no Kernel or E2B key. That path is still real Chromium with Playwright, owner-scoped profiles, durable last-URL recovery, and an owner-bound live viewport. Provider failover is configured through BROWSER_PROVIDER_FALLBACKS; fail over only on provider availability errors, never on page challenges, stale references, or uncertain consequential actions.
 - A request to connect, link, add, save, sign in to, or log in to a website account is a vault request when that website is not an explicitly supported Composio app integration. Call CHUCK_VAULT_SAVE with the website service and exact HTTPS origin; do not search Composio first and do not tell the user the website is unsupported.

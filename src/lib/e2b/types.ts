@@ -47,6 +47,8 @@ export type E2BBrowserRecord = {
   /** RFC 7638 thumbprint of the Web Bot Auth key loaded at sandbox creation. */
   webBotAuthKeyId?: string;
   sessionId?: string;
+  /** Dedicated runtime region; used to route reconnects without replaying actions. */
+  region?: string;
   lastUrl?: string;
   title?: string;
   nodes?: E2BBrowserNode[];

@@ -21,7 +21,7 @@ import { browserMetrics } from "../browser-runtime/metrics.js";
 import { browserRefs } from "../browser-runtime/refs.js";
 import { browserSessionManager } from "../browser-runtime/manager.js";
 import { browserTrustRouter, type BrowserTrustDecision } from "../browser-runtime/trustRouter.js";
-import { DedicatedBrowserRuntimeClient } from "../browser-runtime/client.js";
+import { DedicatedBrowserRuntimePool } from "../browser-runtime/client.js";
 
 const MAX_OUTPUT = 16_000;
 const MAX_NODES = 60;
@@ -43,10 +43,16 @@ const DEDICATED_RUNTIME_ACTIONS = new Set<E2BBrowserAction>([
   "start", "stop", "status", "open", "state", "snapshot", "find", "form_inspect", "form_plan", "form_fill", "observe", "screenshot", "screenshot_full", "screenshot_region", "screenshot_region_full", "windows", "display_info", "click", "invoke", "fill", "type", "press", "scroll", "select_option", "check", "uncheck", "focus", "hover", "drag", "move", "desktop_click", "desktop_type", "desktop_press", "wait", "act", "extract", "agent", "back", "forward", "refresh", "tabs", "tab_open", "tab_focus", "tab_close", "upload", "upload_files", "downloads", "download_register", "wait_download", "download_get", "download_delete", "dialog_list", "dialog_dismiss", "clipboard_read", "clipboard_write", "pdf", "diagnostics", "events", "recording_start", "recording_stop", "recording_list", "recording_get", "recording_delete", "recording_download", "stream_start", "stream_status", "stream_stop",
 ]);
 
-function dedicatedBrowserRuntime(): DedicatedBrowserRuntimeClient | undefined {
+let dedicatedRuntimePool: DedicatedBrowserRuntimePool | undefined;
+
+function dedicatedBrowserRuntime(): DedicatedBrowserRuntimePool | undefined {
   if (!config.browserRuntimeEnabled) return undefined;
-  if (!config.browserRuntimeUrl || !config.browserRuntimeToken || !config.browserRuntimeOwnerSigningSecret) throw new E2BBrowserError("Dedicated browser runtime is enabled but its URL, token, or owner-signing secret is missing");
-  return new DedicatedBrowserRuntimeClient({ baseUrl: config.browserRuntimeUrl, token: config.browserRuntimeToken, ownerSigningSecret: config.browserRuntimeOwnerSigningSecret, timeoutMs: config.e2bRequestTimeoutMs });
+  if ((!config.browserRuntimeUrl && !config.browserRuntimeRegions.length) || !config.browserRuntimeToken || !config.browserRuntimeOwnerSigningSecret) throw new E2BBrowserError("Dedicated browser runtime is enabled but its URL/regions, token, or owner-signing secret is missing");
+  dedicatedRuntimePool ??= new DedicatedBrowserRuntimePool(
+    config.browserRuntimeRegions.length ? config.browserRuntimeRegions : [{ id: "default", baseUrl: config.browserRuntimeUrl }],
+    { token: config.browserRuntimeToken, ownerSigningSecret: config.browserRuntimeOwnerSigningSecret, timeoutMs: config.e2bRequestTimeoutMs, defaultRegion: config.browserDefaultRegion },
+  );
+  return dedicatedRuntimePool;
 }
 
 function trustMetadata(decision: BrowserTrustDecision): Record<string, unknown> {
@@ -490,6 +496,7 @@ export class E2BBrowserEngine {
     const session = await getSession(userId);
     const retained = session.e2bBrowser?.runtime === "dedicated" ? session.e2bBrowser : undefined;
     let sessionId = typeof args.sessionId === "string" && args.sessionId.trim() ? args.sessionId.trim() : retained?.sessionId;
+    if (retained?.sessionId) client.bindSession(retained.sessionId, retained.region);
     if (action === "start" || (action === "open" && !sessionId)) {
       const startUrl = typeof args.url === "string" && args.url.trim() ? args.url : "https://example.com";
       const started = await client.start(ownerScope, { startUrl, ...(typeof args.profileId === "string" ? { profileId: args.profileId } : {}), headful: true, ...(typeof args.region === "string" ? { region: args.region } : {}) });
@@ -621,7 +628,8 @@ export class E2BBrowserEngine {
     if (!sessionId) { session.e2bBrowser = undefined; await saveSession(userId, session); return; }
     const now = Date.now();
     const prior = session.e2bBrowser;
-    session.e2bBrowser = { sandboxId: "dedicated-runtime", runtime: "dedicated", sessionId, createdAt: prior?.createdAt ?? now, updatedAt: now, expiresAt: now + 24 * 60 * 60_000, ...(typeof result?.url === "string" ? { lastUrl: result.url } : prior?.lastUrl ? { lastUrl: prior.lastUrl } : {}), ...(typeof result?.title === "string" ? { title: result.title } : prior?.title ? { title: prior.title } : {}) };
+    const runtimeRegion = typeof result?.runtimeRegion === "string" ? result.runtimeRegion : typeof result?.region === "string" ? result.region : prior?.region;
+    session.e2bBrowser = { sandboxId: "dedicated-runtime", runtime: "dedicated", sessionId, createdAt: prior?.createdAt ?? now, updatedAt: now, expiresAt: now + 24 * 60 * 60_000, ...(runtimeRegion ? { region: runtimeRegion } : {}), ...(typeof result?.url === "string" ? { lastUrl: result.url } : prior?.lastUrl ? { lastUrl: prior.lastUrl } : {}), ...(typeof result?.title === "string" ? { title: result.title } : prior?.title ? { title: prior.title } : {}) };
     await saveSession(userId, session);
   }
 
@@ -1666,6 +1674,7 @@ export class E2BBrowserEngine {
     const dedicated = dedicatedBrowserRuntime();
     const retained = dedicated ? await this.record(userId) : undefined;
     if (dedicated && retained?.runtime === "dedicated" && retained.sessionId) {
+      dedicated.bindSession(retained.sessionId, retained.region);
       const live = await dedicated.liveView(String(userId), retained.sessionId);
       const targetUrl = typeof live.url === "string" ? live.url : typeof live.liveViewUrl === "string" ? live.liveViewUrl : undefined;
       if (!targetUrl || !/^https:\/\//i.test(targetUrl)) throw new E2BBrowserError("Dedicated browser runtime did not return a secure live-view URL");

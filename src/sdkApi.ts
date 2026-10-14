@@ -1405,9 +1405,7 @@ async function loadSdkExecutionContext(userId: number, threadId: string): Promis
   legacyProjection: boolean;
 }> {
   const [session, directThread] = await Promise.all([getSession(userId), getSdkThread(userId, threadId)]);
-  if (directThread) {
-    return { session, thread: directThread, legacyProjection: false };
-  }
+  if (directThread && isDurableStore() && config.durableStateSdkTablesEnabled) return { session, thread: directThread, legacyProjection: false };
   const legacySession = await getSessionWithSdkRuns(userId, threadId);
   const legacyThread = legacySession.sdkThreads?.find((item) => item.id === threadId);
   if (!legacyThread) throw new Error("sdk_thread_not_found");

@@ -280,11 +280,11 @@ test("loads and writes the release manifest", async () => {
 
 test("current upgrade manifest announces the browser platform accurately", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.59.0");
-  assert.equal(notice?.version, "4.59.0");
-  assert.match(notice?.bullets[0] ?? "", /real local Chromium.*without Kernel or E2B.*owner-bound live viewport/);
-  assert.match(notice?.bullets[1] ?? "", /Live URLs can be delivered during the active private run/);
-  assert.match(notice?.bullets[2] ?? "", /Provider failover never replays page actions/);
+  assert.equal(notice?.id, "release-4.60.0");
+  assert.equal(notice?.version, "4.60.0");
+  assert.match(notice?.bullets[0] ?? "", /per-session Xvfb.*x11vnc.*websockify\/noVNC.*PNG fallback/);
+  assert.match(notice?.bullets[1] ?? "", /open-tab frontier.*active tab.*regional pools.*warm readiness.*CDP endpoints/);
+  assert.match(notice?.bullets[2] ?? "", /twenty public sites.*screenshot evidence.*challenge classification.*p50\/p95/);
 });
 
 test("lead campaign preset describes durable, discovery-first work and bounded enrichment", () => {
