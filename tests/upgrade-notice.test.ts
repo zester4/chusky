@@ -210,8 +210,9 @@ test("Treg lead-signal preset describes durable monitoring and external-action b
 test("Treg intelligence preset describes routed discovery, evidence, and spend controls", () => {
   const bullets = getAgentUpgradePreset("tregIntelligence");
   assert.equal(bullets.length, 3);
-  assert.match(bullets[0], /people and company search/);
-  assert.match(bullets[0], /hard per-route cost cap/);
+  assert.match(bullets[0], /read-only Treg research playbooks/);
+  assert.match(bullets[0], /qualified lead enrichment/);
+  assert.match(bullets[0], /buying signals, hiring, technology, and market mapping/);
   assert.match(bullets[1], /verified email/);
   assert.match(bullets[2], /confirmed purchase intent/);
 });
@@ -257,13 +258,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the browser control plane accurately", async () => {
+test("current upgrade manifest announces the Treg research engine accurately", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.57.0");
-  assert.equal(notice?.version, "4.57.0");
-  assert.match(notice?.bullets[0] ?? "", /BrowserSessionManager.*warm-session.*reconnectable leases/);
-  assert.match(notice?.bullets[1] ?? "", /CDP endpoints.*opaque.*encrypted profile.*generation-bound refs/);
-  assert.match(notice?.bullets[2] ?? "", /latency percentiles.*challenge outcomes.*approval-gated or blocked/);
+  assert.equal(notice?.id, "release-4.58.0");
+  assert.equal(notice?.version, "4.58.0");
+  assert.match(notice?.bullets[0] ?? "", /Treg research playbooks.*account research.*buying signals/);
+  assert.match(notice?.bullets[1] ?? "", /Muna.*bounded Treg search.*spend.*pending-call/);
+  assert.match(notice?.bullets[2] ?? "", /Plans make no provider calls.*do not authorize spend/);
 });
 
 test("lead campaign preset describes durable, discovery-first work and bounded enrichment", () => {

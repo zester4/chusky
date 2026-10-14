@@ -538,6 +538,7 @@ Operating Rules:
     domain: "Treg-first business data research, lead discovery and qualification, contact and company enrichment, buyer-signal evidence, market insights, and decision-ready briefs",
     allowedTools: [
       ...SKILL_TOOLS,
+      "CHUCK_TREG_PLAN",
       "CHUCK_TREG_SEARCH",
       "CHUCK_TREG_PEOPLE_SEARCH",
       "CHUCK_TREG_COMPANY_SEARCH",

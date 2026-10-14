@@ -87,6 +87,7 @@ import { appendTraceEvent, compensationView, executeCompensation, listCompensati
 import type { OutcomeCheck } from "./reliability/contracts.js";
 import { diagnoseMissionRepair } from "./reliability/repair.js";
 import { TregGateway } from "./treg/gateway.js";
+import { buildTregPlan } from "./treg/engine.js";
 import { TregSpendGuard } from "./treg/spend.js";
 import { TregOAuth } from "./treg/oauth.js";
 import { MonidGateway } from "./monid/gateway.js";
@@ -1918,6 +1919,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const spend = await getMonidSpend(userId, dayKey);
       return { spend: spend ?? { userId, dayKey, spentUsd: 0, reservedUsd: 0, missionSpent: {}, missionReserved: {}, rateWindowCalls: 0, reservations: {} }, receipts: await listMonidReceipts(userId, args.limit === undefined ? 25 : Number(args.limit), runtime.organizationId) };
     }
+    case "CHUCK_TREG_PLAN": return buildTregPlan({ task: text(args.task, 2_000), playbook: args.playbook === undefined ? undefined : text(args.playbook, 32), budgetUsd: args.budgetUsd === undefined ? undefined : Number(args.budgetUsd) });
     case "CHUCK_TREG_SEARCH": return tregGateway().search(text(args.q, 500), args.limit === undefined ? 8 : Number(args.limit), runtime.organizationId);
     case "CHUCK_TREG_PEOPLE_SEARCH": {
       const missionId = effectiveTregMissionId(args, runtime);

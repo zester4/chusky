@@ -270,6 +270,17 @@ function normalizeCompanySearchRow(row: JsonObject): TregCompanySearchResult {
   };
 }
 
+function canonicalCompanyDomain(value: string | undefined): string | undefined {
+  if (!value?.trim()) return undefined;
+  try {
+    const candidate = value.trim();
+    const url = new URL(candidate.includes("://") ? candidate : `https://${candidate}`);
+    return url.hostname.toLowerCase().replace(/^www\./, "").replace(/\.$/, "") || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeCompanyJobRow(row: JsonObject): TregCompanyJobResult {
   const jobUrl = httpsUrl(row.job_url ?? row.url ?? row.apply_url);
   const urls = sourceUrls(row) ?? (jobUrl ? [jobUrl] : undefined);
@@ -542,7 +553,7 @@ export class TregGateway {
     if (metadata.priceUsd === undefined || metadata.priceUsd < 0) throw new Error("Treg company-search price is unavailable; no provider call was made.");
     const estimatedCostUsd = metadata.priceUnit === "result" || metadata.priceUnit === "row"
       ? metadata.priceUsd * limit
-      : metadata.priceUnit === "call" || metadata.priceUsd === 0
+      : metadata.priceUnit === "call"
         ? metadata.priceUsd
         : undefined;
     if (estimatedCostUsd === undefined || !Number.isFinite(estimatedCostUsd)) throw new Error("Treg company-search price unit is unknown; no provider call was made.");
@@ -553,14 +564,22 @@ export class TregGateway {
     const body = { ...identityBody, ...(country ? { country } : {}), limit };
     const response = await this.call({ userId: options.userId, endpointId: endpoint, method: "POST", body, missionId: options.missionId, organizationId: options.organizationId, endpointMetadata: metadata, estimateUsd: estimatedCostUsd, routeMaxCostUsd: maxSpendUsd, idempotencyKey: options.idempotencyKey });
     const route = routeMetadata(response.result);
-    const companies = resultRows(response.result, ["companies", "results", "items"]).map(normalizeCompanySearchRow);
+    const providerCompanies = resultRows(response.result, ["companies", "results", "items"]).map(normalizeCompanySearchRow);
+    const requestedDomain = canonicalCompanyDomain(options.domain);
+    const identityMismatches = requestedDomain
+      ? providerCompanies.filter((company) => canonicalCompanyDomain(company.domain) !== requestedDomain).length
+      : 0;
+    const companies = requestedDomain
+      ? providerCompanies.filter((company) => canonicalCompanyDomain(company.domain) === requestedDomain)
+      : providerCompanies;
     const warnings = [
       ...(route.pending || response.receipt.pending ? ["Treg is still processing this search. Do not retry it yet; inspect the existing Treg call before starting another search."] : []),
       ...(route.ignoredFilters?.length || response.receipt.ignoredFilters?.length ? [`Treg reports filters it could not apply: ${(route.ignoredFilters ?? response.receipt.ignoredFilters ?? []).join(", ")}. Review returned rows against the requested constraints.`] : []),
+      ...(identityMismatches ? [`Treg returned ${identityMismatches} company record(s) without an exact match to the requested domain; those rows were excluded.`] : []),
       ...(response.receipt.costIsEstimate ? ["No confirmed charge was included; displayed cost is the locally reserved estimate."] : []),
       ...(!companies.length && !route.pending && !response.receipt.pending ? ["No companies matched the routed search inputs."] : []),
     ];
-    return { query, companies, endpoint, callId: response.receipt.callId, ...(route.servedBy || response.receipt.servedBy ? { servedBy: route.servedBy ?? response.receipt.servedBy } : {}), ...((route.tried ?? response.receipt.routeTried)?.length ? { tried: route.tried ?? response.receipt.routeTried } : {}), totalCostUsd: response.receipt.costUsd, warnings, incomplete: route.pending || response.receipt.pending === true || Boolean(route.ignoredFilters?.length || response.receipt.ignoredFilters?.length), generatedAt: new Date().toISOString() };
+    return { query, companies, endpoint, callId: response.receipt.callId, ...(route.servedBy || response.receipt.servedBy ? { servedBy: route.servedBy ?? response.receipt.servedBy } : {}), ...((route.tried ?? response.receipt.routeTried)?.length ? { tried: route.tried ?? response.receipt.routeTried } : {}), totalCostUsd: response.receipt.costUsd, warnings, incomplete: route.pending || response.receipt.pending === true || identityMismatches > 0 || Boolean(route.ignoredFilters?.length || response.receipt.ignoredFilters?.length), generatedAt: new Date().toISOString() };
   }
 
   async searchCompanyJobs(options: { userId: number; name?: string; domain?: string; limit?: number; missionId?: string; maxSpendUsd?: number; organizationId?: string }): Promise<{ query: string; jobs: TregCompanyJobResult[]; endpoint: string; callId: string; servedBy?: string; tried?: string[]; totalCostUsd: number; warnings: string[]; incomplete: boolean; generatedAt: string }> {

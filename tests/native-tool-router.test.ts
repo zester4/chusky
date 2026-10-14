@@ -20,6 +20,7 @@ function tools(): any[] {
     { type: "function", function: { name: "CHUCK_CREATE_PDF", description: "Create a verified PDF report", parameters: { type: "object", properties: {} } } },
     { type: "function", function: { name: "CHUCK_BROWSER", description: "Browse a website, inspect pages, and fill forms", parameters: { type: "object", properties: {} } } },
     { type: "function", function: { name: "CHUCK_SEARCH_MEMORY", description: "Search the owner's saved memory", parameters: { type: "object", properties: {} } } },
+    { type: "function", function: { name: "CHUCK_TREG_PLAN", description: "Plan a bounded Treg research workflow", parameters: { type: "object", properties: {} } } },
     { type: "function", function: { name: "CHUCK_MONID_SEARCH", description: "Search Monid's live catalog for external structured-data/API endpoints, public datasets, census/demographic data, forecasts, social/market feeds, and on-chain data. Use only when existing Chusky tools and Treg leave a capability gap.", parameters: { type: "object", properties: {} } } },
     { type: "function", function: { name: "COMPOSIO_SEARCH_WEB", description: "Search the public web", parameters: { type: "object", properties: {} } } },
   ];
@@ -113,6 +114,15 @@ test("bundle fallback exposes Monid for structured data use cases", async () => 
       const route = await routeNativeToolsForTurn(tools(), query);
       assert.ok(route.tools.some((tool: any) => tool.function.name === "CHUCK_MONID_SEARCH"), `expected Monid for ${query}`);
     }
+  } finally { restore(); }
+});
+
+test("Treg business-intelligence requests discover the read-only research planner", async () => {
+  const restore = withConfig({ nativeToolLoading: "bundle", jevNativeToolRouting: false });
+  try {
+    const route = await routeNativeToolsForTurn(tools(), "Plan a Treg buying-signal and people-research workflow");
+    assert.ok(route.tools.some((tool: any) => tool.function.name === "CHUCK_TREG_PLAN"));
+    assert.ok(searchNativeToolManifest("Treg buying signals runbook", undefined, 10).some((item) => item.slug === "CHUCK_TREG_PLAN"));
   } finally { restore(); }
 });
 

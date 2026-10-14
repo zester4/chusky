@@ -128,7 +128,7 @@ export const AGENT_UPGRADE_PRESETS = {
     "Checks run only when the owner enables the Attention Pulse, require Treg configuration, obey existing spend controls, and never contact leads or write to connected apps.",
   ],
   tregIntelligence: [
-    "Added direct Treg-routed people and company search for live discovery, plus email verification, with bounded result counts, source URLs, provider attribution, and a hard per-route cost cap.",
+    "Added reusable, read-only Treg research playbooks for account research, people discovery, qualified lead enrichment and generation, buying signals, hiring, technology, and market mapping, plus general research; endpoint choices and prices remain discovered live.",
     "People search distinguishes provider-returned email from explicitly verified email and reports ignored filters, pending jobs, and incomplete results; pending calls can be inspected without blind retries.",
     "Lead campaigns can use bounded Treg discovery within their own reserved allowance; signal watches now record new and changed evidence while keeping buying signals separate from confirmed purchase intent.",
   ],

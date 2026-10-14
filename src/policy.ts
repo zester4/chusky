@@ -134,7 +134,7 @@ const APPROVAL_NATIVE_TOOLS = new Set([
 // still enforces account scope, spend reservations, rate limits, and provider
 // availability; this only removes the interactive Chusky approval prompt.
 const TREG_AUTONOMOUS_TOOLS = new Set([
-  "CHUCK_TREG_SEARCH", "CHUCK_TREG_PEOPLE_SEARCH", "CHUCK_TREG_COMPANY_SEARCH", "CHUCK_TREG_COMPANY_JOBS_SEARCH", "CHUCK_TREG_EMAIL_VERIFY", "CHUCK_TREG_CALL_STATUS", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_MY_TOOLS",
+  "CHUCK_TREG_PLAN", "CHUCK_TREG_SEARCH", "CHUCK_TREG_PEOPLE_SEARCH", "CHUCK_TREG_COMPANY_SEARCH", "CHUCK_TREG_COMPANY_JOBS_SEARCH", "CHUCK_TREG_EMAIL_VERIFY", "CHUCK_TREG_CALL_STATUS", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_MY_TOOLS",
   "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE",
   "CHUCK_TREG_BALANCE", "CHUCK_TREG_USAGE", "CHUCK_TREG_OAUTH_STATUS", "CHUCK_TREG_OAUTH_CONNECTIONS",
 ]);
@@ -519,7 +519,7 @@ export function requiresToolApproval(slug: string, args: Record<string, unknown>
 }
 
 export function isReadOnlyToolSlug(slug: string): boolean {
-  if (slug === "CHUCK_ATTENTION_STATE" || slug === "CHUCK_DAYTONA_FILE_DETAILS") return true;
+  if (slug === "CHUCK_ATTENTION_STATE" || slug === "CHUCK_DAYTONA_FILE_DETAILS" || canonicalPolicySlug(slug) === "CHUCK_TREG_PLAN") return true;
   if (MONID_AUTONOMOUS_TOOLS.has(canonicalPolicySlug(slug))) return true;
   if (!slug || RISKY_TOOL_PATTERN.test(slug) || COMPOSIO_WRITE_PATTERN.test(slug) || ADDITIONAL_MUTATING_TOOL_PATTERN.test(slug)) return false;
   return COMPOSIO_READ_ONLY_PATTERN.test(slug);

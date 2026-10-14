@@ -118,7 +118,7 @@ test("routes business workflow objectives to their owning specialists", () => {
 
 test("Muna has bounded Treg and Monid research tools with strict business-data instructions", () => {
   const muna = WORKER_CAPABILITIES.muna;
-  const tregTools = ["CHUCK_TREG_SEARCH", "CHUCK_TREG_PEOPLE_SEARCH", "CHUCK_TREG_COMPANY_SEARCH", "CHUCK_TREG_COMPANY_JOBS_SEARCH", "CHUCK_TREG_EMAIL_VERIFY", "CHUCK_TREG_CALL_STATUS", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE"];
+  const tregTools = ["CHUCK_TREG_PLAN", "CHUCK_TREG_SEARCH", "CHUCK_TREG_PEOPLE_SEARCH", "CHUCK_TREG_COMPANY_SEARCH", "CHUCK_TREG_COMPANY_JOBS_SEARCH", "CHUCK_TREG_EMAIL_VERIFY", "CHUCK_TREG_CALL_STATUS", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE"];
   for (const tool of tregTools) {
     assert.ok(muna.allowedTools.includes(tool), `${tool} must be available to Muna`);
     assert.ok(chuckTools.some((candidate) => candidate.function.name === tool), `${tool} must have a native schema`);

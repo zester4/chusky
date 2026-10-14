@@ -493,6 +493,36 @@ test("TregGateway maps company query to exactly one Treg identity and preflights
   }
 });
 
+test("Treg company search excludes provider rows that do not match an exact requested domain", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
+      recordReceipt: async () => {},
+      fetchImpl: async (url) => {
+        if (url.includes("/catalog/endpoints/")) {
+          return new Response(JSON.stringify({ id: "treg.companies.search", title: "Company search", provider: "treg", price_usd: 0, price_unit: "call" }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ result: { companies: [
+          { name: "HubSpot", domain: "https://www.hubspot.com/company/about" },
+          { name: "LPL Financial Solutions", domain: "https://meetings-na2.hubspot.com/lalexander-lutterodt" },
+        ] } }), { status: 200, headers: { "X-Treg-Call-Id": "call_company_domain_match", "X-Treg-Cost-Micro": "380" } });
+      },
+    });
+
+    const result = await gateway.searchCompanies({ userId: 1, domain: "hubspot.com", limit: 1, maxSpendUsd: 0.1 });
+
+    assert.deepEqual(result.companies.map((company) => company.name), ["HubSpot"]);
+    assert.equal(result.incomplete, true);
+    assert.match(result.warnings.join(" "), /1 company record\(s\).*exact match.*excluded/);
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+  }
+});
+
 test("Treg company search combines identity inputs into one q field and blocks an over-cap estimate", async () => {
   const previous = { enabled: config.tregEnabled, token: config.tregToken };
   config.tregEnabled = true;
@@ -533,6 +563,7 @@ test("Treg company search rejects country-only input and unknown prices before p
   config.tregToken = "test-token";
   let metadataCalls = 0;
   let providerCalls = 0;
+  let metadataPriceUsd = 0.01;
   try {
     const gateway = new TregGateway({
       spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
@@ -540,7 +571,7 @@ test("Treg company search rejects country-only input and unknown prices before p
       fetchImpl: async (url) => {
         if (url.includes("/catalog/endpoints/")) {
           metadataCalls += 1;
-          return new Response(JSON.stringify({ id: "treg.companies.search", title: "Company search", provider: "treg", price_usd: 0.01 }), { status: 200 });
+          return new Response(JSON.stringify({ id: "treg.companies.search", title: "Company search", provider: "treg", price_usd: metadataPriceUsd }), { status: 200 });
         }
         providerCalls += 1;
         return new Response(JSON.stringify({ result: { companies: [] } }), { status: 200 });
@@ -550,6 +581,11 @@ test("Treg company search rejects country-only input and unknown prices before p
     assert.equal(metadataCalls, 0);
     await assert.rejects(gateway.searchCompanies({ userId: 1, query: "B2B SaaS", maxSpendUsd: 0.1 }), /price unit is unknown; no provider call was made/);
     assert.equal(metadataCalls, 1);
+    assert.equal(providerCalls, 0);
+
+    metadataPriceUsd = 0;
+    await assert.rejects(gateway.searchCompanies({ userId: 1, domain: "example.com", maxSpendUsd: 0.1 }), /price unit is unknown; no provider call was made/);
+    assert.equal(metadataCalls, 2, "a zero price with unknown units is also rejected");
     assert.equal(providerCalls, 0);
   } finally {
     config.tregEnabled = previous.enabled;
