@@ -196,6 +196,7 @@ function relevance(query: string, descriptor: NativeToolDescriptor): number {
 function inferredFamily(query: string): NativeToolBundle | undefined {
   const normalized = query.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   if (/\bmonid\b/.test(normalized)) return "monid";
+  if (/\btreg\b|\b(?:buying|buyer|purchase) intent signals?\b|\b(?:company|people|hiring|funding|technology adoption) signals?\b/.test(normalized)) return "intelligence";
   if (/\b(?:verified (?:work )?emails?|business contacts?|target companies|local (?:service )?(?:businesses|prospects?)|company enrichment|company brief|partnership (?:brief|meeting|research)|ai citation visibility|citation counts?|youtube (?:videos?|transcripts?)|video digest|video transcript|videos? (?:are )?outperforming|creator (?:outliers?|performance|baseline)|customer reviews?|review evidence|content opportunities|content improvements?|seo (?:pages?|content|keyword)|keyword (?:evidence|research))\b/.test(normalized)) return "monid";
   if (/\btiny\s*fish\b|\btinyfish\b/.test(normalized)) return "tinyfish";
   if (/\b(?:lead|leads|prospect|prospects|campaign|pipeline|qualification)\b/.test(normalized)) return "autonomy";

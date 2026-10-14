@@ -41,6 +41,13 @@ Telegram, SDK clients, or logs.
 
 ## Chusky tool routing
 
+For broad or multi-step Treg research, use `CHUCK_TREG_PLAN` first. It selects a
+task playbook and returns a runbook, context checklist, discovery queries, and
+evidence checks without calling a provider or authorizing spend. Treat its
+endpoint queries as discovery suggestions: Treg's catalog is dynamic, so use
+the existing tools to inspect current schemas, prices, and coverage before
+execution.
+
 1. Use `CHUCK_TREG_SEARCH` when the owner asks to explore provider coverage or
    when choosing a generic catalog endpoint.
 2. Use `CHUCK_TREG_GET` before a generic paid `CHUCK_TREG_CALL`; inspect price,

@@ -7,11 +7,13 @@ Treg is Chusky’s **external intelligence** path: live third-party catalog data
 
 It is **not** a substitute for Gmail, CRM, Slack, or other owner-connected apps.
 Those actions use **Composio**.
+Hiring may indicate a timing change, but it is not proof of a purchase or confirmed intent.
 
 ## Primary tools
 
 | Tool | Use when |
 |------|----------|
+| `CHUCK_TREG_PLAN` | You need a reusable runbook for broad or multi-step Treg research; it is plan-only and does not call a provider |
 | `CHUCK_TREG_SEARCH` | You need endpoints for a **task** (not a vendor name) |
 | `CHUCK_TREG_PEOPLE_SEARCH` | Discover a bounded set of people from a market, company domain, title, or geography |
 | `CHUCK_TREG_COMPANY_SEARCH` | Discover a bounded set of companies from a market, firmographic, technology, domain, or geography query |
@@ -27,6 +29,11 @@ Those actions use **Composio**.
 | OAuth tools | Only if owner explicitly needs a **Treg-held** provider account |
 
 Prefer **ENRICH_*** and **RESOLVE** over raw CALL for common jobs.
+For multi-step account, people, lead, signal, hiring, technology, or market
+research, call `CHUCK_TREG_PLAN` first and follow its workflow as a checklist.
+The plan is not authority to spend: use current endpoint schemas and prices,
+then execute only through the existing bounded tools or durable campaign/watch
+path.
 For standard discovery, prefer Treg's routed people/company search over picking
 one upstream provider yourself. Use precise filters and small result limits;
 route output can name its provider and any filters it could not apply. Campaign
@@ -36,7 +43,7 @@ one identity input (`query`, `name`, `domain`, `industry`, or `technology`);
 add `country` only as a filter. The gateway checks the routed endpoint's price
 and requested cap before dispatch, so do not call `CHUCK_TREG_SEARCH` or
 `CHUCK_TREG_GET` separately for that same fixed search.
-For company hiring evidence, use `CHUCK_TREG_COMPANY_JOBS_SEARCH` with a specific company name or domain and a small result limit. It uses one fixed routed search with an enforced per-call cost cap; it does not expose arbitrary provider calls. Preserve listing URLs and posting dates where returned. Hiring may indicate a timing change, but it is not proof of a purchase or confirmed intent. An empty result means no listings were returned for those inputs, not that the company is not hiring.
+For company hiring evidence, use `CHUCK_TREG_COMPANY_JOBS_SEARCH` with a specific company name or domain and a small result limit. It uses one fixed routed search with an enforced per-call cost cap; it does not expose arbitrary provider calls. Preserve listing URLs and posting dates where returned. An empty result means no listings were returned for those inputs, not that the company is not hiring.
 When delegated to Muna, `CHUCK_TREG_RESOLVE` inspects catalog endpoint methods
 and skips everything except endpoints explicitly declared `GET`, `HEAD`, or
 `OPTIONS`, with known per-call pricing within budget; it performs at most one

@@ -58,6 +58,7 @@ import { loginWithVault } from "./vault/broker.js";
 import { classifyBrowserIntent, createBrowserOperationPlan, normalizeBrowserAlias, normalizeBrowserOrigin, normalizePlaybook, verifyBrowserResult, type BrowserHandoffReason, type BrowserPlaybookRecord } from "./vault/browserOps.js";
 import { normalizeChallengeProvider, normalizeChallengeType, transitionChallengeState } from "./vault/challengeResolution.js";
 import { cancelShopping, listSavedShoppingSites, listShopping, pauseShopping, removeSavedShoppingSite, resumeShopping, saveShoppingSitePreference, selectShoppingRetailer, startShopping, updateShopping } from "./shopping/shopping.js";
+import { buildSiteEntry } from "./shopping/siteAdapters.js";
 import { cancelAutomaticCalendarMeetingJoins, confirmRecallMeetingParticipant, getRecallMeetingForUser, joinRecallMeeting, joinPreparedCalendarMeeting, leaveRecallMeeting, listRecallMeetingsForUser, listRecallMeetingParticipantsForOwner, lookupRecallMeetingContext, ownerExplicitlyRequestedTranscriptRetention, prepareRecallMeetingMission } from "./meetings/service.js";
 import { hasMeetingMissionInput } from "./meetings/mission.js";
 import { isMeetingRepresentativeEmailTool, needsPrivateMeetingBriefBeforeJoin } from "./meetings/representative.js";
@@ -87,6 +88,7 @@ import type { OutcomeCheck } from "./reliability/contracts.js";
 import { diagnoseMissionRepair } from "./reliability/repair.js";
 import { diagnoseMission } from "./reliability/missionDoctor.js";
 import { TregGateway } from "./treg/gateway.js";
+import { buildTregPlan } from "./treg/engine.js";
 import { TregSpendGuard } from "./treg/spend.js";
 import { TregOAuth } from "./treg/oauth.js";
 import { MonidGateway } from "./monid/gateway.js";
@@ -1919,6 +1921,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const spend = await getMonidSpend(userId, dayKey);
       return { spend: spend ?? { userId, dayKey, spentUsd: 0, reservedUsd: 0, missionSpent: {}, missionReserved: {}, rateWindowCalls: 0, reservations: {} }, receipts: await listMonidReceipts(userId, args.limit === undefined ? 25 : Number(args.limit), runtime.organizationId) };
     }
+    case "CHUCK_TREG_PLAN": return buildTregPlan({ task: text(args.task, 2_000), playbook: args.playbook === undefined ? undefined : text(args.playbook, 32), budgetUsd: args.budgetUsd === undefined ? undefined : Number(args.budgetUsd) });
     case "CHUCK_TREG_SEARCH": return tregGateway().search(text(args.q, 500), args.limit === undefined ? 8 : Number(args.limit), runtime.organizationId);
     case "CHUCK_TREG_PEOPLE_SEARCH": {
       const missionId = effectiveTregMissionId(args, runtime);
@@ -2927,6 +2930,35 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_DAYTONA_CODE": return daytonaCall(runtime, () => daytonaEngine.code(userId, args));
     case "CHUCK_DAYTONA_LSP": return daytonaCall(runtime, () => daytonaEngine.lsp(userId, args));
     case "CHUCK_DAYTONA_GIT": return daytonaCall(runtime, () => daytonaEngine.git(userId, args));
+    case "CHUCK_BROWSER_RETAILER_START": {
+      const entry = buildSiteEntry({
+        site: text(args.site, 120),
+        query: optionalText(args.query, 240, "query"),
+        location: optionalText(args.location, 180, "location"),
+        postcode: optionalText(args.postcode, 40, "postcode"),
+        country: optionalText(args.country, 2, "country"),
+        origin: optionalText(args.origin, 180, "origin"),
+        destination: optionalText(args.destination, 180, "destination"),
+        departureDate: optionalText(args.departureDate, 32, "departureDate"),
+        returnDate: optionalText(args.returnDate, 32, "returnDate"),
+      });
+      const opened = await nativeTool(userId, "CHUCK_BROWSER", { action: "open", url: entry.url, ...(args.sessionId ? { sessionId: args.sessionId } : {}), label: `search ${entry.site}` }, runtime);
+      let bootstrap: unknown;
+      if (entry.steps.length > 0) {
+        bootstrap = await nativeTool(userId, "CHUCK_BROWSER", {
+          action: "agent",
+          ...(args.sessionId ? { sessionId: args.sessionId } : {}),
+          steps: entry.steps,
+          maxSteps: entry.steps.length,
+          maxActions: entry.steps.length,
+          maxDurationMs: 45_000,
+          noProgressLimit: 1,
+          completionAssertions: entry.assertions,
+          label: `bootstrap ${entry.site} search`,
+        }, runtime);
+      }
+      return { action: "retailer_start", entry, opened, ...(bootstrap !== undefined ? { bootstrap } : {}) };
+    }
     case "CHUCK_BROWSER_PLAN": {
       const origin = args.origin ? normalizeBrowserOrigin(text(args.origin)) : undefined;
       const playbook = origin ? await findBrowserPlaybook(userId, origin, args.accountAlias ? normalizeBrowserAlias(args.accountAlias) : "default") : undefined;

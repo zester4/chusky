@@ -1,11 +1,11 @@
 {
-  "id": "release-4.57.0",
-  "version": "4.57.0",
+  "id": "release-4.58.0",
+  "version": "4.58.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added a provider-neutral BrowserSessionManager with warm-session scheduling, preferred-region placement, bounded owner concurrency, reconnectable leases, and adapters for E2B, Kernel, Playwright, or Agent Browser.",
-    "Provider CDP endpoints stay inside trusted adapters behind opaque owner-bound broker tickets; encrypted profile envelopes and generation-bound refs prevent cross-account state leakage and stale DOM actions.",
-    "Browser attach, reconnect, action, and challenge telemetry now exposes bounded latency percentiles, failure rates, and challenge outcomes, while one shared policy evaluator keeps high-impact browser actions approval-gated or blocked."
+    "Added reusable Treg research playbooks for account research, people discovery, qualified lead generation, buying signals, hiring, technology, market mapping, and general research; providers and prices are discovered live.",
+    "Chusky routes these playbooks through Muna and bounded Treg search, enrichment, source, spend, pending-call, and durable workflow controls.",
+    "Plans make no provider calls and do not authorize spend; identity matching, source quality, privacy, and outreach boundaries remain active."
   ],
-  "createdAt": "2026-10-13T15:12:13.719Z"
+  "createdAt": "2026-10-14T01:14:17.171Z"
 }
