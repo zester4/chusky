@@ -126,14 +126,15 @@ export function splitSessionDomains(session: UserSession, separateSdkRuns = fals
 function object(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 
 /** Rehydrate a normal UserSession only when all canonical Neon documents exist. */
-export function joinSessionDomains(core: UserSession, documents: ReadonlyMap<DurableSessionDomain, unknown>): UserSession {
-  const missingDomains = DURABLE_SESSION_DOMAINS.filter((domain) => !documents.has(domain));
+export function joinSessionDomains(core: UserSession, documents: ReadonlyMap<DurableSessionDomain, unknown>, includeSdkTables = true): UserSession {
+  const requiredDomains = includeSdkTables ? DURABLE_SESSION_DOMAINS : DURABLE_SESSION_DOMAINS.filter((domain) => domain !== "sdk");
+  const missingDomains = requiredDomains.filter((domain) => !documents.has(domain));
   if (missingDomains.length) throw new DurableSessionDocumentsIncompleteError(missingDomains);
   const conversation = object(documents.get("conversation"));
   const profile = object(documents.get("profile"));
   const memories = object(documents.get("memories"));
   const assets = object(documents.get("assets"));
-  const sdk = object(documents.get("sdk"));
+  const sdk = includeSdkTables ? object(documents.get("sdk")) : {};
   const { durableSessionFormat: _marker, ...session } = core as SessionWithDurableMarker;
   return {
     ...session,
@@ -152,10 +153,12 @@ export function joinSessionDomains(core: UserSession, documents: ReadonlyMap<Dur
     sdkFiles: Array.isArray(assets.sdkFiles) ? assets.sdkFiles as SdkFileRecord[] : [],
     artifacts: Array.isArray(assets.artifacts) ? assets.artifacts as ArtifactRecord[] : [],
     artifactRegistrationIntents: Array.isArray(assets.artifactRegistrationIntents) ? assets.artifactRegistrationIntents as UserSession["artifactRegistrationIntents"] : [],
-    sdkThreads: Array.isArray(sdk.sdkThreads) ? sdk.sdkThreads as SdkThreadRecord[] : [],
-    sdkIdempotency: object(sdk.sdkIdempotency) as UserSession["sdkIdempotency"],
-    sdkAudit: Array.isArray(sdk.sdkAudit) ? sdk.sdkAudit as UserSession["sdkAudit"] : [],
-    sdkWebhooks: Array.isArray(sdk.sdkWebhooks) ? sdk.sdkWebhooks as UserSession["sdkWebhooks"] : [],
-    sdkProjects: Array.isArray(sdk.sdkProjects) ? sdk.sdkProjects as UserSession["sdkProjects"] : [],
+    ...(includeSdkTables ? {
+      sdkThreads: Array.isArray(sdk.sdkThreads) ? sdk.sdkThreads as SdkThreadRecord[] : [],
+      sdkIdempotency: object(sdk.sdkIdempotency) as UserSession["sdkIdempotency"],
+      sdkAudit: Array.isArray(sdk.sdkAudit) ? sdk.sdkAudit as UserSession["sdkAudit"] : [],
+      sdkWebhooks: Array.isArray(sdk.sdkWebhooks) ? sdk.sdkWebhooks as UserSession["sdkWebhooks"] : [],
+      sdkProjects: Array.isArray(sdk.sdkProjects) ? sdk.sdkProjects as UserSession["sdkProjects"] : [],
+    } : {}),
   };
 }

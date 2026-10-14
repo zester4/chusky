@@ -70,6 +70,15 @@ test("SDK usage returns owner-scoped counters and rejects invalid aggregates", a
   await assert.rejects(() => state.readSdkRunUsage(42), /invalid counts/);
 });
 
+test("Neon session-domain reads can be narrowed to only the requested domains", async () => {
+  const pool = new FakePool();
+  const state = new NeonDurableState(pool as never);
+  await state.readSessionDomains(42, ["profile", "assets"]);
+  const read = pool.calls.at(-1)!;
+  assert.match(read.text, /domain = ANY\(\$2::text\[\]\)/);
+  assert.deepEqual(read.values, [42, ["profile", "assets"]]);
+});
+
 function session(): UserSession {
   const now = Date.now();
   return {

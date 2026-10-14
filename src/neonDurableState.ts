@@ -1039,11 +1039,14 @@ export class NeonDurableState {
     await this.measuredQuery(this.database, "SELECT instance_id, batch_id, query_hash, query_family, observed_at, commands, errors, request_bytes, response_bytes, duration_ms, max_value_bytes FROM chusky_query_metric_sample LIMIT 0");
   }
 
-  async readSessionDomains(userId: number): Promise<Map<DurableSessionDomain, DurableSessionDocument>> {
+  async readSessionDomains(userId: number, requestedDomains: readonly DurableSessionDomain[] = DURABLE_SESSION_DOMAINS): Promise<Map<DurableSessionDomain, DurableSessionDocument>> {
     assertUserId(userId);
+    const domains = [...new Set(requestedDomains)];
+    if (domains.some((domain) => !DOMAIN_SET.has(domain))) throw new Error("A durable session read contains an unknown domain.");
+    if (!domains.length) return new Map();
     const result = await this.measuredQuery<SessionRow>(this.database,
       "SELECT domain, payload, version, updated_at FROM chusky_session_domain WHERE user_id = $1 AND domain = ANY($2::text[])",
-      [userId, DURABLE_SESSION_DOMAINS],
+      [userId, domains],
     );
     for (const row of result.rows) {
       const bytes = Buffer.byteLength(JSON.stringify(row.payload), "utf8");
@@ -1272,6 +1275,8 @@ export class NeonDurableState {
       throw new Error("A durable session write contains an unknown domain.");
     }
     const versions = new Map<DurableSessionDomain, number>();
+    const hasSdkTableChanges = Boolean(sdkTableChanges && (sdkTableChanges.threads.length || sdkTableChanges.deletedThreadIds.length || sdkTableChanges.audit.length || sdkTableChanges.idempotency.length));
+    if (!documents.size && !sdkRuns.length && !hasSdkTableChanges) return versions;
     let writtenBytes = 0;
     const client = await this.database.connect();
     try {
