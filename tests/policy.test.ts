@@ -250,13 +250,14 @@ test("provider metadata classifies dynamic Composio tools before heuristic fallb
 });
 
 test("verified triggers autonomously execute routine writes across toolkits and pause only for critical actions", () => {
-  for (const slug of ["ASHBY_CREATE_APPLICATION_NOTE", "MYSTERY_UPDATE_RECORD", "GMAIL_SEND_EMAIL", "SLACK_POST_MESSAGE", "GOOGLECALENDAR_CREATE_EVENT", "SLACK_INVITE_USER", "NEWSLETTER_UNSUBSCRIBE"]) {
+  for (const slug of ["ASHBY_CREATE_APPLICATION_NOTE", "MYSTERY_UPDATE_RECORD", "GMAIL_SEND_EMAIL", "SLACK_POST_MESSAGE", "GOOGLECALENDAR_CREATE_EVENT", "NEWSLETTER_UNSUBSCRIBE"]) {
     assert.equal(requiresToolApproval(slug, {}, false, false, true), false, `${slug} is routine trigger work`);
   }
   for (const [slug, args] of [
     ["GMAIL_DELETE_MESSAGE", {}],
     ["STRIPE_CREATE_REFUND", {}],
     ["AWS_UPDATE_PERMISSION", {}],
+    ["SLACK_INVITE_USER", {}],
     ["VERCEL_DEPLOY_PROJECT", {}],
     ["COMPOSIO_EXECUTE_TOOL", { tool_slug: "ASHBY_DELETE_APPLICATION", arguments: { application_id: "app_1" } }],
     ["COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "SLACK_POST_MESSAGE", arguments: {} }, { tool_slug: "STRIPE_CREATE_REFUND", arguments: {} }] }],

@@ -23,20 +23,18 @@ test("exhausted trigger workflow makes an unsaved run visibly failed without exp
 });
 
 test("default trigger policy requires end-to-end execution and provider-specific handling", () => {
-  assert.match(TRIGGER_DEFAULT_HANDLING, /standing instruction to handle every matching event/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /Do not substitute a summary for execution/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /complete routine, in-scope work now/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /verify each provider write with a provider receipt or a read-back/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /Email: read the full triggering message and relevant thread/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /send the answer; do not leave a draft solely because the message is personal/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /An enabled trigger assigns you the matching event/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /A notification or summary alone is not completion/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /answer a clear ordinary email question.*send the reply/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /do not stop at a draft/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /routine Slack conversations, CRM updates, scheduling, and other provider events/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /provider receipt or read the changed record/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /starts with "Action taken:"/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /Slack and other messaging: read the originating conversation and thread/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /Ashby applications: inspect the complete application, answers, resume/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /Pause only before a refund, deletion, or a critical decision/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /Never return NO_ACTION/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /at most six short bullets/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /how completed work was verified/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /Do not paste the provider message/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /not by quoting internal rules or narrating policy/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /Never return NO_ACTION for a verified trigger/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /<example>.*A sender asks a clear, routine question/s);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /<example>.*A promotional newsletter arrives/s);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /<example>.*material financial or otherwise critical decision/s);
 });
 
 test("trigger Telegram heading uses Markdown that renders as bold HTML", () => {

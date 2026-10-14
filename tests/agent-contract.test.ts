@@ -64,11 +64,11 @@ test("preview links are included exactly once even when the model omits them", (
 test("verified triggers receive executor framing while ordinary conversations do not", () => {
   assert.equal(triggerAutonomyInstructions(undefined), undefined);
   const instructions = triggerAutonomyInstructions("evt_trigger_1");
-  assert.match(instructions ?? "", /AUTONOMOUS TRIGGER EXECUTION/);
-  assert.match(instructions ?? "", /standing trigger policy authorizes routine business handling/i);
-  assert.match(instructions ?? "", /Complete the routine business action/i);
-  assert.match(instructions ?? "", /Pause only for refunds, deletion, or a critical decision/i);
-  assert.match(instructions ?? "", /provider receipt or read-back/i);
+  assert.match(instructions ?? "", /TRIGGER HANDLING/);
+  assert.match(instructions ?? "", /An enabled trigger assigns you the matching event/i);
+  assert.match(instructions ?? "", /answer a clear ordinary email question.*send the reply/i);
+  assert.match(instructions ?? "", /existing approval boundary/i);
+  assert.match(instructions ?? "", /provider receipt or read the changed record/i);
   assert.doesNotMatch(instructions ?? "", /return exactly NO_ACTION/i);
 });
 
@@ -129,7 +129,7 @@ test("verified trigger runs execute an unfamiliar toolkit write and pause a refu
     assert.match(result.text, /added and verified/i);
     assert.deepEqual(executed, ["ASHBY_CREATE_APPLICATION_NOTE"], "ordinary writes from a new toolkit execute during trigger handling");
     assert.equal(executionOptions[0]?.account, "ca_ashby", "source-toolkit writes are bound to the verified originating account");
-    assert.match(String(requests[0]?.messages?.[0]?.content), /AUTONOMOUS TRIGGER EXECUTION/);
+    assert.match(String(requests[0]?.messages?.[0]?.content), /TRIGGER HANDLING/);
 
     nextSlug = "STRIPE_CREATE_REFUND";
     nextArgs = { charge_id: "ch_123" };
