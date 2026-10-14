@@ -2,7 +2,7 @@ import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import { nativeTool } from "../src/nativeTools.js";
 import { validateNativeToolArguments } from "../src/agentTools.js";
-import { createMission, initStore, startMission } from "../src/store.js";
+import { createMission, getMission, initStore, startMission, updateMission } from "../src/store.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
 
@@ -23,6 +23,30 @@ test("mission native tools honor their published long-text limits", async () => 
 
   assert.equal(updated.checkpoint, checkpoint);
   assert.equal(updated.nextAction, nextAction);
+});
+
+test("mission doctor returns owner-scoped runtime diagnosis without changing mission state", async () => {
+  const userId = 951110;
+  const mission = await createMission(userId, {
+    title: "Diagnose stale wait",
+    objective: "Find why a durable wait cannot resume.",
+    definitionOfDone: "The runtime mismatch is identified without changing the mission.",
+    steps: [{ id: "active", title: "Resume check", objective: "Continue after the timer" }],
+  });
+  await startMission(userId, mission.id);
+  await updateMission(userId, mission.id, {
+    status: "waiting",
+    waiting: { kind: "timer", runAt: Date.now() + 60_000, stepId: "missing-step" },
+  });
+
+  const report = await nativeTool(userId, "CHUCK_MISSION_DOCTOR", { id: mission.id }) as { missionId: string; health: string; reasons: string[]; nextActions: string[] };
+  assert.equal(report.missionId, mission.id);
+  assert.equal(report.health, "stalled");
+  assert.ok(report.reasons.includes("mission_wait_step_mismatch"));
+  assert.ok(report.nextActions.some((action) => /repair the saved wait continuation/i.test(action)));
+  assert.equal((await getMission(userId, mission.id))?.status, "waiting");
+  await assert.rejects(nativeTool(userId + 1, "CHUCK_MISSION_DOCTOR", { id: mission.id }), /not found or not owned/);
+  assert.equal((await getMission(userId, mission.id))?.status, "waiting");
 });
 
 test("mission start accepts its published objective and step text limits", async () => {

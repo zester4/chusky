@@ -241,7 +241,7 @@ test("existing-mission recovery exposes lifecycle controls but suppresses missio
   const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["native"]), jevNativeToolRouting: true, jevNativeToolMaxCandidates: 12, jevNativeToolMinConfidence: 0.5, jevNativeToolMinProbability: 0.1 });
   try {
     const missionTools = [
-      "CHUCK_MISSION_START", "CHUCK_MISSION_LIST", "CHUCK_MISSION_GET", "CHUCK_MISSION_PROOF",
+      "CHUCK_MISSION_START", "CHUCK_MISSION_LIST", "CHUCK_MISSION_GET", "CHUCK_MISSION_PROOF", "CHUCK_MISSION_DOCTOR",
       "CHUCK_MISSION_CHECKPOINT", "CHUCK_MISSION_WAIT_EVENT", "CHUCK_MISSION_STEP_COMPLETE",
       "CHUCK_MISSION_REPLAN", "CHUCK_MISSION_PAUSE", "CHUCK_MISSION_RESUME",
       "CHUCK_MISSION_CANCEL", "CHUCK_MISSION_BLOCK", "CHUCK_MISSION_COMPLETE",
@@ -263,11 +263,12 @@ test("existing-mission recovery exposes lifecycle controls but suppresses missio
 test("mission controls are not added to unrelated enforce-mode turns", async () => {
   const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["native"]), jevNativeToolRouting: true, jevNativeToolMaxCandidates: 12, jevNativeToolMinConfidence: 0.5, jevNativeToolMinProbability: 0.1 });
   try {
-    const missionTools = ["CHUCK_MISSION_START", "CHUCK_MISSION_RESUME"].map((name) => ({ type: "function", function: { name, description: `${name.replaceAll("_", " ")} durable mission control`, parameters: { type: "object", properties: {} } } }));
+    const missionTools = ["CHUCK_MISSION_START", "CHUCK_MISSION_RESUME", "CHUCK_MISSION_DOCTOR"].map((name) => ({ type: "function", function: { name, description: `${name.replaceAll("_", " ")} durable mission control`, parameters: { type: "object", properties: {} } } }));
     const route = await computeNativeToolRoute("Create a PDF report", [...tools(), ...missionTools], { client: new JevClient({ apiKey: "k", fetchImpl: chooseRequestedTool() }) });
     const names = route.tools.map((tool: any) => tool.function.name);
     assert.ok(!names.includes("CHUCK_MISSION_START"));
     assert.ok(!names.includes("CHUCK_MISSION_RESUME"));
+    assert.ok(!names.includes("CHUCK_MISSION_DOCTOR"));
   } finally { restore(); }
 });
 

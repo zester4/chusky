@@ -350,6 +350,11 @@ At minimum, cover:
 10. cross-channel parity for list, inspect, pause, resume, cancel, and failure.
 
 When diagnosing a production mission, start with the owner-scoped mission ID.
+In interactive agent turns, `CHUCK_MISSION_DOCTOR` returns the same bounded,
+read-only runtime diagnosis as the dashboard/API, including wait mismatch,
+worker lease, task failure, and budget signals. Pair it with
+`CHUCK_MISSION_GET` or `CHUCK_MISSION_PROOF` for persisted mission detail; the
+doctor never repairs or resumes work.
 Inspect status, `waiting`, `checkpoint`, `nextAction`, active step IDs, linked
 task IDs, task lease/workflow IDs, version, budget counters, and recent events.
 Then inspect the QStash/Upstash workflow run and durable outbox receipt. Never
