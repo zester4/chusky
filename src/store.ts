@@ -5,7 +5,7 @@
 import Redis from "ioredis";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { config } from "./config.js";
-import { stableSdkUserId } from "./sdkIdentity.js";
+import { canonicalSdkFingerprint, stableSdkUserId } from "./sdkIdentity.js";
 import { withDistributedLease } from "./distributedLease.js";
 import { createNeonDurableState, durableSdkRunHash, DURABLE_SESSION_DOMAINS, type DurableConversationMessage, type DurableMissionEvent, type DurableMissionRecord, type DurableObjectMetadata, type DurableSessionDocument, type DurableSessionDomain, type DurableStateStatus, type DurableSdkTableChanges, type DurableSdkTableState, type NeonDurableState } from "./neonDurableState.js";
 import { archiveRecallTranscriptSegment, deleteRecallTranscriptArchive, getArchivedRecallTranscriptSegment, listArchivedRecallTranscriptSegments, recallTranscriptMeetingHash, updateRecallTranscriptArchiveExpiry as updateArchivedRecallExpiry, type RecallTranscriptArchiveDependencies } from "./recallTranscriptArchive.js";
@@ -190,7 +190,7 @@ function compactSdkIdempotency(value: unknown): Record<string, { fingerprint: st
     if (!record || typeof record !== "object" || Array.isArray(record)) return [];
     const item = record as { fingerprint?: unknown; response?: unknown; createdAt?: unknown };
     if (typeof item.fingerprint !== "string" || typeof item.createdAt !== "number" || !Number.isFinite(item.createdAt)) return [];
-    return [[key, { fingerprint: item.fingerprint.slice(0, 200), response: compactReplayValue(item.response), createdAt: Number(item.createdAt) }]];
+    return [[key, { fingerprint: canonicalSdkFingerprint(item.fingerprint), response: compactReplayValue(item.response), createdAt: Number(item.createdAt) }]];
   }));
 }
 
@@ -2421,6 +2421,7 @@ class RedisBackend implements Backend {
         // from attempting to insert the same legacy runs twice.
         const session = await this.getSession(userId);
         if (document || session.sdkThreads?.length || session.sdkAudit?.length || Object.keys(session.sdkIdempotency ?? {}).length) {
+          compactSessionPersistence(session);
           await this.saveSession(userId, session);
           await this.invalidateSdkTableCaches(userId);
         }
@@ -6066,6 +6067,7 @@ export async function getSdkIdempotency(uid: number, key: string): Promise<{ fin
 }
 
 export async function saveSdkIdempotency(uid: number, key: string, fingerprint: string, response: unknown): Promise<void> {
+  fingerprint = canonicalSdkFingerprint(fingerprint);
   if (!key || key.length > 255 || !/^[a-f0-9]{32,128}$/.test(fingerprint)) throw new Error("SDK idempotency record is invalid.");
   return backend.saveSdkIdempotency(uid, key, fingerprint, response);
 }

@@ -5,7 +5,7 @@ import { Readable } from "node:stream";
 import { cors } from "hono/cors";
 import { routePath } from "hono/route";
 import { config } from "./config.js";
-import { stableSdkUserId } from "./sdkIdentity.js";
+import { canonicalSdkFingerprint, stableSdkUserId } from "./sdkIdentity.js";
 import { withNeonQueryMetricRoute, type DurableObjectMetadata } from "./neonDurableState.js";
 import { promoteSdkFileUpload } from "./sdkFilePromotion.js";
 import { getAuth } from "./auth.js";
@@ -1387,7 +1387,7 @@ function idempotency(c: any, session: Awaited<ReturnType<typeof getSession>>, fi
   session.sdkIdempotency = Object.fromEntries(entries);
   const key = (c.req.header("Idempotency-Key") ?? "").trim().slice(0, 255); if (!key) return {};
   const existing = session.sdkIdempotency?.[key]; if (!existing) return { key };
-  return existing.fingerprint === fingerprint ? { replay: existing.response } : { mismatch: true };
+  return canonicalSdkFingerprint(existing.fingerprint) === canonicalSdkFingerprint(fingerprint) ? { replay: existing.response } : { mismatch: true };
 }
 
 /** Persist an idempotency result without saving a caller's stale session snapshot. */
@@ -1400,7 +1400,7 @@ async function sdkIdempotency(c: any, userId: number, fingerprint: string): Prom
   if (!key) return {};
   const existing = await getSdkIdempotency(userId, key);
   if (!existing) return { key };
-  return existing.fingerprint === fingerprint ? { replay: existing.response } : { mismatch: true };
+  return canonicalSdkFingerprint(existing.fingerprint) === canonicalSdkFingerprint(fingerprint) ? { replay: existing.response } : { mismatch: true };
 }
 
 /** Apply an owner-scoped SDK mutation with a durable 24-hour replay record. */

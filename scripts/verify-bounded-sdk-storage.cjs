@@ -35,7 +35,7 @@ async function main() {
     history: [{ role: 'user', content: 'legacy history' }],
     runs: [{ id: runId, status: 'completed', events: [], createdAt: now, updatedAt: now }], createdAt: now, updatedAt: now }];
   session.sdkAudit = [{ id: `audit_${randomUUID()}`, action: 'verification', requestId: 'synthetic', status: 200, at: now }];
-  session.sdkIdempotency = { legacy: { fingerprint: 'a'.repeat(64), response: { ok: true }, createdAt: now } };
+  session.sdkIdempotency = { legacy: { fingerprint: 'POST:/v1/reminders:{"text":"synthetic"}', response: { ok: true }, createdAt: now } };
   const legacy = splitSessionDomains(session, false, false);
   await state.writeSessionDomains(owner, legacy.domains);
   await redis.set(keys[0], JSON.stringify(legacy.core), 'EX', 600);
