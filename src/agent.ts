@@ -83,7 +83,7 @@ import { createComposioOutcomeReadAdapter } from "./reliability/composioReadAdap
 import { browserRunHasProgress, browserRunProgressMarker } from "./lib/e2b/runProgress.js";
 import { executeOutcomeVerification, type OutcomeReadAdapter } from "./reliability/outcomeEngine.js";
 import type { OutcomeCheck } from "./reliability/contracts.js";
-import { buildComposioBatchActions, collectComposioToolPresentations, composioToolkitSlugsNeedingMetadata, enrichComposioToolPresentationsFromToolkits, settleComposioBatchActions, successfulComposioBatchActions, type ComposioBatchAction, type ComposioToolPresentation } from "./toolActivity.js";
+import { buildComposioBatchActions, collectComposioToolPresentations, composioActivityActionLabel, composioToolkitSlugsNeedingMetadata, enrichComposioToolPresentationsFromToolkits, settleComposioBatchActions, successfulComposioBatchActions, type ComposioBatchAction, type ComposioToolPresentation } from "./toolActivity.js";
 import { MISSION_WORKER_CONTROL_TOOLS } from "./missionWorker.js";
 import { ELENA_DISABLED_PROMPT } from "./proactive/featureFlag.js";
 
@@ -2273,6 +2273,29 @@ function toolPresentationActivityFields(presentation?: ComposioToolPresentation)
   };
 }
 
+function presentationForActivityCall(
+  toolSlug: string,
+  args: Record<string, unknown> | undefined,
+  presentations: ReadonlyMap<string, ComposioToolPresentation>,
+): ComposioToolPresentation | undefined {
+  const direct = presentations.get(toolSlug);
+  if (direct) return direct;
+  if (toolSlug !== "COMPOSIO_EXECUTE_TOOL" || !args) return undefined;
+  const nestedToolSlug = args.tool_slug ?? args.toolSlug ?? args.slug;
+  if (typeof nestedToolSlug !== "string") return undefined;
+  const nestedSlug = nestedToolSlug.trim().toUpperCase();
+  return /^[A-Z][A-Z0-9_]{1,199}$/.test(nestedSlug) ? presentations.get(nestedSlug) : undefined;
+}
+
+function composioActivityLabelForCall(
+  toolSlug: string,
+  args: Record<string, unknown> | undefined,
+  presentations: ReadonlyMap<string, ComposioToolPresentation>,
+): string | undefined {
+  if (!toolSlug.startsWith("COMPOSIO_") && !presentations.has(toolSlug)) return undefined;
+  return composioActivityActionLabel(toolSlug, args, presentations);
+}
+
 async function enrichComposioToolPresentations(
   composioClient: any,
   presentations: Map<string, ComposioToolPresentation>,
@@ -3396,12 +3419,26 @@ export async function runAgent(
 
       if (onStatus) await onStatus(toolStatus(slug));
       const toolStartedAt = Date.now();
-      let activityMessage = toolStatus(slug).slice(0, 4000);
-      let activityPresentation: ComposioToolPresentation | undefined;
-      let batchActivityActions: ComposioBatchAction[] = [];
-      await reportToolActivity({ toolSlug: slug, callId: call.id, status: "started", message: activityMessage });
       let auditArgs: Record<string, unknown> | undefined;
       try { auditArgs = parseToolArguments(call.function.arguments); } catch { /* malformed provider args are logged by shape only */ }
+      // Seed the durable activity row with the exact provider/action metadata
+      // already present in the exposed tool catalog. The old flow emitted a
+      // generic status first and only enriched it after argument parsing,
+      // which made clients briefly (or permanently, after a missed event)
+      // render “I’m taking care of that…” instead of the real action.
+      let activityPresentation: ComposioToolPresentation | undefined = presentationForActivityCall(slug, auditArgs, composioToolPresentations);
+      let activityActionLabel = composioActivityLabelForCall(slug, auditArgs, composioToolPresentations)
+        ?? (slug.startsWith("COMPOSIO_") ? "Connected app action" : undefined);
+      let activityMessage = (activityActionLabel ?? toolStatus(slug)).slice(0, 4000);
+      let batchActivityActions: ComposioBatchAction[] = [];
+      await reportToolActivity({
+        toolSlug: slug,
+        callId: call.id,
+        status: "started",
+        message: activityMessage,
+        ...toolPresentationActivityFields(activityPresentation),
+        ...(activityActionLabel ? { actionLabel: activityActionLabel } : {}),
+      });
       logger.debug(safeToolAudit({ tool: slug, args: auditArgs, userId, runId: options?.runId, startedAt: toolStartedAt, status: "started" }), "Tool call");
       await persistRun("running", "run.tool_started", undefined, { tool: slug, callId: call.id, round });
 
@@ -3468,7 +3505,7 @@ export async function runAgent(
           removeStaleBrowserVisualContext(messages);
           pendingBrowserVisualContextMessage = undefined;
         }
-        activityPresentation = composioToolPresentations.get(slug);
+        activityPresentation = presentationForActivityCall(slug, args, composioToolPresentations);
         if (!slug.startsWith("COMPOSIO_") && activityPresentation) {
           await enrichComposioToolPresentations(composio, composioToolPresentations, signal);
           activityPresentation = composioToolPresentations.get(slug);
@@ -3478,11 +3515,15 @@ export async function runAgent(
           batchActivityActions = buildComposioBatchActions(args, call.id, composioToolPresentations);
           if (batchActivityActions.length) {
             activityMessage = `Carrying out ${batchActivityActions.length} independent actions in parallel`;
+            activityActionLabel = activityMessage;
             await reportToolActivity({ toolSlug: slug, callId: call.id, status: "started", message: activityMessage, actionLabel: activityMessage, batchActions: batchActivityActions });
           }
-        } else if (activityPresentation?.actionLabel) {
-          activityMessage = activityPresentation.actionLabel;
-          await reportToolActivity({ toolSlug: slug, callId: call.id, status: "started", message: activityMessage, ...toolPresentationActivityFields(activityPresentation) });
+        } else {
+          activityActionLabel = composioActivityLabelForCall(slug, args, composioToolPresentations) ?? activityActionLabel;
+          if (activityActionLabel) {
+            activityMessage = activityActionLabel;
+            await reportToolActivity({ toolSlug: slug, callId: call.id, status: "started", message: activityMessage, ...toolPresentationActivityFields(activityPresentation), actionLabel: activityActionLabel });
+          }
         }
         // A malformed provider payload was never a real tool attempt. Do not
         // charge it against the user's bounded execution budget.
@@ -4078,17 +4119,17 @@ export async function runAgent(
         if (e instanceof MissionDurationApprovalRequiredError) {
           const approval = new ApprovalRequiredError(e.approvalId, "CHUCK_MISSION_RESUME", e.args);
           batchActivityActions = batchActivityActions.map((action) => ({ ...action, status: "approval_required", summary: "Waiting for approval before this mission can continue" }));
-          await reportToolActivity({ toolSlug: slug, callId: call.id, status: "approval_required", message: activityMessage, ...toolPresentationActivityFields(activityPresentation), ...(batchActivityActions.length ? { batchActions: batchActivityActions } : {}), durationMs: Math.max(0, Date.now() - toolStartedAt) });
+          await reportToolActivity({ toolSlug: slug, callId: call.id, status: "approval_required", message: activityMessage, ...toolPresentationActivityFields(activityPresentation), ...(activityActionLabel ? { actionLabel: activityActionLabel } : {}), ...(batchActivityActions.length ? { batchActions: batchActivityActions } : {}), durationMs: Math.max(0, Date.now() - toolStartedAt) });
           throw approval;
         }
         if (e instanceof ApprovalRequiredError) {
           batchActivityActions = batchActivityActions.map((action) => ({ ...action, status: "approval_required", summary: "Waiting for approval before this batch can run" }));
-          await reportToolActivity({ toolSlug: slug, callId: call.id, status: "approval_required", message: activityMessage, ...toolPresentationActivityFields(activityPresentation), ...(batchActivityActions.length ? { batchActions: batchActivityActions } : {}), durationMs: Math.max(0, Date.now() - toolStartedAt) });
+          await reportToolActivity({ toolSlug: slug, callId: call.id, status: "approval_required", message: activityMessage, ...toolPresentationActivityFields(activityPresentation), ...(activityActionLabel ? { actionLabel: activityActionLabel } : {}), ...(batchActivityActions.length ? { batchActions: batchActivityActions } : {}), durationMs: Math.max(0, Date.now() - toolStartedAt) });
           throw e;
         }
         if (signal?.aborted || (e instanceof DOMException && e.name === "AbortError")) {
           batchActivityActions = batchActivityActions.map((action) => ({ ...action, status: "unknown", summary: "Batch was interrupted; provider outcomes may be partial" }));
-          await reportToolActivity({ toolSlug: slug, callId: call.id, status: "cancelled", message: activityMessage, ...toolPresentationActivityFields(activityPresentation), ...(batchActivityActions.length ? { batchActions: batchActivityActions } : {}), durationMs: Math.max(0, Date.now() - toolStartedAt) });
+          await reportToolActivity({ toolSlug: slug, callId: call.id, status: "cancelled", message: activityMessage, ...toolPresentationActivityFields(activityPresentation), ...(activityActionLabel ? { actionLabel: activityActionLabel } : {}), ...(batchActivityActions.length ? { batchActions: batchActivityActions } : {}), durationMs: Math.max(0, Date.now() - toolStartedAt) });
           throw e;
         }
         if (externalClaim?.state === "new") await failExternalAction(userId, externalClaim.logicalActionId, e instanceof Error ? e.message : String(e)).catch(() => undefined);
@@ -4148,6 +4189,7 @@ export async function runAgent(
         status: toolFailed ? "failed" : "completed",
         message: activityMessage,
         ...toolPresentationActivityFields(activityPresentation),
+        ...(activityActionLabel ? { actionLabel: activityActionLabel } : {}),
         ...(batchActivityActions.length ? {
           batchActions: toolFailed
             ? settleComposioBatchActions(batchActivityActions, undefined, "Batch failed; individual action outcomes were not confirmed")

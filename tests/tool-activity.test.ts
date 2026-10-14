@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildComposioBatchActions, collectComposioToolPresentations, correlateComposioBatchOutcomes, enrichComposioToolPresentationsFromToolkits, settleComposioBatchActions, successfulComposioBatchActions } from "../src/toolActivity.js";
+import { buildComposioBatchActions, collectComposioToolPresentations, composioActivityActionLabel, correlateComposioBatchOutcomes, enrichComposioToolPresentationsFromToolkits, settleComposioBatchActions, successfulComposioBatchActions } from "../src/toolActivity.js";
 
 test("extracts explicit, safe app metadata from nested Composio discovery output", () => {
   const metadata = collectComposioToolPresentations({ data: { tools: [{ tool_slug: "GMAIL_SEARCH_EMAILS", name: "Search emails", human_description: "Find matching messages", toolkit: { slug: "gmail", name: "Gmail", logo: "https://assets.example/gmail.svg" }, arguments: { query: "private search" } }] } });
@@ -48,15 +48,22 @@ test("reads toolkit slugs from Composio search schemas and enriches them from to
 test("creates bounded parallel action rows without copying their arguments", () => {
   const metadata = collectComposioToolPresentations({ tools: [{ tool_slug: "GMAIL_SEARCH_EMAILS", name: "Search messages", toolkit: { slug: "gmail", name: "Gmail", logo: "https://assets.example/gmail.svg" } }] });
   const actions = buildComposioBatchActions({ tools: [
-    { tool_slug: "GMAIL_SEARCH_EMAILS", arguments: { query: "secret text" } },
-    { tool_slug: "NOTION_SEARCH", arguments: { query: "private" } },
+    { tool_slug: "GMAIL_SEARCH_EMAILS", arguments: { query: "Acme" } },
+    { tool_slug: "NOTION_SEARCH", arguments: { query: "api-key-secret" } },
     { tool_slug: "CHUCK_FORGET_MEMORY", arguments: {} },
   ] }, "call-1", metadata);
   assert.equal(actions.length, 2);
-  assert.deepEqual(actions[0], { id: "call-1:0", toolSlug: "GMAIL_SEARCH_EMAILS", status: "started", actionLabel: "Search messages", toolkitSlug: "gmail", toolkitName: "Gmail", toolkitLogo: "https://assets.example/gmail.svg" });
+  assert.deepEqual(actions[0], { id: "call-1:0", toolSlug: "GMAIL_SEARCH_EMAILS", status: "started", actionLabel: "Searching for Acme", toolkitSlug: "gmail", toolkitName: "Gmail", toolkitLogo: "https://assets.example/gmail.svg" });
   assert.equal(actions[1]?.actionLabel, "Search");
-  assert.equal(JSON.stringify(actions).includes("secret text"), false);
+  assert.equal(JSON.stringify(actions).includes("api-key-secret"), false);
   assert.equal(buildComposioBatchActions({ tools: Array.from({ length: 70 }, () => ({ tool_slug: "GMAIL_SEARCH_EMAILS", arguments: {} })) }, "call-2", metadata).length, 50);
+});
+
+test("derives bounded contextual labels for searches, email sends, and nested execute calls", () => {
+  assert.equal(composioActivityActionLabel("GOOGLEMAPS_SEARCH_BUSINESSES", { query: "Acme" }), "Searching for Acme");
+  assert.equal(composioActivityActionLabel("GMAIL_SEND_EMAIL", { recipient_email: "tony@example.com", body: "private" }), "Sending the email to Tony");
+  assert.equal(composioActivityActionLabel("COMPOSIO_EXECUTE_TOOL", { tool_slug: "GOOGLEMAPS_SEARCH_BUSINESSES", arguments: { query: "Acme" } }), "Searching for Acme");
+  assert.equal(composioActivityActionLabel("GMAIL_SEND_EMAIL", { recipient_email: "api-key-secret@example.com" }), "Sending the email");
 });
 
 test("correlates outcomes only by an explicit unique action slug and explicit result status", () => {

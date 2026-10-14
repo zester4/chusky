@@ -37,6 +37,104 @@ const normalizeToolSlug = (value: unknown): string | undefined => {
     : undefined;
 };
 
+type ActivityCallArguments = Readonly<Record<string, unknown>>;
+
+const activityContextKeys = {
+  search: ["query", "search_query", "searchQuery", "search", "term", "keywords", "location", "name"],
+  recipient: ["recipient_name", "recipientName", "recipient", "to", "email", "recipient_email", "recipientEmail", "contact_name", "contactName"],
+  url: ["url", "website", "link"],
+} as const;
+
+function safeActivityContext(value: unknown): string | undefined {
+  const text = safeText(value, 96);
+  if (!text || /\b(?:api[_ -]?key|access[_ -]?token|auth(?:entication)?|password|secret|private[_ -]?key|bearer)\b/i.test(text)) return undefined;
+  return text;
+}
+
+function firstActivityArgument(args: ActivityCallArguments | undefined, keys: readonly string[]): unknown {
+  if (!args) return undefined;
+  for (const key of keys) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim()) return value;
+    if (Array.isArray(value)) {
+      const first = value.find((item) => typeof item === "string" && item.trim());
+      if (first) return first;
+    }
+  }
+  return undefined;
+}
+
+function displayRecipient(value: unknown): string | undefined {
+  const text = safeActivityContext(value);
+  if (!text) return undefined;
+  const named = text.match(/^(.+?)\s*<[^>]+>$/)?.[1]?.trim();
+  if (named) return named.slice(0, 64);
+  const email = text.match(/^([^@\s]+)@[^@\s]+$/)?.[1];
+  if (!email) return text.slice(0, 64);
+  return email
+    .split(/[._+-]+/)
+    .filter(Boolean)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1).toLowerCase()}`)
+    .join(" ")
+    .slice(0, 64);
+}
+
+function nestedActivityTarget(
+  toolSlug: string,
+  args: ActivityCallArguments | undefined,
+  metadata?: ReadonlyMap<string, ComposioToolPresentation>,
+): { toolSlug: string; args?: ActivityCallArguments; presentation?: ComposioToolPresentation } {
+  if (toolSlug !== "COMPOSIO_EXECUTE_TOOL" || !args) return { toolSlug, args, presentation: metadata?.get(toolSlug) };
+  const nestedSlug = normalizeToolSlug(args.tool_slug ?? args.toolSlug ?? args.slug);
+  const nestedArgs = args.arguments ?? args.input;
+  const normalizedArgs = nestedArgs && typeof nestedArgs === "object" && !Array.isArray(nestedArgs)
+    ? nestedArgs as ActivityCallArguments
+    : undefined;
+  return nestedSlug
+    ? { toolSlug: nestedSlug, args: normalizedArgs, presentation: metadata?.get(nestedSlug) }
+    : { toolSlug, args, presentation: metadata?.get(toolSlug) };
+}
+
+/**
+ * Build a concise, truthful activity label from the selected action and a
+ * small allowlist of safe display arguments. Never copy a provider payload,
+ * message body, credential, or arbitrary argument into the run timeline.
+ */
+export function composioActivityActionLabel(
+  toolSlug: string,
+  args?: ActivityCallArguments,
+  metadata?: ReadonlyMap<string, ComposioToolPresentation>,
+): string | undefined {
+  const target = nestedActivityTarget(toolSlug, args, metadata);
+  const actionSlug = target.toolSlug;
+  const upper = actionSlug.toUpperCase();
+  const searchValue = safeActivityContext(firstActivityArgument(target.args, activityContextKeys.search));
+  if (searchValue && /(?:SEARCH|FIND|LOOKUP|QUERY|PLACES|BUSINESS)/i.test(upper)) return `Searching for ${searchValue}`;
+
+  if (/(?:SEND_EMAIL|EMAIL_SEND)/i.test(upper)) {
+    const recipient = displayRecipient(firstActivityArgument(target.args, activityContextKeys.recipient));
+    return recipient ? `Sending the email to ${recipient}` : "Sending the email";
+  }
+  if (/(?:SEND|MESSAGE|POST|PUBLISH|NOTIFY)/i.test(upper)) {
+    const recipient = displayRecipient(firstActivityArgument(target.args, activityContextKeys.recipient));
+    return recipient ? `Sending a message to ${recipient}` : fallbackComposioActionLabel(actionSlug);
+  }
+
+  const url = safeActivityContext(firstActivityArgument(target.args, activityContextKeys.url));
+  if (url && /(?:FETCH|GET|LIST|READ|RETRIEVE|EXTRACT|CRAWL|BROWSE|OPEN)/i.test(upper)) {
+    try {
+      const parsed = new URL(url);
+      return parsed.protocol === "http:" || parsed.protocol === "https:"
+        ? `Reading ${parsed.hostname}`
+        : "Reading the page";
+    } catch {
+      return "Reading the page";
+    }
+  }
+
+  return normalizeToolSlug(actionSlug) ? fallbackComposioActionLabel(actionSlug) : undefined;
+}
+
 export function fallbackComposioActionLabel(toolSlug: string): string {
   const parts = toolSlug.split("_");
   return parts.length > 1
@@ -146,11 +244,15 @@ export function buildComposioBatchActions(
     const toolSlug = normalizeToolSlug(input.tool_slug ?? input.toolSlug ?? input.slug);
     if (!toolSlug) return [];
     const presentation = metadata.get(toolSlug);
+    const itemArguments = input.arguments ?? input.input;
+    const actionArguments = itemArguments && typeof itemArguments === "object" && !Array.isArray(itemArguments)
+      ? itemArguments as ActivityCallArguments
+      : undefined;
     return [{
       id: `${callId}:${index}`,
       toolSlug,
       status: "started" as const,
-      actionLabel: presentation?.actionLabel ?? fallbackComposioActionLabel(toolSlug),
+      actionLabel: composioActivityActionLabel(toolSlug, actionArguments, metadata) ?? fallbackComposioActionLabel(toolSlug),
       ...(presentation?.toolkitSlug ? { toolkitSlug: presentation.toolkitSlug } : {}),
       ...(presentation?.toolkitName ? { toolkitName: presentation.toolkitName } : {}),
       ...(presentation?.toolkitLogo ? { toolkitLogo: presentation.toolkitLogo } : {}),
