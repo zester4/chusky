@@ -111,6 +111,12 @@ function oneOf<T extends string>(key: string, fallback: T, values: readonly T[])
   return raw as T;
 }
 
+function boundedOption(key: string, fallback: string, max: number): string {
+  const value = optional(key, fallback).trim();
+  if (!value || value.length > max || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value)) throw new Error(`${key} must be a bounded identifier`);
+  return value;
+}
+
 const defaultModel = optional("DEFAULT_MODEL", "minimax/minimax-m3:free");
 
 export const config = {
@@ -397,6 +403,9 @@ export const config = {
   // retained as an explicit compatibility fallback for constrained templates.
   e2bBrowserEngine: optional("E2B_BROWSER_ENGINE", "chrome"),
   kernelApiKey: optional("KERNEL_API_KEY", ""),
+  // Kernel is a paid optional adapter. Require a second opt-in so a stale
+  // provider variable cannot create billable sessions by accident.
+  kernelBrowserOptIn: optional("KERNEL_BROWSER_OPT_IN", "false") === "true",
   kernelStealth: optional("KERNEL_STEALTH", "true") === "true",
   kernelProxyId: optional("KERNEL_PROXY_ID", ""),
   kernelBrowserTimeoutSeconds: Number(optional("KERNEL_BROWSER_TIMEOUT_SECONDS", "900")),
@@ -422,6 +431,15 @@ export const config = {
   browserRuntimeToken: optional("CHUSKY_BROWSER_RUNTIME_TOKEN", ""),
   browserRuntimeOwnerSigningSecret: optional("CHUSKY_BROWSER_RUNTIME_OWNER_SIGNING_SECRET", ""),
   browserRuntimeEnabled: optional("CHUSKY_BROWSER_RUNTIME_MODE", "off").toLowerCase() === "dedicated",
+  // Trust routing keeps owner/origin identity stable and stops blind retries
+  // after repeated challenges or access denials. It does not spoof a user or
+  // bypass site controls.
+  browserTrustMode: oneOf("CHUSKY_BROWSER_TRUST_MODE", "balanced", ["strict", "balanced"] as const),
+  browserOperatorId: boundedOption("CHUSKY_BROWSER_OPERATOR_ID", "chusky", 80),
+  browserDefaultRegion: boundedOption("CHUSKY_BROWSER_REGION", "default", 80),
+  browserOwnerChromeEnabled: optional("CHUSKY_BROWSER_OWNER_CHROME_ENABLED", "false") === "true",
+  browserFlagThreshold: boundedInt("CHUSKY_BROWSER_FLAG_THRESHOLD", 3, 1, 10),
+  browserFlagCooldownMs: boundedInt("CHUSKY_BROWSER_FLAG_COOLDOWN_MS", 900_000, 60_000, 86_400_000),
   // Cloudflare Web Bot Auth identity; the private key is used only by the
   // trusted E2B browser process and never enters page or model context.
   webBotAuthEnabled: optional("WEB_BOT_AUTH_ENABLED", "false") === "true",
@@ -593,7 +611,7 @@ DAYTONA COMPUTER
 - Before scaffolding or designing a web app, load the fullstack-guardian and ui-ux-pro-max skills. Read fullstack-guardian/references/design-template.md and ui-ux-pro-max/scripts/design_system.py with CHUCK_READ_SKILL_FILE; also read the UI skill's relevant reference guidance. Use the design-system script's discovery inputs/output as a starting point, then make an archetype-appropriate, non-generic design decision. Do not default to purple, generic gradient heroes, repeated KPI-card grids, invented metrics, or unchanged starter copy. Treat CHUCK_DAYTONA_APP scaffold as a foundation only: rewrite the information hierarchy, content, navigation, states, and visual treatment for the user's brief before sharing a preview. Build the visual hierarchy, spacing, typography, responsive states, loading/empty/error states, and interaction details as part of the implementation; use compact controls and unobtrusive scrollbars while preserving accessible touch targets and reduced-motion behavior.
 - For new web apps, use CHUCK_DAYTONA_APP scaffold with vite-react or nextjs. It creates a durable app project on an isolated local feature branch, but scaffold output is never the finished app. After edits, call verify: this captures actual typecheck, lint, test (when configured), and required production-build evidence. start repeats verification and refuses to expose a stale or failing build. Use visual to capture the live signed preview, inspect the actual screenshot for template residue, overlap, weak hierarchy, fake content, and missing states, then call review with an honest pass/fail summary. Only after the app is brief-specific and executable plus visual review pass may release prepare an external handoff. The signed preview URL is temporary but can be sent through the active Telegram, WhatsApp, Sendblue/iMessage, Slack, or CLI conversation. GitHub push, permanent deployment, credentials, and publishing remain separate externally-visible approval-gated actions.
 - Use CHUCK_DAYTONA_COMPUTER only for desktop GUI, local files, artifacts, terminals, and applications. Inspect status, display_info, windows, and accessibility before interacting. Never use it for website navigation, browser tabs, web forms, or web screenshots; use CHUCK_BROWSER for all web-browser work. Process diagnostics are only for the Daytona desktop stack (novnc, x11vnc, xfce4, xvfb), never a browser or Chrome process. Daytona is Chusky's private isolated computer workspace, so ordinary computer and filesystem work is agent-controlled; destructive file/workspace actions still require the normal approval boundary, and no Daytona capability may bypass approval for an external or irreversible action.
-- Use CHUCK_BROWSER for browser work. It uses the configured dedicated Kernel headed Chromium runtime when enabled, otherwise the retained E2B headed Chrome for Testing browser (or explicit Chromium compatibility mode); Daytona remains Chusky's computer, file, artifact, and app backend. Check status, open only explicit http(s) URLs without embedded credentials, inspect with snapshot/find/screenshot, then interact through accessible node actions or bounded coordinates when the page requires them. Do not claim an interaction succeeded without inspecting the result. When the user explicitly asks only for a screenshot or to see what is happening, use action=screenshot and stop; the image is sent through their active private channel. CAPTCHA/2FA handoff uses the same retained browser session; it never asks for secrets in chat.
+- Use CHUCK_BROWSER for browser work. It uses the configured dedicated Kernel headed Chromium runtime when enabled, otherwise the retained E2B headed Chrome for Testing browser (or explicit Chromium compatibility mode); Daytona remains Chusky's computer, file, artifact, and app backend. Check status, open only explicit http(s) URLs without embedded credentials, inspect with snapshot/find/screenshot, then interact through accessible node actions or bounded coordinates when the page requires them. Do not claim an interaction succeeded without inspecting the result. When the user explicitly asks only for a screenshot or to see what is happening, use action=screenshot and stop; the image is sent through their active private channel. Challenge orchestration is provider-neutral: let the configured provider solver attempt a supported CAPTCHA or press-and-hold, wait for a fresh observation to verify clearance, and if it fails or remains active use the private handoff URL. Never click or replay a challenge blindly, never restart the browser, and after the owner says continue complete the handoff and verify the same retained session and origin before resuming. It never asks for secrets in chat.
 - Use CHUCK_DAYTONA_PTY for long-running interactive commands (dev servers, shells, test watchers). Persist and reuse its sessionId; use read after write, resize when terminal dimensions change, and kill only when the process should end.
 - Use CHUCK_DAYTONA_GIT for repository operations inside Daytona: clone, status, branch, checkout, pull, add, and local commit. Run checks before push. Push is externally visible and must use the normal approval flow; use verified Composio/GitHub tools for pull requests, CI, reviews, and deployments.
 - Treat routine sending and publishing requested by the user as autonomous. Actions that are destructive, financial, permission-changing, production deployment, or remote Git push remain subject to the normal approval flow. Private Daytona execution and workspace file operations are agent-controlled.
@@ -766,9 +784,16 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   durableStateEnabled: optional("DURABLE_STATE_ENABLED", "false") === "true",
   durableStateDatabaseUrl: optional("DURABLE_STATE_DATABASE_URL", ""),
   durableStateMigrationDatabaseUrl: optional("DURABLE_STATE_MIGRATION_DATABASE_URL", ""),
-  durableStorageMetricsEnabled: optional("DURABLE_STORAGE_METRICS_ENABLED", "false") === "true",
-  // Per-run SDK records require migration 0002; cut over independently after it is applied.
-  durableStateSdkRunsEnabled: optional("DURABLE_STATE_SDK_RUNS_ENABLED", "false") === "true",
+  // Durable deployments enable storage/query telemetry by default. Set the
+  // explicit flag to false only for a deliberately unobserved local rollout.
+  durableStorageMetricsEnabled: optional("DURABLE_STORAGE_METRICS_ENABLED", optional("DURABLE_STATE_ENABLED", "false") === "true" ? "true" : "false") === "true",
+  // Per-run records and the bounded SDK tables are part of the durable-state
+  // cutover. The env flags remain available for staged migrations.
+  durableStateSdkRunsEnabled: optional("DURABLE_STATE_SDK_RUNS_ENABLED", optional("DURABLE_STATE_ENABLED", "false") === "true" ? "true" : "false") === "true",
+  durableStateSdkTablesEnabled: optional("DURABLE_STATE_SDK_TABLES_ENABLED", optional("DURABLE_STATE_ENABLED", "false") === "true" ? "true" : "false") === "true",
+  durableStateRetentionDays: boundedInt("DURABLE_STATE_RETENTION_DAYS", 90, 1, 3650),
+  durableSdkAuditRetentionDays: boundedInt("DURABLE_SDK_AUDIT_RETENTION_DAYS", 90, 1, 3650),
+  durableSdkRunRetentionDays: boundedInt("DURABLE_SDK_RUN_RETENTION_DAYS", 30, 1, 3650),
   // Neon is canonical per owner only after that owner's mission backfill marker exists.
   durableStateMissionsEnabled: optional("DURABLE_STATE_MISSIONS_ENABLED", "false") === "true",
   // Opt-in Neon object catalog for verified R2 assets; requires migration 0008.

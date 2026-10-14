@@ -140,7 +140,7 @@ const TREG_AUTONOMOUS_TOOLS = new Set([
 ]);
 
 const MONID_AUTONOMOUS_TOOLS = new Set([
-  "CHUCK_MONID_SEARCH", "CHUCK_MONID_INSPECT", "CHUCK_MONID_RUN_GET", "CHUCK_MONID_RUNS_LIST",
+  "CHUCK_MONID_PLAN", "CHUCK_MONID_SEARCH", "CHUCK_MONID_INSPECT", "CHUCK_MONID_RUN_GET", "CHUCK_MONID_RUNS_LIST",
   "CHUCK_MONID_BALANCE", "CHUCK_MONID_USAGE",
 ]);
 
@@ -256,6 +256,8 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
 }
 
 const STATUSES: Record<string, string> = {
+  CHUCK_TREG_PLAN: "🧭 I’m mapping the Treg research steps…",
+  CHUCK_BROWSER_RETAILER_START: "🌐 I’m opening the fastest verified site entry point…",
   CHUCK_LEAD_CAMPAIGN: "🎯 I’m setting up a durable, source-backed lead campaign…",
   CHUCK_FIND_TOOLS: "🧭 I’m finding the relevant tools…",
   CHUCK_SEARCH_SKILLS: "🧭 I’m bringing in the relevant guidance…",

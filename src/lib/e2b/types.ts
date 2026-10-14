@@ -192,7 +192,7 @@ export type E2BCommandResult = {
   createdAt?: number;
   screenshot?: string;
   needsUserInteraction?: boolean;
-  challenge?: { type: "captcha" | "two_factor" | "site_challenge"; detected: boolean };
+  challenge?: { type: "captcha" | "two_factor" | "site_challenge" | "press_and_hold"; detected: boolean; userRequired?: boolean; terminalStatus?: "success" | "solved" | "failure" | "failed" | "timeout" | "abandoned"; solverStatus?: "success" | "failure" | "timeout" | "abandoned"; solver?: { status?: string } };
   tabs?: Array<{ index: number; url: string; title: string; active: boolean }>;
   activeIndex?: number;
   error?: string;

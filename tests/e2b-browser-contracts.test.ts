@@ -233,6 +233,16 @@ test("human handoff blocks browser mutation until same-origin verification", () 
   assert.doesNotThrow(() => assertE2BBrowserHandoffAllowsAction("click", [handoff], "https://example.test", "sandbox", 20_000));
 });
 
+test("human handoff is bound to the exact retained browser session when a lease is present", () => {
+  const handoff = {
+    id: "bh_session", userId: 8, workspaceId: "sandbox", sessionId: "br_expected", origin: "https://example.test", reason: "captcha" as const,
+    status: "waiting" as const, createdAt: 10, expiresAt: 10_000,
+  };
+  assert.doesNotThrow(() => assertE2BBrowserHandoffAllowsAction("status", [handoff], "https://example.test/path", "sandbox", 100, "br_other"));
+  assert.throws(() => assertE2BBrowserHandoffAllowsAction("click", [handoff], "https://example.test/path", "sandbox", 100, "br_other"), /A private browser handoff/);
+  assert.throws(() => assertE2BBrowserHandoffAllowsAction("click", [handoff], "https://example.test/path", "sandbox", 100, "br_expected"), E2BBrowserHandoffWaitingError);
+});
+
 test("browser recovery remaps re-rendered transportation location controls without guessing", () => {
   const pickup = { nodeId: "old-pickup", role: "textbox", name: "Pickup location", index: 0, frameIndex: 0, url: "https://ride.example", capturedAt: 1 };
   const currentPickup = { nodeId: "new-pickup", role: "combobox", name: "Where should we pick you up?", index: 1, frameIndex: 0, url: "https://ride.example", capturedAt: 2 };

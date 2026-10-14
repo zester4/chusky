@@ -59,6 +59,17 @@ class FakePool {
   async end() { this.ended = true; }
 }
 
+test("SDK usage returns owner-scoped counters and rejects invalid aggregates", async () => {
+  const pool = new FakePool();
+  pool.reads = [{ count: "128", active: "2" }];
+  const state = new NeonDurableState(pool as never);
+  assert.deepEqual(await state.readSdkRunUsage(42), { count: 128, active: 2 });
+  assert.deepEqual(pool.calls[0]?.values, [42]);
+  assert.doesNotMatch(pool.calls[0]?.text ?? "", /SELECT\s+(payload|\*)/i);
+  pool.reads = [{ count: "1", active: "2" }];
+  await assert.rejects(() => state.readSdkRunUsage(42), /invalid counts/);
+});
+
 function session(): UserSession {
   const now = Date.now();
   return {
@@ -481,6 +492,19 @@ test("session split leaves runs out of the SDK document and emits owner-thread r
       return true;
     },
   );
+});
+
+test("session split keeps SDK threads, idempotency, and audit rows out of the hot SDK document", () => {
+  const original = session();
+  original.sdkThreads = [{ id: "thr_1", externalId: "external", metadata: {}, history: [], runs: [], createdAt: 1, updatedAt: 1 }];
+  original.sdkIdempotency = { key: { fingerprint: "a".repeat(64), response: { ok: true }, createdAt: 1 } };
+  original.sdkAudit = [{ id: "audit_1", action: "GET /v1/threads", requestId: "req_1", status: 200, at: 1 }];
+  const { core, domains, sdkRuns } = splitSessionDomains(original, true, true);
+  assert.equal(sdkRuns.length, 0);
+  assert.deepEqual(domains.get("sdk"), { sdkWebhooks: [], sdkProjects: [] });
+  assert.deepEqual(core.sdkThreads, []);
+  assert.deepEqual(core.sdkIdempotency, {});
+  assert.deepEqual(core.sdkAudit, []);
 });
 
 test("session-domain writes retain embedded SDK runs until per-run cutover is enabled", () => {

@@ -107,7 +107,7 @@ export const WORKER_SKILL_BINDINGS: Record<Exclude<CapabilityWorkerName, "chusky
           "references/03-icp-and-scoring.md",
           "references/06-never-dos.md",
         ],
-        monid: ["references/research-briefs.md"],
+        monid: ["references/research-briefs.md", "references/engine-playbooks.md"],
       },
     },
 };

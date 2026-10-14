@@ -4,6 +4,7 @@ export * from "./evaluation.js";
 export * from "./health.js";
 export * from "./observation.js";
 export * from "./orchestrator.js";
+export * from "./challenge-manager.js";
 export * from "./recovery.js";
 export * from "./safety.js";
 export * from "./target-registry.js";

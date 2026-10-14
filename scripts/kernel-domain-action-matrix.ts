@@ -48,6 +48,7 @@ async function main() {
   }
   await initStore({ memoryOnly: true, suppressStorageMetrics: true });
   config.browserProvider = "kernel";
+  config.kernelBrowserOptIn = true;
   const owner = randomInt(2_100_000_000, 2_147_000_000);
   const engine = new E2BBrowserEngine();
   const invoke = (action: string, args: Record<string, unknown> = {}) => engine.browser(owner, { action, ...args }, { ownerPrivateRun: true, visualFeedback: true });

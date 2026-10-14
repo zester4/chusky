@@ -72,6 +72,9 @@ test("E2B runtime starts display and browser services through separate idempoten
   assert.match(browserEngine, /startIfMissing\("if \[ ! -f \/tmp\/chusky-browser\.pid \]/);
   assert.match(browserEngine, /JSON\.parse\(payload\.body\)\.ok === true/);
   assert.match(browserEngine, /runtimeDiagnostics/);
+  assert.match(browserEngine, /browserTrustRouter/);
+  assert.match(browserEngine, /navigationTrust/);
+  assert.match(browserEngine, /recordTrustResult/);
   assert.doesNotMatch(browserEngine, /process\.exit\(2\)/);
   assert.doesNotMatch(browserEngine, /bash -lc '[^\n]*chusky-xvfb\.pid[^\n]*chusky-fluxbox\.pid[^\n]*chusky-browser\.pid/);
   assert.match(browserEngine, /x11vnc -display :99 -rfbport 5900/);

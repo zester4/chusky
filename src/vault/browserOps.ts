@@ -93,8 +93,11 @@ export type BrowserHandoffRecord = {
   credentialId?: string;
   reason: BrowserHandoffReason;
   provider?: BrowserChallengeProvider;
+  /** Opaque provider session lease; never a CDP or provider URL. */
+  sessionId?: string;
   challengeType?: BrowserChallengeType;
   resolutionState?: BrowserChallengeState;
+  solverOutcome?: "solved" | "failed" | "timeout" | "abandoned";
   status: "waiting" | "awaiting_verification" | "completed" | "expired" | "cancelled";
   createdAt: number;
   expiresAt: number;

@@ -123,7 +123,7 @@ test("Muna has bounded Treg and Monid research tools with strict business-data i
     assert.ok(muna.allowedTools.includes(tool), `${tool} must be available to Muna`);
     assert.ok(chuckTools.some((candidate) => candidate.function.name === tool), `${tool} must have a native schema`);
   }
-  for (const tool of ["CHUCK_MONID_SEARCH", "CHUCK_MONID_INSPECT", "CHUCK_MONID_RUN", "CHUCK_MONID_RUN_GET", "CHUCK_MONID_RUNS_LIST", "CHUCK_MONID_BALANCE", "CHUCK_MONID_USAGE", "CHUCK_TINYFISH_SEARCH", "CHUCK_TINYFISH_FETCH"]) {
+  for (const tool of ["CHUCK_MONID_PLAN", "CHUCK_MONID_SEARCH", "CHUCK_MONID_INSPECT", "CHUCK_MONID_RUN", "CHUCK_MONID_RUN_GET", "CHUCK_MONID_RUNS_LIST", "CHUCK_MONID_BALANCE", "CHUCK_MONID_USAGE", "CHUCK_TINYFISH_SEARCH", "CHUCK_TINYFISH_FETCH"]) {
     assert.ok(muna.allowedTools.includes(tool), `${tool} must be available to Muna`);
   }
   for (const tool of ["CHUCK_TREG_CALL", "CHUCK_TREG_MY_TOOLS", "CHUCK_TREG_BALANCE", "CHUCK_TREG_USAGE", "CHUCK_TREG_OAUTH_START", "CHUCK_TREG_OAUTH_REVOKE", "CHUCK_CREATE_TRIGGER", "CHUCK_SCHEDULE_JOB", "CHUCK_TASK_CREATE", "CHUCK_EMAIL_ARTIFACT", "CHUCK_BROWSER", "CHUCK_MISSION_CREATE"]) {
@@ -132,12 +132,23 @@ test("Muna has bounded Treg and Monid research tools with strict business-data i
   assert.deepEqual(muna.allowedComposioPrefixes, []);
   assert.deepEqual(muna.allowedMemoryCategories, ["business", "project", "procedural"]);
   assert.match(muna.systemPrompt, /Treg-first Business and Data Intelligence Specialist/i);
+  assert.match(muna.systemPrompt, /CHUCK_TREG_PLAN first/i);
   assert.match(muna.systemPrompt, /Keep verified, catch-all, unknown, invalid, and no-match email outcomes distinct/i);
   assert.match(muna.systemPrompt, /actual spend/i);
   assert.match(muna.systemPrompt, /not proof of a confirmed purchase/i);
   assert.match(muna.systemPrompt, /contact people or businesses/i);
   assert.match(muna.systemPrompt, /not a hard provider spend ceiling/i);
   assert.match(muna.systemPrompt, /monitoring/i);
+  assert.match(muna.systemPrompt, /CHUCK_MONID_PLAN first/i);
+  assert.match(muna.systemPrompt, /profitability, conversions, targeting/i);
+});
+
+test("routes SEO, competitor ad, and public website extraction research to Muna", () => {
+  for (const objective of [
+    "Audit SEO rankings and keyword opportunities for our site",
+    "Research competitor ads in the public ad library",
+    "Extract public pricing and product details from competitor websites",
+  ]) assert.deepEqual(classifyDelegationObjective(objective), ["muna"]);
 });
 
 test("delegates Treg business research to Muna with only the selected bounded tools", async () => {

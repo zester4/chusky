@@ -129,9 +129,10 @@ export type VerificationResult = {
 };
 
 export type ChallengeResult = {
-  status: "cleared" | "failed" | "timeout" | "user-required";
+  status: "cleared" | "failed" | "timeout" | "abandoned" | "user-required";
   observation?: BrowserObservation;
   liveViewUrl?: string;
+  expiresAt?: number;
 };
 
 export type BrowserAdapter = {
@@ -190,4 +191,6 @@ export type BrowserRunResult = {
   finalObservation?: BrowserObservation;
   events: BrowserTraceEvent[];
   reason?: string;
+  challenge?: import("./challenge-manager.js").ChallengeOutcome;
+  continuation?: { session: SessionHandle; challenge: import("./challenge-manager.js").ChallengeOutcome };
 };

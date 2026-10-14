@@ -1,12 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { CaptchaTracker, shouldAttemptAutomaticCaptchaWait, waitForChallengeClear } from "../e2b/browser-template/kernel-controller.mjs";
-import { kernelLiveViewUrl } from "../src/lib/e2b/kernel.js";
+import { kernelBrowserEnabled, kernelConfigurationStatus, kernelLiveViewUrl } from "../src/lib/e2b/kernel.js";
 import { config } from "../src/config.js";
 import { E2BBrowserEngine } from "../src/lib/e2b/browser.js";
 import { initStore, getSession, saveSession } from "../src/store.js";
 import Kernel from "@onkernel/sdk";
 import { Sandbox } from "e2b";
+
+test("Kernel is disabled unless the paid adapter is explicitly opted in", () => {
+  const previous = { browserProvider: config.browserProvider, kernelApiKey: config.kernelApiKey, kernelBrowserOptIn: config.kernelBrowserOptIn };
+  Object.assign(config, { browserProvider: "kernel", kernelApiKey: "test-key-not-live", kernelBrowserOptIn: false });
+  try {
+    assert.equal(kernelConfigurationStatus(), "disabled");
+    assert.throws(() => kernelBrowserEnabled(), /cost guard/);
+    config.kernelBrowserOptIn = true;
+    assert.equal(kernelBrowserEnabled(), true);
+  } finally { Object.assign(config, previous); }
+});
 
 
 test("unordered CAPTCHA telemetry never constitutes page success", () => {
@@ -75,8 +86,8 @@ test("private live view URLs cannot point at unrelated or insecure origins", () 
 
 test("Kernel rejects shared access, model credentials and foreign auth IDs before provider dispatch", async () => {
   await initStore({ memoryOnly: true });
-  const previous = { browserProvider: config.browserProvider, kernelApiKey: config.kernelApiKey };
-  Object.assign(config, { browserProvider: "kernel", kernelApiKey: "test-key-not-live" });
+  const previous = { browserProvider: config.browserProvider, kernelApiKey: config.kernelApiKey, kernelBrowserOptIn: config.kernelBrowserOptIn };
+  Object.assign(config, { browserProvider: "kernel", kernelApiKey: "test-key-not-live", kernelBrowserOptIn: true });
   try {
     const engine = new E2BBrowserEngine();
     await assert.rejects(engine.browser(961001, { action: "status" }), /owner.*private/);
@@ -87,8 +98,8 @@ test("Kernel rejects shared access, model credentials and foreign auth IDs befor
 
 test("managed auth verifies ownership binding and does not restart active login", async (t) => {
   await initStore({ memoryOnly: true });
-  const previous = { browserProvider: config.browserProvider, kernelApiKey: config.kernelApiKey };
-  Object.assign(config, { browserProvider: "kernel", kernelApiKey: "test-key-not-live" });
+  const previous = { browserProvider: config.browserProvider, kernelApiKey: config.kernelApiKey, kernelBrowserOptIn: config.kernelBrowserOptIn };
+  Object.assign(config, { browserProvider: "kernel", kernelApiKey: "test-key-not-live", kernelBrowserOptIn: true });
   const owner = 961002;
   const session = await getSession(owner);
   session.kernelAuthConnections = [{ id: "auth-owned", domain: "example.com", profileId: "profile-owned", profileName: "owned-profile", accountAlias: "default" }];
@@ -111,8 +122,8 @@ test("managed auth verifies ownership binding and does not restart active login"
 
 test("uncertain controller recovery preserves the retained browser and never creates a replacement", async (t) => {
   await initStore({ memoryOnly: true });
-  const previous = { browserProvider: config.browserProvider, kernelApiKey: config.kernelApiKey, e2bEnabled: config.e2bEnabled, e2bApiKey: config.e2bApiKey };
-  Object.assign(config, { browserProvider: "kernel", kernelApiKey: "test", e2bEnabled: true, e2bApiKey: "test" });
+  const previous = { browserProvider: config.browserProvider, kernelApiKey: config.kernelApiKey, kernelBrowserOptIn: config.kernelBrowserOptIn, e2bEnabled: config.e2bEnabled, e2bApiKey: config.e2bApiKey };
+  Object.assign(config, { browserProvider: "kernel", kernelApiKey: "test", kernelBrowserOptIn: true, e2bEnabled: true, e2bApiKey: "test" });
   const owner = 961003;
   const session = await getSession(owner);
   session.e2bBrowser = { sandboxId: "controller-owned", harness: "agent-browser", engine: "chrome", kernel: { sessionId: "remote-owned", profileId: "profile-owned" }, createdAt: Date.now(), updatedAt: Date.now(), expiresAt: Date.now() + 60_000 };
@@ -129,8 +140,8 @@ test("uncertain controller recovery preserves the retained browser and never cre
 
 test("stopping an already expired remote browser still closes its controller", async (t) => {
   await initStore({ memoryOnly: true });
-  const previous = { browserProvider: config.browserProvider, kernelApiKey: config.kernelApiKey };
-  Object.assign(config, { browserProvider: "kernel", kernelApiKey: "test" });
+  const previous = { browserProvider: config.browserProvider, kernelApiKey: config.kernelApiKey, kernelBrowserOptIn: config.kernelBrowserOptIn };
+  Object.assign(config, { browserProvider: "kernel", kernelApiKey: "test", kernelBrowserOptIn: true });
   const owner = 961004;
   const session = await getSession(owner);
   session.e2bBrowser = { sandboxId: "controller-owned", kernel: { sessionId: "remote-owned", profileId: "profile-owned" }, createdAt: 1, updatedAt: 1, expiresAt: 2 };
@@ -149,8 +160,8 @@ test("stopping an already expired remote browser still closes its controller", a
 
 test("partially provisioned browser blocks replacement until cleanup", async (t) => {
   await initStore({ memoryOnly: true });
-  const previous = { browserProvider: config.browserProvider, kernelApiKey: config.kernelApiKey, e2bEnabled: config.e2bEnabled, e2bApiKey: config.e2bApiKey };
-  Object.assign(config, { browserProvider: "kernel", kernelApiKey: "test", e2bEnabled: true, e2bApiKey: "test" });
+  const previous = { browserProvider: config.browserProvider, kernelApiKey: config.kernelApiKey, kernelBrowserOptIn: config.kernelBrowserOptIn, e2bEnabled: config.e2bEnabled, e2bApiKey: config.e2bApiKey };
+  Object.assign(config, { browserProvider: "kernel", kernelApiKey: "test", kernelBrowserOptIn: true, e2bEnabled: true, e2bApiKey: "test" });
   const owner = 961005;
   const session = await getSession(owner);
   session.kernelBrowserPending = { sessionId: "pending-remote", profileId: "profile-owned", createdAt: Date.now() };
@@ -168,8 +179,8 @@ test("partially provisioned browser blocks replacement until cleanup", async (t)
 
 test("a lost create response retains a provider-resolvable name instead of duplicating creation", async (t) => {
   await initStore({ memoryOnly: true });
-  const previous = { browserProvider: config.browserProvider, kernelApiKey: config.kernelApiKey, e2bEnabled: config.e2bEnabled, e2bApiKey: config.e2bApiKey };
-  Object.assign(config, { browserProvider: "kernel", kernelApiKey: "test", e2bEnabled: true, e2bApiKey: "test" });
+  const previous = { browserProvider: config.browserProvider, kernelApiKey: config.kernelApiKey, kernelBrowserOptIn: config.kernelBrowserOptIn, e2bEnabled: config.e2bEnabled, e2bApiKey: config.e2bApiKey };
+  Object.assign(config, { browserProvider: "kernel", kernelApiKey: "test", kernelBrowserOptIn: true, e2bEnabled: true, e2bApiKey: "test" });
   const owner = 961006;
   const session = await getSession(owner);
   session.kernelBrowserProfileId = "profile-owned";

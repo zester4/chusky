@@ -59,9 +59,11 @@ export function assertE2BBrowserHandoffAllowsAction(
   currentUrl?: string,
   workspaceId?: string,
   now = Date.now(),
+  sessionId?: string,
 ): void {
   const active = handoffs.find((item) => item.workspaceId === workspaceId && item.expiresAt > now && (item.status === "waiting" || item.status === "awaiting_verification"));
   if (!active || ["status", "stop"].includes(action)) return;
+  if (active.sessionId && active.sessionId !== sessionId) throw new Error("A private browser handoff is bound to a different retained browser session.");
   if (active.status === "waiting" && !["screenshot", "screenshot_full", "screenshot_region", "screenshot_region_full"].includes(action)) {
     throw new E2BBrowserHandoffWaitingError(active.id, active.expiresAt);
   }

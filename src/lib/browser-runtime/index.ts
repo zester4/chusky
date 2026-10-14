@@ -6,3 +6,5 @@ export * from "./manager.js";
 export * from "./metrics.js";
 export * from "./profiles.js";
 export * from "./refs.js";
+export * from "./siteCapabilities.js";
+export * from "./trustRouter.js";

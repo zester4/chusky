@@ -20,6 +20,7 @@ import { browserLiveViewDeliveryConfigured, browserLiveViewUrl, createBrowserLiv
 import { browserMetrics } from "../browser-runtime/metrics.js";
 import { browserRefs } from "../browser-runtime/refs.js";
 import { browserSessionManager } from "../browser-runtime/manager.js";
+import { browserTrustRouter, type BrowserTrustDecision } from "../browser-runtime/trustRouter.js";
 import { DedicatedBrowserRuntimeClient } from "../browser-runtime/client.js";
 
 const MAX_OUTPUT = 16_000;
@@ -46,6 +47,49 @@ function dedicatedBrowserRuntime(): DedicatedBrowserRuntimeClient | undefined {
   if (!config.browserRuntimeEnabled) return undefined;
   if (!config.browserRuntimeUrl || !config.browserRuntimeToken || !config.browserRuntimeOwnerSigningSecret) throw new E2BBrowserError("Dedicated browser runtime is enabled but its URL, token, or owner-signing secret is missing");
   return new DedicatedBrowserRuntimeClient({ baseUrl: config.browserRuntimeUrl, token: config.browserRuntimeToken, ownerSigningSecret: config.browserRuntimeOwnerSigningSecret, timeoutMs: config.e2bRequestTimeoutMs });
+}
+
+function trustMetadata(decision: BrowserTrustDecision): Record<string, unknown> {
+  return {
+    route: decision.route,
+    origin: decision.origin,
+    provider: decision.provider,
+    region: decision.region,
+    circuit: decision.circuit,
+    identity: decision.identity,
+    reason: decision.reason,
+  };
+}
+
+function navigationTrust(userId: number, action: E2BBrowserAction, args: Record<string, unknown>, ownerPrivateRun: boolean): BrowserTrustDecision | undefined {
+  if (!(action === "open" || action === "start") || typeof args.url !== "string" || !/^https:\/\//i.test(args.url)) return undefined;
+  const decision = browserTrustRouter.beforeNavigation({ ownerId: userId, url: args.url, ownerPrivateRun });
+  if (decision.route === "human-handoff") throw new E2BBrowserError(`${decision.reason} Use CHUCK_BROWSER_HANDOFF for the retained session.`);
+  if (decision.route === "blocked") throw new E2BBrowserError(decision.reason);
+  if (decision.route !== "browser") throw new E2BBrowserError(`The site trust registry selected the ${decision.route} route, but that adapter is not configured for this browser session.`);
+  return decision;
+}
+
+function recordTrustResult(userId: number, result: unknown, fallbackUrl?: string): void {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return;
+  const record = result as Record<string, unknown>;
+  const challenge = record.challenge && typeof record.challenge === "object" && !Array.isArray(record.challenge) ? record.challenge as Record<string, unknown> : undefined;
+  const url = typeof record.url === "string" ? record.url : fallbackUrl;
+  if (!url || !/^https:\/\//i.test(url)) return;
+  const terminalStatus = typeof challenge?.terminalStatus === "string" && ["success", "solved", "failure", "timeout", "abandoned", "handoff"].includes(challenge.terminalStatus)
+    ? challenge.terminalStatus as "success" | "solved" | "failure" | "timeout" | "abandoned" | "handoff"
+    : undefined;
+  const rawSignal = typeof record.trustSignal === "string" ? record.trustSignal : undefined;
+  const signal = rawSignal && ["challenge", "access_denied", "rate_limited", "login_rejected", "network_blocked", "unknown"].includes(rawSignal)
+    ? rawSignal as "challenge" | "access_denied" | "rate_limited" | "login_rejected" | "network_blocked" | "unknown"
+    : undefined;
+  browserTrustRouter.recordOutcome(userId, {
+    url,
+    ...(signal ? { signal } : {}),
+    challenge: challenge?.detected === true,
+    needsUserInteraction: record.needsUserInteraction === true,
+    terminalStatus,
+  });
 }
 
 function dedicatedActionKind(action: E2BBrowserAction): string {
@@ -1072,13 +1116,14 @@ export class E2BBrowserEngine {
     return withUserLock(userId, async () => {
       await this.purgeExpiredBrowserFiles(userId);
       const action = safeAction(args.action);
+      const navigationDecision = navigationTrust(userId, action, args, internal.ownerPrivateRun === true);
       if (action.startsWith("auth_")) return this.managedAuth(userId, action, args, internal.ownerPrivateRun === true);
       const dedicated = dedicatedBrowserRuntime();
       if (dedicated) {
         const dedicatedRecord = (await getSession(userId)).e2bBrowser;
         const workspaceId = dedicatedRecord?.sandboxId ?? "dedicated-runtime";
         if (!internal.vaultLoginFlow) {
-          assertE2BBrowserHandoffAllowsAction(action, (await getSession(userId)).browserHandoffs ?? [], dedicatedRecord?.lastUrl, workspaceId);
+          assertE2BBrowserHandoffAllowsAction(action, (await getSession(userId)).browserHandoffs ?? [], dedicatedRecord?.lastUrl, workspaceId, Date.now(), dedicatedRecord?.sessionId);
           if (action === "act" || action === "agent") {
             await guardNestedVaultBrowserActions(userId, workspaceId, action, args, dedicatedRecord?.lastUrl, internal.ownerPrivateRun === true, internal.ownerApprovedAction === true);
           } else {
@@ -1086,7 +1131,10 @@ export class E2BBrowserEngine {
           }
         }
         if (!DEDICATED_RUNTIME_ACTIONS.has(action)) throw new E2BBrowserError(`Dedicated runtime does not support ${action} through CHUCK_BROWSER yet`);
-        return this.dedicatedBrowser(userId, action, args, internal);
+        const result = await this.dedicatedBrowser(userId, action, args, internal);
+        recordTrustResult(userId, result, typeof args.url === "string" ? args.url : undefined);
+        if (navigationDecision && result && typeof result === "object" && !Array.isArray(result)) return { ...(result as Record<string, unknown>), trust: trustMetadata(navigationDecision) };
+        return result;
       }
       if (kernelBrowserEnabled() && !internal.ownerPrivateRun) throw new E2BBrowserError("Kernel browser profiles are available only in the owner's private conversation");
       const commandTimeoutMs = resolveE2BBrowserCommandTimeout(args.timeoutMs, config.e2bRequestTimeoutMs);
@@ -1203,9 +1251,9 @@ export class E2BBrowserEngine {
         try {
           const { sandbox } = await this.sandbox(userId, false);
           const health = await this.run(sandbox, { action: "health" }, commandTimeoutMs);
-          return { provider: record.kernel ? "kernel" : "e2b", sandboxId: record.sandboxId, lastUrl: record.lastUrl, title: record.title, sessionId: record.sessionId, expiresAt: record.expiresAt, health: health.health ?? health, metrics: browserMetrics.snapshot() };
+          return { provider: record.kernel ? "kernel" : "e2b", sandboxId: record.sandboxId, lastUrl: record.lastUrl, title: record.title, sessionId: record.sessionId, expiresAt: record.expiresAt, health: health.health ?? health, metrics: browserMetrics.snapshot(), trust: browserTrustRouter.readiness() };
         } catch (error) {
-          return { provider: record.kernel ? "kernel" : "e2b", sandboxId: record.sandboxId, lastUrl: record.lastUrl, title: record.title, sessionId: record.sessionId, expiresAt: record.expiresAt, health: { status: "unhealthy", error: redactBrowserText(error instanceof Error ? error.message : String(error), 400) } };
+          return { provider: record.kernel ? "kernel" : "e2b", sandboxId: record.sandboxId, lastUrl: record.lastUrl, title: record.title, sessionId: record.sessionId, expiresAt: record.expiresAt, health: { status: "unhealthy", error: redactBrowserText(error instanceof Error ? error.message : String(error), 400) }, trust: browserTrustRouter.readiness() };
         }
       }
       if (["download_get", "recording_download", "recording_get"].includes(action)) {
@@ -1271,7 +1319,7 @@ export class E2BBrowserEngine {
       }
       if (record.sessionId && !["state", "snapshot", "find", "form_inspect", "form_plan"].includes(action) && args.sessionId !== record.sessionId) throw new E2BBrowserError("Acquire the active E2B browser session lease before steering this browser");
       if (record.sessionId && args.sessionId === record.sessionId && browserSessionManager.isTracked(userId, record.sessionId)) browserSessionManager.assertLease(userId, record.sessionId);
-      if (!internal.vaultLoginFlow) assertE2BBrowserHandoffAllowsAction(action, (await getSession(userId)).browserHandoffs ?? [], record.lastUrl, record.sandboxId);
+      if (!internal.vaultLoginFlow) assertE2BBrowserHandoffAllowsAction(action, (await getSession(userId)).browserHandoffs ?? [], record.lastUrl, record.sandboxId, Date.now(), record.sessionId);
       if (!internal.vaultLoginFlow) {
         if (action === "act" || action === "agent") {
           await guardNestedVaultBrowserActions(userId, record.sandboxId, action, args, record.lastUrl, internal.ownerPrivateRun === true, internal.ownerApprovedAction === true);
@@ -1382,7 +1430,11 @@ export class E2BBrowserEngine {
         Object.assign(request, { selector: replanned.selector });
         result = await this.run(sandbox, request, commandTimeoutMs);
       }
-      if (result.challenge?.detected) browserMetrics.record({ kind: "challenge", provider: record.kernel ? "kernel" : "e2b", status: result.needsUserInteraction ? "handoff" : "failure", action, challengeType: result.challenge.type, ownerId: userId });
+      if (result.challenge?.detected) {
+        const terminal = result.challenge.terminalStatus ?? result.challenge.solverStatus ?? result.challenge.solver?.status;
+        const status = terminal === "success" || terminal === "solved" ? "solved" : terminal === "timeout" ? "timeout" : terminal === "abandoned" ? "abandoned" : result.needsUserInteraction ? "handoff" : "failure";
+        browserMetrics.record({ kind: "challenge", provider: record.kernel ? "kernel" : "e2b", status, action, challengeType: result.challenge.type, ownerId: userId });
+      }
       let importedFiles: E2BBrowserFileRecord[] = [];
       if (["wait_download"].includes(action)) importedFiles = await this.syncRuntimeFiles(userId, sandbox, record, "download");
       if (action === "pdf" && result.pdf?.filePath && result.pdf.size) {
@@ -1419,6 +1471,7 @@ export class E2BBrowserEngine {
       const safe = {
         provider: next.kernel ? "kernel" : "e2b",
         sandboxId: next.sandboxId,
+        ...(next.sessionId ? { sessionId: next.sessionId } : {}),
         action,
         ...(agent ? { agent } : {}),
         ...(result.observationId ? { observationId: result.observationId } : {}),
@@ -1483,7 +1536,8 @@ export class E2BBrowserEngine {
       };
       Object.assign(safe, result.forms ? { forms: result.forms } : {}, result.desktopAction ? { desktopAction: result.desktopAction } : {}, result.clipboard ? { clipboard: result.clipboard, ...(typeof result.text === "string" ? { text: result.text } : {}) } : {}, next.checkpoint ? { checkpoint: next.checkpoint } : {});
       const challenge = result.challenge && typeof result.challenge === "object" ? result.challenge : undefined;
-      const safeWithChallenge = { ...safe, ...(result.needsUserInteraction ? { needsUserInteraction: true } : {}), ...(challenge ? { challenge } : {}), ...(Array.isArray(result.tabs) ? { tabs: result.tabs } : {}) };
+      recordTrustResult(userId, result, next.lastUrl);
+      const safeWithChallenge = { ...safe, ...(navigationDecision ? { trust: trustMetadata(navigationDecision) } : {}), ...(result.needsUserInteraction ? { needsUserInteraction: true } : {}), ...(challenge ? { challenge } : {}), ...(Array.isArray(result.tabs) ? { tabs: result.tabs } : {}) };
       if (action === "state" || action === "snapshot" || action === "form_inspect" || action === "open" || action === "back" || action === "forward" || action === "refresh") {
         return { ...safeWithChallenge, accessibility: { role: "main", children: nodes.map(({ nodeId, role, name, frameIndex, frameUrl, observationId, pageGeneration }) => ({ nodeId, role, name, ...(frameIndex !== undefined ? { frameIndex } : {}), ...(frameUrl ? { frameUrl } : {}), ...(observationId ? { observationId } : {}), ...(pageGeneration !== undefined ? { pageGeneration } : {}) })) }, verificationRequired: !["state", "snapshot", "find", "form_inspect", "health", "status", "start"].includes(action) };
       }
@@ -1607,9 +1661,20 @@ export class E2BBrowserEngine {
 
   async browserHandoff(userId: number, reason?: string): Promise<{ sandboxId: string; url: string; expiresAt: number; message: string }> {
     return withUserLock(userId, async () => {
-    const { sandbox, record } = await this.sandbox(userId);
     const requestedTtl = Number(config.e2bBrowserHandoffTtlSeconds);
     const ttlSeconds = Number.isFinite(requestedTtl) ? Math.min(900, Math.max(60, Math.floor(requestedTtl))) : 300;
+    const dedicated = dedicatedBrowserRuntime();
+    const retained = dedicated ? await this.record(userId) : undefined;
+    if (dedicated && retained?.runtime === "dedicated" && retained.sessionId) {
+      const live = await dedicated.liveView(String(userId), retained.sessionId);
+      const targetUrl = typeof live.url === "string" ? live.url : typeof live.liveViewUrl === "string" ? live.liveViewUrl : undefined;
+      if (!targetUrl || !/^https:\/\//i.test(targetUrl)) throw new E2BBrowserError("Dedicated browser runtime did not return a secure live-view URL");
+      const expiresAt = typeof live.expiresAt === "number" && Number.isFinite(live.expiresAt) ? live.expiresAt : Math.min(retained.expiresAt, Date.now() + ttlSeconds * 1000);
+      const issued = await this.issueLiveView(userId, retained, { targetUrl, startedAt: Date.now(), expiresAt, port: 443, mode: "interactive" });
+      await this.save(userId, { ...retained, stream: issued.stream, updatedAt: Date.now() });
+      return { sandboxId: retained.sandboxId, url: issued.url, expiresAt, message: `Open this private browser session to complete ${reason || "the website step"}. It expires soon. When you are done, return here and say continue; Chusky will inspect the same retained browser before it does anything else.` };
+    }
+    const { sandbox, record } = await this.sandbox(userId);
     const stream = record.kernel
       ? { url: kernelLiveViewUrl((await kernelClient().browsers.retrieve(record.kernel.sessionId)).browser_live_view_url), startedAt: Date.now(), expiresAt: record.expiresAt, port: 443 }
       : await this.startBrowserStream(sandbox, ttlSeconds);

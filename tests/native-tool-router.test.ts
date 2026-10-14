@@ -101,7 +101,7 @@ test("native tool discovery returns bounded searchable metadata", () => {
 });
 
 test("structured data requests can discover Monid without naming the provider", () => {
-  for (const query of ["census demographics", "weather forecast", "onchain wallet data", "public dataset API", "verified business contacts", "AI citation visibility", "YouTube transcripts", "compare customer reviews", "local service prospects", "videos outperforming for creators", "SEO keyword evidence"]) {
+  for (const query of ["census demographics", "weather forecast", "onchain wallet data", "public dataset API", "verified business contacts", "AI citation visibility", "YouTube transcripts", "compare customer reviews", "local service prospects", "videos outperforming for creators", "SEO keyword evidence", "competitor ad intelligence", "scrape public product pages"]) {
     const found = searchDiscoveredToolManifest(query);
     assert.ok(found.some((item) => item.slug === "CHUCK_MONID_SEARCH"), `expected Monid discovery tool for ${query}`);
   }
@@ -110,7 +110,7 @@ test("structured data requests can discover Monid without naming the provider", 
 test("bundle fallback exposes Monid for structured data use cases", async () => {
   const restore = withConfig({ nativeToolLoading: "bundle", jevNativeToolRouting: false });
   try {
-    for (const query of ["Pull census demographics for Austin", "Compare weather forecasts", "Find social media data", "Get on-chain wallet data", "Find verified business contacts", "Compare customer reviews", "Find local service prospects"]) {
+    for (const query of ["Pull census demographics for Austin", "Compare weather forecasts", "Find social media data", "Get on-chain wallet data", "Find verified business contacts", "Compare customer reviews", "Find local service prospects", "Research competitor ads", "Scrape public business websites"]) {
       const route = await routeNativeToolsForTurn(tools(), query);
       assert.ok(route.tools.some((tool: any) => tool.function.name === "CHUCK_MONID_SEARCH"), `expected Monid for ${query}`);
     }

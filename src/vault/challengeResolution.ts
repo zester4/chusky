@@ -1,14 +1,14 @@
 /** E2B-backed state for browser challenges and owner handoff. */
-export const BROWSER_CHALLENGE_PROVIDERS = ["e2b", "kernel", "owner"] as const;
+export const BROWSER_CHALLENGE_PROVIDERS = ["e2b", "kernel", "playwright", "agent-browser", "owner"] as const;
 export type BrowserChallengeProvider = typeof BROWSER_CHALLENGE_PROVIDERS[number];
 
 export const BROWSER_CHALLENGE_TYPES = ["captcha", "two_factor", "age_verification", "site_challenge", "login", "user_requested"] as const;
 export type BrowserChallengeType = typeof BROWSER_CHALLENGE_TYPES[number];
 
-export const BROWSER_CHALLENGE_STATES = ["detected", "solving", "solved_unverified", "verified", "handoff_required", "expired", "blocked"] as const;
+export const BROWSER_CHALLENGE_STATES = ["detected", "solving", "solved_unverified", "verified", "handoff_required", "failed", "timeout", "abandoned", "expired", "blocked"] as const;
 export type BrowserChallengeState = typeof BROWSER_CHALLENGE_STATES[number];
 
-export type BrowserChallengeEvent = "detected" | "provider_solving_started" | "provider_solving_finished" | "owner_handoff_created" | "verification_passed" | "verification_failed" | "expired" | "blocked";
+export type BrowserChallengeEvent = "detected" | "provider_solving_started" | "provider_solving_finished" | "provider_solving_failed" | "provider_solving_timeout" | "provider_solving_abandoned" | "owner_handoff_created" | "verification_passed" | "verification_failed" | "expired" | "blocked";
 
 export type BrowserChallengeResolution = {
   provider: BrowserChallengeProvider;
@@ -34,6 +34,10 @@ export function transitionChallengeState(state: BrowserChallengeState, event: Br
   if (event === "provider_solving_finished") {
     if (state !== "solving") throw new Error(`Cannot finish provider solving from ${state}`);
     return "solved_unverified";
+  }
+  if (event === "provider_solving_failed" || event === "provider_solving_timeout" || event === "provider_solving_abandoned") {
+    if (state !== "solving") throw new Error(`Cannot finish provider solving from ${state}`);
+    return event === "provider_solving_failed" ? "failed" : event === "provider_solving_timeout" ? "timeout" : "abandoned";
   }
   if (event === "owner_handoff_created") return "handoff_required";
   if (event === "verification_passed") {

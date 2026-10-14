@@ -61,3 +61,23 @@ and the vault guard. Routine browse/search actions can proceed in an authorized
 private run. Checkout, purchase, account changes, uploads, and sensitive
 downloads require the existing explicit approval path; password/email changes
 and account deletion remain blocked.
+
+## Trust routing
+
+`SiteCapabilityRegistry` and `BrowserTrustRouter` sit in front of navigation.
+They keep the default route honest: common interactive sites use the headed
+browser, while API, OAuth, WebMCP, or owner-Chrome routes are selectable only
+after verified capability metadata is registered. The registry never infers an
+API or WebMCP endpoint from a hostname.
+
+The router derives a stable, opaque owner/origin identity key and exposes only
+safe posture metadata: provider, configured region, profile consistency, Web
+Bot Auth state, and egress configuration. It does not spoof fingerprints,
+rotate identities, or claim that a site will accept automation.
+
+Repeated challenge, access-denied, rate-limit, or login-rejection signals open
+a bounded circuit for that owner and origin. Private runs are routed to the
+existing same-session handoff; shared or non-owner runs are blocked. A verified
+human resolution clears the circuit. This prevents the agent from hammering a
+site or replaying the same failed action and gives the owner a deterministic
+recovery path.

@@ -1539,7 +1539,7 @@ test("Redis storage metrics are private, root-only, bounded aggregates", async (
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("cache-control"), "private, no-store");
   const body = await response.json() as { scope: string; data: Record<string, number> };
-  assert.equal(body.scope, "process-local");
+  assert.equal(body.scope, config.durableStorageMetricsEnabled ? "process-local-and-neon-aggregates" : "process-local");
   assert.equal(typeof body.data["redis.session.commands"], "number");
   assert.equal(typeof body.data["redis.missions.responseBytes"], "number");
   assert.equal(JSON.stringify(body).includes("chuck:"), false);

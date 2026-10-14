@@ -843,7 +843,7 @@ tools after local checks pass. Changing `DAYTONA_SNAPSHOT` does not change an ex
 
 ### Kernel-hosted browser (opt-in)
 
-Set `BROWSER_PROVIDER=kernel`, `KERNEL_API_KEY`, and `KERNEL_STEALTH=true` alongside
+Set `BROWSER_PROVIDER=kernel`, `KERNEL_BROWSER_OPT_IN=true`, `KERNEL_API_KEY`, and `KERNEL_STEALTH=true` alongside
 the existing E2B configuration. Rebuild the E2B browser template with
 `npm run e2b:template:build` before activating it. E2B runs the trusted controller;
 Kernel hosts Chromium, so existing browser tools, vault guards, fresh observation
@@ -855,6 +855,9 @@ verification, native visual mouse/keyboard controls, owner-specific persistent
 profiles, private live view, and MP4 replay recordings. Solver success is not proof
 the page cleared; unresolved CAPTCHA and MFA return to private owner takeover.
 hCaptcha availability depends on provider access. No site-wide success rate is promised.
+The separate `KERNEL_BROWSER_OPT_IN` guard is intentional: `BROWSER_PROVIDER=kernel`
+alone must never create a paid Kernel session. Keep `BROWSER_PROVIDER=e2b` and
+`KERNEL_BROWSER_OPT_IN=false` for the normal headed Chrome path.
 
 `CHUCK_BROWSER` actions `auth_start`, `auth_status`, and `auth_resume` provide
 hosted Managed Auth. Supply only website metadata; enter secrets on the private
@@ -1574,6 +1577,12 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `WEB_BOT_AUTH_SIGN_REQUESTS` | browser identity | `false` | Sign browser requests only after Cloudflare approves the identity |
 | `WEB_BOT_AUTH_DIRECTORY_URL` | browser identity | — | Exact public HTTPS URL ending in `/.well-known/http-message-signatures-directory` |
 | `WEB_BOT_AUTH_PRIVATE_KEY_B64` | browser identity | — | Unique Ed25519 PKCS#8 DER private key, base64 encoded; server/E2B process only |
+| `CHUSKY_BROWSER_TRUST_MODE` | browser trust routing | `balanced` | `strict` reports incomplete identity posture; `balanced` keeps normal headed browsing available |
+| `CHUSKY_BROWSER_OPERATOR_ID` | browser trust routing | `chusky` | Stable operator namespace used with owner/origin hashing; never a page credential |
+| `CHUSKY_BROWSER_REGION` | browser trust routing | `default` | Preferred scheduling/egress region metadata; actual placement remains provider-owned |
+| `CHUSKY_BROWSER_OWNER_CHROME_ENABLED` | browser trust routing | `false` | Reserved for an explicit owner-Chrome adapter; it does not attach to a personal profile today |
+| `CHUSKY_BROWSER_FLAG_THRESHOLD` | browser trust routing | `3` | Challenge/access signals before a bounded owner-origin circuit opens |
+| `CHUSKY_BROWSER_FLAG_COOLDOWN_MS` | browser trust routing | `900000` | Circuit cooldown before another automatic attempt is eligible |
 | `LINK_AGENT_WALLET_ENABLED` | Stripe Link Agent Wallet | `false` | Enable owner-controlled Link spend requests |
 | `LINK_CLIENT_ID` | Stripe Link OAuth | — | Confidential Link OAuth client ID |
 | `LINK_CLIENT_SECRET` | Stripe Link OAuth | — | Server-only Link OAuth client secret |
@@ -1601,6 +1610,15 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `SESSION_TTL` | — | `2592000` | Redis TTL (30 days) |
 | `BETTER_AUTH_DATABASE_URL` | Neon | — | Production Better Auth PostgreSQL connection string; required when `NODE_ENV=production` and auth is enabled |
 | `BETTER_AUTH_MIGRATION_DATABASE_URL` | Neon | — | Direct PostgreSQL connection used only by `npm run auth:migrate` for Better Auth schema migrations |
+| `DURABLE_STATE_ENABLED` | Neon | `false` | Enable the canonical owner-scoped session/domain repository; apply all `migrations/` first |
+| `DURABLE_STATE_DATABASE_URL` | Neon | — | Pooled runtime PostgreSQL URL for durable state |
+| `DURABLE_STATE_MIGRATION_DATABASE_URL` | Neon | — | Direct PostgreSQL URL used only by `npm run durable-state:migrate` |
+| `DURABLE_STATE_SDK_RUNS_ENABLED` | Neon | follows durable state | Store SDK run payloads in the bounded `chusky_sdk_run` table |
+| `DURABLE_STATE_SDK_TABLES_ENABLED` | Neon | follows durable state | Store SDK threads, audit events, and idempotency records in separate bounded tables |
+| `DURABLE_STORAGE_METRICS_ENABLED` | Neon/Redis | follows durable state | Persist Redis and PostgreSQL query/transfer samples for admin diagnostics |
+| `DURABLE_STATE_RETENTION_DAYS` | Neon | `90` | Retain durable conversation history for this many days before bounded cleanup |
+| `DURABLE_SDK_AUDIT_RETENTION_DAYS` | Neon | `90` | Retain SDK audit rows for this many days |
+| `DURABLE_SDK_RUN_RETENTION_DAYS` | Neon | `30` | Retain terminal SDK run rows for this many days |
 | `BETTER_AUTH_DATABASE` | — | `./data/better-auth.sqlite` | Local-development Better Auth SQLite fallback only |
 | `PORT` | — | `8080` | HTTP port |
 | `LOG_LEVEL` | — | `info` | trace/debug/info/warn/error |

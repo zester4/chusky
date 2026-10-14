@@ -8,12 +8,13 @@ import { getSession, initStore } from "../src/store.js";
 async function main() {
   const configured = Boolean(config.e2bEnabled && config.e2bApiKey && config.kernelApiKey && config.e2bBrowserTemplate);
   kernelTimeoutSeconds();
-  console.log(JSON.stringify({ configured, configurationStatus: kernelConfigurationStatus(), provider: config.browserProvider, e2bEnabled: config.e2bEnabled, e2bKeyPresent: Boolean(config.e2bApiKey), kernelKeyPresent: Boolean(config.kernelApiKey), templateRebuildRequired: true, liveRequested: process.argv.includes("--live") }));
+  console.log(JSON.stringify({ configured, configurationStatus: kernelConfigurationStatus(), provider: config.browserProvider, kernelOptIn: config.kernelBrowserOptIn, e2bEnabled: config.e2bEnabled, e2bKeyPresent: Boolean(config.e2bApiKey), kernelKeyPresent: Boolean(config.kernelApiKey), templateRebuildRequired: true, liveRequested: process.argv.includes("--live") }));
   if (!process.argv.includes("--live")) return;
   if (!configured) throw new Error("Kernel smoke requires E2B_ENABLED, E2B_API_KEY, KERNEL_API_KEY and a rebuilt browser template");
   // Disposable synthetic owner, memory-only store: never attach a real user's profile.
   await initStore({ memoryOnly: true, suppressStorageMetrics: true });
   config.browserProvider = "kernel";
+  config.kernelBrowserOptIn = true;
   const owner = randomInt(1_000_000_000, 2_000_000_000);
   const engine = new E2BBrowserEngine();
   const invoke = (action: string, args: Record<string, unknown> = {}) => engine.browser(owner, { action, ...args }, { ownerPrivateRun: true });

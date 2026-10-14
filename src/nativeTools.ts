@@ -42,6 +42,8 @@ import { E2BBrowserError, E2BBrowserHandoffWaitingError } from "./lib/e2b/errors
 import { browserHandoffWaitingResult } from "./lib/e2b/contracts.js";
 import { isTrustedBrowserUrlObservation } from "./lib/e2b/contracts.js";
 import { browserChallengeStillActive } from "./lib/e2b/handoffStatus.js";
+import { browserChallengeManager, type DetectedBrowserChallenge } from "./lib/browser-runtime/challenge.js";
+import { browserTrustRouter } from "./lib/browser-runtime/trustRouter.js";
 import { E2B_BROWSER_ACTIONS } from "./lib/e2b/types.js";
 import { transferDaytonaImage, type DaytonaImageTransferInput } from "./daytonaImageTransfer.js";
 import { controlTwilioCallForUser, isTwilioVoiceConfigured, startTwilioCallForUser } from "./calls/twilio.js";
@@ -91,6 +93,7 @@ import { buildTregPlan } from "./treg/engine.js";
 import { TregSpendGuard } from "./treg/spend.js";
 import { TregOAuth } from "./treg/oauth.js";
 import { MonidGateway } from "./monid/gateway.js";
+import { buildMonidPlan } from "./monid/engine.js";
 import { MonidSpendGuard } from "./monid/spend.js";
 import { decideMemoryDisposition } from "./autonomy/decisionLoop.js";
 import { routeBrowserNext } from "./decisions/browserRouter.js";
@@ -710,13 +713,13 @@ function browserHandoffReason(value: unknown): BrowserHandoffReason {
   return reason as BrowserHandoffReason;
 }
 
-async function createBrowserHandoffRecord(userId: number, input: { reason?: unknown; service?: unknown; origin?: unknown; shoppingPlanId?: unknown; credentialId?: unknown }, ownerPrivateRun: boolean) {
+async function createBrowserHandoffRecord(userId: number, input: { reason?: unknown; service?: unknown; origin?: unknown; shoppingPlanId?: unknown; credentialId?: unknown; provider?: unknown; sessionId?: unknown; solverOutcome?: unknown }, ownerPrivateRun: boolean) {
   if (!ownerPrivateRun) throw new Error("Private browser handoffs are available only in the owner's private conversation");
   const reason = browserHandoffReason(input.reason);
   const service = input.service ? normaliseVaultService(text(input.service)) : undefined;
   let origin = input.origin ? normaliseVaultOrigin(text(input.origin)) : undefined;
-  if (!config.e2bEnabled || !config.e2bApiKey) {
-    throw new Error("E2B is required for browser handoff. Configure E2B_ENABLED=true and E2B_API_KEY; Daytona cannot provide browser handoffs.");
+  if ((!config.e2bEnabled || !config.e2bApiKey) && !config.browserRuntimeEnabled) {
+    throw new Error("A retained browser provider is required for browser handoff. Configure E2B or the dedicated browser runtime; Daytona cannot provide handoffs.");
   }
   if (!origin) {
     const observed = await e2bBrowserEngine.browser(userId, { action: "state" });
@@ -727,6 +730,9 @@ async function createBrowserHandoffRecord(userId: number, input: { reason?: unkn
   }
   const credentialId = input.credentialId ? text(input.credentialId, 200) : undefined;
   const handoff = await e2bBrowserEngine.browserHandoff(userId, reason.replaceAll("_", " "));
+  const provider = normalizeChallengeProvider(input.provider ?? (config.browserProvider === "kernel" ? "kernel" : config.browserRuntimeEnabled ? "playwright" : "e2b"));
+  const sessionId = input.sessionId ? text(input.sessionId, 160) : undefined;
+  const solverOutcome = input.solverOutcome && ["solved", "failed", "timeout", "abandoned"].includes(String(input.solverOutcome)) ? String(input.solverOutcome) as "solved" | "failed" | "timeout" | "abandoned" : undefined;
   const record = await saveBrowserHandoff(userId, {
     id: `bh_${randomUUID()}`,
     userId,
@@ -735,9 +741,11 @@ async function createBrowserHandoffRecord(userId: number, input: { reason?: unkn
     ...(origin ? { origin } : {}),
     ...(credentialId ? { credentialId } : {}),
     reason,
-    provider: config.browserProvider === "kernel" ? "kernel" : "e2b",
+    provider,
+    ...(sessionId ? { sessionId } : {}),
     challengeType: normalizeChallengeType(reason),
-    resolutionState: "handoff_required",
+    ...(solverOutcome ? { solverOutcome } : {}),
+    resolutionState: solverOutcome === "solved" ? "solved_unverified" : "handoff_required",
     status: "waiting",
     createdAt: Date.now(),
     expiresAt: handoff.expiresAt,
@@ -745,6 +753,26 @@ async function createBrowserHandoffRecord(userId: number, input: { reason?: unkn
   await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "handoff_requested", ...(service ? { service } : {}), ...(origin ? { origin } : {}), status: "waiting", summary: `Private browser handoff requested for ${reason.replaceAll("_", " ")}`, createdAt: Date.now() });
   const shoppingPlan = input.shoppingPlanId ? await pauseShopping(userId, { id: text(input.shoppingPlanId), reason }) : undefined;
   return { ...handoff, handoffId: record.id, status: record.status, reason, ...(service ? { service } : {}), ...(origin ? { origin } : {}), ...(shoppingPlan ? { shoppingPlan: { id: shoppingPlan.id, status: shoppingPlan.status, pausedReason: shoppingPlan.pausedReason } } : {}) };
+}
+
+async function processBrowserChallengeResult(userId: number, result: unknown, runtime: NativeToolRuntime, action: string, requestOrigin?: string): Promise<unknown> {
+  if (!result || typeof result !== "object" || Array.isArray(result) || runtime.ownerPrivateRun !== true) return result;
+  const managed = await browserChallengeManager.handoff({
+    result,
+    createHandoff: async (challenge: DetectedBrowserChallenge) => {
+      const reason = challenge.type === "two_factor" ? "two_factor" : challenge.type === "captcha" ? "captcha" : challenge.type === "age_verification" ? "age_verification" : "site_challenge";
+      return createBrowserHandoffRecord(userId, {
+        reason,
+        origin: challenge.observedOrigin ?? requestOrigin,
+        provider: challenge.provider,
+        sessionId: challenge.sessionId,
+        solverOutcome: challenge.solverOutcome,
+      }, true);
+    },
+  });
+  if (!managed.handoff) return result;
+  await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "handoff_requested", ...(requestOrigin ? { origin: requestOrigin } : {}), status: "waiting", summary: `Browser ${action.replaceAll("_", " ")} paused for a private challenge handoff`, createdAt: Date.now() });
+  return managed.result;
 }
 
 async function runDelegationWithDurableContinuation(
@@ -1674,11 +1702,13 @@ async function resumeBrowserHandoff(userId: number, id: string, ownerPrivateRun:
     const session = await recordVaultSession(userId, { credentialId: saved.id, service: saved.service, accountAlias: saved.accountAlias, origin: saved.origin, workspaceId: saved.session.workspaceId, status: "authenticated", lastAuthenticatedAt: Date.now(), lastUsedAt: Date.now() });
     await updateBrowserHandoffResolution(userId, id, transitionChallengeState(handoff.resolutionState ?? "handoff_required", "verification_passed"));
     await updateBrowserHandoff(userId, id, "completed", Date.now());
+    if (handoff.origin) browserTrustRouter.clearAfterVerifiedHuman(userId, handoff.origin);
     await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "handoff_completed", service: saved.service, origin: saved.origin, status: "succeeded", summary: "Private browser handoff resumed automatically after same-origin challenge clearance", createdAt: Date.now() });
     return { id, status: "completed", handoffCompleted: true, session: { id: session.id, workspaceId: session.workspaceId, status: session.status, origin: session.origin } };
   }
   await updateBrowserHandoffResolution(userId, id, transitionChallengeState(handoff.resolutionState ?? "handoff_required", "verification_passed"));
   await updateBrowserHandoff(userId, id, "completed", Date.now());
+  if (handoff.origin) browserTrustRouter.clearAfterVerifiedHuman(userId, handoff.origin);
   await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "handoff_completed", ...(handoff.origin ? { origin: handoff.origin } : {}), status: "succeeded", summary: "Private browser handoff resumed automatically after same-origin challenge clearance", createdAt: Date.now() });
   return { id, status: "completed", handoffCompleted: true };
 }
@@ -1903,6 +1933,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       }
       throw new Error("Unsupported TinyFish monitor action.");
     }
+    case "CHUCK_MONID_PLAN": return buildMonidPlan({ task: text(args.task, 2_000), playbook: args.playbook === undefined ? undefined : text(args.playbook, 32), budgetUsd: args.budgetUsd === undefined ? undefined : Number(args.budgetUsd) });
     case "CHUCK_MONID_SEARCH": return monidGateway().discover(text(args.query, 500), args.limit === undefined ? 5 : Number(args.limit), runtime.organizationId);
     case "CHUCK_MONID_INSPECT": return monidGateway().inspect(text(args.provider, 64), text(args.endpoint, 300), runtime.organizationId);
     case "CHUCK_MONID_RUN": return monidGateway().run({
@@ -3099,25 +3130,28 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     }
     case "CHUCK_BROWSER_OBSERVE": {
       const browser = automatedBrowserEngine("observe");
-      return abortableToolCall(runtime, () => browser.browser(userId, {
+      const result = await abortableToolCall(runtime, () => browser.browser(userId, {
         action: "observe",
         includeScreenshot: args.includeScreenshot === true,
         includeForms: args.includeForms !== false,
         includePageContent: args.includePageContent === true,
       }, { ownerPrivateRun: runtime.ownerPrivateRun, visualFeedback: true, signal: runtime.signal }));
+      return processBrowserChallengeResult(userId, result, runtime, "observe");
     }
     case "CHUCK_BROWSER_ACT": {
       const browser = automatedBrowserEngine("act");
       const step = { ...args, action: args.action };
-      return abortableToolCall(runtime, () => browser.browser(userId, { action: "act", step }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId), visualFeedback: true, signal: runtime.signal }));
+      const result = await abortableToolCall(runtime, () => browser.browser(userId, { action: "act", step }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId), visualFeedback: true, signal: runtime.signal }));
+      return processBrowserChallengeResult(userId, result, runtime, "act");
     }
     case "CHUCK_BROWSER_EXTRACT": {
       const browser = automatedBrowserEngine("extract");
-      return abortableToolCall(runtime, () => browser.browser(userId, { action: "extract", schema: args.schema }, { ownerPrivateRun: runtime.ownerPrivateRun, visualFeedback: true, signal: runtime.signal }));
+      const result = await abortableToolCall(runtime, () => browser.browser(userId, { action: "extract", schema: args.schema }, { ownerPrivateRun: runtime.ownerPrivateRun, visualFeedback: true, signal: runtime.signal }));
+      return processBrowserChallengeResult(userId, result, runtime, "extract");
     }
     case "CHUCK_BROWSER_AGENT": {
       const browser = automatedBrowserEngine("agent");
-      return abortableToolCall(runtime, () => browser.browser(userId, {
+      const result = await abortableToolCall(runtime, () => browser.browser(userId, {
         action: "agent",
         steps: args.steps,
         maxSteps: args.maxSteps,
@@ -3127,6 +3161,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         completionAssertions: args.completionAssertions,
         sessionId: args.sessionId,
       }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId), visualFeedback: true, signal: runtime.signal }));
+      return processBrowserChallengeResult(userId, result, runtime, "agent");
     }
     case "CHUCK_BROWSER": {
       const action = classifyBrowserIntent({ label: typeof args.label === "string" ? args.label : String(args.action ?? "browse"), url: typeof args.url === "string" ? args.url : undefined });
@@ -3139,16 +3174,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
           runtime.registerCancellationCleanup(async () => { await browser.browser(userId, { action: "session_release", sessionId }); });
         }
         await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "browser_action", ...(origin ? { origin } : {}), action, status: "succeeded", summary: `Browser ${String(args.action ?? "operation").replaceAll("_", " ")} completed`, createdAt: Date.now() });
-        if (result && typeof result === "object" && (result as { needsUserInteraction?: unknown }).needsUserInteraction === true && (result as { challenge?: unknown }).challenge) {
-          const challenge = (result as { challenge?: { type?: unknown } }).challenge;
-          const reason = challenge?.type === "two_factor" ? "two_factor" : challenge?.type === "captcha" ? "captcha" : "site_challenge";
-          const observedUrl = typeof (result as { observedUrl?: unknown }).observedUrl === "string" ? (result as { observedUrl: string }).observedUrl : undefined;
-          let observedOrigin: string | undefined;
-          if (observedUrl) { try { const current = new URL(observedUrl); if (current.protocol === "https:") observedOrigin = current.origin; } catch { /* use request origin fallback */ } }
-          const handoff = await createBrowserHandoffRecord(userId, { reason, origin: observedOrigin ?? origin }, runtime.ownerPrivateRun === true);
-          return { ...(result as Record<string, unknown>), browserHandoff: handoff, next: "Open the private browser link delivered to you, complete the challenge there, return and say continue, then call CHUCK_BROWSER_HANDOFF_COMPLETE followed by CHUCK_BROWSER_VERIFY." };
-        }
-        return result;
+        return processBrowserChallengeResult(userId, result, runtime, String(args.action ?? "operation"), origin);
       } catch (error) {
         if (error instanceof E2BBrowserHandoffWaitingError) {
           await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "browser_action", ...(origin ? { origin } : {}), action, status: "waiting", summary: "Browser action paused until the owner completes the private handoff", createdAt: Date.now() });
@@ -3162,7 +3188,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_BROWSER_HANDOFF_STATUS": {
       const id = args.id ? text(args.id) : undefined;
       const records = id ? [await getBrowserHandoff(userId, id)] : await listBrowserHandoffs(userId, args.limit === undefined ? 10 : Number(args.limit));
-      const visible = records.filter((record): record is NonNullable<typeof record> => Boolean(record)).map((record) => ({ id: record.id, workspaceId: record.workspaceId, ...(record.service ? { service: record.service } : {}), ...(record.origin ? { origin: record.origin } : {}), reason: record.reason, provider: normalizeChallengeProvider(record.provider), challengeType: normalizeChallengeType(record.challengeType ?? record.reason), resolutionState: record.resolutionState ?? (record.status === "completed" ? "verified" : record.status === "expired" ? "expired" : "handoff_required"), status: record.status, createdAt: record.createdAt, expiresAt: record.expiresAt, ...(record.completedAt ? { completedAt: record.completedAt } : {}) }));
+      const visible = records.filter((record): record is NonNullable<typeof record> => Boolean(record)).map((record) => ({ id: record.id, workspaceId: record.workspaceId, ...(record.sessionId ? { sessionId: record.sessionId } : {}), ...(record.service ? { service: record.service } : {}), ...(record.origin ? { origin: record.origin } : {}), reason: record.reason, provider: normalizeChallengeProvider(record.provider), challengeType: normalizeChallengeType(record.challengeType ?? record.reason), ...(record.solverOutcome ? { solverOutcome: record.solverOutcome } : {}), resolutionState: record.resolutionState ?? (record.status === "completed" ? "verified" : record.status === "expired" ? "expired" : "handoff_required"), status: record.status, createdAt: record.createdAt, expiresAt: record.expiresAt, ...(record.completedAt ? { completedAt: record.completedAt } : {}) }));
       return id ? visible[0] ?? { id, status: "not_found" } : visible;
     }
     case "CHUCK_BROWSER_HANDOFF_COMPLETE": {

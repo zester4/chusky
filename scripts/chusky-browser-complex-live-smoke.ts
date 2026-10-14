@@ -39,6 +39,7 @@ async function main() {
   if (!configured) throw new Error("Complex Kernel smoke requires E2B_ENABLED, E2B_API_KEY, KERNEL_API_KEY and a rebuilt browser template");
   await initStore({ memoryOnly: true, suppressStorageMetrics: true });
   config.browserProvider = "kernel";
+  config.kernelBrowserOptIn = true;
   const owner = randomInt(2_000_000_000, 2_100_000_000);
   const engine = new E2BBrowserEngine();
   const invoke = (action: string, args: Record<string, unknown> = {}) => engine.browser(owner, { action, ...args }, { ownerPrivateRun: true, visualFeedback: true });

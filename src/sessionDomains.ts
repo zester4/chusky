@@ -99,18 +99,21 @@ export function sessionUsesNeonDomains(session: UserSession): boolean {
 }
 
 /** Separate high-growth fields without changing the UserSession API used by callers. */
-export function splitSessionDomains(session: UserSession, separateSdkRuns = false): { core: UserSession; domains: DurableSessionPayloads; sdkRuns: Array<{ threadId: string; run: SdkThreadRecord["runs"][number] }> } {
+export function splitSessionDomains(session: UserSession, separateSdkRuns = false, separateSdkTables = false): { core: UserSession; domains: DurableSessionPayloads; sdkRuns: Array<{ threadId: string; run: SdkThreadRecord["runs"][number] }> } {
   const { durableDomainSnapshots: _snapshots, ...sessionCore } = session as UserSession & { durableDomainSnapshots?: Partial<Record<DurableSessionDomain, unknown>> };
   const sdkRuns = separateSdkRuns ? (session.sdkThreads ?? []).flatMap((thread) => thread.runs.map((run) => ({ threadId: thread.id, run }))) : [];
   const sdkThreads = separateSdkRuns ? (session.sdkThreads ?? []).map((thread) => ({ ...thread, runs: [] })) : session.sdkThreads ?? [];
-  const domains: DurableSessionPayloads = new Map([
+  const sdkTablePayload = separateSdkTables
+    ? { sdkWebhooks: session.sdkWebhooks ?? [], sdkProjects: session.sdkProjects ?? [] }
+    : { sdkThreads, sdkIdempotency: session.sdkIdempotency ?? {}, sdkAudit: session.sdkAudit ?? [], sdkWebhooks: session.sdkWebhooks ?? [], sdkProjects: session.sdkProjects ?? [] };
+  const domains: DurableSessionPayloads = new Map<DurableSessionDomain, unknown>([
     // updatedAt is intentionally excluded: saveSession refreshes it for every
     // turn, and persisting it here would rewrite the profile on every message.
     ["profile", { model: session.model, totalMessages: session.totalMessages, totalCost: session.totalCost, ...(typeof session.telegramChatId === "number" ? { telegramChatId: session.telegramChatId } : {}), ...(typeof session.voiceReplies === "boolean" ? { voiceReplies: session.voiceReplies } : {}), ...(session.voicePreferences ? { voicePreferences: session.voicePreferences } : {}), createdAt: session.createdAt }],
     ["conversation", { summaries: session.summaries }],
     ["memories", { memories: session.memories }],
     ["assets", { imageAssets: session.imageAssets, sdkFiles: session.sdkFiles ?? [], artifacts: session.artifacts ?? [], artifactRegistrationIntents: session.artifactRegistrationIntents ?? [] }],
-    ["sdk", { sdkThreads, sdkIdempotency: session.sdkIdempotency ?? {}, sdkAudit: session.sdkAudit ?? [], sdkWebhooks: session.sdkWebhooks ?? [], sdkProjects: session.sdkProjects ?? [] }],
+    ["sdk", sdkTablePayload],
   ]);
   const core = {
     ...sessionCore,

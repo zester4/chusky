@@ -117,6 +117,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Monid endpoint runs require owner approval; Chusky reserves per-owner and per-mission spend, requires an explicit cap for per-result pricing, and never blindly retries uncertain runs.",
     "Monid is disabled until a server-side API key is configured. Review Monid's current terms and data handling before enabling it for production or sensitive workloads.",
   ],
+  monidEngine: [
+    "Added read-only Monid playbooks for SEO, ads, verified leads, local prospects, company briefs, video and content research, AI visibility, creator analysis, reviews, and public-site extraction; providers and prices remain discovered live.",
+    "Muna now uses Monid playbooks for scoped research, endpoint-specific evidence checks, and clear limits while paid calls continue through Chusky's existing approval, spend-reservation, and async-run controls.",
+    "The planner makes no provider calls and cannot approve spend; public-source, data-quality, privacy, and existing Monid availability boundaries remain in force.",
+  ],
   muna: [
     "Muna is Chusky's Treg-first Business and Data Intelligence specialist for people/company discovery, qualification, enrichment, bounded hiring evidence, and buying-signal research; Monid is an optional fallback.",
     "Muna returns source-linked evidence, freshness, exact verification states, pending-call status, and settled spend under bounded Treg route budgets; buying signals remain distinct from confirmed purchase intent.",
@@ -158,9 +163,9 @@ export const AGENT_UPGRADE_PRESETS = {
     "Routine browsing stays autonomous; private-origin checks, session leases, credential isolation, and exact approval or block rules for uploads, sensitive actions, and account changes remain enforced.",
   ],
   browserChallengeResolution: [
-    "Added E2B-backed browser challenge states that distinguish detection, solving, unverified clearance, owner handoff, verification, expiry, and blocking.",
-    "E2B handoffs persist the retained browser session, challenge type, and resolution state while preserving owner-scoped sessions and same-origin verification.",
-    "Challenge completion is never trusted by itself: Chusky re-inspects the live E2B page and verifies the expected origin and result before resuming.",
+    "Added provider-neutral browser challenge orchestration that distinguishes detection, provider solving, unverified clearance, owner handoff, verification, failure, timeout, abandonment, expiry, and blocking.",
+    "E2B, Kernel, dedicated Playwright/CDP runtimes, and future providers persist the challenge type and resolution state through the same retained-session handoff contract with opaque metadata and owner-scoped live view.",
+    "Challenge completion is never trusted by itself: Chusky re-inspects the live E2B page or dedicated page in the same browser session, verifies the expected origin, and resumes only after the page is clear.",
   ],
   browserReliability: [
     "Added universal, label-aware form planning and bounded end-to-end form filling for text fields, selects, custom comboboxes, checkboxes, radios, and submit controls.",
@@ -190,7 +195,7 @@ export const AGENT_UPGRADE_PRESETS = {
   browserControlPlane: [
     "Added a provider-neutral BrowserSessionManager with warm-session scheduling, preferred-region placement, bounded owner concurrency, reconnectable leases, and adapters for E2B, Kernel, Playwright, or Agent Browser.",
     "Provider CDP endpoints stay inside trusted adapters behind opaque owner-bound broker tickets; encrypted profile envelopes and generation-bound refs prevent cross-account state leakage and stale DOM actions.",
-    "Browser attach, reconnect, action, and challenge telemetry now exposes bounded latency percentiles, failure rates, and challenge outcomes, while one shared policy evaluator keeps high-impact browser actions approval-gated or blocked.",
+    "Browser telemetry reports bounded latency percentiles, failures, and challenge outcomes; BrowserTrustRouter selects verified routes, keeps owner/origin identity stable, and hands repeated challenges to the owner instead of blindly retrying.",
   ],
   browserDomainWorkflows: [
     "Added owner-scoped browser planning for flights, stays, telecom services, and streaming accounts with structured route, date, guest, plan, title, and profile constraints.",

@@ -104,6 +104,29 @@ export async function reviewMemoryReflection(input: { ownerUserId: number; refle
   return Boolean(result.rowCount);
 }
 
+/** Delete only terminal reflection rows older than the retention cutoff. */
+export async function pruneMemoryReflections(beforeMs: number, limit = 5000): Promise<number> {
+  if (!durableMemoryConfigured()) return 0;
+  if (!Number.isSafeInteger(beforeMs) || beforeMs <= 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 5000) {
+    throw new Error("Memory reflection retention arguments are invalid");
+  }
+  const result = await poolForDurableMemory().query(
+    `WITH expired AS (
+       SELECT id FROM chusky_memory_reflections
+       WHERE updated_at < to_timestamp($1 / 1000.0)
+         AND status IN ('rejected', 'consolidated', 'duplicate', 'failed')
+       ORDER BY updated_at, id
+       LIMIT $2
+     )
+     DELETE FROM chusky_memory_reflections target
+     USING expired
+     WHERE target.id = expired.id
+     RETURNING target.id`,
+    [beforeMs, limit],
+  );
+  return result.rowCount ?? 0;
+}
+
 export async function drainMemoryReflectionQueue(limit = 20): Promise<{ processed: number; reviewed: number; failed: number }> {
   if (!durableMemoryConfigured()) return { processed: 0, reviewed: 0, failed: 0 };
   const claimed = await poolForDurableMemory().query(`WITH next AS (SELECT id FROM chusky_memory_reflections WHERE status IN ('queued','accepted') AND (claimed_at IS NULL OR claimed_at < now()-interval '5 minutes') ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT $1) UPDATE chusky_memory_reflections r SET status='processing',claimed_at=now(),attempts=attempts+1,updated_at=now() FROM next WHERE r.id=next.id RETURNING r.*`, [Math.max(1, Math.min(100, limit))]);

@@ -39,6 +39,10 @@ Useful task shapes include pulling and comparing public demographic or forecast 
 
 ## Research playbooks
 
+For a structured workflow, call `CHUCK_MONID_PLAN` with the task, optional playbook (`seo`, `ad_intelligence`, `lead_sourcing`, `local_prospects`, `company_brief`, `video_digest`, `content_opportunities`, `ai_visibility`, `creator_analysis`, `product_reviews`, `web_extraction`, or `general_research`), and known total budget. The planner is read-only: it does not search Monid, inspect endpoints, run calls, or grant approval. Follow it with the existing governed `CHUCK_MONID_*` tools, which discover endpoint names and prices live. Never treat the playbook as a fixed endpoint recipe.
+
+The reusable workflows and field-specific checks are in `references/engine-playbooks.md`. Use them as checklists, and inspect the live endpoint schema and pricing every time.
+
 For prospecting, contact discovery, local business qualification, partnership briefs, content/audience research, platform visibility, creator/video analysis, or product-review comparisons, follow the relevant reference before choosing endpoints:
 
 - `references/lead-sourcing.md` covers fit-first company discovery, selective enrichment, and exact email verification states.

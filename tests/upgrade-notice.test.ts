@@ -190,6 +190,16 @@ test("Muna upgrade preset describes Treg-first business intelligence and its bou
   assert.match(bullets[2], /Chusky retains Treg administration/);
 });
 
+test("Monid engine upgrade preset describes dynamic research playbooks and paid-call boundaries", () => {
+  const bullets = getAgentUpgradePreset("monidEngine");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.monidEngine]);
+  assert.match(bullets[0], /SEO.*ads.*verified leads.*local prospects.*company briefs.*video and content research.*AI visibility.*creator analysis.*reviews.*public-site extraction/i);
+  assert.match(bullets[0], /discovered live/i);
+  assert.match(bullets[1], /approval, spend-reservation, and async-run controls/i);
+  assert.match(bullets[2], /planner makes no provider calls/i);
+});
+
 test("Treg upgrade preset describes live provider data and spend controls", () => {
   const bullets = getAgentUpgradePreset("treg");
   assert.equal(bullets.length, 3);
@@ -258,13 +268,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the Treg research engine accurately", async () => {
+test("current upgrade manifest announces the Monid and Treg engines accurately", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
   assert.equal(notice?.id, "release-4.58.0");
   assert.equal(notice?.version, "4.58.0");
-  assert.match(notice?.bullets[0] ?? "", /Treg research playbooks.*account research.*buying signals/);
-  assert.match(notice?.bullets[1] ?? "", /Muna.*bounded Treg search.*spend.*pending-call/);
-  assert.match(notice?.bullets[2] ?? "", /Plans make no provider calls.*do not authorize spend/);
+  assert.match(notice?.bullets[0] ?? "", /Monid and Treg research planners.*SEO.*ads.*company\/account research.*lead enrichment\/discovery.*buying signals/);
+  assert.match(notice?.bullets[1] ?? "", /Muna.*approval, spend-reservation, account-scope, and async\/pending-call controls/);
+  assert.match(notice?.bullets[2] ?? "", /Both planners make no provider calls/);
 });
 
 test("lead campaign preset describes durable, discovery-first work and bounded enrichment", () => {
@@ -308,12 +318,12 @@ test("browser live view preset describes the provider-neutral owner-only stream"
   assert.match(bullets[2]!, /stream_stop.*Kernel.*CAPTCHA.*2FA/i);
 });
 
-test("browser control-plane preset describes sessions, broker isolation, refs, and metrics", () => {
+test("browser control-plane preset describes sessions, broker isolation, refs, metrics, and trust routing", () => {
   const bullets = getAgentUpgradePreset("browserControlPlane");
   assert.equal(bullets.length, 3);
   assert.match(bullets[0]!, /provider-neutral BrowserSessionManager.*warm-session.*reconnectable leases/i);
   assert.match(bullets[1]!, /CDP endpoints.*opaque.*encrypted profile.*generation-bound refs/i);
-  assert.match(bullets[2]!, /latency percentiles.*challenge outcomes.*approval-gated or blocked/i);
+  assert.match(bullets[2]!, /latency percentiles.*challenge outcomes.*BrowserTrustRouter.*stable.*blindly retrying/i);
 });
 
 test("browser domain workflow preset describes safe travel, service, and streaming planning", () => {

@@ -25,6 +25,8 @@ test("routes structured external data tasks to Monid guidance without requiring 
     "Compare customer reviews for these products",
     "Which videos are outperforming for specialty coffee creators",
     "Which SEO pages or FAQs should my store prioritize",
+    "Research competitor ads in a public ad library",
+    "Scrape public pages to compare product information",
     "Use Monid to search its API catalog",
   ]) {
     assert.ok(routedSkillNames(query).includes("monid"), `expected Monid guidance for ${query}`);

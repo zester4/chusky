@@ -3,6 +3,9 @@ import { config } from "../../config.js";
 
 export function kernelBrowserEnabled(): boolean {
   if (!["e2b", "kernel"].includes(config.browserProvider)) throw new Error("BROWSER_PROVIDER must be e2b or kernel");
+  if (config.browserProvider === "kernel" && !config.kernelBrowserOptIn) {
+    throw new Error("Kernel browser is disabled by the cost guard. Set KERNEL_BROWSER_OPT_IN=true only for an explicit Kernel run.");
+  }
   if (config.browserProvider === "kernel" && !config.kernelApiKey) throw new Error("Kernel browser requires KERNEL_API_KEY");
   return config.browserProvider === "kernel";
 }
@@ -10,6 +13,7 @@ export function kernelBrowserEnabled(): boolean {
 export function kernelConfigurationStatus(): "disabled" | "configured" | "misconfigured" {
   if (config.browserProvider === "e2b") return "disabled";
   if (config.browserProvider !== "kernel") return "misconfigured";
+  if (!config.kernelBrowserOptIn) return "disabled";
   try { kernelTimeoutSeconds(); } catch { return "misconfigured"; }
   return config.kernelApiKey && config.e2bEnabled && config.e2bApiKey && config.e2bBrowserTemplate
     && Number.isFinite(config.kernelCaptchaWaitMs) && config.kernelCaptchaWaitMs >= 0 && config.kernelCaptchaWaitMs <= 30_000

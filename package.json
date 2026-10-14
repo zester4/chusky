@@ -47,6 +47,7 @@
     "e2b:shopping:platform-smoke": "tsx scripts/e2b-shopping-platform-smoke.ts",
     "e2b:domain:live-matrix": "tsx scripts/e2b-domain-live-matrix.ts",
     "e2b:shopping:order-review": "tsx scripts/e2b-retailer-live-matrix.ts --food --order-review",
+    "e2b:shopping:site-adapters": "tsx scripts/e2b-site-adapter-live-matrix.ts",
     "browser:benchmark": "tsx scripts/browser-benchmark.ts",
     "e2b:browser:retailer-matrix": "tsx scripts/e2b-retailer-live-matrix.ts",
     "e2b:shopping:flow": "tsx scripts/e2b-retailer-live-matrix.ts --food",

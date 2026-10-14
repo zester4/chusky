@@ -3,9 +3,9 @@
   "version": "4.58.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added reusable, read-only Treg research playbooks for account research, people discovery, qualified lead enrichment and generation, buying signals, hiring, technology, market mapping, and general research; provider endpoints and prices are discovered live.",
-    "Chusky routes these playbooks through Muna and bounded Treg search, enrichment, source, spend, pending-call, and durable workflow controls.",
-    "Plans make no provider calls and do not authorize spend; identity matching, source quality, privacy, and outreach boundaries remain active."
+    "Added Monid and Treg research planners: reusable SEO, ads, extraction, company/account research, people and lead enrichment/discovery, buying signals, hiring, technology, market maps, and general research; endpoints stay live-discovered.",
+    "Muna uses the matching research playbook and executes through existing approval, spend-reservation, account-scope, and async/pending-call controls; campaigns and recurring watches use Chusky's durable workflows.",
+    "Both planners make no provider calls and cannot authorize spend; data-quality, privacy, and Treg/Monid configuration boundaries remain active."
   ],
   "createdAt": "2026-10-14T01:14:17.171Z"
 }

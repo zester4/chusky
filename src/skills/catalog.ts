@@ -124,7 +124,7 @@ const ROUTED_SKILLS: Array<{ name: string; triggers: string[] }> = [
     "weather forecast", "on-chain data", "blockchain wallet data", "social media data",
     "verified business contacts", "verified work emails", "target companies", "local prospects", "local businesses", "sales leads",
     "company enrichment", "company brief", "partnership brief", "partnership research", "ai citation visibility", "citation counts", "youtube transcripts", "youtube video",
-    "video transcript", "video transcripts", "video digest", "videos outperforming", "videos are outperforming", "creator outliers", "creator performance", "creator baseline", "customer reviews", "review evidence", "content opportunities", "content improvements", "seo page", "seo content", "seo keyword", "keyword research", "keyword evidence",
+    "video transcript", "video transcripts", "video digest", "videos outperforming", "videos are outperforming", "creator outliers", "creator performance", "creator baseline", "customer reviews", "review evidence", "content opportunities", "content improvements", "seo page", "seo content", "seo keyword", "keyword research", "keyword evidence", "competitor ads", "ad library", "ad intelligence", "paid search footprint", "public website extraction", "website scraping research", "public site crawl", "scrape public pages",
   ] },
   { name: "grill-me", triggers: ["grill me", "challenge assumptions", "stress test the plan"] },
   { name: "brainstorming", triggers: ["brainstorm", "ideate", "ideas for"] },
