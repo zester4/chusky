@@ -41,6 +41,15 @@ or deployment is implied by local tests.
 
 ## Intent routing
 
+For the curated shopping and service sites, `CHUCK_BROWSER_RETAILER_START`
+compiles a bounded user intent into a safe direct search/location URL or a
+short semantic bootstrap sequence. It is an entry accelerator, not a site
+permission or purchase tool. The agent must inspect the returned observation and
+screenshot, verify the query/location state, and fall back to normal adaptive
+browser navigation if the site redirects, requires location selection, changes
+its controls, or presents a challenge. It never accepts credentials, payment
+data, or order submission instructions.
+
 - “Connect/link/add/save/sign in to my Amazon account” starts `CHUCK_VAULT_SAVE`
   with a normalized service name and exact HTTPS origin.
 - `CHUCK_VAULT_SAVE` returns a private, short-lived HTTPS setup URL. The user
