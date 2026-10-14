@@ -27,6 +27,10 @@ Those actions use **Composio**.
 | OAuth tools | Only if owner explicitly needs a **Treg-held** provider account |
 
 Prefer **ENRICH_*** and **RESOLVE** over raw CALL for common jobs.
+For standard discovery, prefer Treg's routed people/company search over picking
+one upstream provider yourself. Use precise filters and small result limits;
+route output can name its provider and any filters it could not apply. Campaign
+searches consume the same campaign-level Treg allowance as enrichment.
 For company discovery, call `CHUCK_TREG_COMPANY_SEARCH` directly with exactly
 one identity input (`query`, `name`, `domain`, `industry`, or `technology`);
 add `country` only as a filter. The gateway checks the routed endpoint's price
@@ -39,10 +43,6 @@ and skips everything except endpoints explicitly declared `GET`, `HEAD`, or
 provider call.
 If no read-only endpoint covers the signal query, report the gap to Chusky so
 the owner can decide the next safe step.
-For standard discovery, prefer Treg's routed people/company search over picking
-one upstream provider yourself. Use precise filters and small result limits;
-route output can name its provider and any filters it could not apply. Campaign
-searches consume the same campaign-level Treg allowance as enrichment.
 
 ## How to talk about results
 
