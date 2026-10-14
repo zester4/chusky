@@ -27,6 +27,11 @@ Those actions use **Composio**.
 | OAuth tools | Only if owner explicitly needs a **Treg-held** provider account |
 
 Prefer **ENRICH_*** and **RESOLVE** over raw CALL for common jobs.
+For company discovery, call `CHUCK_TREG_COMPANY_SEARCH` directly with exactly
+one identity input (`query`, `name`, `domain`, `industry`, or `technology`);
+add `country` only as a filter. The gateway checks the routed endpoint's price
+and requested cap before dispatch, so do not call `CHUCK_TREG_SEARCH` or
+`CHUCK_TREG_GET` separately for that same fixed search.
 For company hiring evidence, use `CHUCK_TREG_COMPANY_JOBS_SEARCH` with a specific company name or domain and a small result limit. It uses one fixed routed search with an enforced per-call cost cap; it does not expose arbitrary provider calls. Preserve listing URLs and posting dates where returned. Hiring may indicate a timing change, but it is not proof of a purchase or confirmed intent. An empty result means no listings were returned for those inputs, not that the company is not hiring.
 When delegated to Muna, `CHUCK_TREG_RESOLVE` inspects catalog endpoint methods
 and skips everything except endpoints explicitly declared `GET`, `HEAD`, or

@@ -517,15 +517,41 @@ export class TregGateway {
     return { query, people, endpoint, callId: response.receipt.callId, ...(route.servedBy || response.receipt.servedBy ? { servedBy: route.servedBy ?? response.receipt.servedBy } : {}), ...((route.tried ?? response.receipt.routeTried)?.length ? { tried: route.tried ?? response.receipt.routeTried } : {}), totalCostUsd: response.receipt.costUsd, warnings, incomplete: route.pending || response.receipt.pending === true || Boolean(route.ignoredFilters?.length || response.receipt.ignoredFilters?.length), generatedAt: new Date().toISOString() };
   }
 
-  async searchCompanies(options: { userId: number; query?: string; name?: string; domain?: string; industry?: string; technology?: string; country?: string; limit?: number; missionId?: string; maxSpendUsd?: number; organizationId?: string }): Promise<{ query: string; companies: TregCompanySearchResult[]; endpoint: string; callId: string; servedBy?: string; tried?: string[]; totalCostUsd: number; warnings: string[]; incomplete: boolean; generatedAt: string }> {
+  async searchCompanies(options: { userId: number; query?: string; name?: string; domain?: string; industry?: string; technology?: string; country?: string; limit?: number; missionId?: string; maxSpendUsd?: number; idempotencyKey?: string; organizationId?: string }): Promise<{ query: string; companies: TregCompanySearchResult[]; endpoint: string; callId: string; servedBy?: string; tried?: string[]; totalCostUsd: number; warnings: string[]; incomplete: boolean; generatedAt: string }> {
     const endpoint = "treg.companies.search";
-    const query = [options.query, options.name ? `company ${options.name}` : "", options.domain ? `domain ${options.domain}` : "", options.industry ? `industry ${options.industry}` : "", options.technology ? `technology ${options.technology}` : "", options.country ? `country ${options.country}` : ""].filter(Boolean).join("; ").slice(0, 1000);
-    if (!query) throw new Error("Provide a company-search description, company name, domain, industry, or technology.");
+    type CompanySearchIdentityField = "query" | "name" | "domain" | "industry" | "technology";
+    const identityInputs: readonly (readonly [CompanySearchIdentityField, string | undefined])[] = [
+      ["query", options.query?.trim().slice(0, 800)],
+      ["name", options.name?.trim().slice(0, 240)],
+      ["domain", options.domain?.trim().slice(0, 240)],
+      ["industry", options.industry?.trim().slice(0, 200)],
+      ["technology", options.technology?.trim().slice(0, 160)],
+    ];
+    const identities = identityInputs.filter((entry): entry is readonly [CompanySearchIdentityField, string] => Boolean(entry[1]));
+    if (!identities.length) throw new Error("Provide one company-search identity: query, name, domain, industry, or technology. A country filter alone is not enough.");
+    const country = options.country?.trim().slice(0, 120) || undefined;
+    const query = [
+      ...identities.map(([kind, value]) => kind === "query" && identities.length === 1 ? value : `${kind}: ${value}`),
+      ...(country ? [`country: ${country}`] : []),
+    ].join("; ").slice(0, 1000);
     const maxSpendUsd = options.maxSpendUsd ?? config.tregPerCallSoftCapUsd;
+    if (!Number.isFinite(maxSpendUsd) || maxSpendUsd < 0) throw new Error("Treg company-search maxSpendUsd must be a finite non-negative amount.");
     const limit = Math.max(1, Math.min(25, Math.floor(options.limit ?? 10)));
-    await this.getEndpoint(endpoint, options.organizationId);
-    const body = { ...(options.query ? { query: options.query.slice(0, 800) } : {}), ...(options.name ? { name: options.name.slice(0, 240) } : {}), ...(options.domain ? { domain: options.domain.slice(0, 240) } : {}), ...(options.industry ? { industry: options.industry.slice(0, 200) } : {}), ...(options.technology ? { technology: options.technology.slice(0, 160) } : {}), ...(options.country ? { country: options.country.slice(0, 120) } : {}), limit };
-    const response = await this.call({ userId: options.userId, endpointId: endpoint, method: "POST", body, missionId: options.missionId, organizationId: options.organizationId, estimateUsd: maxSpendUsd, routeMaxCostUsd: maxSpendUsd });
+    const metadata = await this.getEndpoint(endpoint, options.organizationId);
+    if (metadata.id !== endpoint) throw new Error("Treg company-search catalog identity did not match; no provider call was made.");
+    if (metadata.priceUsd === undefined || metadata.priceUsd < 0) throw new Error("Treg company-search price is unavailable; no provider call was made.");
+    const estimatedCostUsd = metadata.priceUnit === "result" || metadata.priceUnit === "row"
+      ? metadata.priceUsd * limit
+      : metadata.priceUnit === "call" || metadata.priceUsd === 0
+        ? metadata.priceUsd
+        : undefined;
+    if (estimatedCostUsd === undefined || !Number.isFinite(estimatedCostUsd)) throw new Error("Treg company-search price unit is unknown; no provider call was made.");
+    if (estimatedCostUsd > maxSpendUsd) throw new Error(`Treg company-search estimate $${estimatedCostUsd.toFixed(6)} exceeds the $${maxSpendUsd.toFixed(6)} limit; no provider call was made.`);
+    const identityBody: JsonObject = identities.length === 1
+      ? { [identities[0][0] === "query" ? "q" : identities[0][0]]: identities[0][1] }
+      : { q: identities.map(([kind, value]) => `${kind}: ${value}`).join("; ").slice(0, 800) };
+    const body = { ...identityBody, ...(country ? { country } : {}), limit };
+    const response = await this.call({ userId: options.userId, endpointId: endpoint, method: "POST", body, missionId: options.missionId, organizationId: options.organizationId, endpointMetadata: metadata, estimateUsd: estimatedCostUsd, routeMaxCostUsd: maxSpendUsd, idempotencyKey: options.idempotencyKey });
     const route = routeMetadata(response.result);
     const companies = resultRows(response.result, ["companies", "results", "items"]).map(normalizeCompanySearchRow);
     const warnings = [
@@ -665,11 +691,12 @@ export class TregGateway {
     return { revoked: true, id: secretId.slice(0, 200) };
   }
 
-  async call(options: { userId: number; endpointId: string; method?: string; body?: unknown; query?: Record<string, string | number | undefined>; missionId?: string; estimateUsd?: number; routeMaxCostUsd?: number; routeVerify?: boolean; organizationId?: string; idempotencyKey?: string }): Promise<{ result: unknown; receipt: TregCallReceipt }> {
+  async call(options: { userId: number; endpointId: string; method?: string; body?: unknown; query?: Record<string, string | number | undefined>; missionId?: string; estimateUsd?: number; routeMaxCostUsd?: number; routeVerify?: boolean; organizationId?: string; idempotencyKey?: string; endpointMetadata?: TregEndpointHit }): Promise<{ result: unknown; receipt: TregCallReceipt }> {
     const target = options.endpointId.trim();
     if (!target || target.length > 500 || /[#?]/.test(target)) throw new Error("Invalid Treg endpoint or team-tool target");
     const isOwnTarget = /^https:\/\//i.test(target) || target.includes("/");
-    const metadata = isOwnTarget ? undefined : await this.getEndpoint(target, options.organizationId).catch(() => undefined);
+    if (options.endpointMetadata && (isOwnTarget || options.endpointMetadata.id !== target)) throw new Error("Pre-inspected Treg endpoint metadata does not match the requested catalog endpoint");
+    const metadata = isOwnTarget ? undefined : options.endpointMetadata ?? await this.getEndpoint(target, options.organizationId).catch(() => undefined);
     if (metadata?.strictQuery && options.body !== undefined) throw new Error("strict-query catalog endpoint requires declared query parameters; omit the request body");
     if (isOwnTarget) {
       const tools = await this.myTools(options.organizationId);

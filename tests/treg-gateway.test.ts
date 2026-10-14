@@ -455,6 +455,108 @@ test("TregGateway sends the company enrichment contract and unwraps provider out
   }
 });
 
+test("TregGateway maps company query to exactly one Treg identity and preflights its price once", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  let metadataCalls = 0;
+  let providerCalls = 0;
+  let requestBody: Record<string, unknown> | undefined;
+  let idempotencyKey: string | undefined;
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
+      recordReceipt: async () => {},
+      fetchImpl: async (url, init) => {
+        if (url.includes("/catalog/endpoints/")) {
+          metadataCalls += 1;
+          return new Response(JSON.stringify({ id: "treg.companies.search", title: "Company search", provider: "treg", price_usd: 0, price_unit: "call" }), { status: 200 });
+        }
+        providerCalls += 1;
+        requestBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        idempotencyKey = (init.headers as Record<string, string>)["Idempotency-Key"];
+        return new Response(JSON.stringify({ result: { companies: [{ name: "Acme", domain: "acme.example" }] } }), { status: 200, headers: { "X-Treg-Call-Id": "call_company_1", "X-Treg-Cost-Micro": "0" } });
+      },
+    });
+    const result = await gateway.searchCompanies({
+      userId: 1, query: "B2B SaaS companies", country: "London", limit: 3, maxSpendUsd: 0.1, idempotencyKey: "stable-company-search",
+    });
+    assert.deepEqual(requestBody, { q: "B2B SaaS companies", country: "London", limit: 3 });
+    assert.equal(metadataCalls, 1, "the metadata used for preflight is reused for the call");
+    assert.equal(providerCalls, 1, "one company search reaches the provider");
+    assert.equal(idempotencyKey, "stable-company-search");
+    assert.equal(result.callId, "call_company_1");
+    assert.equal(result.companies[0]?.name, "Acme");
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+  }
+});
+
+test("Treg company search combines identity inputs into one q field and blocks an over-cap estimate", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  let providerCalls = 0;
+  let requestBody: Record<string, unknown> | undefined;
+  let metadataPriceUsd = 0.02;
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
+      recordReceipt: async () => {},
+      fetchImpl: async (url, init) => {
+        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "treg.companies.search", title: "Company search", provider: "treg", price_usd: metadataPriceUsd, price_unit: "result" }), { status: 200 });
+        providerCalls += 1;
+        requestBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ result: { companies: [] } }), { status: 200, headers: { "X-Treg-Call-Id": "call_company_2", "X-Treg-Cost-Micro": "0" } });
+      },
+    });
+    await gateway.searchCompanies({ userId: 1, query: "B2B SaaS", industry: "software", country: "London", limit: 3, maxSpendUsd: 0.1 });
+    assert.deepEqual(requestBody, { q: "query: B2B SaaS; industry: software", country: "London", limit: 3 });
+    assert.equal(providerCalls, 1);
+
+    metadataPriceUsd = 0.04;
+    await assert.rejects(
+      gateway.searchCompanies({ userId: 1, industry: "software", country: "London", limit: 3, maxSpendUsd: 0.1 }),
+      /estimate \$0\.120000 exceeds the \$0\.100000 limit; no provider call was made/,
+    );
+    assert.equal(providerCalls, 1, "over-cap requests stop after catalog inspection");
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+  }
+});
+
+test("Treg company search rejects country-only input and unknown prices before provider dispatch", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  let metadataCalls = 0;
+  let providerCalls = 0;
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
+      recordReceipt: async () => {},
+      fetchImpl: async (url) => {
+        if (url.includes("/catalog/endpoints/")) {
+          metadataCalls += 1;
+          return new Response(JSON.stringify({ id: "treg.companies.search", title: "Company search", provider: "treg", price_usd: 0.01 }), { status: 200 });
+        }
+        providerCalls += 1;
+        return new Response(JSON.stringify({ result: { companies: [] } }), { status: 200 });
+      },
+    });
+    await assert.rejects(gateway.searchCompanies({ userId: 1, country: "London", maxSpendUsd: 0.1 }), /country filter alone is not enough/);
+    assert.equal(metadataCalls, 0);
+    await assert.rejects(gateway.searchCompanies({ userId: 1, query: "B2B SaaS", maxSpendUsd: 0.1 }), /price unit is unknown; no provider call was made/);
+    assert.equal(metadataCalls, 1);
+    assert.equal(providerCalls, 0);
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+  }
+});
+
 test("TregGateway falls back to the work-email capability search when a person query is too specific", async () => {
   const previous = { enabled: config.tregEnabled, token: config.tregToken };
   config.tregEnabled = true;
@@ -652,6 +754,26 @@ test("Muna people search, company search, and email verification share the trust
       { tool: "company", maxSpendUsd: 0.03 },
       { tool: "verify", maxSpendUsd: 0.03 },
     ]);
+  } finally {
+    setTregGatewayForTests(undefined);
+  }
+});
+
+test("repeated identical company searches in one agent run reuse the same idempotency key", async () => {
+  const keys: Array<string | undefined> = [];
+  const gateway = {
+    searchCompanies: async (options: { idempotencyKey?: string }) => { keys.push(options.idempotencyKey); return { companies: [] }; },
+  } as unknown as TregGateway;
+  setTregGatewayForTests(gateway);
+  try {
+    const args = { query: "B2B SaaS companies", country: "London", limit: 3, maxSpendUsd: 0.1 };
+    const runtime = { currentRunId: "run-company-search-1" };
+    await nativeTool(42, "CHUCK_TREG_COMPANY_SEARCH", args, runtime);
+    await nativeTool(42, "CHUCK_TREG_COMPANY_SEARCH", args, runtime);
+    await nativeTool(42, "CHUCK_TREG_COMPANY_SEARCH", { ...args, limit: 4 }, runtime);
+    assert.ok(keys[0]);
+    assert.equal(keys[0], keys[1], "the exact same request is replay-safe within the run");
+    assert.notEqual(keys[0], keys[2], "a materially different request receives a different key");
   } finally {
     setTregGatewayForTests(undefined);
   }

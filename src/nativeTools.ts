@@ -353,6 +353,14 @@ function missionStartIdempotencyKey(userId: number, args: Record<string, unknown
   return `agent-run:${scope}:${fingerprint}`;
 }
 
+function runScopedIdempotencyKey(userId: number, operation: string, intent: unknown, runtime: NativeToolRuntime): string | undefined {
+  const runId = runtime.currentRunId?.trim();
+  if (!runId) return undefined;
+  const scope = createHash("sha256").update(`${userId}:${runId}`).digest("hex").slice(0, 24);
+  const fingerprint = createHash("sha256").update(stableJson(intent)).digest("hex").slice(0, 48);
+  return `agent-run:${operation}:${scope}:${fingerprint}`;
+}
+
 function leadDedupeKey(candidate: { companyName: string; domain?: string; website?: string; personName?: string; workEmail?: string; linkedinUrl?: string }): string {
   const cleanUrl = (value: string) => {
     try { const url = new URL(value); url.hash = ""; url.search = ""; return url.toString().replace(/\/$/, "").toLowerCase(); } catch { return value.trim().toLowerCase(); }
@@ -1925,13 +1933,26 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_TREG_COMPANY_SEARCH": {
       const missionId = effectiveTregMissionId(args, runtime);
       const requestedSpend = args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd);
-      return withLeadCampaignTregBudget(userId, missionId, requestedSpend, runtime, (reservedUsd) => tregGateway().searchCompanies({
-        userId, query: args.query ? text(args.query, 800) : undefined,
-        name: args.name ? text(args.name, 240) : undefined, domain: args.domain ? text(args.domain, 240) : undefined,
-        industry: args.industry ? text(args.industry, 200) : undefined, technology: args.technology ? text(args.technology, 160) : undefined,
-        country: args.country ? text(args.country, 120) : undefined, limit: args.limit === undefined ? 10 : Number(args.limit),
-        missionId, maxSpendUsd: reservedUsd ?? effectiveTregSpendLimit(requestedSpend, runtime), organizationId: runtime.organizationId,
-      }));
+      return withLeadCampaignTregBudget(userId, missionId, requestedSpend, runtime, (reservedUsd) => {
+        const maxSpendUsd = reservedUsd ?? effectiveTregSpendLimit(requestedSpend, runtime);
+        const search = {
+          query: args.query ? text(args.query, 800).trim() : undefined,
+          name: args.name ? text(args.name, 240).trim() : undefined,
+          domain: args.domain ? text(args.domain, 240).trim() : undefined,
+          industry: args.industry ? text(args.industry, 200).trim() : undefined,
+          technology: args.technology ? text(args.technology, 160).trim() : undefined,
+          country: args.country ? text(args.country, 120).trim() : undefined,
+          limit: args.limit === undefined ? 10 : Number(args.limit),
+          maxSpendUsd,
+          missionId,
+        };
+        return tregGateway().searchCompanies({
+          userId,
+          ...search,
+          idempotencyKey: runScopedIdempotencyKey(userId, "treg-company-search", search, runtime),
+          organizationId: runtime.organizationId,
+        });
+      });
     }
     case "CHUCK_TREG_COMPANY_JOBS_SEARCH": {
       const missionId = effectiveTregMissionId(args, runtime);

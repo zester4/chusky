@@ -30,6 +30,14 @@ test("every published native schema declares and enforces each top-level require
   }
 });
 
+test("Treg company search requires an identity field before native dispatch", () => {
+  assert.throws(
+    () => validateNativeToolArguments("CHUCK_TREG_COMPANY_SEARCH", { country: "London" }),
+    /requires at least one of: query, name, domain, industry, technology/,
+  );
+  assert.doesNotThrow(() => validateNativeToolArguments("CHUCK_TREG_COMPANY_SEARCH", { query: "B2B SaaS companies", country: "London" }));
+});
+
 test("mission start gives an actionable correction when an existing mission ID is passed", () => {
   assert.throws(
     () => validateNativeToolArguments("CHUCK_MISSION_START", { id: "mis_existing" }),

@@ -41,9 +41,12 @@ Telegram, SDK clients, or logs.
 
 ## Chusky tool routing
 
-1. Use `CHUCK_TREG_SEARCH` for a capability query.
-2. Use `CHUCK_TREG_GET` before a paid catalog call; inspect price, inputs,
-   account requirements, and reliability.
+1. Use `CHUCK_TREG_SEARCH` when the owner asks to explore provider coverage or
+   when choosing a generic catalog endpoint.
+2. Use `CHUCK_TREG_GET` before a generic paid `CHUCK_TREG_CALL`; inspect price,
+   inputs, account requirements, and reliability. Fixed routed discovery tools
+   such as `CHUCK_TREG_COMPANY_SEARCH` perform their own metadata and price
+   preflight; do not repeat catalog search/inspection for the same route.
 3. Use `CHUCK_TREG_PLATFORMS` when multiple providers can satisfy the job.
 4. Use `CHUCK_TREG_MY_TOOLS` before calling an organization-owned API.
 5. Use `CHUCK_TREG_ENRICH_PERSON`, `CHUCK_TREG_ENRICH_COMPANY`, or bounded
