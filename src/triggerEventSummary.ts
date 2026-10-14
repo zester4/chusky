@@ -72,13 +72,21 @@ function firstValue(payload: Record<string, unknown>, keys: readonly string[]): 
   return values.map((value) => cleanText(value)).find(Boolean);
 }
 
+function preserveSafeEmailLinks(value: string): string {
+  return value.replace(/<a\b[^>]*\bhref\s*=\s*(?:"(https?:\/\/[^"\s]+)"|'(https?:\/\/[^'\s]+)')[^>]*>([\s\S]*?)<\/a\s*>/gi, (_match, doubleQuoted: string | undefined, singleQuoted: string | undefined, label: string) => {
+    const url = decodeHtmlEntities(doubleQuoted || singleQuoted || "").trim();
+    const linkText = cleanText(label, 180);
+    return linkText && linkText !== url ? `${linkText}: ${url}` : url;
+  });
+}
+
 function emailSummary(event: { triggerSlug: string; payload: Record<string, unknown>; toolkit?: string }): string[] {
   const subject = firstValue(event.payload, ["subject", "emailsubject", "title"]);
   const sender = firstValue(event.payload, ["from", "sender", "sendername", "fromemail", "senderemail"]);
   const recipient = firstValue(event.payload, ["to", "recipient", "toemail"]);
   const date = firstValue(event.payload, ["date", "timestamp", "receivedat", "receivedtime"]);
   const bodyValue = firstValue(event.payload, ["snippet", "preview", "message_text", "messagetext", "body", "content", "text"]);
-  const body = bodyValue && /<\/?[a-z][^>]*>/i.test(bodyValue) ? cleanText(bodyValue.replace(/<title[^>]*>[\s\S]*?<\/title>/i, " "), 900) : bodyValue;
+  const body = bodyValue && /<\/?[a-z][^>]*>/i.test(bodyValue) ? cleanText(preserveSafeEmailLinks(bodyValue.replace(/<title[^>]*>[\s\S]*?<\/title>/i, " ")), 900) : bodyValue;
   const titleMatch = bodyValue?.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   const inferredSubject = subject || (titleMatch?.[1] ? cleanText(titleMatch[1], 240) : undefined);
   return [
