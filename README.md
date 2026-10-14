@@ -1601,6 +1601,15 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `SESSION_TTL` | — | `2592000` | Redis TTL (30 days) |
 | `BETTER_AUTH_DATABASE_URL` | Neon | — | Production Better Auth PostgreSQL connection string; required when `NODE_ENV=production` and auth is enabled |
 | `BETTER_AUTH_MIGRATION_DATABASE_URL` | Neon | — | Direct PostgreSQL connection used only by `npm run auth:migrate` for Better Auth schema migrations |
+| `DURABLE_STATE_ENABLED` | Neon | `false` | Enable the canonical owner-scoped session/domain repository; apply all `migrations/` first |
+| `DURABLE_STATE_DATABASE_URL` | Neon | — | Pooled runtime PostgreSQL URL for durable state |
+| `DURABLE_STATE_MIGRATION_DATABASE_URL` | Neon | — | Direct PostgreSQL URL used only by `npm run durable-state:migrate` |
+| `DURABLE_STATE_SDK_RUNS_ENABLED` | Neon | follows durable state | Store SDK run payloads in the bounded `chusky_sdk_run` table |
+| `DURABLE_STATE_SDK_TABLES_ENABLED` | Neon | follows durable state | Store SDK threads, audit events, and idempotency records in separate bounded tables |
+| `DURABLE_STORAGE_METRICS_ENABLED` | Neon/Redis | follows durable state | Persist Redis and PostgreSQL query/transfer samples for admin diagnostics |
+| `DURABLE_STATE_RETENTION_DAYS` | Neon | `90` | Retain durable conversation history for this many days before bounded cleanup |
+| `DURABLE_SDK_AUDIT_RETENTION_DAYS` | Neon | `90` | Retain SDK audit rows for this many days |
+| `DURABLE_SDK_RUN_RETENTION_DAYS` | Neon | `30` | Retain terminal SDK run rows for this many days |
 | `BETTER_AUTH_DATABASE` | — | `./data/better-auth.sqlite` | Local-development Better Auth SQLite fallback only |
 | `PORT` | — | `8080` | HTTP port |
 | `LOG_LEVEL` | — | `info` | trace/debug/info/warn/error |

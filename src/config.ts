@@ -766,9 +766,16 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   durableStateEnabled: optional("DURABLE_STATE_ENABLED", "false") === "true",
   durableStateDatabaseUrl: optional("DURABLE_STATE_DATABASE_URL", ""),
   durableStateMigrationDatabaseUrl: optional("DURABLE_STATE_MIGRATION_DATABASE_URL", ""),
-  durableStorageMetricsEnabled: optional("DURABLE_STORAGE_METRICS_ENABLED", "false") === "true",
-  // Per-run SDK records require migration 0002; cut over independently after it is applied.
-  durableStateSdkRunsEnabled: optional("DURABLE_STATE_SDK_RUNS_ENABLED", "false") === "true",
+  // Durable deployments enable storage/query telemetry by default. Set the
+  // explicit flag to false only for a deliberately unobserved local rollout.
+  durableStorageMetricsEnabled: optional("DURABLE_STORAGE_METRICS_ENABLED", optional("DURABLE_STATE_ENABLED", "false") === "true" ? "true" : "false") === "true",
+  // Per-run records and the bounded SDK tables are part of the durable-state
+  // cutover. The env flags remain available for staged migrations.
+  durableStateSdkRunsEnabled: optional("DURABLE_STATE_SDK_RUNS_ENABLED", optional("DURABLE_STATE_ENABLED", "false") === "true" ? "true" : "false") === "true",
+  durableStateSdkTablesEnabled: optional("DURABLE_STATE_SDK_TABLES_ENABLED", optional("DURABLE_STATE_ENABLED", "false") === "true" ? "true" : "false") === "true",
+  durableStateRetentionDays: boundedInt("DURABLE_STATE_RETENTION_DAYS", 90, 1, 3650),
+  durableSdkAuditRetentionDays: boundedInt("DURABLE_SDK_AUDIT_RETENTION_DAYS", 90, 1, 3650),
+  durableSdkRunRetentionDays: boundedInt("DURABLE_SDK_RUN_RETENTION_DAYS", 30, 1, 3650),
   // Neon is canonical per owner only after that owner's mission backfill marker exists.
   durableStateMissionsEnabled: optional("DURABLE_STATE_MISSIONS_ENABLED", "false") === "true",
   // Opt-in Neon object catalog for verified R2 assets; requires migration 0008.

@@ -3,9 +3,10 @@ import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { Readable } from "node:stream";
 import { cors } from "hono/cors";
+import { routePath } from "hono/route";
 import { config } from "./config.js";
 import { stableSdkUserId } from "./sdkIdentity.js";
-import type { DurableObjectMetadata } from "./neonDurableState.js";
+import { withNeonQueryMetricRoute, type DurableObjectMetadata } from "./neonDurableState.js";
 import { promoteSdkFileUpload } from "./sdkFilePromotion.js";
 import { getAuth } from "./auth.js";
 import { ApprovalRequiredError, createTrigger, createUserOutcomeReadAdapter, deleteTrigger, disconnectConnectedAccount, executeExactComposioAction, fetchModels, getConnectionUrl, getReconnectUrl, getToolkitStatesPage, listConnectedAccounts, listMeetingComposioCapabilities, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, transcriptionFormatForMimeType, updateTriggerInstructions, transcribeAudio, queueVideoWorkflow, type AgentToolActivity } from "./agent.js";
@@ -15,7 +16,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createCliDevice, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type TriggerEventRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, appendSdkAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createCliDevice, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, deleteSdkThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getSdkIdempotency, getSdkRun, getSdkThread, listSdkAuditEvents, listSdkRuns, listSdkThreads, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, saveSdkIdempotency, saveSdkRun, saveSdkThread, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type TriggerEventRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
@@ -402,11 +403,7 @@ function streamA2ATask(c: any, id: A2AJsonRpcId, owner: A2AOwner, taskId: string
   });
 }
 async function audit(userId: number, action: string, requestId: string, status: number): Promise<void> {
-  await mutateSession(userId, (session) => {
-    session.sdkAudit ??= [];
-    session.sdkAudit.push({ id: `audit_${randomUUID()}`, action: action.slice(0, 120), requestId, status, at: Date.now() });
-    session.sdkAudit = session.sdkAudit.slice(-500);
-  });
+  await appendSdkAuditEvent(userId, { id: `audit_${randomUUID()}`, action: action.slice(0, 120), requestId, status, at: Date.now() });
 }
 async function companyAudit(projectId: string, action: string, requestId: string, status: number): Promise<void> {
   await appendCompanyAuditEvent(projectId, { id: `audit_${randomUUID()}`, action: action.slice(0, 120), requestId, status, at: Date.now() });
@@ -939,6 +936,39 @@ async function persistSdkRunSnapshot(
   historyAppend: SdkThreadRecord["history"] = [],
   costIncrement = 0,
 ): Promise<void> {
+  // Progress and approval snapshots are hot writes. Keep them on the bounded
+  // run row so a long run does not repeatedly load and rewrite the account's
+  // session domains. Terminal closeout still uses the session projection once
+  // to append the user-visible conversation history and cost.
+  if (run.status !== "completed" && run.status !== "failed") {
+    const stored = await getSdkRun(userId, threadId, run.id);
+    if (stored) {
+      const mergedEvents = new Map<string, SdkRunRecord["events"][number]>();
+      for (const item of [...stored.events, ...run.events]) mergedEvents.set(item.id, item);
+      const orderedEvents = [...mergedEvents.values()].sort((left, right) => left.at - right.at);
+      const events = [
+        ...orderedEvents.filter((item) => item.type === "run.tool_activity").slice(-200),
+        ...orderedEvents.filter((item) => item.type === "run.subagent_activity").slice(-300),
+        ...orderedEvents.filter((item) => item.type !== "run.tool_activity" && item.type !== "run.subagent_activity").slice(-200),
+      ].sort((left, right) => left.at - right.at);
+      const preserveCancellation = stored.status === "cancelled" && run.status !== "cancelled";
+      const nextRun: SdkRunRecord = {
+        ...run,
+        events,
+        status: preserveCancellation ? "cancelled" : run.status,
+        approvalId: preserveCancellation ? undefined : run.approvalId,
+        durableVersion: stored.durableVersion,
+      };
+      try {
+        if (await saveSdkRun(userId, threadId, nextRun)) {
+          Object.assign(run, nextRun, { durableVersion: (stored.durableVersion ?? 0) + 1 });
+          return;
+        }
+      } catch (error) {
+        logger.warn({ userId, threadId, runId: run.id, err: error }, "Direct SDK run progress write conflicted; falling back to session reconciliation");
+      }
+    }
+  }
   const persistedRun = await mutateSession(userId, (session) => {
     const thread = session.sdkThreads?.find((item) => item.id === threadId);
     const stored = thread?.runs.find((item) => item.id === run.id);
@@ -1362,40 +1392,30 @@ function idempotency(c: any, session: Awaited<ReturnType<typeof getSession>>, fi
 
 /** Persist an idempotency result without saving a caller's stale session snapshot. */
 async function recordSdkIdempotency(userId: number, key: string, fingerprint: string, response: unknown): Promise<void> {
-  await mutateSession(userId, (session) => {
-    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-    const entries = Object.entries(session.sdkIdempotency ?? {})
-      .filter(([, record]) => record.createdAt >= cutoff)
-      .sort((left, right) => right[1].createdAt - left[1].createdAt)
-      .slice(0, 500);
-    session.sdkIdempotency = {
-      ...Object.fromEntries(entries),
-      [key]: { fingerprint, response, createdAt: Date.now() },
-    };
-  });
+  await saveSdkIdempotency(userId, key, fingerprint, response);
+}
+
+async function sdkIdempotency(c: any, userId: number, fingerprint: string): Promise<{ replay?: unknown; key?: string; mismatch?: boolean }> {
+  const key = (c.req.header("Idempotency-Key") ?? "").trim().slice(0, 255);
+  if (!key) return {};
+  const existing = await getSdkIdempotency(userId, key);
+  if (!existing) return { key };
+  return existing.fingerprint === fingerprint ? { replay: existing.response } : { mismatch: true };
 }
 
 /** Apply an owner-scoped SDK mutation with a durable 24-hour replay record. */
 async function sdkMutation(c: any, fingerprint: string, execute: (userId: number) => Promise<unknown>, status = 200): Promise<Response> {
   const userId = sdkUser(c)!.userId;
-  const current = await getSession(userId);
-  const prior = idempotency(c, current, fingerprint);
+  const prior = await sdkIdempotency(c, userId, fingerprint);
   if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.") as Response;
   if (prior.replay !== undefined) return c.json(prior.replay, status) as Response;
   const response = await execute(userId);
-  if (prior.key) {
-    // Re-read after the mutation: pause/resume/run update the canonical
-    // reminder/job record, and saving the pre-mutation session would clobber it.
-    const fresh = await getSession(userId);
-    fresh.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() };
-    await saveSession(userId, fresh);
-  }
+  if (prior.key) await recordSdkIdempotency(userId, prior.key, fingerprint, response);
   return c.json(response, status) as Response;
 }
 
 async function sdkAutonomyMutation(c: any, userId: number, fingerprint: string, execute: () => Promise<unknown>): Promise<Response> {
-  const session = await getSession(userId);
-  const prior = idempotency(c, session, fingerprint);
+  const prior = await sdkIdempotency(c, userId, fingerprint);
   if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.") as Response;
   if (prior.replay !== undefined) return c.json(prior.replay) as Response;
   const lockToken = randomUUID();
@@ -1403,7 +1423,7 @@ async function sdkAutonomyMutation(c: any, userId: number, fingerprint: string, 
   const renewal = setInterval(() => { void renewUserLock(userId, lockToken, 300).catch(() => undefined); }, 60_000);
   try {
     const response = await execute();
-    if (prior.key) { const fresh = await getSession(userId); fresh.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(userId, fresh); }
+    if (prior.key) await recordSdkIdempotency(userId, prior.key, fingerprint, response);
     return c.json(response) as Response;
   } finally { clearInterval(renewal); await releaseUserLock(userId, lockToken); }
 }
@@ -1664,6 +1684,10 @@ export function registerSdkApi(app: Hono): void {
   });
 
   app.use("/v1/*", cors({ origin: (origin) => origin && config.betterAuthTrustedOrigins.includes(origin) ? origin : "", credentials: true, allowHeaders: ["Authorization", "Content-Type", "Idempotency-Key", "X-Chusky-User-Id", "X-Chusky-Provider-Proof-Signature"], allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] }));
+  app.use("/v1/*", async (c, next) => {
+    const route = `${c.req.method} ${routePath(c, -1) || "/v1/*"}`;
+    return withNeonQueryMetricRoute(route, () => next());
+  });
   app.use("/v1/*", async (c, next) => {
     const token = (c.req.header("Authorization") ?? "").replace(/^Bearer\s+/i, "");
     let principal = await authorized(token);
@@ -2973,7 +2997,7 @@ export function registerSdkApi(app: Hono): void {
 
   app.post("/v1/admin/projects", async (c) => { const body = await c.req.json().catch(() => ({})) as { name?: string; scopes?: string[] }; const name = String(body.name ?? "").trim().slice(0, 100); const scopes = Array.isArray(body.scopes) && body.scopes.every((item) => typeof item === "string") ? [...new Set(body.scopes)].slice(0, 20) : ["*"]; if (!name) return apiError(c, 400, "invalid_project", "Project name is required."); const control = await getSession(0); const id = `proj_${randomUUID()}`; const secret = `chsk_${id}_${randomBytes(24).toString("base64url")}`; const record: SdkProjectRecord = { id, name, keyPrefix: secret.slice(0, 18), keyHash: digestKey(secret), scopes, createdAt: Date.now() }; control.sdkProjects!.push(record); await saveSession(0, control); return c.json({ id, name, key: secret, keyPrefix: record.keyPrefix, scopes, createdAt: new Date(record.createdAt).toISOString() }, 201); });
   app.get("/v1/admin/projects", async (c) => c.json({ data: (await getSession(0)).sdkProjects!.map(({ keyHash: _keyHash, ...project }) => ({ ...project, createdAt: new Date(project.createdAt).toISOString(), revokedAt: project.revokedAt ? new Date(project.revokedAt).toISOString() : undefined })) }));
-  app.get("/v1/admin/audit-events", async (c) => { const after = Number(c.req.query("after") ?? 0) || 0; return c.json({ data: (await getSession(0)).sdkAudit!.filter((item) => item.at > after) }); });
+  app.get("/v1/admin/audit-events", async (c) => { c.header("Cache-Control", "private, max-age=1, stale-while-revalidate=4"); const after = Number(c.req.query("after") ?? 0) || 0; return c.json({ data: await listSdkAuditEvents(0, after, 500) }); });
   app.get("/v1/admin/storage/metrics", async (c) => {
     c.header("Cache-Control", "private, no-store");
     return c.json({ data: await durableStorageMetrics(), scope: config.durableStorageMetricsEnabled ? "process-local-and-neon-aggregates" : "process-local" });
@@ -3025,18 +3049,20 @@ export function registerSdkApi(app: Hono): void {
 
   app.post("/v1/threads", async (c) => {
     const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { metadata?: Record<string, unknown> };
-    const session = await getSession(owner.userId); const fingerprint = createHash("sha256").update(`POST:/threads:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); const now = Date.now();
+    const fingerprint = createHash("sha256").update(`POST:/threads:${JSON.stringify(body)}`).digest("hex"); const prior = await sdkIdempotency(c, owner.userId, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); const now = Date.now();
     const thread: SdkThreadRecord = { id: `thr_${randomUUID()}`, externalId: owner.externalId, metadata: body.metadata && typeof body.metadata === "object" ? body.metadata : {}, history: [], runs: [], createdAt: now, updatedAt: now };
-    const response = threadView(thread); session.sdkThreads!.push(thread); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: now }; await saveSession(owner.userId, session); return c.json(response, 201);
+    const response = threadView(thread);
+    if (await saveSdkThread(owner.userId, thread, prior.key ? { key: prior.key, fingerprint, response } : undefined)) return c.json(response, 201);
+    const session = await getSession(owner.userId); const legacyPrior = idempotency(c, session, fingerprint); if (legacyPrior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (legacyPrior.replay) return c.json(legacyPrior.replay, 201); session.sdkThreads!.push(thread); if (legacyPrior.key) session.sdkIdempotency![legacyPrior.key] = { fingerprint, response, createdAt: now }; await saveSession(owner.userId, session); return c.json(response, 201);
   });
   app.get("/v1/threads", async (c) => {
-    const owner = sdkUser(c)!; const includeArchived = c.req.query("includeArchived") === "true"; const threads = (await getSession(owner.userId)).sdkThreads!.filter((item) => includeArchived || item.metadata.archived !== true); const result = page(threads, c.req.query("cursor"), c.req.query("limit")); return c.json({ data: result.data.map(threadView), ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) });
+    const owner = sdkUser(c)!; const includeArchived = c.req.query("includeArchived") === "true"; const threads = (await listSdkThreads(owner.userId)).filter((item) => includeArchived || item.metadata.archived !== true); const result = page(threads, c.req.query("cursor"), c.req.query("limit")); c.header("Cache-Control", "private, max-age=1, stale-while-revalidate=4"); return c.json({ data: result.data.map(threadView), ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) });
   });
   app.get("/v1/threads/:threadId", async (c) => {
-    const thread = (await getSession(sdkUser(c)!.userId)).sdkThreads!.find((item) => item.id === c.req.param("threadId")); return thread ? c.json(threadView(thread)) : apiError(c, 404, "not_found", "Thread not found.");
+    const thread = await getSdkThread(sdkUser(c)!.userId, c.req.param("threadId")); return thread ? c.json(threadView(thread)) : apiError(c, 404, "not_found", "Thread not found.");
   });
-  app.patch("/v1/threads/:threadId", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { title?: unknown; archived?: unknown }; const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found."); if (body.title !== undefined) { const title = String(body.title).trim(); if (title.length > 120) return apiError(c, 400, "invalid_title", "Conversation title must be 120 characters or fewer."); if (title) thread.metadata.title = title; else delete thread.metadata.title; } if (body.archived !== undefined) { if (typeof body.archived !== "boolean") return apiError(c, 400, "invalid_archived", "archived must be a boolean."); thread.metadata.archived = body.archived; } thread.updatedAt = Date.now(); await saveSession(owner.userId, session); return c.json(threadView(thread)); });
-  app.delete("/v1/threads/:threadId", async (c) => { const owner = sdkUser(c)!; const session = await getSessionWithSdkRuns(owner.userId, c.req.param("threadId")); const index = session.sdkThreads!.findIndex((item) => item.id === c.req.param("threadId")); if (index < 0) return apiError(c, 404, "not_found", "Thread not found."); const thread = session.sdkThreads![index]; if (thread.runs.some((run) => run.status === "running" || run.status === "queued")) return apiError(c, 409, "thread_active", "A conversation with a running request cannot be deleted."); session.sdkThreads!.splice(index, 1); await saveSession(owner.userId, session); await deleteSdkRunsForThread(owner.userId, thread.id); return c.body(null, 204); });
+  app.patch("/v1/threads/:threadId", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { title?: unknown; archived?: unknown }; const thread = await getSdkThread(owner.userId, c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found."); if (body.title !== undefined) { const title = String(body.title).trim(); if (title.length > 120) return apiError(c, 400, "invalid_title", "Conversation title must be 120 characters or fewer."); if (title) thread.metadata.title = title; else delete thread.metadata.title; } if (body.archived !== undefined) { if (typeof body.archived !== "boolean") return apiError(c, 400, "invalid_archived", "archived must be a boolean."); thread.metadata.archived = body.archived; } thread.updatedAt = Date.now(); if (await saveSdkThread(owner.userId, thread)) return c.json(threadView(thread)); const session = await getSession(owner.userId); const legacyThread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!legacyThread) return apiError(c, 404, "not_found", "Thread not found."); if (body.title !== undefined) { const title = String(body.title).trim(); if (title) legacyThread.metadata.title = title; else delete legacyThread.metadata.title; } if (body.archived !== undefined) legacyThread.metadata.archived = body.archived as boolean; legacyThread.updatedAt = Date.now(); await saveSession(owner.userId, session); return c.json(threadView(legacyThread)); });
+  app.delete("/v1/threads/:threadId", async (c) => { const owner = sdkUser(c)!; const threadId = c.req.param("threadId"); const thread = await getSdkThread(owner.userId, threadId); if (!thread) return apiError(c, 404, "not_found", "Thread not found."); const runs = await listSdkRuns(owner.userId, threadId); if (runs.some((run) => run.status === "running" || run.status === "queued")) return apiError(c, 409, "thread_active", "A conversation with a running request cannot be deleted."); if (await deleteSdkThread(owner.userId, threadId)) { await deleteSdkRunsForThread(owner.userId, threadId); return c.body(null, 204); } const session = await getSessionWithSdkRuns(owner.userId, threadId); const index = session.sdkThreads!.findIndex((item) => item.id === threadId); if (index < 0) return apiError(c, 404, "not_found", "Thread not found."); session.sdkThreads!.splice(index, 1); await saveSession(owner.userId, session); await deleteSdkRunsForThread(owner.userId, threadId); return c.body(null, 204); });
   app.post("/v1/threads/:threadId/runs", async (c) => {
     const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as RunBody;
     const policyError = validateRunPolicy(body); if (policyError) return apiError(c, 400, "invalid_run_policy", policyError);
@@ -3231,14 +3257,36 @@ export function registerSdkApi(app: Hono): void {
     }, cancel: () => { clientDisconnected = true; } });
     return new Response(stream, { headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff" } });
   });
-  app.get("/v1/threads/:threadId/runs", async (c) => { const thread = (await getSessionWithSdkRuns(sdkUser(c)!.userId, c.req.param("threadId"))).sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found."); const result = page(thread.runs, c.req.query("cursor"), c.req.query("limit")); return c.json({ data: result.data.map((run) => runView(thread.id, run)), ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) }); });
-  app.get("/v1/threads/:threadId/runs/:runId", async (c) => { const thread = (await getSessionWithSdkRuns(sdkUser(c)!.userId, c.req.param("threadId"))).sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); return thread && run ? c.json(runView(thread.id, run)) : apiError(c, 404, "not_found", "Run not found."); });
+   app.get("/v1/threads/:threadId/runs", async (c) => {
+     const owner = sdkUser(c)!;
+     const threadId = c.req.param("threadId");
+     const thread = await getSdkThread(owner.userId, threadId);
+     if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
+     const result = page(await listSdkRuns(owner.userId, threadId), c.req.query("cursor"), c.req.query("limit"));
+     c.header("Cache-Control", "private, max-age=1, stale-while-revalidate=4");
+     return c.json({ data: result.data.map((run) => runView(thread.id, run)), ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) });
+   });
+   app.get("/v1/threads/:threadId/runs/:runId", async (c) => {
+     const owner = sdkUser(c)!;
+     const threadId = c.req.param("threadId");
+     const run = await getSdkRun(owner.userId, threadId, c.req.param("runId"));
+     if (!run) return apiError(c, 404, "not_found", "Run not found.");
+     c.header("Cache-Control", "private, max-age=1, stale-while-revalidate=4");
+     return c.json(runView(threadId, run));
+   });
   app.patch("/v1/threads/:threadId/runs/:runId/feedback", async (c) => {
     const owner = sdkUser(c)!;
     const threadId = c.req.param("threadId");
     const runId = c.req.param("runId");
     const body = await c.req.json().catch(() => ({})) as { feedback?: unknown };
     if (body.feedback !== undefined && body.feedback !== null && body.feedback !== "positive" && body.feedback !== "negative") return apiError(c, 400, "invalid_feedback", "feedback must be positive, negative, or null.");
+    const directThread = await getSdkThread(owner.userId, threadId);
+    const directRun = await getSdkRun(owner.userId, threadId, runId);
+    if (directThread && directRun) {
+      const { feedback: _previousFeedback, ...runWithoutFeedback } = directRun;
+      const updatedRun: SdkRunRecord = { ...runWithoutFeedback, updatedAt: Date.now(), ...(body.feedback === "positive" || body.feedback === "negative" ? { feedback: body.feedback } : {}) };
+      if (await saveSdkRun(owner.userId, threadId, updatedRun)) return c.json(runView(threadId, updatedRun));
+    }
     const session = await getSessionWithSdkRuns(owner.userId, threadId);
     const thread = session.sdkThreads!.find((item) => item.id === threadId);
     const run = thread?.runs.find((item) => item.id === runId);
@@ -3250,8 +3298,24 @@ export function registerSdkApi(app: Hono): void {
     await saveSession(owner.userId, session);
     return c.json(runView(thread.id, run));
   });
-   app.get("/v1/threads/:threadId/runs/:runId/events", async (c) => { const thread = (await getSessionWithSdkRuns(sdkUser(c)!.userId, c.req.param("threadId"))).sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); const cursor = Number(c.req.query("after") ?? 0) || 0; return thread && run ? c.json({ data: run.events.filter((item) => item.at > cursor) }) : apiError(c, 404, "not_found", "Run not found."); });
-   app.get("/v1/threads/:threadId/runs/:runId/trace", async (c) => { const owner = sdkUser(c)!; const session = await getSessionWithSdkRuns(owner.userId, c.req.param("threadId")); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); if (!thread || !run) return apiError(c, 404, "not_found", "Run not found."); const trace = await getAgentRun(owner.userId, run.id); if (!trace) return c.json({ runId: run.id, data: [], state: undefined }); const includeState = c.req.query("include_state") === "true"; return c.json({ runId: run.id, status: trace.status, version: trace.version, createdAt: new Date(trace.createdAt).toISOString(), updatedAt: new Date(trace.updatedAt).toISOString(), events: trace.events, ...(includeState ? { state: trace.state } : {}) }); });
+    app.get("/v1/threads/:threadId/runs/:runId/events", async (c) => {
+      const owner = sdkUser(c)!;
+      const run = await getSdkRun(owner.userId, c.req.param("threadId"), c.req.param("runId"));
+      if (!run) return apiError(c, 404, "not_found", "Run not found.");
+      const cursor = Number(c.req.query("after") ?? 0) || 0;
+      c.header("Cache-Control", "private, max-age=1, stale-while-revalidate=4");
+      return c.json({ data: run.events.filter((item) => item.at > cursor) });
+    });
+    app.get("/v1/threads/:threadId/runs/:runId/trace", async (c) => {
+      const owner = sdkUser(c)!;
+      const run = await getSdkRun(owner.userId, c.req.param("threadId"), c.req.param("runId"));
+      if (!run) return apiError(c, 404, "not_found", "Run not found.");
+      const trace = await getAgentRun(owner.userId, run.id);
+      if (!trace) return c.json({ runId: run.id, data: [], state: undefined });
+      const includeState = c.req.query("include_state") === "true";
+      c.header("Cache-Control", "private, max-age=1, stale-while-revalidate=4");
+      return c.json({ runId: run.id, status: trace.status, version: trace.version, createdAt: new Date(trace.createdAt).toISOString(), updatedAt: new Date(trace.updatedAt).toISOString(), events: trace.events, ...(includeState ? { state: trace.state } : {}) });
+    });
   app.post("/v1/threads/:threadId/runs/:runId/resume", async (c) => {
     const owner = sdkUser(c)!; const session = await getSessionWithSdkRuns(owner.userId, c.req.param("threadId")); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); const prior = thread?.runs.find((item) => item.id === c.req.param("runId"));
     if (!thread || !prior) return apiError(c, 404, "not_found", "Run not found.");
@@ -3712,7 +3776,7 @@ export function registerSdkApi(app: Hono): void {
     if (!project) return apiError(c, 404, "company_project_not_found", "Company telemetry is not available for this API project.");
     return c.json(await companyUsageView(project.id));
   });
-  app.get("/v1/audit-events", async (c) => { const session = await getSession(sdkUser(c)!.userId); const after = Number(c.req.query("after") ?? 0) || 0; return c.json({ data: session.sdkAudit!.filter((item) => item.at > after) }); });
+  app.get("/v1/audit-events", async (c) => { c.header("Cache-Control", "private, max-age=1, stale-while-revalidate=4"); const after = Number(c.req.query("after") ?? 0) || 0; return c.json({ data: await listSdkAuditEvents(sdkUser(c)!.userId, after, 500) }); });
   app.get("/v1/activity", async (c) => {
     const userId = sdkUser(c)!.userId;
     const since = Number(c.req.query("since") ?? 0) || 0;
@@ -3834,7 +3898,7 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/operator/route", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; const candidates = Array.isArray(body.candidates) ? body.candidates.filter((item): item is { id: string; health?: any; costMultiplier?: number; latencyMultiplier?: number } => Boolean(item) && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string").slice(0, 100) : []; const route = chooseReliableRoute(candidates, { requireHealthy: body.requireHealthy === true }); return route ? c.json({ route }) : apiError(c, 409, "no_healthy_route", "No eligible route is available."); });
   app.get("/v1/runs", async (c) => { const userId = sdkUser(c)!.userId; const status = c.req.query("status"); const limit = Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 50) || 50)); const data = (await listAgentRuns(userId, limit)).filter((run) => !status || run.status === status).map((run) => ({ ...run, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() })); return c.json({ data }); });
   app.get("/v1/runs/:id", async (c) => { const run = await getAgentRun(sdkUser(c)!.userId, c.req.param("id")); return run ? c.json({ ...run, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() }) : apiError(c, 404, "not_found", "Agent run not found."); });
-  app.get("/v1/usage", async (c) => { const owner = sdkUser(c)!; const session = await getSessionWithSdkRuns(owner.userId); const files = session.sdkFiles!; const runs = session.sdkThreads!.flatMap((thread) => thread.runs); return c.json({ messages: session.totalMessages, cost: session.totalCost, files: { count: files.length, declaredBytes: files.reduce((total, file) => total + file.size, 0), available: files.filter((file) => file.status === "available").length }, runs: { count: runs.length, active: runs.filter((run) => run.status === "running").length }, tasks: { count: (await listTasks(owner.userId)).length } }); });
+  app.get("/v1/usage", async (c) => { c.header("Cache-Control", "private, max-age=5, stale-while-revalidate=15"); const owner = sdkUser(c)!; const session = await getSessionWithSdkRuns(owner.userId); const files = session.sdkFiles!; const runs = session.sdkThreads!.flatMap((thread) => thread.runs); return c.json({ messages: session.totalMessages, cost: session.totalCost, files: { count: files.length, declaredBytes: files.reduce((total, file) => total + file.size, 0), available: files.filter((file) => file.status === "available").length }, runs: { count: runs.length, active: runs.filter((run) => run.status === "running").length }, tasks: { count: (await listTasks(owner.userId)).length } }); });
   app.post("/v1/webhooks", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { url?: string }; let url: URL; try { url = new URL(String(body.url ?? "")); } catch { return apiError(c, 400, "invalid_webhook", "A valid HTTPS webhook URL is required."); } if (!isSafeWebhookUrl(url)) return apiError(c, 400, "invalid_webhook", "Webhook URLs must use public HTTPS endpoints."); const session = await getSession(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); const secret = `whsec_${randomBytes(24).toString("base64url")}`; const hook = { id: `wh_${randomUUID()}`, url: url.toString(), secretCiphertext: sealWebhookSecret(secret), createdAt: Date.now() }; const response = { id: hook.id, url: hook.url, secret, createdAt: new Date(hook.createdAt).toISOString() }; session.sdkWebhooks!.push(hook); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); return c.json(response, 201); });
   app.get("/v1/webhooks", async (c) => { const hooks = (await getSession(sdkUser(c)!.userId)).sdkWebhooks!.filter((item) => !item.disabledAt).map(({ secretCiphertext: _secretCiphertext, ...item }) => item); return c.json({ data: hooks }); });
   app.get("/v1/webhooks/:webhookId/deliveries", async (c) => { const owner = sdkUser(c)!; const hook = (await getSession(owner.userId)).sdkWebhooks!.find((item) => item.id === c.req.param("webhookId")); if (!hook) return apiError(c, 404, "not_found", "Webhook not found."); const data = (await listOutbox(undefined, 100, owner.userId)).filter((item) => item.webhook?.webhookId === hook.id).map((item) => ({ id: item.id, status: item.status, attempts: item.attempts, lastError: item.lastError, createdAt: new Date(item.createdAt).toISOString(), deliveredAt: item.deliveredAt ? new Date(item.deliveredAt).toISOString() : undefined })); return c.json({ data }); });

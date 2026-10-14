@@ -483,6 +483,19 @@ test("session split leaves runs out of the SDK document and emits owner-thread r
   );
 });
 
+test("session split keeps SDK threads, idempotency, and audit rows out of the hot SDK document", () => {
+  const original = session();
+  original.sdkThreads = [{ id: "thr_1", externalId: "external", metadata: {}, history: [], runs: [], createdAt: 1, updatedAt: 1 }];
+  original.sdkIdempotency = { key: { fingerprint: "a".repeat(64), response: { ok: true }, createdAt: 1 } };
+  original.sdkAudit = [{ id: "audit_1", action: "GET /v1/threads", requestId: "req_1", status: 200, at: 1 }];
+  const { core, domains, sdkRuns } = splitSessionDomains(original, true, true);
+  assert.equal(sdkRuns.length, 0);
+  assert.deepEqual(domains.get("sdk"), { sdkWebhooks: [], sdkProjects: [] });
+  assert.deepEqual(core.sdkThreads, []);
+  assert.deepEqual(core.sdkIdempotency, {});
+  assert.deepEqual(core.sdkAudit, []);
+});
+
 test("session-domain writes retain embedded SDK runs until per-run cutover is enabled", () => {
   const original = session();
   const { domains, sdkRuns } = splitSessionDomains(original);

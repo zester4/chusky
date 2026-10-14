@@ -7,7 +7,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, 
 import { config } from "./config.js";
 import { stableSdkUserId } from "./sdkIdentity.js";
 import { withDistributedLease } from "./distributedLease.js";
-import { createNeonDurableState, durableSdkRunHash, DURABLE_SESSION_DOMAINS, type DurableConversationMessage, type DurableMissionEvent, type DurableMissionRecord, type DurableObjectMetadata, type DurableSessionDocument, type DurableSessionDomain, type DurableStateStatus, type NeonDurableState } from "./neonDurableState.js";
+import { createNeonDurableState, durableSdkRunHash, DURABLE_SESSION_DOMAINS, type DurableConversationMessage, type DurableMissionEvent, type DurableMissionRecord, type DurableObjectMetadata, type DurableSessionDocument, type DurableSessionDomain, type DurableStateStatus, type DurableSdkTableChanges, type DurableSdkTableState, type NeonDurableState } from "./neonDurableState.js";
 import { archiveRecallTranscriptSegment, deleteRecallTranscriptArchive, getArchivedRecallTranscriptSegment, listArchivedRecallTranscriptSegments, recallTranscriptMeetingHash, updateRecallTranscriptArchiveExpiry as updateArchivedRecallExpiry, type RecallTranscriptArchiveDependencies } from "./recallTranscriptArchive.js";
 import { backfillMissionSnapshotToNeon } from "./missionBackfill.js";
 import { HOT_CONVERSATION_MESSAGES, joinSessionDomains, mergeDurableSessionDomain, sessionUsesNeonDomains, splitSessionDomains } from "./sessionDomains.js";
@@ -24,7 +24,7 @@ import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channel
 import type { ApprovalPolicy, HandoffRecord, WorkerDuration } from "./subagents/contracts.js";
 import type { CapabilityWorkerName } from "./memory/types.js";
 import { durableMemoryConfigured, forgetAllPersonalDurableMemories, forgetDurableMemory, getDurableMemoryByKey, mergeDurablePersonalMemories, saveDurableMemory, saveMemoryEntity, searchDurableMemory, setDurableMemoryRuntimeMode } from "./memory/durable.js";
-import { queueConversationReflection } from "./memory/reflection.js";
+import { pruneMemoryReflections, queueConversationReflection } from "./memory/reflection.js";
 import { classifyMemory } from "./memory/classifier.js";
 import { deriveMissionToolHints } from "./missionWorker.js";
 import type { MissionRoutingCache } from "./decisions/missionRoutingCache.js";
@@ -1802,7 +1802,17 @@ interface Backend {
   saveSession(userId: number, s: UserSession): Promise<void>;
   readConversationBefore(userId: number, before: { createdAt: number; id: string }, limit: number): Promise<DurableConversationMessage[] | undefined>;
   getSdkRun(userId: number, threadId: string, runId: string): Promise<SdkRunRecord | undefined>;
+  getSdkThread(userId: number, threadId: string): Promise<SdkThreadRecord | undefined>;
+  listSdkThreads(userId: number): Promise<SdkThreadRecord[]>;
+  saveSdkThread(userId: number, thread: SdkThreadRecord, idempotency?: { key: string; fingerprint: string; response: unknown }): Promise<boolean>;
+  deleteSdkThread(userId: number, threadId: string): Promise<boolean>;
   listSdkRuns(userId: number, threadId: string): Promise<SdkRunRecord[]>;
+  saveSdkRun(userId: number, threadId: string, run: SdkRunRecord): Promise<boolean>;
+  getSdkIdempotency(userId: number, key: string): Promise<{ fingerprint: string; response: unknown; createdAt: number } | undefined>;
+  saveSdkIdempotency(userId: number, key: string, fingerprint: string, response: unknown): Promise<void>;
+  appendSdkAuditEvent(userId: number, event: { id: string; action: string; requestId: string; status: number; at: number }): Promise<void>;
+  listSdkAuditEvents(userId: number, afterMs: number, limit: number): Promise<Array<{ id: string; action: string; requestId: string; status: number; at: number }>>;
+  invalidateSdkRunCaches?(userId: number, threadIds: readonly string[], runIds: readonly string[]): Promise<void>;
   deleteSdkRun(userId: number, threadId: string, runId: string): Promise<void>;
   deleteSdkRunsForThread(userId: number, threadId: string): Promise<void>;
   getDurableStateHealth(): Promise<DurableStateStatus>;
@@ -2141,13 +2151,35 @@ function boundedAgentRun(record: AgentRunRecord): AgentRunRecord {
 // ── Redis ─────────────────────────────────────────────────────────────────────
 class RedisBackend implements Backend {
   private readonly durableStorageMetrics = { redisSessionCommands: 0, redisSessionBytesRead: 0, redisSessionBytesWritten: 0, redisDomainCacheHits: 0, redisDomainCacheMisses: 0, redisSessionCoreBytes: 0, redisDomainCacheBytes: 0 };
-  constructor(private r: Redis, private readonly durableState?: NeonDurableState, private readonly durableSdkRunsEnabled = false, private readonly durableStateMissionsEnabled = false, private readonly redisCommandMetrics = new RedisCommandMetrics(), private readonly redisMetricsPublisher?: RedisMetricsPublisher) {}
+  private retentionLastRunAt = 0;
+  constructor(private r: Redis, private readonly durableState?: NeonDurableState, private readonly durableSdkRunsEnabled = false, private readonly durableSdkTablesEnabled = false, private readonly durableStateMissionsEnabled = false, private readonly redisCommandMetrics = new RedisCommandMetrics(), private readonly redisMetricsPublisher?: RedisMetricsPublisher) {}
 
   private async missionOwnerUsesNeon(userId: number): Promise<boolean> {
     return this.durableStateMissionsEnabled && Boolean(this.durableState) && await this.durableState!.isMissionOwnerMigrated(userId);
   }
   async flushStorageMetrics(): Promise<void> {
     await this.redisMetricsPublisher?.flush();
+    if (!this.durableState) return;
+    try {
+      await this.durableState.flushQueryMetrics();
+    } catch (error) {
+      logger.warn({ errorType: error instanceof Error ? error.name : "QueryMetricsError" }, "Durable query metrics persistence failed");
+    }
+    const now = Date.now();
+    if (now - this.retentionLastRunAt < 60 * 60_000) return;
+    this.retentionLastRunAt = now;
+    try {
+      await this.durableState.pruneDurableStateRetention({
+        messagesBeforeMs: now - config.durableStateRetentionDays * 24 * 60 * 60_000,
+        auditBeforeMs: now - config.durableSdkAuditRetentionDays * 24 * 60 * 60_000,
+        idempotencyBeforeMs: now - 24 * 60 * 60_000,
+        runsBeforeMs: now - config.durableSdkRunRetentionDays * 24 * 60 * 60_000,
+      });
+      await this.durableState.pruneQueryMetrics(now - 30 * 24 * 60 * 60_000);
+      if (durableMemoryConfigured()) await pruneMemoryReflections(now - config.durableStateRetentionDays * 24 * 60 * 60_000);
+    } catch (error) {
+      logger.warn({ errorType: error instanceof Error ? error.name : "DurableRetentionError" }, "Durable retention sweep failed");
+    }
   }
   async close(): Promise<void> {
     try { await this.r.quit(); }
@@ -2178,7 +2210,12 @@ class RedisBackend implements Backend {
       }
     }
     const localSnapshot = this.redisMetricsPublisher?.unflushedSnapshot() ?? this.redisCommandMetrics.snapshot();
-    return { ...this.redisCommandMetrics.flatten(localSnapshot), ...persisted, ...redis, redisDomainCacheHits, redisDomainCacheMisses, redisDomainCacheHitRatio: attempts ? redisDomainCacheHits / attempts : 0, ...(this.durableState?.getMetrics() ?? {}) };
+    let queryTotals: Record<string, number> = {};
+    if (this.durableState && config.durableStorageMetricsEnabled) {
+      try { queryTotals = await this.durableState.queryMetricTotals(Date.now() - 24 * 60 * 60_000, 1); }
+      catch { queryTotals = { "postgres.query.metrics_available": 0 }; }
+    }
+    return { ...this.redisCommandMetrics.flatten(localSnapshot), ...persisted, ...redis, redisDomainCacheHits, redisDomainCacheMisses, redisDomainCacheHitRatio: attempts ? redisDomainCacheHits / attempts : 0, ...queryTotals, ...(this.durableState?.getMetrics() ?? {}) };
   }
   getObjectMetadata(userId: number, objectId: string): Promise<DurableObjectMetadata | undefined> {
     return this.durableState?.getObjectMetadata(userId, objectId) ?? Promise.resolve(undefined);
@@ -2234,6 +2271,10 @@ class RedisBackend implements Backend {
   private pendingOutboxIndexesReady = false;
   private sk = (id: number) => `chuck:session:${id}`;
   private sessionDomainsKey = (id: number) => `chuck:session-domains:${id}`;
+  private sdkTablesKey = (id: number) => `chuck:sdk-tables:${id}`;
+  private sdkThreadsKey = (id: number) => `chuck:sdk-threads:${id}`;
+  private sdkRunKey = (userId: number, threadId: string, runId: string) => `chuck:sdk-run:${userId}:${threadId}:${runId}`;
+  private sdkRunListKey = (userId: number, threadId: string) => `chuck:sdk-runs:${userId}:${threadId}`;
   private readonly sessionDomainCacheTtlSeconds = 5 * 60;
   private readonly maxSessionDomainCacheBytes = 512 * 1024;
   // Redis hash tags keep every key touched by one project's Lua transaction in the same cluster slot.
@@ -2311,6 +2352,86 @@ class RedisBackend implements Backend {
   private channelConversationKey = (id: string) => `chuck:channel:conversation:${createHash("sha256").update(id).digest("hex")}`;
   private channelDebounceKey = (id: string) => `chuck:channel:debounce:${createHash("sha256").update(id).digest("hex")}`;
 
+  private async readSdkTables(userId: number): Promise<DurableSdkTableState> {
+    if (!this.durableState || !this.durableSdkTablesEnabled) return { threads: [], audit: [], idempotency: [] };
+    const key = this.sdkTablesKey(userId);
+    const cached = await this.r.get(key);
+    if (cached) {
+      try {
+        const value = JSON.parse(cached) as DurableSdkTableState;
+        if (value && Array.isArray(value.threads) && Array.isArray(value.audit) && Array.isArray(value.idempotency)) return value;
+      } catch { /* Redis cache is disposable; Neon is authoritative. */ }
+    }
+    const state = await this.durableState.readSdkTables(userId);
+    await this.writeSdkTablesCache(userId, state);
+    return state;
+  }
+
+  private async writeSdkTablesCache(userId: number, state: DurableSdkTableState): Promise<void> {
+    if (!this.durableSdkTablesEnabled) return;
+    const encoded = JSON.stringify(state);
+    if (Buffer.byteLength(encoded, "utf8") > 768 * 1024) return;
+    await this.r.setex(this.sdkTablesKey(userId), 5 * 60, encoded);
+  }
+
+  private async readSdkThreads(userId: number): Promise<SdkThreadRecord[]> {
+    if (!this.durableState || !this.durableSdkTablesEnabled) return (await this.getSession(userId)).sdkThreads ?? [];
+    const key = this.sdkThreadsKey(userId);
+    const cached = await this.r.get(key);
+    if (cached) {
+      try {
+        const rows = JSON.parse(cached) as SdkThreadRecord[];
+        if (Array.isArray(rows)) return rows;
+      } catch { /* Redis cache is disposable; Neon is authoritative. */ }
+    }
+    const rows = (await this.durableState.readSdkThreads(userId)).map((thread) => ({ id: thread.threadId, externalId: thread.externalId, metadata: thread.metadata, history: thread.history as Message[], runs: [], createdAt: thread.createdAt, updatedAt: thread.updatedAt }));
+    const encoded = JSON.stringify(rows);
+    if (Buffer.byteLength(encoded, "utf8") <= 768 * 1024) await this.r.setex(key, 5 * 60, encoded);
+    return rows;
+  }
+
+  private async invalidateSdkTableCaches(userId: number): Promise<void> {
+    await this.r.del(this.sdkTablesKey(userId), this.sdkThreadsKey(userId));
+  }
+
+  private async attachSdkTables(userId: number, session: UserSession): Promise<UserSession> {
+    if (!this.durableState || !this.durableSdkTablesEnabled || userId === 0) return session;
+    const state = await this.readSdkTables(userId);
+    mergeDurableSdkTableState(session, state);
+    return session;
+  }
+
+  private async ensureSdkTablesMigrated(userId: number): Promise<void> {
+    if (!this.durableState || !this.durableSdkTablesEnabled || userId === 0) return;
+    const key = `chuck:sdk-tables-ready:${userId}`;
+    if (await this.r.get(key)) return;
+    const lockKey = `sdk-table-cutover:${userId}`;
+    const token = randomUUID();
+    await withDistributedLease({
+      acquire: () => this.acquireKeyLock(lockKey, token, 30),
+      renew: () => this.renewKeyLock(lockKey, token, 30),
+      release: () => this.releaseKeyLock(lockKey, token),
+    }, async () => {
+      if (await this.r.get(key)) return;
+      const document = await this.durableState!.readSessionDomain(userId, "sdk");
+      const payload = document?.payload as Record<string, unknown> | undefined;
+      if (!document || (payload && ["sdkThreads", "sdkAudit", "sdkIdempotency"].some((field) => Object.hasOwn(payload, field)))) {
+        // Backfill under the normal save lease and CAS before direct reads.
+        // Rechecking under a cutover lease prevents concurrent cold readers
+        // from attempting to insert the same legacy runs twice.
+        const session = await this.getSession(userId);
+        if (document || session.sdkThreads?.length || session.sdkAudit?.length || Object.keys(session.sdkIdempotency ?? {}).length) {
+          await this.saveSession(userId, session);
+          await this.invalidateSdkTableCaches(userId);
+        }
+      }
+      await this.r.setex(key, 300, "1");
+    }, {
+      busyMessage: "SDK history migration is busy; retry shortly.",
+      lostMessage: "SDK history migration lost its lease; retry shortly.",
+    });
+  }
+
   async getSession(userId: number): Promise<UserSession> {
     this.durableStorageMetrics.redisSessionCommands += 1;
     const raw = await this.r.get(this.sk(userId));
@@ -2356,6 +2477,7 @@ class RedisBackend implements Backend {
             [...splitSessionDomains(session).domains].map(([domain, payload]) => [domain, structuredClone(payload)]),
           ) as DurableSessionMetadata["durableDomainSnapshots"];
         }
+        session = await this.attachSdkTables(userId, session);
         session.approvals = await this.listApprovals(userId, 20);
         return session;
       } catch (error) {
@@ -2397,8 +2519,9 @@ class RedisBackend implements Backend {
         session.durableDomainSnapshots = Object.fromEntries([...payloads].map(([domain, payload]) => [domain, structuredClone(payload)])) as DurableSessionMetadata["durableDomainSnapshots"];
         if (!hadProfileDomain) session.durableDomainHashes = { ...session.durableDomainHashes, profile: "profile-needs-backfill" };
         if (Array.isArray(conversation?.history) && conversation.history.length) session.durableDomainHashes = { ...session.durableDomainHashes, conversation: "legacy-history-needs-compaction" };
-        session.approvals = await this.listApprovals(userId, 20);
-        return session;
+        const attached = await this.attachSdkTables(userId, session);
+        attached.approvals = await this.listApprovals(userId, 20);
+        return attached;
       }
     }
     const session = fresh();
@@ -2407,8 +2530,9 @@ class RedisBackend implements Backend {
         [...splitSessionDomains(session).domains].map(([domain, payload]) => [domain, structuredClone(payload)]),
       ) as DurableSessionMetadata["durableDomainSnapshots"];
     }
-    session.approvals = await this.listApprovals(userId, 20);
-    return session;
+    const attached = await this.attachSdkTables(userId, session);
+    attached.approvals = await this.listApprovals(userId, 20);
+    return attached;
   }
 
   async saveSession(userId: number, s: UserSession): Promise<void> {
@@ -2443,16 +2567,17 @@ class RedisBackend implements Backend {
         return compacted ? [{ id: compacted.id!, role: compacted.role, content: compacted.content, createdAt: compacted.createdAt ?? Date.now(), ...(compacted.sourceId ? { sourceId: compacted.sourceId } : {}) }] : [];
       });
       if (pendingMessages.length) await this.durableState.appendConversationMessages(userId, pendingMessages);
-      let { core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled);
+      let { core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled || this.durableSdkTablesEnabled, this.durableSdkTablesEnabled);
       const metadata = withMessageIds as UserSession & DurableSessionMetadata;
       let oldHashes = metadata.durableDomainHashes ?? {};
       let oldSnapshots = metadata.durableDomainSnapshots;
       const changedDomains = new Map([...domains].filter(([domain, payload]) => oldHashes[domain] !== durableDomainHash(payload)));
       const expectedVersions = new Map([...changedDomains.keys()].map((domain) => [domain, metadata.durableDomainVersions?.[domain]] as const));
+      let sdkTableChanges = this.durableSdkTablesEnabled ? durableSdkTableChanges(userId, withMessageIds, metadata.durableSdkTablesSnapshot) : undefined;
       (core as UserSession & DurableSessionMetadata).durableConversationHeadId = withMessageIds.history.at(-1)?.id;
       // Neon commits all domains before Redis points at them. If this fails,
       // the old Redis session remains canonical and can be retried safely.
-      const changedSdkRuns = this.durableSdkRunsEnabled ? sdkRuns.filter(({ run }) => run.durablePayloadHash !== durableSdkRunHash(run)) : sdkRuns;
+      const changedSdkRuns = (this.durableSdkRunsEnabled || this.durableSdkTablesEnabled) ? sdkRuns.filter(({ run }) => run.durablePayloadHash !== durableSdkRunHash(run)) : sdkRuns;
       // Telegram, web, SDK, audit, and proactive handlers can all save the
       // same owner session concurrently. On a version race, merge only edits
       // that are independent relative to the caller's loaded snapshot. Never
@@ -2464,7 +2589,7 @@ class RedisBackend implements Backend {
       // lease. Reconcile once under the lease before attempting the CAS so the
       // common stale-snapshot case does not consume the conflict retry budget.
       if (changedDomains.size) {
-        const latest = await this.durableState.readSessionDomains(userId);
+        const latest = new Map<DurableSessionDomain, DurableSessionDocument>((await Promise.all([...changedDomains.keys()].map(async (domain) => [domain, await this.durableState!.readSessionDomain(userId, domain)] as const))).filter((entry): entry is readonly [DurableSessionDomain, DurableSessionDocument] => Boolean(entry[1])));
         const latestPayloads = new Map<DurableSessionDomain, unknown>(
           [...domains].map(([domain, payload]) => [domain, latest.get(domain)?.payload ?? payload]),
         );
@@ -2497,25 +2622,27 @@ class RedisBackend implements Backend {
             ...oldSnapshots,
             ...Object.fromEntries([...latestPayloads].map(([domain, payload]) => [domain, structuredClone(payload)])),
           };
-          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads), {
+          const sdkState = { sdkThreads: withMessageIds.sdkThreads, sdkIdempotency: withMessageIds.sdkIdempotency, sdkAudit: withMessageIds.sdkAudit };
+          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads), sdkState, {
             durableDomainVersions: { ...metadata.durableDomainVersions, ...latestVersions },
             durableDomainHashes: oldHashes,
             durableDomainSnapshots: oldSnapshots,
           });
-          ({ core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled));
+          ({ core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled || this.durableSdkTablesEnabled, this.durableSdkTablesEnabled));
+          sdkTableChanges = this.durableSdkTablesEnabled ? durableSdkTableChanges(userId, withMessageIds, metadata.durableSdkTablesSnapshot) : undefined;
         }
       }
       let writeAttempts = 0;
       while (true) {
         try {
-          writtenVersions = await this.durableState.writeSessionDomains(userId, changedDomains, changedSdkRuns.map(({ threadId, run }) => ({ threadId, runId: run.id, payload: run, expectedVersion: run.durableVersion })), writeExpectedVersions);
+          writtenVersions = await this.durableState.writeSessionDomains(userId, changedDomains, changedSdkRuns.map(({ threadId, run }) => ({ threadId, runId: run.id, payload: run, expectedVersion: run.durableVersion })), writeExpectedVersions, sdkTableChanges);
           break;
         } catch (error) {
           const isVersionConflict = error instanceof Error && /(?:domain version conflict|SDK run version conflict)/i.test(error.message);
           if (!isVersionConflict || writeAttempts >= 7) throw error;
           writeAttempts += 1;
           await new Promise((resolve) => setTimeout(resolve, Math.min(500, 10 * (2 ** (writeAttempts - 1)))));
-          const latest = await this.durableState.readSessionDomains(userId);
+          const latest = new Map<DurableSessionDomain, DurableSessionDocument>((await Promise.all([...changedDomains.keys()].map(async (domain) => [domain, await this.durableState!.readSessionDomain(userId, domain)] as const))).filter((entry): entry is readonly [DurableSessionDomain, DurableSessionDocument] => Boolean(entry[1])));
           const latestPayloads = new Map<DurableSessionDomain, unknown>([...domains].map(([domain, payload]) => [domain, latest.get(domain)?.payload ?? payload]));
           for (const [domain, desired] of changedDomains) {
             const current = latest.get(domain)?.payload;
@@ -2526,8 +2653,10 @@ class RedisBackend implements Backend {
             latestPayloads.set(domain, merged);
             domains.set(domain, merged);
           }
-          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads));
-          ({ core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled));
+          const sdkState = { sdkThreads: withMessageIds.sdkThreads, sdkIdempotency: withMessageIds.sdkIdempotency, sdkAudit: withMessageIds.sdkAudit };
+          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads), sdkState);
+          ({ core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled || this.durableSdkTablesEnabled, this.durableSdkTablesEnabled));
+          sdkTableChanges = this.durableSdkTablesEnabled ? durableSdkTableChanges(userId, withMessageIds, metadata.durableSdkTablesSnapshot) : undefined;
           writeExpectedVersions = new Map([...changedDomains.keys()].map((domain) => [domain, latest.get(domain)?.version] as const));
         }
       }
@@ -2539,9 +2668,12 @@ class RedisBackend implements Backend {
       const nextHashes = { ...oldHashes, ...Object.fromEntries([...changedDomains].map(([domain, payload]) => [domain, durableDomainHash(payload)])) };
       const nextSnapshots = { ...oldSnapshots, ...Object.fromEntries([...changedDomains].map(([domain, payload]) => [domain, structuredClone(payload)])) };
       const nextHeadId = withMessageIds.history.at(-1)?.id;
-      Object.assign(core as UserSession & DurableSessionMetadata, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableDomainSnapshots: nextSnapshots, durableConversationHeadId: nextHeadId });
-      Object.assign(s as UserSession & DurableSessionMetadata, withMessageIds, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableDomainSnapshots: nextSnapshots, durableConversationHeadId: nextHeadId });
+      const nextSdkTablesSnapshot = this.durableSdkTablesEnabled ? durableSdkTablesSnapshot(withMessageIds) : metadata.durableSdkTablesSnapshot;
+      Object.assign(core as UserSession & DurableSessionMetadata, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableDomainSnapshots: nextSnapshots, durableSdkTablesSnapshot: nextSdkTablesSnapshot, durableConversationHeadId: nextHeadId });
+      Object.assign(s as UserSession & DurableSessionMetadata, withMessageIds, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableDomainSnapshots: nextSnapshots, durableSdkTablesSnapshot: nextSdkTablesSnapshot, durableConversationHeadId: nextHeadId });
       await this.writeSessionDomainCache(userId, domains, nextVersions);
+      if (this.durableSdkTablesEnabled) await this.writeSdkTablesCache(userId, { threads: withMessageIds.sdkThreads!.map((thread) => ({ userId, threadId: thread.id, externalId: thread.externalId, metadata: thread.metadata, history: thread.history, createdAt: thread.createdAt, updatedAt: thread.updatedAt })), audit: withMessageIds.sdkAudit!.map((event) => ({ userId, auditId: event.id, action: event.action, requestId: event.requestId, status: event.status, createdAt: event.at })), idempotency: Object.entries(withMessageIds.sdkIdempotency ?? {}).map(([key, record]) => ({ userId, key, fingerprint: record.fingerprint, response: record.response, createdAt: record.createdAt })) });
+       if (changedSdkRuns.length) await this.invalidateSdkRunCaches(userId, changedSdkRuns.map(({ threadId }) => threadId), changedSdkRuns.map(({ run }) => run.id));
       persisted = core;
     }
     // User 0 is the SDK control plane (projects, hashes, and admin audit), not a conversation.
@@ -2611,24 +2743,144 @@ class RedisBackend implements Backend {
     await this.r.eval(script, 1, this.sessionDomainsKey(userId), this.sessionDomainCacheTtlSeconds, encoded);
   }
 
+  async getSdkThread(userId: number, threadId: string): Promise<SdkThreadRecord | undefined> {
+    await this.ensureSdkTablesMigrated(userId);
+    if (this.durableState && this.durableSdkTablesEnabled) {
+      const durable = (await this.durableState.readSdkThread(userId, threadId));
+      if (durable) return { id: durable.threadId, externalId: durable.externalId, metadata: durable.metadata, history: durable.history as Message[], runs: [], createdAt: durable.createdAt, updatedAt: durable.updatedAt };
+    }
+    const legacy = (await this.getSession(userId)).sdkThreads?.find((thread) => thread.id === threadId);
+    return legacy ? structuredClone({ ...legacy, runs: [] }) : undefined;
+  }
+
+  async listSdkThreads(userId: number): Promise<SdkThreadRecord[]> {
+    await this.ensureSdkTablesMigrated(userId);
+    return (await this.readSdkThreads(userId)).map((thread) => structuredClone({ ...thread, runs: [] }));
+  }
+
+  async saveSdkThread(userId: number, thread: SdkThreadRecord, idempotency?: { key: string; fingerprint: string; response: unknown }): Promise<boolean> {
+    await this.ensureSdkTablesMigrated(userId);
+    if (!this.durableState || !this.durableSdkTablesEnabled) return false;
+    await this.durableState.writeSdkTableChanges(userId, {
+      threads: [{ userId, threadId: thread.id, externalId: thread.externalId, metadata: thread.metadata, history: thread.history, createdAt: thread.createdAt, updatedAt: thread.updatedAt }],
+      deletedThreadIds: [], audit: [], idempotency: idempotency ? [{ userId, key: idempotency.key, fingerprint: idempotency.fingerprint, response: idempotency.response, createdAt: Date.now() }] : [],
+    });
+    await this.invalidateSdkTableCaches(userId);
+    return true;
+  }
+
+  async deleteSdkThread(userId: number, threadId: string): Promise<boolean> {
+    await this.ensureSdkTablesMigrated(userId);
+    if (!this.durableState || !this.durableSdkTablesEnabled) return false;
+    await this.durableState.writeSdkTableChanges(userId, { threads: [], deletedThreadIds: [threadId], audit: [], idempotency: [] });
+    await this.invalidateSdkTableCaches(userId);
+    return true;
+  }
+
   async getSdkRun(userId: number, threadId: string, runId: string): Promise<SdkRunRecord | undefined> {
-    const durable = this.durableSdkRunsEnabled ? await this.durableState?.readSdkRun(userId, threadId, runId) : undefined;
-    if (durable) return durable.payload as SdkRunRecord;
+    await this.ensureSdkTablesMigrated(userId);
+    if (this.durableState && this.durableSdkRunsEnabled) {
+      const key = this.sdkRunKey(userId, threadId, runId);
+      const cached = await this.r.get(key);
+      if (cached) {
+        try {
+          const run = JSON.parse(cached) as SdkRunRecord;
+          if (run?.id === runId) return run;
+        } catch { /* Redis run cache is disposable. */ }
+      }
+      const durable = await this.durableState.readSdkRun(userId, threadId, runId);
+      if (durable) {
+        const run = durable.payload as SdkRunRecord;
+        await this.r.setex(key, 1, JSON.stringify(run));
+        return run;
+      }
+    }
     return (await this.getSession(userId)).sdkThreads?.find((thread) => thread.id === threadId)?.runs.find((run) => run.id === runId);
   }
 
   async listSdkRuns(userId: number, threadId: string): Promise<SdkRunRecord[]> {
+    await this.ensureSdkTablesMigrated(userId);
     if (!this.durableState || !this.durableSdkRunsEnabled) return (await this.getSession(userId)).sdkThreads?.find((thread) => thread.id === threadId)?.runs ?? [];
+    const key = this.sdkRunListKey(userId, threadId);
+    const cached = await this.r.get(key);
+    if (cached) {
+      try {
+        const runs = JSON.parse(cached) as SdkRunRecord[];
+        if (Array.isArray(runs)) return runs;
+      } catch { /* Redis run cache is disposable. */ }
+    }
     const durable = await this.durableState.listSdkRuns(userId, threadId, 200);
-    return durable.map((record) => record.payload as SdkRunRecord);
+    const runs = durable.map((record) => record.payload as SdkRunRecord);
+    await this.r.setex(key, 1, JSON.stringify(runs));
+    return runs;
+  }
+
+  async saveSdkRun(userId: number, threadId: string, run: SdkRunRecord): Promise<boolean> {
+    if (!this.durableState || !this.durableSdkRunsEnabled) return false;
+    await this.durableState.writeSdkRun(userId, threadId, run.id, run, run.durableVersion);
+    await this.invalidateSdkRunCaches(userId, [threadId], [run.id]);
+    return true;
+  }
+
+  async getSdkIdempotency(userId: number, key: string): Promise<{ fingerprint: string; response: unknown; createdAt: number } | undefined> {
+    await this.ensureSdkTablesMigrated(userId);
+    if (this.durableState && this.durableSdkTablesEnabled) {
+      const record = await this.durableState.readSdkIdempotency(userId, key);
+      return record ? { fingerprint: record.fingerprint, response: record.response, createdAt: record.createdAt } : undefined;
+    }
+    const record = (await this.getSession(userId)).sdkIdempotency?.[key];
+    return record ? structuredClone(record) : undefined;
+  }
+
+  async saveSdkIdempotency(userId: number, key: string, fingerprint: string, response: unknown): Promise<void> {
+    await this.ensureSdkTablesMigrated(userId);
+    if (this.durableState && this.durableSdkTablesEnabled) {
+      await this.durableState.writeSdkIdempotency({ userId, key, fingerprint, response, createdAt: Date.now() });
+      await this.invalidateSdkTableCaches(userId);
+      return;
+    }
+    const session = await this.getSession(userId);
+    session.sdkIdempotency ??= {};
+    session.sdkIdempotency[key] = { fingerprint, response, createdAt: Date.now() };
+    await this.saveSession(userId, session);
+  }
+
+  async appendSdkAuditEvent(userId: number, event: { id: string; action: string; requestId: string; status: number; at: number }): Promise<void> {
+    await this.ensureSdkTablesMigrated(userId);
+    if (this.durableState && this.durableSdkTablesEnabled) {
+      await this.durableState.appendSdkAuditEvent({ userId, auditId: event.id, action: event.action, requestId: event.requestId, status: event.status, createdAt: event.at });
+      await this.invalidateSdkTableCaches(userId);
+      return;
+    }
+    const session = await this.getSession(userId);
+    session.sdkAudit ??= [];
+    session.sdkAudit.push(event);
+    session.sdkAudit = session.sdkAudit.slice(-500);
+    await this.saveSession(userId, session);
+  }
+
+  async listSdkAuditEvents(userId: number, afterMs: number, limit: number): Promise<Array<{ id: string; action: string; requestId: string; status: number; at: number }>> {
+    await this.ensureSdkTablesMigrated(userId);
+    if (this.durableState && this.durableSdkTablesEnabled) {
+      return (await this.durableState.readSdkAuditEvents(userId, afterMs, limit)).map((event) => ({ id: event.auditId, action: event.action, requestId: event.requestId, status: event.status, at: event.createdAt }));
+    }
+    return (await this.getSession(userId)).sdkAudit?.filter((event) => event.at > afterMs).slice(-Math.max(1, Math.min(500, limit))) ?? [];
+  }
+
+  async invalidateSdkRunCaches(userId: number, threadIds: readonly string[], runIds: readonly string[]): Promise<void> {
+    const keys = new Set<string>(threadIds.map((threadId) => this.sdkRunListKey(userId, threadId)));
+    for (const threadId of threadIds) for (const runId of runIds) keys.add(this.sdkRunKey(userId, threadId, runId));
+    if (keys.size) await this.r.del(...keys);
   }
 
   async deleteSdkRun(userId: number, threadId: string, runId: string): Promise<void> {
     if (this.durableSdkRunsEnabled) await this.durableState?.deleteSdkRun(userId, threadId, runId);
+    await this.r.del(this.sdkRunKey(userId, threadId, runId), this.sdkRunListKey(userId, threadId));
   }
 
   async deleteSdkRunsForThread(userId: number, threadId: string): Promise<void> {
     if (this.durableSdkRunsEnabled) await this.durableState?.deleteSdkRunsForThread(userId, threadId);
+    await this.r.del(this.sdkRunListKey(userId, threadId));
   }
 
   async getTregSpend(userId: number, dayKey: string): Promise<TregSpendSnapshot | undefined> {
@@ -4114,6 +4366,15 @@ class MemoryBackend implements Backend {
   async markObjectDeleted(_userId: number, _objectId: string): Promise<boolean> { return false; }
   async markObjectFailed(_userId: number, _objectId: string): Promise<boolean> { return false; }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, structuredClone(s)); }
+  async getSdkThread(userId: number, threadId: string) {
+    const thread = this.sessions.get(userId)?.sdkThreads?.find((item) => item.id === threadId);
+    return thread ? structuredClone({ ...thread, runs: [] }) : undefined;
+  }
+  async listSdkThreads(userId: number) {
+    return structuredClone(this.sessions.get(userId)?.sdkThreads?.map((thread) => ({ ...thread, runs: [] })) ?? []);
+  }
+  async saveSdkThread(_userId: number, _thread: SdkThreadRecord, _idempotency?: { key: string; fingerprint: string; response: unknown }) { return false; }
+  async deleteSdkThread(_userId: number, _threadId: string) { return false; }
   async getSdkRun(userId: number, threadId: string, runId: string) {
     const session = this.sessions.get(userId);
     const run = session?.sdkThreads?.find((thread) => thread.id === threadId)?.runs.find((item) => item.id === runId);
@@ -4121,6 +4382,27 @@ class MemoryBackend implements Backend {
   }
   async listSdkRuns(userId: number, threadId: string) {
     return structuredClone(this.sessions.get(userId)?.sdkThreads?.find((thread) => thread.id === threadId)?.runs ?? []);
+  }
+  async saveSdkRun(_userId: number, _threadId: string, _run: SdkRunRecord) { return false; }
+  async getSdkIdempotency(userId: number, key: string) {
+    const record = this.sessions.get(userId)?.sdkIdempotency?.[key];
+    return record ? structuredClone(record) : undefined;
+  }
+  async saveSdkIdempotency(userId: number, key: string, fingerprint: string, response: unknown) {
+    const session = this.sessions.get(userId) ?? fresh();
+    session.sdkIdempotency ??= {};
+    session.sdkIdempotency[key] = { fingerprint, response, createdAt: Date.now() };
+    this.sessions.set(userId, structuredClone(session));
+  }
+  async appendSdkAuditEvent(userId: number, event: { id: string; action: string; requestId: string; status: number; at: number }) {
+    const session = this.sessions.get(userId) ?? fresh();
+    session.sdkAudit ??= [];
+    session.sdkAudit.push(event);
+    session.sdkAudit = session.sdkAudit.slice(-500);
+    this.sessions.set(userId, structuredClone(session));
+  }
+  async listSdkAuditEvents(userId: number, afterMs: number, limit: number) {
+    return structuredClone(this.sessions.get(userId)?.sdkAudit?.filter((event) => event.at > afterMs).slice(-Math.max(1, Math.min(500, limit))) ?? []);
   }
   async deleteSdkRun(userId: number, threadId: string, runId: string) {
     const session = this.sessions.get(userId);
@@ -4951,6 +5233,9 @@ export async function initStore(options: { memoryOnly?: boolean; suppressStorage
   if (!options.memoryOnly && config.durableStateSdkRunsEnabled && !config.durableStateEnabled) {
     throw new Error("DURABLE_STATE_ENABLED=true is required when DURABLE_STATE_SDK_RUNS_ENABLED=true.");
   }
+  if (!options.memoryOnly && config.durableStateSdkTablesEnabled && !config.durableStateEnabled) {
+    throw new Error("DURABLE_STATE_ENABLED=true is required when DURABLE_STATE_SDK_TABLES_ENABLED=true.");
+  }
   if (!options.memoryOnly && config.durableObjectCatalogEnabled && !config.durableStateEnabled) {
     throw new Error("DURABLE_STATE_ENABLED=true is required when DURABLE_OBJECT_CATALOG_ENABLED=true.");
   }
@@ -4975,10 +5260,12 @@ export async function initStore(options: { memoryOnly?: boolean; suppressStorage
   }
   if (!options.memoryOnly && config.durableStateEnabled) await durableState!.assertSessionSchema();
   if (!options.memoryOnly && config.durableStateSdkRunsEnabled) await durableState!.assertSdkRunSchema();
+  if (!options.memoryOnly && config.durableStateSdkTablesEnabled) await durableState!.assertSdkTablesSchema();
   if (!options.memoryOnly && config.durableObjectCatalogEnabled) await durableState!.assertObjectMetadataSchema();
   if (!options.memoryOnly && config.durableRecallTranscriptArchiveEnabled) await durableState!.assertRecallTranscriptArchiveSchema();
   if (!options.memoryOnly && config.durableStateMissionsEnabled) await durableState!.assertMissionSchema();
   if (!options.memoryOnly && config.durableStorageMetricsEnabled) await durableState!.assertStorageMetricsSchema();
+  if (!options.memoryOnly && config.durableStorageMetricsEnabled) await durableState!.assertQueryMetricsSchema();
   if (config.redisUrl && !options.memoryOnly) {
     try {
       const r = new Redis(config.redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
@@ -5006,11 +5293,11 @@ export async function initStore(options: { memoryOnly?: boolean; suppressStorage
             onError: (error, phase) => logger.warn({ phase, errorType: error instanceof Error ? error.name : "StorageMetricsError" }, "Durable storage metrics persistence failed"),
           })
         : undefined;
-      backend = new RedisBackend(r, durableState, config.durableStateSdkRunsEnabled, config.durableStateMissionsEnabled, redisCommandMetrics, redisMetricsPublisher);
-      if (redisMetricsPublisher) {
-        redisMetricsFlushTimer = setInterval(() => { void redisMetricsPublisher.flush(); }, 60_000);
+      backend = new RedisBackend(r, durableState, config.durableStateSdkRunsEnabled, config.durableStateSdkTablesEnabled, config.durableStateMissionsEnabled, redisCommandMetrics, redisMetricsPublisher);
+      if (redisMetricsPublisher || durableState) {
+        redisMetricsFlushTimer = setInterval(() => { void backend.flushStorageMetrics?.(); }, 60_000);
         redisMetricsFlushTimer.unref();
-        void redisMetricsPublisher.flush();
+        void backend.flushStorageMetrics?.();
       }
       logger.info("Store: Redis connected");
       return;
@@ -5666,10 +5953,54 @@ export async function getSession(uid: number): Promise<UserSession> {
   return { ...fresh(), ...s, providerProofs: uid === 0 && Array.isArray(s.providerProofs) ? s.providerProofs.filter((item): item is ProviderProof => Boolean(item) && typeof item.surface === "string" && typeof item.correlationId === "string" && Number.isFinite(item.verifiedAt) && Number.isFinite(item.expiresAt)).slice(-100) : [], voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], autonomyRuns: Array.isArray(s.autonomyRuns) ? s.autonomyRuns.flatMap((item) => { const normalized = normalizeAutonomyRun(item, uid); return normalized ? [normalized] : []; }).slice(-200) : [], jobOccurrences: Array.isArray(s.jobOccurrences) ? s.jobOccurrences.flatMap((item) => { const normalized = normalizeJobOccurrence(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], externalActions: Array.isArray(s.externalActions) ? s.externalActions.flatMap((item) => { const normalized = normalizeExternalAction(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], reliabilitySamples: Array.isArray(s.reliabilitySamples) ? s.reliabilitySamples.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.operation === "string" && Number.isFinite(item.at) && ["success", "failure", "uncertain", "timeout"].includes(item.status)).slice(-2000) : [], outcomeVerifications: Array.isArray(s.outcomeVerifications) ? s.outcomeVerifications.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.status === "string").slice(-200) : [], compensations: Array.isArray(s.compensations) ? s.compensations.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.originalActionId === "string" && typeof item.objective === "string").slice(-500) : [], reliabilityTrace: Array.isArray(s.reliabilityTrace) ? s.reliabilityTrace.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.kind === "string" && typeof item.type === "string" && typeof item.summary === "string" && Number.isFinite(item.at)).slice(-5000) : [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, mcpConnections: Array.isArray(s.mcpConnections) ? s.mcpConnections.flatMap((item) => { const normalized = normalizeMcpConnectionRecord(item); return normalized ? [normalized] : []; }).slice(0, 50) : [], browserPlaybooks, browserAudit, browserHandoffs, meetingRooms: uid === 0 && Array.isArray(s.meetingRooms) ? s.meetingRooms.map(normalizeMeetingRoom).filter((item): item is MeetingRoomRecord => Boolean(item)).slice(0, 100) : [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, ...(typeof meeting.roomId === "string" && /^room_[A-Za-z0-9_-]{1,96}$/.test(meeting.roomId) ? { roomId: meeting.roomId } : { roomId: undefined }), ...(typeof meeting.organizationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(meeting.organizationId) ? { organizationId: meeting.organizationId } : { organizationId: undefined }), ...(typeof meeting.teamId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(meeting.teamId) ? { teamId: meeting.teamId } : { teamId: undefined }), ...(typeof meeting.projectId === "string" && /^proj_[A-Za-z0-9_-]{1,120}$/.test(meeting.projectId) ? { projectId: meeting.projectId } : { projectId: undefined }), ...(Array.isArray(meeting.roomAllowedComposioTools) ? { roomAllowedComposioTools: meeting.roomAllowedComposioTools.filter((tool): tool is string => typeof tool === "string").slice(0, 100) } : {}), ...(Array.isArray(meeting.roomAllowedNativeTools) ? { roomAllowedNativeTools: meeting.roomAllowedNativeTools.filter((tool): tool is string => typeof tool === "string").slice(0, 50) } : {}), visibility: meeting.visibility === "team" || meeting.visibility === "organization" ? meeting.visibility : undefined, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, visualContextEnabled: meeting.visualContextEnabled === true, transcriptRetentionDays: [1, 7, 30].includes(meeting.transcriptRetentionDays as number) ? meeting.transcriptRetentionDays as 1 | 7 | 30 : undefined, transcriptExpiresAt: Number.isSafeInteger(meeting.transcriptExpiresAt) && Number(meeting.transcriptExpiresAt) > 0 ? Number(meeting.transcriptExpiresAt) : undefined, transcriptStatus: ["processing", "ready", "failed"].includes(meeting.transcriptStatus as string) ? meeting.transcriptStatus as "processing" | "ready" | "failed" : undefined, transcriptErrorCode: typeof meeting.transcriptErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? meeting.transcriptErrorCode : undefined, mission: normalizeMeetingMission(meeting.mission), calendarAttendees: normalizeCalendarAttendees(meeting.calendarAttendees), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 180) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], attendees: normalizeCalendarAttendees(item.attendees), sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
-type DurableSessionMetadata = { durableDomainVersions?: Partial<Record<DurableSessionDomain, number>>; durableDomainHashes?: Partial<Record<DurableSessionDomain, string>>; durableDomainSnapshots?: Partial<Record<DurableSessionDomain, unknown>>; durableConversationHeadId?: string };
+type DurableSdkTableSnapshot = { threads: Record<string, string>; audit: Record<string, string>; idempotency: Record<string, string> };
+type DurableSessionMetadata = { durableDomainVersions?: Partial<Record<DurableSessionDomain, number>>; durableDomainHashes?: Partial<Record<DurableSessionDomain, string>>; durableDomainSnapshots?: Partial<Record<DurableSessionDomain, unknown>>; durableSdkTablesSnapshot?: DurableSdkTableSnapshot; durableConversationHeadId?: string };
 
 function durableDomainHash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function sdkTableHash(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
+
+function durableSdkTableSnapshotFromState(state: DurableSdkTableState): DurableSdkTableSnapshot {
+  return {
+    threads: Object.fromEntries(state.threads.map((thread) => [thread.threadId, sdkTableHash({ externalId: thread.externalId, metadata: thread.metadata, history: thread.history, createdAt: thread.createdAt, updatedAt: thread.updatedAt })])),
+    audit: Object.fromEntries(state.audit.map((event) => [event.auditId, sdkTableHash({ id: event.auditId, action: event.action, requestId: event.requestId, status: event.status, at: event.createdAt })])),
+    idempotency: Object.fromEntries(state.idempotency.map((record) => [record.key, sdkTableHash({ fingerprint: record.fingerprint, response: record.response, createdAt: record.createdAt })])),
+  };
+}
+
+function durableSdkTablesSnapshot(session: UserSession): DurableSdkTableSnapshot {
+  return {
+    threads: Object.fromEntries((session.sdkThreads ?? []).map((thread) => [thread.id, sdkTableHash({ externalId: thread.externalId, metadata: thread.metadata, history: thread.history, createdAt: thread.createdAt, updatedAt: thread.updatedAt })])),
+    audit: Object.fromEntries((session.sdkAudit ?? []).map((event) => [event.id, sdkTableHash(event)])),
+    idempotency: Object.fromEntries(Object.entries(session.sdkIdempotency ?? {}).map(([key, record]) => [key, sdkTableHash(record)])),
+  };
+}
+
+function durableSdkTableChanges(userId: number, session: UserSession, prior?: DurableSdkTableSnapshot): DurableSdkTableChanges {
+  const current = durableSdkTablesSnapshot(session);
+  const threads = (session.sdkThreads ?? []).filter((thread) => !prior || prior.threads[thread.id] !== current.threads[thread.id]).map((thread) => ({ userId, threadId: thread.id, externalId: thread.externalId, metadata: thread.metadata, history: thread.history, createdAt: thread.createdAt, updatedAt: thread.updatedAt }));
+  const deletedThreadIds = prior ? Object.keys(prior.threads).filter((threadId) => !Object.hasOwn(current.threads, threadId)) : [];
+  const audit = (session.sdkAudit ?? []).filter((event) => !prior || prior.audit[event.id] !== current.audit[event.id]).map((event) => ({ userId, auditId: event.id, action: event.action, requestId: event.requestId, status: event.status, createdAt: event.at }));
+  const idempotency = Object.entries(session.sdkIdempotency ?? {}).filter(([key, record]) => !prior || prior.idempotency[key] !== current.idempotency[key]).map(([key, record]) => ({ userId, key, fingerprint: record.fingerprint, response: record.response, createdAt: record.createdAt }));
+  return { threads, deletedThreadIds, audit, idempotency };
+}
+
+function mergeDurableSdkTableState(session: UserSession, state: DurableSdkTableState): void {
+  const legacyThreads = new Map((session.sdkThreads ?? []).map((thread) => [thread.id, thread]));
+  for (const thread of state.threads) legacyThreads.set(thread.threadId, { id: thread.threadId, externalId: thread.externalId, metadata: thread.metadata, history: thread.history as Message[], runs: legacyThreads.get(thread.threadId)?.runs ?? [], createdAt: thread.createdAt, updatedAt: thread.updatedAt });
+  const legacyAudit = new Map((session.sdkAudit ?? []).map((event) => [event.id, event]));
+  for (const event of state.audit) legacyAudit.set(event.auditId, { id: event.auditId, action: event.action, requestId: event.requestId, status: event.status, at: event.createdAt });
+  const idempotency = { ...(session.sdkIdempotency ?? {}) };
+  for (const record of state.idempotency) idempotency[record.key] = { fingerprint: record.fingerprint, response: record.response, createdAt: record.createdAt };
+  session.sdkThreads = [...legacyThreads.values()].sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id)).slice(0, 100);
+  session.sdkAudit = [...legacyAudit.values()].sort((left, right) => right.at - left.at || left.id.localeCompare(right.id)).slice(0, 500);
+  session.sdkIdempotency = Object.fromEntries(Object.entries(idempotency).sort((left, right) => right[1].createdAt - left[1].createdAt).slice(0, 500));
+  // The snapshot represents what is already in the bounded tables, not the
+  // merged in-memory view. This makes the first post-cutover save backfill
+  // legacy SDK rows before the old JSON domain is removed.
+  (session as UserSession & DurableSessionMetadata).durableSdkTablesSnapshot = durableSdkTableSnapshotFromState(state);
 }
 
 function durableProfilePayload(session: UserSession): unknown {
@@ -5700,9 +6031,51 @@ export async function getSdkRun(uid: number, threadId: string, runId: string): P
   return backend.getSdkRun(uid, threadId, runId);
 }
 
+export async function getSdkThread(uid: number, threadId: string): Promise<SdkThreadRecord | undefined> {
+  if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId)) return undefined;
+  return backend.getSdkThread(uid, threadId);
+}
+
+export async function listSdkThreads(uid: number): Promise<SdkThreadRecord[]> {
+  return backend.listSdkThreads(uid);
+}
+
+export async function saveSdkThread(uid: number, thread: SdkThreadRecord, idempotency?: { key: string; fingerprint: string; response: unknown }): Promise<boolean> {
+  if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(thread.id)) throw new Error("SDK thread identity is invalid.");
+  return backend.saveSdkThread(uid, thread, idempotency);
+}
+
+export async function deleteSdkThread(uid: number, threadId: string): Promise<boolean> {
+  if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId)) throw new Error("SDK thread identity is invalid.");
+  return backend.deleteSdkThread(uid, threadId);
+}
+
 export async function listSdkRuns(uid: number, threadId: string): Promise<SdkRunRecord[]> {
   if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId)) return [];
   return backend.listSdkRuns(uid, threadId);
+}
+
+export async function saveSdkRun(uid: number, threadId: string, run: SdkRunRecord): Promise<boolean> {
+  if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId) || !/^run_[A-Za-z0-9_-]{1,120}$/.test(run.id)) throw new Error("SDK run identity is invalid.");
+  return backend.saveSdkRun(uid, threadId, run);
+}
+
+export async function getSdkIdempotency(uid: number, key: string): Promise<{ fingerprint: string; response: unknown; createdAt: number } | undefined> {
+  if (!key || key.length > 255) return undefined;
+  return backend.getSdkIdempotency(uid, key);
+}
+
+export async function saveSdkIdempotency(uid: number, key: string, fingerprint: string, response: unknown): Promise<void> {
+  if (!key || key.length > 255 || !/^[a-f0-9]{32,128}$/.test(fingerprint)) throw new Error("SDK idempotency record is invalid.");
+  return backend.saveSdkIdempotency(uid, key, fingerprint, response);
+}
+
+export async function appendSdkAuditEvent(uid: number, event: { id: string; action: string; requestId: string; status: number; at: number }): Promise<void> {
+  return backend.appendSdkAuditEvent(uid, event);
+}
+
+export async function listSdkAuditEvents(uid: number, afterMs = 0, limit = 500): Promise<Array<{ id: string; action: string; requestId: string; status: number; at: number }>> {
+  return backend.listSdkAuditEvents(uid, Math.max(0, Number.isSafeInteger(afterMs) ? afterMs : 0), Math.max(1, Math.min(500, Math.floor(limit))));
 }
 
 export async function deleteSdkRun(uid: number, threadId: string, runId: string): Promise<void> {

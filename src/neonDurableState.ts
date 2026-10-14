@@ -1,5 +1,6 @@
 import type { QueryResultRow } from "pg";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { REDIS_METRIC_FAMILIES, type RedisCommandFamilyMetrics, type RedisMetricFamily } from "./redisMetrics.js";
 
 export const DURABLE_SESSION_DOMAINS = ["profile", "conversation", "memories", "assets", "sdk"] as const;
@@ -28,6 +29,65 @@ export interface DurableSdkRun {
   createdAt: number;
   updatedAt: number;
   version: number;
+}
+
+export interface DurableSdkThread {
+  userId: number;
+  threadId: string;
+  externalId: string;
+  metadata: Record<string, unknown>;
+  history: unknown[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DurableSdkAuditEvent {
+  userId: number;
+  auditId: string;
+  action: string;
+  requestId: string;
+  status: number;
+  createdAt: number;
+}
+
+export interface DurableSdkIdempotencyRecord {
+  userId: number;
+  key: string;
+  fingerprint: string;
+  response: unknown;
+  createdAt: number;
+}
+
+export interface DurableSdkTableState {
+  threads: DurableSdkThread[];
+  audit: DurableSdkAuditEvent[];
+  idempotency: DurableSdkIdempotencyRecord[];
+}
+
+export interface DurableSdkTableChanges {
+  threads: readonly DurableSdkThread[];
+  deletedThreadIds: readonly string[];
+  audit: readonly DurableSdkAuditEvent[];
+  idempotency: readonly DurableSdkIdempotencyRecord[];
+}
+
+export interface QueryMetricSample {
+  queryHash: string;
+  queryFamily: string;
+  commands: number;
+  errors: number;
+  requestBytes: number;
+  responseBytes: number;
+  durationMs: number;
+  maxValueBytes: number;
+}
+
+const queryMetricRoute = new AsyncLocalStorage<string>();
+
+/** Attribute private query/transfer aggregates to a bounded API route label. */
+export function withNeonQueryMetricRoute<T>(route: string, work: () => Promise<T>): Promise<T> {
+  const bounded = route.replace(/[^A-Za-z0-9_ ./:-]/g, "").slice(0, 120) || "unknown";
+  return queryMetricRoute.run(bounded, work);
 }
 
 export interface DurableConversationMessage {
@@ -112,9 +172,21 @@ interface TransactionPool extends Queryable {
 
 type SessionRow = { domain: DurableSessionDomain; payload: unknown; version: number; updated_at: Date };
 type SdkRunRow = { user_id: string | number; thread_id: string; run_id: string; payload: unknown; created_at: Date; updated_at: Date; version: number };
+type SdkThreadRow = { user_id: string | number; thread_id: string; external_id: string; metadata: unknown; history: unknown; created_at: Date; updated_at: Date };
+type SdkAuditRow = { user_id: string | number; audit_id: string; action: string; request_id: string; status: number; created_at: Date };
+type SdkIdempotencyRow = { user_id: string | number; idempotency_key: string; fingerprint: string; response: unknown; created_at: Date };
 type MissionRow = { owner_user_id: string | number; mission_id: string; status: string; idempotency_key: string | null; payload: unknown; version: number; created_at: Date; updated_at: Date };
 const MISSION_STATUSES = new Set(["queued", "running", "waiting", "paused", "blocked", "completed", "failed", "cancelled"]);
 const REDIS_FAMILY_SET = new Set<string>(REDIS_METRIC_FAMILIES);
+
+/** Telemetry must never be able to change the outcome of a database call. */
+function safeJsonBytes(value: unknown): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(value ?? null), "utf8");
+  } catch {
+    return 0;
+  }
+}
 
 const DOMAIN_SET = new Set<string>(DURABLE_SESSION_DOMAINS);
 
@@ -136,6 +208,10 @@ function assertSdkRunIdentity(threadId: string, runId: string): void {
   if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId) || !/^run_[A-Za-z0-9_-]{1,120}$/.test(runId)) {
     throw new Error("Durable SDK run identity is invalid.");
   }
+}
+
+function assertSdkThreadIdentity(threadId: string): void {
+  if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId)) throw new Error("Durable SDK thread identity is invalid.");
 }
 
 function validateMissionRecord(record: DurableMissionRecord): void {
@@ -231,6 +307,30 @@ function toSdkRun(row: SdkRunRow): DurableSdkRun {
   };
 }
 
+function millis(value: unknown): number {
+  if (value instanceof Date) return value.getTime();
+  const parsed = new Date(String(value)).getTime();
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function asObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function asArray(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
+
+function toSdkThread(row: SdkThreadRow): DurableSdkThread {
+  return { userId: Number(row.user_id), threadId: row.thread_id, externalId: row.external_id, metadata: asObject(row.metadata), history: asArray(row.history), createdAt: millis(row.created_at), updatedAt: millis(row.updated_at) };
+}
+
+function toSdkAudit(row: SdkAuditRow): DurableSdkAuditEvent {
+  return { userId: Number(row.user_id), auditId: row.audit_id, action: row.action, requestId: row.request_id, status: Number(row.status), createdAt: millis(row.created_at) };
+}
+
+function toSdkIdempotency(row: SdkIdempotencyRow): DurableSdkIdempotencyRecord {
+  return { userId: Number(row.user_id), key: row.idempotency_key, fingerprint: row.fingerprint, response: row.response, createdAt: millis(row.created_at) };
+}
+
 function assertDomain(domain: string): asserts domain is DurableSessionDomain {
   if (!DOMAIN_SET.has(domain)) throw new Error("Unknown durable session domain.");
 }
@@ -273,19 +373,69 @@ function toDurableMission(row: MissionRow): DurableMissionRecord {
  */
 export class NeonDurableState {
   private readonly metrics: DurableStateMetrics = { queryCount: 0, queryErrors: 0, queryDurationMs: 0, conversationMessagesRead: 0, conversationMessagesWritten: 0, conversationBytesRead: 0, conversationBytesWritten: 0, sessionDomainWrites: 0, sessionDomainBytesRead: 0, sessionDomainBytesWritten: 0, largestSessionDomainBytes: 0 };
+  private readonly queryMetricInstanceId = randomUUID();
+  private queryMetricBatchId = 0;
+  private readonly queryMetrics = new Map<string, QueryMetricSample>();
 
   constructor(private readonly database: TransactionPool) {}
 
   private async measuredQuery<Row extends QueryResultRow = QueryResultRow>(queryable: Queryable, text: string, values?: unknown[]): Promise<{ rows: Row[] }> {
     const startedAt = Date.now();
     this.metrics.queryCount += 1;
+    const normalized = text.replace(/\s+/g, " ").trim().toLowerCase();
+    const route = queryMetricRoute.getStore();
+    const queryHash = createHash("sha256").update(route ? `${route}\n${normalized}` : normalized).digest("hex");
+    const table = normalized.match(/(?:from|into|update|join)\s+([a-z0-9_]+)/)?.[1] ?? "other";
+    const queryFamily = `${route ? `route:${route}|` : ""}${table}`.slice(0, 120);
+    const requestBytes = safeJsonBytes(values ?? []);
     try {
-      return await queryable.query<Row>(text, values);
+      const result = await queryable.query<Row>(text, values);
+      const responseBytes = safeJsonBytes(result.rows);
+      this.recordQueryMetric({ queryHash, queryFamily, commands: 1, errors: 0, requestBytes, responseBytes, durationMs: Math.max(0, Date.now() - startedAt), maxValueBytes: Math.max(requestBytes, responseBytes) });
+      return result;
     } catch (error) {
       this.metrics.queryErrors += 1;
+      this.recordQueryMetric({ queryHash, queryFamily, commands: 1, errors: 1, requestBytes, responseBytes: 0, durationMs: Math.max(0, Date.now() - startedAt), maxValueBytes: requestBytes });
       throw error;
     } finally {
       this.metrics.queryDurationMs += Math.max(0, Date.now() - startedAt);
+    }
+  }
+
+  private recordQueryMetric(sample: QueryMetricSample): void {
+    if (!this.queryMetrics.has(sample.queryHash) && this.queryMetrics.size >= 999) {
+      sample = { ...sample, queryHash: createHash("sha256").update("query-metric-overflow").digest("hex"), queryFamily: "overflow" };
+    }
+    const prior = this.queryMetrics.get(sample.queryHash);
+    if (!prior) {
+      this.queryMetrics.set(sample.queryHash, { ...sample });
+      return;
+    }
+    prior.commands += sample.commands;
+    prior.errors += sample.errors;
+    prior.requestBytes += sample.requestBytes;
+    prior.responseBytes += sample.responseBytes;
+    prior.durationMs += sample.durationMs;
+    prior.maxValueBytes = Math.max(prior.maxValueBytes, sample.maxValueBytes);
+  }
+
+  /** Take the process-local query/transfer counters without retaining SQL or payloads. */
+  takeQueryMetricSnapshot(): { instanceId: string; batchId: number; observedAt: number; samples: QueryMetricSample[] } | undefined {
+    if (!this.queryMetrics.size) return undefined;
+    const samples = [...this.queryMetrics.values()].map((sample) => ({ ...sample }));
+    this.queryMetrics.clear();
+    return { instanceId: this.queryMetricInstanceId, batchId: ++this.queryMetricBatchId, observedAt: Date.now(), samples };
+  }
+
+  /** Persist a snapshot and restore it if the metrics table is temporarily unavailable. */
+  async flushQueryMetrics(): Promise<void> {
+    const batch = this.takeQueryMetricSnapshot();
+    if (!batch) return;
+    try {
+      await this.recordQueryMetricBatch(batch);
+    } catch (error) {
+      for (const sample of batch.samples) this.recordQueryMetric(sample);
+      throw error;
     }
   }
 
@@ -578,6 +728,118 @@ export class NeonDurableState {
     return result.rows.length;
   }
 
+  /** Persist aggregated PostgreSQL query/transfer counters without SQL text or payloads. */
+  async recordQueryMetricBatch(batch: { instanceId: string; batchId: number; observedAt: number; samples: readonly QueryMetricSample[] }): Promise<void> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(batch.instanceId)) throw new Error("Query metric instance identity is invalid.");
+    if (!Number.isSafeInteger(batch.batchId) || batch.batchId <= 0 || !Number.isSafeInteger(batch.observedAt) || batch.observedAt <= 0 || !batch.samples.length || batch.samples.length > 1000) throw new Error("Query metric batch is invalid.");
+    for (const sample of batch.samples) {
+      if (!/^[a-f0-9]{64}$/.test(sample.queryHash) || !sample.queryFamily || sample.queryFamily.length > 120 || !Number.isSafeInteger(sample.commands) || !Number.isSafeInteger(sample.errors) || sample.errors > sample.commands || !Number.isSafeInteger(sample.requestBytes) || !Number.isSafeInteger(sample.responseBytes) || !Number.isSafeInteger(sample.durationMs) || !Number.isSafeInteger(sample.maxValueBytes) || [sample.commands, sample.errors, sample.requestBytes, sample.responseBytes, sample.durationMs, sample.maxValueBytes].some((value) => value < 0)) throw new Error("Query metric sample is invalid.");
+    }
+    await this.measuredQuery(this.database,
+      `INSERT INTO chusky_query_metric_sample
+       (instance_id, batch_id, query_hash, query_family, observed_at, commands, errors, request_bytes, response_bytes, duration_ms, max_value_bytes)
+       SELECT $1::uuid, $2::bigint, metric.query_hash, metric.query_family, to_timestamp($3 / 1000.0), metric.commands, metric.errors,
+         metric.request_bytes, metric.response_bytes, metric.duration_ms, metric.max_value_bytes
+       FROM jsonb_to_recordset($4::jsonb) AS metric(query_hash text, query_family text, commands bigint, errors bigint, request_bytes bigint, response_bytes bigint, duration_ms bigint, max_value_bytes bigint)
+       ON CONFLICT (instance_id, batch_id, query_hash) DO NOTHING`,
+      [batch.instanceId, batch.batchId, batch.observedAt, JSON.stringify(batch.samples.map((sample) => ({
+        query_hash: sample.queryHash, query_family: sample.queryFamily,
+        commands: sample.commands, errors: sample.errors,
+        request_bytes: sample.requestBytes, response_bytes: sample.responseBytes,
+        duration_ms: sample.durationMs, max_value_bytes: sample.maxValueBytes,
+      })))]);
+  }
+
+  async pruneQueryMetrics(beforeMs: number, limit = 5000): Promise<number> {
+    if (!Number.isSafeInteger(beforeMs) || beforeMs <= 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 5000) throw new Error("Query metric retention arguments are invalid.");
+    const result = await this.measuredQuery<{ query_hash: string }>(this.database,
+      `WITH expired AS (SELECT ctid FROM chusky_query_metric_sample WHERE observed_at < to_timestamp($1 / 1000.0) ORDER BY observed_at LIMIT $2)
+       DELETE FROM chusky_query_metric_sample target USING expired WHERE target.ctid = expired.ctid RETURNING target.query_hash`, [beforeMs, limit]);
+    return result.rows.length;
+  }
+
+  /** Aggregate bounded query/transfer telemetry without returning SQL or payloads. */
+  async queryMetricTotals(sinceMs: number, windowDays = 1): Promise<Record<string, number>> {
+    if (!Number.isSafeInteger(sinceMs) || sinceMs <= 0 || !Number.isSafeInteger(windowDays) || windowDays < 1 || windowDays > 30) {
+      throw new Error("Query metric window is invalid.");
+    }
+    const result = await this.measuredQuery<Record<string, unknown>>(this.database,
+      `SELECT COALESCE(SUM(commands), 0)::text AS commands, COALESCE(SUM(errors), 0)::text AS errors,
+         COALESCE(SUM(request_bytes), 0)::text AS request_bytes, COALESCE(SUM(response_bytes), 0)::text AS response_bytes,
+         COALESCE(SUM(duration_ms), 0)::text AS duration_ms, COUNT(*)::text AS samples
+       FROM chusky_query_metric_sample
+       WHERE observed_at >= GREATEST(to_timestamp($1 / 1000.0), now() - ($2::integer * interval '1 day'))`, [sinceMs, windowDays]);
+    const row = result.rows[0] ?? {};
+    const count = (key: string): number => {
+      const value = row[key];
+      const parsed = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+      if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error("Query metric aggregate returned an invalid count.");
+      return parsed;
+    };
+    const totals: Record<string, number> = {
+      "postgres.query.samples.1d": count("samples"),
+      "postgres.query.commands.1d": count("commands"),
+      "postgres.query.errors.1d": count("errors"),
+      "postgres.query.request_bytes.1d": count("request_bytes"),
+      "postgres.query.response_bytes.1d": count("response_bytes"),
+      "postgres.query.duration_ms.1d": count("duration_ms"),
+    };
+    const byRoute = await this.measuredQuery<Record<string, unknown>>(this.database,
+      `SELECT query_family, COALESCE(SUM(commands), 0)::text AS commands, COALESCE(SUM(errors), 0)::text AS errors,
+         COALESCE(SUM(request_bytes), 0)::text AS request_bytes, COALESCE(SUM(response_bytes), 0)::text AS response_bytes,
+         COALESCE(SUM(duration_ms), 0)::text AS duration_ms, COUNT(*)::text AS samples
+       FROM chusky_query_metric_sample
+       WHERE observed_at >= GREATEST(to_timestamp($1 / 1000.0), now() - ($2::integer * interval '1 day'))
+       GROUP BY query_family
+       ORDER BY (SUM(request_bytes) + SUM(response_bytes)) DESC, query_family
+       LIMIT 100`, [sinceMs, windowDays]);
+    for (const route of byRoute.rows) {
+      if (typeof route.query_family !== "string" || !route.query_family || route.query_family.length > 120) {
+        throw new Error("Query metric route aggregate returned an invalid family.");
+      }
+      const routeKey = `${route.query_family.replace(/[^A-Za-z0-9_-]+/g, "_").slice(0, 88) || "unknown"}_${createHash("sha256").update(route.query_family).digest("hex").slice(0, 8)}`;
+      const routeCount = (key: string): number => {
+        const value = route[key];
+        const parsed = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+        if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error("Query metric route aggregate returned an invalid count.");
+        return parsed;
+      };
+      totals[`postgres.query.route.${routeKey}.samples.1d`] = routeCount("samples");
+      totals[`postgres.query.route.${routeKey}.commands.1d`] = routeCount("commands");
+      totals[`postgres.query.route.${routeKey}.errors.1d`] = routeCount("errors");
+      totals[`postgres.query.route.${routeKey}.request_bytes.1d`] = routeCount("request_bytes");
+      totals[`postgres.query.route.${routeKey}.response_bytes.1d`] = routeCount("response_bytes");
+      totals[`postgres.query.route.${routeKey}.duration_ms.1d`] = routeCount("duration_ms");
+    }
+    return totals;
+  }
+
+  /** Bounded retention for high-churn SDK and conversation rows. */
+  async pruneDurableStateRetention(cutoffs: { messagesBeforeMs: number; auditBeforeMs: number; idempotencyBeforeMs: number; runsBeforeMs: number }, limit = 5000): Promise<Record<string, number>> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 5000 || Object.values(cutoffs).some((value) => !Number.isSafeInteger(value) || value <= 0)) throw new Error("Durable retention arguments are invalid.");
+    const remove = async (table: string, column: string, cutoff: number): Promise<number> => {
+      const result = await this.measuredQuery<Record<string, unknown>>(this.database,
+        `WITH expired AS (SELECT ctid FROM ${table} WHERE ${column} < to_timestamp($1 / 1000.0) ORDER BY ${column} LIMIT $2)
+         DELETE FROM ${table} target USING expired WHERE target.ctid = expired.ctid RETURNING 1`, [cutoff, limit]);
+      return result.rows.length;
+    };
+    const runs = await this.measuredQuery<Record<string, unknown>>(this.database,
+      `WITH expired AS (
+         SELECT ctid FROM chusky_sdk_run
+         WHERE updated_at < to_timestamp($1 / 1000.0)
+           AND payload->>'status' IN ('completed', 'failed', 'cancelled')
+         ORDER BY updated_at, run_id LIMIT $2
+       )
+       DELETE FROM chusky_sdk_run target USING expired
+       WHERE target.ctid = expired.ctid RETURNING 1`, [cutoffs.runsBeforeMs, limit]);
+    return {
+      messages: await remove("chusky_conversation_message", "created_at", cutoffs.messagesBeforeMs),
+      audit: await remove("chusky_sdk_audit_event", "created_at", cutoffs.auditBeforeMs),
+      idempotency: await remove("chusky_sdk_idempotency", "created_at", cutoffs.idempotencyBeforeMs),
+      runs: runs.rows.length,
+    };
+  }
+
   async assertStorageMetricsSchema(): Promise<void> {
     await this.measuredQuery(this.database,
       "SELECT instance_id, batch_id, family, observed_at, commands, errors, request_bytes, response_bytes, duration_ms, max_value_bytes FROM chusky_storage_metric_sample LIMIT 0");
@@ -767,6 +1029,16 @@ export class NeonDurableState {
     await this.measuredQuery(this.database, "SELECT user_id, thread_id, run_id, payload, version FROM chusky_sdk_run LIMIT 0");
   }
 
+  async assertSdkTablesSchema(): Promise<void> {
+    await this.measuredQuery(this.database, "SELECT user_id, thread_id, external_id, metadata, history, created_at, updated_at FROM chusky_sdk_thread LIMIT 0");
+    await this.measuredQuery(this.database, "SELECT user_id, audit_id, action, request_id, status, created_at FROM chusky_sdk_audit_event LIMIT 0");
+    await this.measuredQuery(this.database, "SELECT user_id, idempotency_key, fingerprint, response, created_at FROM chusky_sdk_idempotency LIMIT 0");
+  }
+
+  async assertQueryMetricsSchema(): Promise<void> {
+    await this.measuredQuery(this.database, "SELECT instance_id, batch_id, query_hash, query_family, observed_at, commands, errors, request_bytes, response_bytes, duration_ms, max_value_bytes FROM chusky_query_metric_sample LIMIT 0");
+  }
+
   async readSessionDomains(userId: number): Promise<Map<DurableSessionDomain, DurableSessionDocument>> {
     assertUserId(userId);
     const result = await this.measuredQuery<SessionRow>(this.database,
@@ -782,6 +1054,22 @@ export class NeonDurableState {
       const document = toDocument(row);
       return [document.domain, document] as const;
     }));
+  }
+
+  /** Read one canonical domain for optimistic reconciliation; never fan out to all domains. */
+  async readSessionDomain(userId: number, domain: DurableSessionDomain): Promise<DurableSessionDocument | undefined> {
+    assertUserId(userId);
+    assertDomain(domain);
+    const result = await this.measuredQuery<SessionRow>(this.database,
+      "SELECT domain, payload, version, updated_at FROM chusky_session_domain WHERE user_id = $1 AND domain = $2",
+      [userId, domain],
+    );
+    const row = result.rows[0];
+    if (!row) return undefined;
+    const bytes = Buffer.byteLength(JSON.stringify(row.payload), "utf8");
+    this.metrics.sessionDomainBytesRead += bytes;
+    this.metrics.largestSessionDomainBytes = Math.max(this.metrics.largestSessionDomainBytes, bytes);
+    return toDocument(row);
   }
 
   /** Append idempotent, owner-scoped messages. Existing IDs are never overwritten. */
@@ -834,8 +1122,151 @@ export class NeonDurableState {
     return result.rows.reverse().map((row) => ({ id: row.message_id, role: row.role, content: row.content, ...(row.source_id ? { sourceId: row.source_id } : {}), createdAt: row.created_at.getTime() }));
   }
 
+  /** Read only the bounded SDK row sets needed by a session cache miss. */
+  async readSdkTables(userId: number, limits: { threads?: number; audit?: number; idempotency?: number } = {}): Promise<DurableSdkTableState> {
+    assertUserId(userId);
+    const threadLimit = Math.max(1, Math.min(100, Math.floor(limits.threads ?? 100)));
+    const auditLimit = Math.max(1, Math.min(500, Math.floor(limits.audit ?? 500)));
+    const idempotencyLimit = Math.max(1, Math.min(500, Math.floor(limits.idempotency ?? 500)));
+    const [threads, audit, idempotency] = await Promise.all([
+      this.measuredQuery<SdkThreadRow>(this.database,
+        "SELECT user_id, thread_id, external_id, metadata, history, created_at, updated_at FROM chusky_sdk_thread WHERE user_id = $1 ORDER BY updated_at DESC, thread_id DESC LIMIT $2",
+        [userId, threadLimit]),
+      this.measuredQuery<SdkAuditRow>(this.database,
+        "SELECT user_id, audit_id, action, request_id, status, created_at FROM chusky_sdk_audit_event WHERE user_id = $1 ORDER BY created_at DESC, audit_id DESC LIMIT $2",
+        [userId, auditLimit]),
+      this.measuredQuery<SdkIdempotencyRow>(this.database,
+        "SELECT user_id, idempotency_key, fingerprint, response, created_at FROM chusky_sdk_idempotency WHERE user_id = $1 AND created_at >= now() - interval '24 hours' ORDER BY created_at DESC, idempotency_key DESC LIMIT $2",
+        [userId, idempotencyLimit]),
+    ]);
+    return { threads: threads.rows.map(toSdkThread), audit: audit.rows.map(toSdkAudit), idempotency: idempotency.rows.map(toSdkIdempotency) };
+  }
+
+  /** Read only SDK threads for list/detail endpoints; never pull audit or idempotency rows. */
+  async readSdkThreads(userId: number, limit = 100): Promise<DurableSdkThread[]> {
+    assertUserId(userId);
+    const boundedLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(100, limit)) : 100;
+    const result = await this.measuredQuery<SdkThreadRow>(this.database,
+      "SELECT user_id, thread_id, external_id, metadata, history, created_at, updated_at FROM chusky_sdk_thread WHERE user_id = $1 ORDER BY updated_at DESC, thread_id DESC LIMIT $2",
+      [userId, boundedLimit]);
+    return result.rows.map(toSdkThread);
+  }
+
+  /** Exact owner-scoped thread lookup for SDK mutations and polling. */
+  async readSdkThread(userId: number, threadId: string): Promise<DurableSdkThread | undefined> {
+    assertUserId(userId);
+    assertSdkThreadIdentity(threadId);
+    const result = await this.measuredQuery<SdkThreadRow>(this.database,
+      "SELECT user_id, thread_id, external_id, metadata, history, created_at, updated_at FROM chusky_sdk_thread WHERE user_id = $1 AND thread_id = $2",
+      [userId, threadId]);
+    return result.rows[0] ? toSdkThread(result.rows[0]) : undefined;
+  }
+
+  /** Bounded owner-scoped audit read; no session document is loaded. */
+  async readSdkAuditEvents(userId: number, afterMs = 0, limit = 500): Promise<DurableSdkAuditEvent[]> {
+    assertUserId(userId);
+    const boundedAfter = Number.isSafeInteger(afterMs) && afterMs >= 0 ? afterMs : 0;
+    const boundedLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(500, limit)) : 500;
+    const result = await this.measuredQuery<SdkAuditRow>(this.database,
+      "SELECT user_id, audit_id, action, request_id, status, created_at FROM chusky_sdk_audit_event WHERE user_id = $1 AND created_at > to_timestamp($2 / 1000.0) ORDER BY created_at ASC, audit_id ASC LIMIT $3",
+      [userId, boundedAfter, boundedLimit]);
+    return result.rows.map(toSdkAudit);
+  }
+
+  /** Exact idempotency lookup; routine SDK writes never need the session document. */
+  async readSdkIdempotency(userId: number, key: string): Promise<DurableSdkIdempotencyRecord | undefined> {
+    assertUserId(userId);
+    if (!key || key.length > 255) throw new Error("Durable SDK idempotency key is invalid.");
+    const result = await this.measuredQuery<SdkIdempotencyRow>(this.database,
+      "SELECT user_id, idempotency_key, fingerprint, response, created_at FROM chusky_sdk_idempotency WHERE user_id = $1 AND idempotency_key = $2 AND created_at >= now() - interval '24 hours'",
+      [userId, key]);
+    return result.rows[0] ? toSdkIdempotency(result.rows[0]) : undefined;
+  }
+
+  /** Atomic single-row idempotency write with fingerprint fencing. */
+  async writeSdkIdempotency(record: DurableSdkIdempotencyRecord): Promise<void> {
+    if (!Number.isSafeInteger(record.userId) || record.userId < 0 || !record.key || record.key.length > 255 || !/^[a-f0-9]{32,128}$/.test(record.fingerprint) || !Number.isSafeInteger(record.createdAt) || record.createdAt < 0 || safeJsonBytes(record.response) > 512_000) {
+      throw new Error("Durable SDK idempotency record is invalid.");
+    }
+    const result = await this.measuredQuery(this.database,
+      `INSERT INTO chusky_sdk_idempotency (user_id, idempotency_key, fingerprint, response, created_at)
+       VALUES ($1, $2, $3, $4::jsonb, to_timestamp($5 / 1000.0))
+       ON CONFLICT (user_id, idempotency_key) DO UPDATE SET response = EXCLUDED.response, created_at = EXCLUDED.created_at
+         WHERE chusky_sdk_idempotency.fingerprint = EXCLUDED.fingerprint
+       RETURNING idempotency_key`,
+      [record.userId, record.key, record.fingerprint, JSON.stringify(record.response), record.createdAt]);
+    if (!result.rows.length) throw new Error("Durable SDK idempotency key conflicts with a different request fingerprint.");
+  }
+
+  /** Append one audit event without rereading or rewriting any session JSON. */
+  async appendSdkAuditEvent(event: DurableSdkAuditEvent): Promise<void> {
+    if (!Number.isSafeInteger(event.userId) || event.userId < 0 || !/^audit_[A-Za-z0-9_-]{1,180}$/.test(event.auditId) || !event.action || event.action.length > 240 || !event.requestId || event.requestId.length > 240 || !Number.isSafeInteger(event.status) || event.status < 100 || event.status > 599 || !Number.isSafeInteger(event.createdAt) || event.createdAt < 0) {
+      throw new Error("Durable SDK audit event is invalid.");
+    }
+    await this.measuredQuery(this.database,
+      `INSERT INTO chusky_sdk_audit_event (user_id, audit_id, action, request_id, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, to_timestamp($6 / 1000.0)) ON CONFLICT (user_id, audit_id) DO NOTHING`,
+      [event.userId, event.auditId, event.action, event.requestId, event.status, event.createdAt]);
+  }
+
+  /** Apply only changed SDK rows in one owner-serialized transaction. */
+  async writeSdkTableChanges(userId: number, changes: DurableSdkTableChanges): Promise<void> {
+    assertUserId(userId);
+    if (changes.threads.length > 100 || changes.deletedThreadIds.length > 100 || changes.audit.length > 500 || changes.idempotency.length > 500) throw new Error("Durable SDK change batch exceeds the storage bound.");
+    const client = await this.database.connect();
+    try {
+      await this.measuredQuery(client, "BEGIN");
+      await this.measuredQuery(client, "SELECT pg_advisory_xact_lock($1::bigint)", [userId]);
+      await this.writeSdkTableChangesWithClient(client, userId, changes);
+      await this.measuredQuery(client, "COMMIT");
+    } catch (error) {
+      try { await client.query("ROLLBACK"); } catch { /* Preserve the original write error. */ }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  private async writeSdkTableChangesWithClient(client: Queryable, userId: number, changes: DurableSdkTableChanges): Promise<void> {
+    const deleted = [...new Set(changes.deletedThreadIds)];
+    for (const threadId of deleted) assertSdkThreadIdentity(threadId);
+    if (deleted.length) await this.measuredQuery(client, "DELETE FROM chusky_sdk_thread WHERE user_id = $1 AND thread_id = ANY($2::text[])", [userId, deleted]);
+    for (const thread of changes.threads) {
+      if (thread.userId !== userId || !thread.externalId || thread.externalId.length > 200) throw new Error("Durable SDK thread owner or external identity is invalid.");
+      assertSdkThreadIdentity(thread.threadId);
+      if (!Number.isSafeInteger(thread.createdAt) || !Number.isSafeInteger(thread.updatedAt) || thread.updatedAt < thread.createdAt) throw new Error("Durable SDK thread timestamps are invalid.");
+      const metadataBytes = Buffer.byteLength(JSON.stringify(thread.metadata ?? {}), "utf8");
+      const historyBytes = Buffer.byteLength(JSON.stringify(thread.history ?? []), "utf8");
+      if (metadataBytes > 128_000 || historyBytes > 512_000) throw new Error("Durable SDK thread payload exceeds the storage bound.");
+      await this.measuredQuery(client,
+        `INSERT INTO chusky_sdk_thread (user_id, thread_id, external_id, metadata, history, created_at, updated_at)
+         VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, to_timestamp($6 / 1000.0), to_timestamp($7 / 1000.0))
+         ON CONFLICT (user_id, thread_id) DO UPDATE SET external_id = EXCLUDED.external_id, metadata = EXCLUDED.metadata,
+           history = EXCLUDED.history, created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at`,
+        [userId, thread.threadId, thread.externalId, JSON.stringify(thread.metadata ?? {}), JSON.stringify(thread.history ?? []), thread.createdAt, thread.updatedAt]);
+    }
+    for (const event of changes.audit) {
+      if (event.userId !== userId || !/^audit_[A-Za-z0-9_-]{1,180}$/.test(event.auditId) || !event.action || event.action.length > 240 || !event.requestId || event.requestId.length > 240 || !Number.isSafeInteger(event.status) || event.status < 100 || event.status > 599 || !Number.isSafeInteger(event.createdAt) || event.createdAt < 0) throw new Error("Durable SDK audit event is invalid.");
+      await this.measuredQuery(client,
+        `INSERT INTO chusky_sdk_audit_event (user_id, audit_id, action, request_id, status, created_at)
+         VALUES ($1, $2, $3, $4, $5, to_timestamp($6 / 1000.0)) ON CONFLICT (user_id, audit_id) DO NOTHING`,
+        [userId, event.auditId, event.action, event.requestId, event.status, event.createdAt]);
+    }
+    for (const record of changes.idempotency) {
+      if (record.userId !== userId || !record.key || record.key.length > 255 || !/^[a-f0-9]{32,128}$/.test(record.fingerprint) || !Number.isSafeInteger(record.createdAt) || record.createdAt < 0) throw new Error("Durable SDK idempotency record is invalid.");
+      if (Buffer.byteLength(JSON.stringify(record.response), "utf8") > 512_000) throw new Error("Durable SDK idempotency response exceeds the storage bound.");
+      const result = await this.measuredQuery(client,
+        `INSERT INTO chusky_sdk_idempotency (user_id, idempotency_key, fingerprint, response, created_at)
+         VALUES ($1, $2, $3, $4::jsonb, to_timestamp($5 / 1000.0))
+         ON CONFLICT (user_id, idempotency_key) DO UPDATE SET response = EXCLUDED.response, created_at = EXCLUDED.created_at
+           WHERE chusky_sdk_idempotency.fingerprint = EXCLUDED.fingerprint RETURNING idempotency_key`,
+        [userId, record.key, record.fingerprint, JSON.stringify(record.response), record.createdAt]);
+      if (!result.rows.length) throw new Error("Durable SDK idempotency key conflicts with a different request fingerprint.");
+    }
+  }
+
   /** Write all supplied domains in one Postgres transaction. */
-  async writeSessionDomains(userId: number, documents: ReadonlyMap<DurableSessionDomain, unknown>, sdkRuns: readonly { threadId: string; runId: string; payload: unknown; expectedVersion?: number }[] = [], expectedVersions: ReadonlyMap<DurableSessionDomain, number | undefined> = new Map()): Promise<Map<DurableSessionDomain, number>> {
+  async writeSessionDomains(userId: number, documents: ReadonlyMap<DurableSessionDomain, unknown>, sdkRuns: readonly { threadId: string; runId: string; payload: unknown; expectedVersion?: number }[] = [], expectedVersions: ReadonlyMap<DurableSessionDomain, number | undefined> = new Map(), sdkTableChanges?: DurableSdkTableChanges): Promise<Map<DurableSessionDomain, number>> {
     assertUserId(userId);
     if ([...documents.keys()].some((domain) => !DOMAIN_SET.has(domain))) {
       throw new Error("A durable session write contains an unknown domain.");
@@ -868,6 +1299,7 @@ export class NeonDurableState {
       for (const run of sdkRuns) {
         await this.writeSdkRunWithClient(client, userId, run.threadId, run.runId, run.payload, run.expectedVersion);
       }
+      if (sdkTableChanges) await this.writeSdkTableChangesWithClient(client, userId, sdkTableChanges);
       await this.measuredQuery(client, "COMMIT");
       this.metrics.sessionDomainWrites += documents.size;
       this.metrics.sessionDomainBytesWritten += writtenBytes;
