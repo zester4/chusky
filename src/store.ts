@@ -51,6 +51,7 @@ import type { TregCallReceipt, TregSpendSnapshot } from "./treg/types.js";
 import type { MonidRunReceipt, MonidSpendSnapshot } from "./monid/types.js";
 import type { LinkOAuthStateRecord, LinkSpendRequestRecord, LinkWalletRecord } from "./link/types.js";
 import { normalizeSdkRunProgress, type SdkRunProgress } from "./sdkRunProgress.js";
+import { encodeSessionDomainCache, parseLegacySessionDomainCache, parseSessionDomainCache, SESSION_DOMAIN_CACHE_TTL_SECONDS, sessionDomainCacheKey } from "./sessionDomainCache.js";
 
 export interface Message {
   /** Stable per-message identity used for idempotent durable history writes. */
@@ -2272,13 +2273,12 @@ class RedisBackend implements Backend {
   private pendingOutboxIndexesReady = false;
   private sk = (id: number) => `chuck:session:${id}`;
   private sessionDomainsKey = (id: number) => `chuck:session-domains:${id}`;
+  private sessionDomainKey = (id: number, domain: DurableSessionDomain) => sessionDomainCacheKey(id, domain);
   private sdkTablesKey = (id: number) => `chuck:sdk-tables:${id}`;
   private sdkThreadsKey = (id: number) => `chuck:sdk-threads:${id}`;
-  private sessionDomainKey = (id: number, domain: DurableSessionDomain) => `chuck:session-domain:${id}:${domain}`;
   private sdkRunKey = (userId: number, threadId: string, runId: string) => `chuck:sdk-run:${userId}:${threadId}:${runId}`;
   private sdkRunListKey = (userId: number, threadId: string) => `chuck:sdk-runs:${userId}:${threadId}`;
-  private readonly sessionDomainCacheTtlSeconds = 5 * 60;
-  private readonly maxSessionDomainCacheBytes = 512 * 1024;
+  private readonly sessionDomainCacheTtlSeconds = SESSION_DOMAIN_CACHE_TTL_SECONDS;
   // Redis hash tags keep every key touched by one project's Lua transaction in the same cluster slot.
   private companyPrefix = (projectId: string) => `chuck:sdk:company:{${companyProjectDigest(projectId)}}`;
   private companyRunsDataKey = (projectId: string) => `${this.companyPrefix(projectId)}:runs:data`;
@@ -2681,7 +2681,7 @@ class RedisBackend implements Backend {
       const nextSdkTablesSnapshot = this.durableSdkTablesEnabled && sdkTablesLoaded ? durableSdkTablesSnapshot(withMessageIds) : metadata.durableSdkTablesSnapshot;
       Object.assign(core as UserSession & DurableSessionMetadata, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableDomainSnapshots: nextSnapshots, durableSdkTablesSnapshot: nextSdkTablesSnapshot, durableConversationHeadId: nextHeadId });
       Object.assign(s as UserSession & DurableSessionMetadata, withMessageIds, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableDomainSnapshots: nextSnapshots, durableSdkTablesSnapshot: nextSdkTablesSnapshot, durableConversationHeadId: nextHeadId });
-      await this.writeSessionDomainCaches(userId, changedDomains, nextVersions);
+      await this.writeSessionDomainCache(userId, domains, nextVersions, changedDomains.keys());
       if (this.durableSdkTablesEnabled) await this.writeSdkTablesCache(userId, { threads: withMessageIds.sdkThreads!.map((thread) => ({ userId, threadId: thread.id, externalId: thread.externalId, metadata: thread.metadata, history: thread.history, createdAt: thread.createdAt, updatedAt: thread.updatedAt })), audit: withMessageIds.sdkAudit!.map((event) => ({ userId, auditId: event.id, action: event.action, requestId: event.requestId, status: event.status, createdAt: event.at })), idempotency: Object.entries(withMessageIds.sdkIdempotency ?? {}).map(([key, record]) => ({ userId, key, fingerprint: record.fingerprint, response: record.response, createdAt: record.createdAt })) });
        if (changedSdkRuns.length) await this.invalidateSdkRunCaches(userId, changedSdkRuns.map(({ threadId }) => threadId), changedSdkRuns.map(({ run }) => run.id));
       persisted = core;
@@ -2700,29 +2700,39 @@ class RedisBackend implements Backend {
   }
 
   private async readSessionDomains(userId: number, includeSdkTables = false): Promise<Map<DurableSessionDomain, DurableSessionDocument>> {
-    const durableState = this.durableState;
-    if (!durableState) throw new Error("Durable session domains require Neon durable state.");
+    if (!this.durableState) throw new Error("Durable session domains require Neon durable state.");
     const domains = DURABLE_SESSION_DOMAINS.filter((domain) => includeSdkTables || domain !== "sdk");
-    const cachedEntries = await Promise.all(domains.map(async (domain) => {
-      const cached = await this.r.get(this.sessionDomainKey(userId, domain));
-      if (!cached) return [domain, undefined] as const;
-      this.durableStorageMetrics.redisSessionBytesRead += Buffer.byteLength(cached, "utf8");
-      try {
-        const document = JSON.parse(cached) as DurableSessionDocument;
-        if (document?.domain === domain && Number.isSafeInteger(document.version) && document.version > 0) return [domain, document] as const;
-      } catch { /* A corrupt cache is disposable; Neon remains authoritative. */ }
-      return [domain, undefined] as const;
-    }));
-    const documents = new Map<DurableSessionDomain, DurableSessionDocument>(cachedEntries.flatMap(([domain, document]) => document ? [[domain, document] as const] : []));
-    this.durableStorageMetrics.redisDomainCacheHits += documents.size;
-    this.durableStorageMetrics.redisDomainCacheMisses += domains.length - documents.size;
-    if (documents.size === domains.length) return documents;
-    const missing = domains.filter((domain) => !documents.has(domain));
-    const fetched = await durableState.readSessionDomains(userId, missing);
-    for (const [domain, document] of fetched) documents.set(domain, document);
-    if (fetched.size) {
-      await this.writeSessionDomainCaches(userId, new Map([...fetched].map(([domain, document]) => [domain, document.payload] as const)), Object.fromEntries([...fetched].map(([domain, document]) => [domain, document.version])));
+    const keys = domains.map((domain) => this.sessionDomainKey(userId, domain));
+    this.durableStorageMetrics.redisSessionCommands += 1;
+    const cached = await this.r.mget(...keys);
+    const documents = new Map<DurableSessionDomain, DurableSessionDocument>();
+    cached.forEach((raw, index) => {
+      if (raw) this.durableStorageMetrics.redisSessionBytesRead += Buffer.byteLength(raw, "utf8");
+      const document = parseSessionDomainCache(raw, domains[index]);
+      if (document) documents.set(domains[index], document);
+    });
+    if (documents.size === domains.length) {
+      this.durableStorageMetrics.redisDomainCacheHits += 1;
+      return documents;
     }
+    this.durableStorageMetrics.redisDomainCacheMisses += 1;
+    // Read the old aggregate key only as a rolling-deploy migration path. It
+    // is never written by the new code, so normal saves cannot recreate the
+    // large read/write amplification this cache caused.
+    this.durableStorageMetrics.redisSessionCommands += 1;
+    const legacyRaw = await this.r.get(this.sessionDomainsKey(userId));
+    if (legacyRaw) this.durableStorageMetrics.redisSessionBytesRead += Buffer.byteLength(legacyRaw, "utf8");
+    const legacy = parseLegacySessionDomainCache(legacyRaw);
+    for (const [domain, document] of legacy) if (!documents.has(domain)) documents.set(domain, document);
+    const missing = domains.filter((domain) => !documents.has(domain));
+    if (missing.length === domains.length) {
+       const durable = await this.durableState.readSessionDomains(userId, missing);
+      for (const [domain, document] of durable) documents.set(domain, document);
+    } else if (missing.length) {
+       const loaded = await Promise.all(missing.map(async (domain) => [domain, await this.durableState!.readSessionDomain(userId, domain)] as const));
+      for (const [domain, document] of loaded) if (document) documents.set(domain, document);
+    }
+    if (documents.size) await this.writeSessionDomainCache(userId, new Map([...documents].map(([domain, document]) => [domain, document.payload] as const)), Object.fromEntries([...documents].map(([domain, document]) => [domain, document.version])), documents.keys());
     return documents;
   }
 
@@ -2738,7 +2748,7 @@ class RedisBackend implements Backend {
       // Re-read under the same lease used by saves. A concurrent writer may
       // have completed the missing rows after the original read.
       const repaired = await repairIncompleteDurableSession(userId, session, { state: this.durableState! });
-      await this.writeSessionDomainCaches(userId, new Map([...repaired].map(([domain, document]) => [domain, document.payload] as const)), Object.fromEntries([...repaired].map(([domain, document]) => [domain, document.version])));
+      await this.writeSessionDomainCache(userId, new Map([...repaired].map(([domain, document]) => [domain, document.payload] as const)), Object.fromEntries([...repaired].map(([domain, document]) => [domain, document.version])), repaired.keys());
       return repaired;
     }, {
       busyMessage: "Owner session is being migrated or saved concurrently; retry shortly.",
@@ -2746,20 +2756,27 @@ class RedisBackend implements Backend {
     });
   }
 
-  private async writeSessionDomainCaches(userId: number, payloads: ReadonlyMap<DurableSessionDomain, unknown>, versions: Partial<Record<DurableSessionDomain, number>>): Promise<void> {
-    const writes = [...payloads].flatMap(([domain, payload]) => Number.isSafeInteger(versions[domain]) ? [[domain, JSON.stringify({ domain, payload, version: versions[domain]!, updatedAt: Date.now() })] as const] : []);
+  private async writeSessionDomainCache(userId: number, payloads: ReadonlyMap<DurableSessionDomain, unknown>, versions: Partial<Record<DurableSessionDomain, number>>, domainsToWrite: Iterable<DurableSessionDomain> = DURABLE_SESSION_DOMAINS): Promise<void> {
+    const allowed = new Set(domainsToWrite);
+    const writes = [...payloads].flatMap(([domain, payload]) => {
+      if (!allowed.has(domain) || !Number.isSafeInteger(versions[domain])) return [];
+      const encoded = encodeSessionDomainCache({ domain, payload, version: versions[domain]!, updatedAt: Date.now() });
+      return encoded ? [{ domain, encoded }] : [];
+    });
     if (!writes.length) return;
-    await Promise.all(writes.map(async ([domain, encoded]) => {
-      if (Buffer.byteLength(encoded, "utf8") > this.maxSessionDomainCacheBytes) return;
-      const key = this.sessionDomainKey(userId, domain);
-      // Never let a delayed writer replace a cache populated from newer Neon
-      // versions. Version comparison and SETEX are one Redis operation.
-      const script = `local incoming=cjson.decode(ARGV[2]); local currentRaw=redis.call('get',KEYS[1]); if currentRaw then local current=cjson.decode(currentRaw); if current.domain == incoming.domain and current.version and incoming.version < current.version then return 0 end end; redis.call('setex',KEYS[1],ARGV[1],ARGV[2]); return 1`;
+    // Never let a delayed writer replace a cache populated from a newer Neon
+    // version. Each domain is compared and SETEXed independently, so changing
+    // one domain no longer transfers the other four domain payloads.
+    const script = "local currentRaw=redis.call('get',KEYS[1]); if currentRaw then local current=cjson.decode(currentRaw); if tonumber(current.version or 0) > tonumber(ARGV[2]) then return 0 end end; redis.call('setex',KEYS[1],ARGV[1],ARGV[3]); return 1";
+    await Promise.all(writes.map(async ({ domain, encoded }) => {
       this.durableStorageMetrics.redisSessionCommands += 1;
       this.durableStorageMetrics.redisSessionBytesWritten += Buffer.byteLength(encoded, "utf8");
       this.durableStorageMetrics.redisDomainCacheBytes = Math.max(this.durableStorageMetrics.redisDomainCacheBytes, Buffer.byteLength(encoded, "utf8"));
-      await this.r.eval(script, 1, key, this.sessionDomainCacheTtlSeconds, encoded);
+      await this.r.eval(script, 1, this.sessionDomainKey(userId, domain), this.sessionDomainCacheTtlSeconds, String(versions[domain]), encoded);
     }));
+    // Prevent older app instances from serving a stale aggregate cache during
+    // a rolling deployment. They will rebuild it from Neon on a miss.
+    await this.r.del(this.sessionDomainsKey(userId));
   }
 
   async getSdkThread(userId: number, threadId: string): Promise<SdkThreadRecord | undefined> {
