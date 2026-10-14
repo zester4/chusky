@@ -14,12 +14,16 @@ export class DedicatedBrowserRuntimeClient {
     return this.request(ownerScope, "/v1/sessions", { method: "POST", body: input });
   }
 
-  async observe(ownerScope: string, sessionId: string, input: { screenshot?: string; screenshotReason?: string; includeFrames?: boolean }): Promise<Record<string, unknown>> {
+  async observe(ownerScope: string, sessionId: string, input: { screenshot?: string; screenshotReason?: string; includeFrames?: boolean; includeForms?: boolean; region?: { x: number; y: number; width: number; height: number } }): Promise<Record<string, unknown>> {
     return this.request(ownerScope, `/v1/sessions/${encodeURIComponent(sessionId)}/observe`, { method: "POST", body: input });
   }
 
   async action(ownerScope: string, sessionId: string, action: Record<string, unknown>): Promise<Record<string, unknown>> {
     return this.request(ownerScope, `/v1/sessions/${encodeURIComponent(sessionId)}/action`, { method: "POST", body: action });
+  }
+
+  async upload(ownerScope: string, sessionId: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.request(ownerScope, `/v1/sessions/${encodeURIComponent(sessionId)}/upload`, { method: "POST", body: input });
   }
 
   async session(ownerScope: string, sessionId: string): Promise<Record<string, unknown>> {
@@ -28,6 +32,21 @@ export class DedicatedBrowserRuntimeClient {
 
   async liveView(ownerScope: string, sessionId: string): Promise<Record<string, unknown>> {
     return this.request(ownerScope, `/v1/sessions/${encodeURIComponent(sessionId)}/live-view`, { method: "GET" });
+  }
+
+  async artifact(ownerScope: string, sessionId: string, artifactId: string): Promise<{ name: string; contentType: string; bytes: Buffer }> {
+    const timestamp = String(Date.now());
+    const signature = createHmac("sha256", this.options.ownerSigningSecret).update(`${timestamp}.${ownerScope}`).digest("hex");
+    const response = await fetch(`${this.baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${this.options.token}`, "x-chusky-owner-scope": ownerScope, "x-chusky-owner-timestamp": timestamp, "x-chusky-owner-signature": signature },
+      signal: AbortSignal.timeout(this.options.timeoutMs ?? 120_000),
+    });
+    if (!response.ok) {
+      const payload = await response.text().catch(() => "");
+      throw new Error(`dedicated browser artifact request failed (${response.status}): ${payload.slice(0, 300) || "unknown_error"}`);
+    }
+    return { name: response.headers.get("content-disposition")?.match(/filename="([^"]+)"/)?.[1] ?? `${artifactId}.bin`, contentType: response.headers.get("content-type") ?? "application/octet-stream", bytes: Buffer.from(await response.arrayBuffer()) };
   }
 
   async stop(ownerScope: string, sessionId: string): Promise<Record<string, unknown>> {

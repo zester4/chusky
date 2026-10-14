@@ -393,7 +393,7 @@ export function sanitizeModelFacingText(value: string): string {
   return sanitizeComputerProviderText(value);
 }
 
-/** Browser operations are exposed only through the E2B-backed CHUCK_BROWSER tools. */
+/** Browser operations are exposed through the provider-neutral CHUCK_BROWSER tools. */
 export function canonicalNativeToolSlug(name: string): string {
   if (name === "CHUCK_COMPUTER") return "CHUCK_DAYTONA_COMPUTER";
   if (name.startsWith("CHUCK_COMPUTER_")) return `CHUCK_DAYTONA_${name.slice("CHUCK_COMPUTER_".length)}`;
@@ -443,7 +443,13 @@ export const modelFacingChuckTools: NativeToolDefinition[] = chuckTools
 
 const browserToolParameters = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER")?.function.parameters as any;
 const browserTool = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER") as any;
-if (browserTool) browserTool.function.description += " With BROWSER_PROVIDER=kernel the E2B controller connects to Kernel Chromium with automatic CAPTCHA handling and native computer controls. stream_start returns a short-lived Chusky-hosted watch URL when WEBHOOK_URL is configured; it is read-only by default. Use mode=interactive only for an explicit human handoff. stream_status reissues the active watch URL, and stream_stop revokes Chusky viewer access; stopping the browser is still required to revoke an already-copied Kernel provider URL. auth_start collects login through a private hosted form, auth_status checks it without restarting, and auth_resume attaches the verified profile to a new task browser. Never put secrets in tool arguments.";
+if (browserTool) {
+  browserTool.function.description = browserTool.function.description
+    .replace("owner-scoped E2B Playwright browser", "owner-scoped configured browser (dedicated Kernel runtime when CHUSKY_BROWSER_RUNTIME_MODE=dedicated, otherwise E2B)")
+    .replace("configured owner-scoped E2B/Kernel browser", "configured owner-scoped browser (dedicated Kernel runtime when CHUSKY_BROWSER_RUNTIME_MODE=dedicated, otherwise E2B)")
+    .replace("same-session E2B handoff", "same-session provider handoff")
+    + " Dedicated mode is real headed Kernel Chromium behind the provider-neutral CHUCK_BROWSER contract. Prefer CHUCK_BROWSER_OBSERVE and CHUCK_BROWSER_ACT one bounded action at a time; use CHUCK_BROWSER_AGENT and E2B-only form/file helpers only when the selected provider supports them. With BROWSER_PROVIDER=kernel the E2B controller can also connect to Kernel Chromium when dedicated mode is off. stream_start returns a short-lived Chusky-hosted watch URL when WEBHOOK_URL is configured; it is read-only by default. Use mode=interactive only for an explicit human handoff. stream_status reissues the active watch URL, and stream_stop revokes Chusky viewer access; stopping the browser is still required to revoke an already-copied provider URL. auth_start collects login through a private hosted form, auth_status checks it without restarting, and auth_resume attaches the verified profile to a new task browser. Never put secrets in tool arguments.";
+}
 if (browserToolParameters?.properties) {
   browserToolParameters.properties.count = { type: "integer", minimum: 1, maximum: 4, description: "Number of bounded E2B sandbox forks to create when action=fork." };
   browserToolParameters.properties.authId = { type: "string", maxLength: 200, description: "Owner-scoped Kernel auth connection returned by auth_start." };
