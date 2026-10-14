@@ -44,6 +44,8 @@ async function main() {
   for (const threads of coldReaders) assert.equal(threads[0].id, threadId);
   assert.equal((await store.listSdkRuns(owner, threadId))[0].id, runId);
   assert.equal((await store.getSdkThread(owner, threadId)).history[0].content, 'legacy history');
+  assert.equal((await state.readSdkThreads(owner))[0].history.length, 0);
+  assert.deepEqual(await store.getSdkRunUsage(owner), { count: 1, active: 0 });
   assert.equal((await store.getSdkIdempotency(owner, 'legacy')).response.ok, true);
   const before = await state.readSessionDomain(owner, 'sdk');
   assert.equal(Object.hasOwn(before.payload, 'sdkThreads'), false);

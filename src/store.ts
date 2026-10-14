@@ -1802,6 +1802,7 @@ interface Backend {
   saveSession(userId: number, s: UserSession): Promise<void>;
   readConversationBefore(userId: number, before: { createdAt: number; id: string }, limit: number): Promise<DurableConversationMessage[] | undefined>;
   getSdkRun(userId: number, threadId: string, runId: string): Promise<SdkRunRecord | undefined>;
+  getSdkRunUsage?(userId: number): Promise<{ count: number; active: number }>;
   getSdkThread(userId: number, threadId: string): Promise<SdkThreadRecord | undefined>;
   listSdkThreads(userId: number): Promise<SdkThreadRecord[]>;
   saveSdkThread(userId: number, thread: SdkThreadRecord, idempotency?: { key: string; fingerprint: string; response: unknown }): Promise<boolean>;
@@ -2823,6 +2824,25 @@ class RedisBackend implements Backend {
     return true;
   }
 
+  async getSdkRunUsage(userId: number): Promise<{ count: number; active: number }> {
+    if (!this.durableState || !this.durableSdkRunsEnabled) {
+      const runs = (await this.getSession(userId)).sdkThreads?.flatMap((thread) => thread.runs) ?? [];
+      return { count: runs.length, active: runs.filter((run) => run.status === "running").length };
+    }
+    await this.ensureSdkTablesMigrated(userId);
+    const key = `chuck:sdk-run-usage:${userId}`;
+    const cached = await this.r.get(key);
+    if (cached) {
+      try {
+        const value = JSON.parse(cached) as { count: number; active: number };
+        if (Number.isSafeInteger(value.count) && value.count >= 0 && Number.isSafeInteger(value.active) && value.active >= 0 && value.active <= value.count) return value;
+      } catch { /* The counter cache is disposable. */ }
+    }
+    const usage = await this.durableState.readSdkRunUsage(userId);
+    await this.r.setex(key, 5, JSON.stringify(usage));
+    return usage;
+  }
+
   async getSdkIdempotency(userId: number, key: string): Promise<{ fingerprint: string; response: unknown; createdAt: number } | undefined> {
     await this.ensureSdkTablesMigrated(userId);
     if (this.durableState && this.durableSdkTablesEnabled) {
@@ -2870,18 +2890,19 @@ class RedisBackend implements Backend {
 
   async invalidateSdkRunCaches(userId: number, threadIds: readonly string[], runIds: readonly string[]): Promise<void> {
     const keys = new Set<string>(threadIds.map((threadId) => this.sdkRunListKey(userId, threadId)));
+    keys.add(`chuck:sdk-run-usage:${userId}`);
     for (const threadId of threadIds) for (const runId of runIds) keys.add(this.sdkRunKey(userId, threadId, runId));
     if (keys.size) await this.r.del(...keys);
   }
 
   async deleteSdkRun(userId: number, threadId: string, runId: string): Promise<void> {
     if (this.durableSdkRunsEnabled) await this.durableState?.deleteSdkRun(userId, threadId, runId);
-    await this.r.del(this.sdkRunKey(userId, threadId, runId), this.sdkRunListKey(userId, threadId));
+    await this.r.del(this.sdkRunKey(userId, threadId, runId), this.sdkRunListKey(userId, threadId), `chuck:sdk-run-usage:${userId}`);
   }
 
   async deleteSdkRunsForThread(userId: number, threadId: string): Promise<void> {
     if (this.durableSdkRunsEnabled) await this.durableState?.deleteSdkRunsForThread(userId, threadId);
-    await this.r.del(this.sdkRunListKey(userId, threadId));
+    await this.r.del(this.sdkRunListKey(userId, threadId), `chuck:sdk-run-usage:${userId}`);
   }
 
   async getTregSpend(userId: number, dayKey: string): Promise<TregSpendSnapshot | undefined> {
@@ -6054,6 +6075,12 @@ export async function deleteSdkThread(uid: number, threadId: string): Promise<bo
 export async function listSdkRuns(uid: number, threadId: string): Promise<SdkRunRecord[]> {
   if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId)) return [];
   return backend.listSdkRuns(uid, threadId);
+}
+
+export async function getSdkRunUsage(uid: number): Promise<{ count: number; active: number }> {
+  if (backend.getSdkRunUsage) return backend.getSdkRunUsage(uid);
+  const runs = (await backend.getSession(uid)).sdkThreads?.flatMap((thread) => thread.runs) ?? [];
+  return { count: runs.length, active: runs.filter((run) => run.status === "running").length };
 }
 
 export async function saveSdkRun(uid: number, threadId: string, run: SdkRunRecord): Promise<boolean> {

@@ -59,6 +59,17 @@ class FakePool {
   async end() { this.ended = true; }
 }
 
+test("SDK usage returns owner-scoped counters and rejects invalid aggregates", async () => {
+  const pool = new FakePool();
+  pool.reads = [{ count: "128", active: "2" }];
+  const state = new NeonDurableState(pool as never);
+  assert.deepEqual(await state.readSdkRunUsage(42), { count: 128, active: 2 });
+  assert.deepEqual(pool.calls[0]?.values, [42]);
+  assert.doesNotMatch(pool.calls[0]?.text ?? "", /SELECT\s+(payload|\*)/i);
+  pool.reads = [{ count: "1", active: "2" }];
+  await assert.rejects(() => state.readSdkRunUsage(42), /invalid counts/);
+});
+
 function session(): UserSession {
   const now = Date.now();
   return {

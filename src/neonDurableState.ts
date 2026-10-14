@@ -1147,7 +1147,7 @@ export class NeonDurableState {
     assertUserId(userId);
     const boundedLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(100, limit)) : 100;
     const result = await this.measuredQuery<SdkThreadRow>(this.database,
-      "SELECT user_id, thread_id, external_id, metadata, history, created_at, updated_at FROM chusky_sdk_thread WHERE user_id = $1 ORDER BY updated_at DESC, thread_id DESC LIMIT $2",
+      "SELECT user_id, thread_id, external_id, metadata, '[]'::jsonb AS history, created_at, updated_at FROM chusky_sdk_thread WHERE user_id = $1 ORDER BY updated_at DESC, thread_id DESC LIMIT $2",
       [userId, boundedLimit]);
     return result.rows.map(toSdkThread);
   }
@@ -1322,6 +1322,20 @@ export class NeonDurableState {
       [userId, threadId, runId],
     );
     return result.rows[0] ? toSdkRun(result.rows[0]) : undefined;
+  }
+
+  /** Dashboard counters never need run inputs, outputs, events, or artifacts. */
+  async readSdkRunUsage(userId: number): Promise<{ count: number; active: number }> {
+    assertUserId(userId);
+    const result = await this.measuredQuery<{ count: string; active: string }>(this.database,
+      `SELECT (SELECT COUNT(*) FROM chusky_sdk_run WHERE user_id = $1)::text AS count,
+        (SELECT COUNT(*) FROM chusky_sdk_run WHERE user_id = $1 AND payload->>'status' = 'running')::text AS active`, [userId]);
+    const count = Number(result.rows[0]?.count);
+    const active = Number(result.rows[0]?.active);
+    if (!Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(active) || active < 0 || active > count) {
+      throw new Error("Durable SDK usage returned invalid counts.");
+    }
+    return { count, active };
   }
 
   /** List one thread's runs in stable creation order, with a hard query bound. */
