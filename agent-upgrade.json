@@ -3,7 +3,7 @@
   "version": "4.58.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added reusable, read-only Treg research playbooks for account research, people discovery, qualified lead enrichment and generation, buying signals, hiring, technology, market mapping, and general research; provider endpoints and prices are discovered live.",
+    "Added reusable Treg research playbooks for account research, people discovery, qualified lead generation, buying signals, hiring, technology, market mapping, and general research; providers and prices are discovered live.",
     "Chusky routes these playbooks through Muna and bounded Treg search, enrichment, source, spend, pending-call, and durable workflow controls.",
     "Plans make no provider calls and do not authorize spend; identity matching, source quality, privacy, and outreach boundaries remain active."
   ],

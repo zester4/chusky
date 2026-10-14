@@ -86,6 +86,7 @@ import { executeOutcomeVerification, verifiedOutcomeEvidenceSummary, type Outcom
 import { appendTraceEvent, compensationView, executeCompensation, listCompensations } from "./reliability/persistence.js";
 import type { OutcomeCheck } from "./reliability/contracts.js";
 import { diagnoseMissionRepair } from "./reliability/repair.js";
+import { diagnoseMission } from "./reliability/missionDoctor.js";
 import { TregGateway } from "./treg/gateway.js";
 import { buildTregPlan } from "./treg/engine.js";
 import { TregSpendGuard } from "./treg/spend.js";
@@ -122,6 +123,7 @@ const SUPERVISOR_DELEGATION_TOOLS = new Set([
   "CHUCK_MISSION_GET",
   "CHUCK_MISSION_LIST",
   "CHUCK_MISSION_PROOF",
+  "CHUCK_MISSION_DOCTOR",
   "CHUCK_MISSION_CHECKPOINT",
   "CHUCK_MISSION_STEP_COMPLETE",
   "CHUCK_MISSION_EVIDENCE",
@@ -2546,6 +2548,15 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const mission = await getMission(userId, text(args.id));
       if (!mission) throw new Error("Mission not found or not owned by you");
       return missionProof(mission);
+    }
+    case "CHUCK_MISSION_DOCTOR": {
+      const mission = await getMission(userId, text(args.id, 160));
+      if (!mission) throw new Error("Mission not found or not owned by you");
+      const [tasks, compensations] = await Promise.all([
+        listTasks(userId),
+        listCompensations(userId),
+      ]);
+      return diagnoseMission({ mission, tasks, compensations });
     }
     case "CHUCK_MISSION_CHECKPOINT": {
       if (runtime.missionTimerResumed && args.checkpoint === runtime.missionWakeCheckpoint) throw new Error("This mission timer already completed; persist the post-wake checkpoint or execute the next action instead of repeating the pre-wait checkpoint.");
