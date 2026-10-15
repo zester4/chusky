@@ -2634,7 +2634,10 @@ class RedisBackend implements Backend {
             ...Object.fromEntries([...latestPayloads].map(([domain, payload]) => [domain, structuredClone(payload)])),
           };
           const sdkState = { sdkThreads: withMessageIds.sdkThreads, sdkIdempotency: withMessageIds.sdkIdempotency, sdkAudit: withMessageIds.sdkAudit };
-          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads), sdkState, {
+          // Ordinary turns intentionally omit the SDK domain until an SDK
+          // operation asks for it. Reconciliation must preserve that partial
+          // load instead of treating the omitted domain as corruption.
+          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads, this.durableSdkTablesEnabled && sdkTablesLoaded), sdkState, {
             durableDomainVersions: { ...metadata.durableDomainVersions, ...latestVersions },
             durableDomainHashes: oldHashes,
             durableDomainSnapshots: oldSnapshots,
@@ -2666,7 +2669,7 @@ class RedisBackend implements Backend {
             domains.set(domain, merged);
           }
           const sdkState = { sdkThreads: withMessageIds.sdkThreads, sdkIdempotency: withMessageIds.sdkIdempotency, sdkAudit: withMessageIds.sdkAudit };
-          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads), sdkState);
+          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads, this.durableSdkTablesEnabled && sdkTablesLoaded), sdkState);
           ({ core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled || this.durableSdkTablesEnabled, this.durableSdkTablesEnabled));
           if (!sdkTablesLoaded) domains.delete("sdk");
           sdkTableChanges = this.durableSdkTablesEnabled ? durableSdkTableChanges(userId, withMessageIds, metadata.durableSdkTablesSnapshot) : undefined;

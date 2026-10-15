@@ -520,6 +520,9 @@ test("session split leaves runs out of the SDK document and emits owner-thread r
       return true;
     },
   );
+  const withoutSdk = new Map(domains);
+  withoutSdk.delete("sdk");
+  assert.deepEqual(joinSessionDomains(core, withoutSdk, false).history, original.history.slice(-20));
 });
 
 test("session split keeps SDK threads, idempotency, and audit rows out of the hot SDK document", () => {
