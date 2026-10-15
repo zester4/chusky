@@ -33,12 +33,12 @@ export async function computeTregTurnRoute(objective: string, options: { client?
   const result = await client.evaluate({ request: jevText(objective, 3_000) }, {
     tool: {
       type: "choice",
-      instructions: "Which live external-data tool should Chusky use first for `request`?",
+      instructions: "Choose the Treg capability that best supplies the live external data explicitly needed for `request`. Match the required entity, fields, and operation to the capability definition; choose __none__ when connected apps, supplied context, or general knowledge are enough. This is a route proposal, not permission to make a paid call.",
       criteria: { ...TREG_TOOL_CRITERIA, [NONE_OPTION]: "No external live-data provider is needed; use connected apps, memory, or general knowledge." },
     },
     live_data: {
       type: "noul",
-      instructions: "Does `request` need fresh data about people, companies, websites, markets, or social/ads activity from an external data provider?",
+      instructions: "Does completing `request` require fresh facts from an external data provider about people, companies, websites, markets, or social/ads activity? Answer yes only when freshness and provider data are necessary; answer no when the supplied context or another available source is sufficient. A yes answer does not authorize spend.",
       criteria: { true: "External provider data is needed.", false: "No external provider data is needed." },
     },
   }, { signal: options.signal, sessionId: options.sessionId });
@@ -105,7 +105,7 @@ export function createTregEndpointJudge(options: { client?: JevClient } = {}): T
         available_inputs: input.availableFields ?? [],
         required_output_fields: input.requiredFields ?? [],
       }, {
-        endpoint: { type: "choice", instructions: "Which provider endpoint best fits `job` for `need`, returning `required_output_fields` from `available_inputs`? Judge task fit only; synchronous, asynchronous, and bulk endpoints are all valid when their mode suits the need.", criteria },
+        endpoint: { type: "choice", instructions: "Choose the endpoint whose documented function and available inputs can best satisfy `need` for `job` and return the required output fields. Match required fields to supported inputs; choose __none__ if no endpoint fits. Judge capability fit only: synchronous, asynchronous, and bulk modes are all valid when the task supports them. Do not weigh price or reliability here; the gateway combines fit with economics and policy.", criteria },
       });
       const answer = result.answers.endpoint as JevChoiceAnswer;
       const selected = input.hits.find((hit) => hit.id === answer.choice);

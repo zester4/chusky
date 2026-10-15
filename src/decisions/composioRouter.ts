@@ -182,10 +182,10 @@ export async function computeJevComposioDecision(objective: string, input: {
     ...(input.recentContext ? { recent_conversation: jevText(input.recentContext, 1_200) } : {}),
   };
   const questions: Record<string, JevQuestion> = {
-    domain: { type: "choice", instructions: "Which business domain does `request` belong to?", criteria: domainCriteria() },
+    domain: { type: "choice", instructions: "Classify the main business domain needed to fulfill `request`, using the domain definitions below. Choose the closest functional domain, not one that only shares words; choose __none__ when none fits. This classification narrows discovery and does not authorize an app action.", criteria: domainCriteria() },
     needs_app: {
       type: "noul",
-      instructions: "Does completing `request` require reading from or acting in a third-party app (email, CRM, calendar, billing, store, support desk, documents, and similar), whether or not it is connected yet?",
+      instructions: "Can Chusky complete the requested outcome using only supplied context and native capabilities, or must it read current data from or change state in a third-party app? Answer yes only when an app read or action is genuinely required; answer no for general advice, drafting without saving, or work already supported by supplied data. Connection status does not determine need.",
       criteria: { true: "A third-party app read or action is required.", false: "It can be answered or produced without touching any app." },
     },
   };
@@ -221,7 +221,7 @@ export async function computeJevComposioDecision(objective: string, input: {
   const toolkitRanking = candidateSlugs.length
     ? await rankOptions(client, {
       state,
-      instructions: "Which app should Chusky use to complete `request`? Prefer a CONNECTED app that can do the job. Choose a not-connected app when the user names it or when no connected app can do the job.",
+      instructions: "Choose the app whose available capability best fulfills `request`. Prefer a connected app when its described functions fit. Choose an unconnected app only when it is explicitly requested or no connected option fits. Choose __none__ if no app is needed. App fit is not proof of authorization or permission to act.",
       options: candidateSlugs.map((slug) => ({ id: slug, description: toolkitDescription(slug, connectedSet.has(toolkitKey(slug)), infoByKey.get(toolkitKey(slug))) })),
       noneDescription: "No app is needed for this request.",
       signal: input.signal,
@@ -276,7 +276,7 @@ export async function computeJevComposioDecision(objective: string, input: {
   const bySlug = new Map(actions.map((action) => [action.slug, action]));
   const ranking = await rankOptions(client, {
     state,
-    instructions: "Which app action should Chusky execute first to make real progress on `request`? Prefer the most specific action that directly performs or reads what is asked.",
+    instructions: "Choose the single first app action that most directly advances `request`, based on each action's name and description. Prefer a necessary, specific read or write over a broad or indirect action. Choose __none__ if none is a meaningful step. This only routes the action; runtime schema, account, approval, and result checks still govern execution.",
     options: actions.map((action) => ({ id: action.slug, description: `${action.name}: ${action.description}` })),
     noneDescription: "None of these actions fits the request.",
     signal: input.signal,
@@ -288,8 +288,8 @@ export async function computeJevComposioDecision(objective: string, input: {
     ? await verifyCandidates(client, {
       state,
       candidates: candidates.map((item) => ({ id: item.id, description: `${bySlug.get(item.id)?.name ?? item.id}: ${bySlug.get(item.id)?.description ?? ""}` })),
-      question: () => "Will Chusky need to call `candidate` at some step to complete `request`?",
-      criteria: { true: "This action is a required read or step for the request.", false: "This action is unrelated or unnecessary for the request." },
+      question: () => "Would calling `candidate` materially help complete the requested outcome, either as a necessary read or a required action step?",
+      criteria: { true: "The described action directly supports a required or strongly useful step toward the requested outcome.", false: "The action is unrelated, redundant, unsafe to infer, or only superficially similar to the request." },
       signal: input.signal,
       sessionId: input.sessionId,
     })

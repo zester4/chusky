@@ -55,7 +55,7 @@ export async function decideTurnAction(query: string, options: {
     }, {
       action_required: {
         type: "noul",
-        instructions: "Does fulfilling the current user request require Chusky to use any specialized skill, native tool, connected third-party app, MCP capability, or live-data provider? Judge only this turn's requested outcome. A conversational answer or reasoning based on the supplied context needs no capability.",
+        instructions: "Does the current user request require Chusky to consult or use a specialized skill, native tool, connected app, MCP capability, or live-data provider to produce the requested outcome? Judge this turn only. Answer yes for current/private data, external state, or an external action; answer no for conversation or reasoning fully supported by supplied context. Do not infer a need merely from capability-related words in context.",
         criteria: {
           true: "A specialized capability must be routed to complete the requested outcome, including reading current owner data or taking an external action.",
           false: "The request can be answered directly without loading a specialized skill, tool, connected app, MCP server, or live-data provider.",

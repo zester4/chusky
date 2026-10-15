@@ -156,13 +156,16 @@ test("rankOptions runs a sharded tournament for large option sets", async () => 
       for (const question of Object.values<any>(request.body.questions)) {
         assert.ok(Object.keys(question.criteria).length <= 101, "each shard respects the per-question option cap");
         assert.ok(NONE_OPTION in question.criteria, "every choice carries an abstain option");
+        assert.match(question.instructions, /functional fit, not keyword overlap/);
+        assert.match(question.instructions, /do not infer connection, authorization, safety, or completion/);
       }
     }
   } finally { restore(); }
 });
 
 test("verifyCandidates returns independent multi-label scores", async () => {
-  const client = new JevClient({ apiKey: "k", fetchImpl: fakeJev() });
+  const captured: Captured[] = [];
+  const client = new JevClient({ apiKey: "k", fetchImpl: fakeJev(captured) });
   const { scores } = await verifyCandidates(client, {
     state: { request: "build a landing page and run an seo audit on it" },
     candidates: [
@@ -175,6 +178,9 @@ test("verifyCandidates returns independent multi-label scores", async () => {
   assert.ok(scores["frontend-design"] >= 0.5);
   assert.ok(scores["seo-audit"] >= 0.5);
   assert.ok(scores["cold-email"] < 0.5);
+  const firstQuestion = Object.values<any>(captured[0]?.body.questions ?? {})[0];
+  assert.match(firstQuestion.instructions.decision_rules, /Assess this candidate independently/);
+  assert.match(firstQuestion.instructions.decision_rules, /does not establish availability, authorization, or successful execution/);
 });
 
 async function skillRoot(): Promise<string> {

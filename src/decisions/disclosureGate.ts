@@ -21,7 +21,7 @@ export async function meetingDisclosureCheck(input: {
     ? { ...fallback, reason: "Jev unavailable; deterministic boundary retained", shadow: false }
     : { ...fallback, allowed: true, reason: "Jev unavailable in shadow mode", shadow: true };
   const result = await withinBudget(client.evaluate({ text: jevText(input.text, 1_500), used_record_tool: input.usedRecordTool, verified_participant: input.verifiedParticipant }, {
-    disclosure: { type: "choice", instructions: "Would this meeting reply reveal private owner data, another person's record, internal notes, or negotiation strategy beyond a verified participant's scope?", criteria: { allow: "The reply is appropriately scoped.", block: "The reply may disclose private or out-of-scope information." } },
+    disclosure: { type: "choice", instructions: "Assess only whether the proposed meeting reply `text` discloses information beyond the confirmed recipient's scope. Choose block if it includes private owner data, another person's record, internal notes, or negotiation strategy not appropriate for that verified participant; choose allow only when the supplied participant and record-tool facts support the disclosure. If scope is unclear, block. This gate does not replace the deterministic boundary.", criteria: { allow: "The reply contains only information appropriate for the verified participant and supplied scope.", block: "The reply may disclose private or out-of-scope information, or the supplied facts do not establish safe scope." } },
   }, { sessionId: input.sessionId }), 400);
   if (!result) return config.meetingDisclosureGateMode === "enforce"
     ? { ...fallback, reason: "Jev timed out; deterministic boundary retained", shadow: false }

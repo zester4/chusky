@@ -103,12 +103,15 @@ test("Jev proposes a next step, but deterministic authority converts high-impact
     assert.equal(result.proposedAction, "replan");
     assert.equal(result.effectiveAction, "ask_owner");
     assert.equal(result.requiresApproval, true);
-    assert.equal(calls.length, 1);
+    assert.equal(calls.length, 2, "selecting an item and deciding its action require sequential Jev evaluations");
+    assert.deepEqual(Object.keys(calls[0]?.questions as object), ["item"]);
+    assert.deepEqual(Object.keys(calls[1]?.questions as object), ["action"]);
+    assert.equal((calls[1]?.state as Record<string, any>).selected_item.id, "mission-1", "the action decision must receive the item selected by the first evaluation");
   });
 });
 
-test("a Jev __none__ item falls back to the deterministic item instead of proposing itemless work", async () => {
-  await withJev(async () => {
+test("a Jev __none__ item falls back without requesting an action for an unselected item", async () => {
+  await withJev(async (calls) => {
     const result = await decideAutonomyStep({
       objective: "Continue the mission",
       items: [{ kind: "mission", id: "mission-1", title: "Continue launch", status: "open", nextAction: "Verify the next milestone" }],
@@ -117,6 +120,7 @@ test("a Jev __none__ item falls back to the deterministic item instead of propos
     });
     assert.equal(result.source, "deterministic");
     assert.equal(result.selectedItemId, "mission-1");
+    assert.equal(calls.length, 1, "the dependent action decision must not run without a selected item");
   }, { item: "__none__", action: "act_now" });
 });
 
@@ -141,5 +145,54 @@ test("autonomy decision loop covers signal triage, follow-up, memory, and recove
     assert.equal(memory.reviewAtDays, 30);
     const recovery = await decideRecovery({ operation: "search provider", error: "Provider unavailable", retryable: false, providerAvailable: false });
     assert.equal(recovery.action, "switch_provider");
+  });
+});
+
+test("Jev only chooses follow-up details after the relevance decision says one is needed", async () => {
+  await withJev(async (calls) => {
+    const result = await decideFollowUp({ summary: "Customer agreed to receive the proposal by email", hasAgreedNextStep: true, preferredChannel: "email", dueAt: "2026-10-01T09:00:00Z" });
+    assert.equal(result.relevant, true);
+    assert.equal(calls.length, 2);
+    assert.deepEqual(Object.keys(calls[0]?.questions as object), ["relevance"]);
+    assert.deepEqual(Object.keys(calls[1]?.questions as object).sort(), ["channel", "message_type", "timing"]);
+    assert.equal((calls[1]?.state as Record<string, unknown>).follow_up_required, true);
+  });
+});
+
+test("Jev selects a memory review lifetime only after deciding to retain the candidate", async () => {
+  await withJev(async (calls) => {
+    const result = await decideMemoryDisposition({ key: "customer preference", value: "Prefers short email summaries" });
+    assert.equal(result.disposition, "remember_until_review");
+    assert.equal(calls.length, 2);
+    assert.deepEqual(Object.keys(calls[0]?.questions as object), ["disposition"]);
+    assert.deepEqual(Object.keys(calls[1]?.questions as object), ["review"]);
+    assert.equal((calls[1]?.state as Record<string, unknown>).selected_disposition, "remember_until_review");
+  });
+});
+
+test("Jev does not ask for review timing when it rejects a memory candidate", async () => {
+  await withJev(async (calls) => {
+    const result = await decideMemoryDisposition({ key: "one-time update", value: "The package arrived this morning" });
+    assert.equal(result.disposition, "do_not_save");
+    assert.equal(calls.length, 1);
+    assert.deepEqual(Object.keys(calls[0]?.questions as object), ["disposition"]);
+  }, { disposition: "do_not_save" });
+});
+
+test("permanent Jev memory retention does not request a review lifetime", async () => {
+  await withJev(async (calls) => {
+    const result = await decideMemoryDisposition({ key: "owner preference", value: "Prefers concise summaries" });
+    assert.equal(result.disposition, "remember");
+    assert.equal(result.reviewAtDays, undefined);
+    assert.equal(calls.length, 1);
+  }, { disposition: "remember" });
+});
+
+test("sensitive memory candidates stay local and are not sent to Jev", async () => {
+  await withJev(async (calls) => {
+    const result = await decideMemoryDisposition({ key: "credential", value: "private token value", sensitive: true });
+    assert.equal(result.disposition, "remember_until_review", "the existing deterministic sensitive-memory policy is preserved");
+    assert.equal(result.source, "deterministic");
+    assert.equal(calls.length, 0);
   });
 });

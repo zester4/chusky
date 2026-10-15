@@ -61,7 +61,7 @@ export async function computeJevSkillRoute(query: string, options: { client?: Je
   };
   const ranking = await rankOptions(client, {
     state,
-    instructions: "Which installed skill's operating guidance should Chusky load to complete `request` with the best outcome? Prefer the skill whose description matches the actual deliverable or workflow, not incidental words.",
+    instructions: "Which installed skill's instructions materially improve Chusky's ability to complete `request`? Match the actual deliverable and workflow to the skill description, not incidental words. Select only directly relevant skills; choose __none__ for general conversation or work fully covered by the agent's normal capabilities.",
     options: skills.map((skill) => ({ id: skill.name, description: skill.description })),
     noneDescription: "No skill applies: small talk, a simple factual answer, or a task no listed skill covers.",
     signal: options.signal,
@@ -88,8 +88,8 @@ export async function computeJevSkillRoute(query: string, options: { client?: Je
     ? await verifyCandidates(client, {
       state,
       candidates: candidates.map((item) => ({ id: item.id, description: byName.get(item.id)?.description ?? item.id })),
-      question: () => "Would loading `candidate` skill guidance materially improve Chusky's result for `request`?",
-      criteria: { true: "The skill's workflow, rules, or checklists directly apply to this request.", false: "The skill is unrelated or only superficially related." },
+      question: () => "Would loading `candidate` skill instructions materially improve completion of `request`?",
+      criteria: { true: "The skill's procedures, constraints, or domain guidance directly apply to the requested deliverable.", false: "The skill is unrelated, duplicates better-matched guidance, or matches only incidental words." },
       signal: options.signal,
       sessionId: options.sessionId,
     })

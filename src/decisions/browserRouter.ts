@@ -27,7 +27,7 @@ export async function routeBrowserNext(input: { observation: BrowserObservation;
   const options = input.observation.candidates.map((candidate) => ({ id: candidate.id, description: candidate.description }));
   const run = rankOptions(input.client ?? jevClient(), {
     state: { goal: input.observation.goal, page: { origin: input.observation.origin, path: input.observation.path, title: input.observation.title, loadState: input.observation.loadState, sessionStatus: input.observation.sessionStatus }, candidates: input.observation.candidates.map(({ id, kind, role, name, action, risk, description, requiresApproval }) => ({ id, kind, role, name, action, risk, description, requiresApproval })) },
-    instructions: "Choose the next bounded browser step for this goal. Select only a candidate from the inspected page. Do not invent selectors, coordinates, URLs, credentials, or approvals. Prefer reinspection when the page is ambiguous and stop or handoff when a human challenge or high-impact action is present.",
+    instructions: "Choose the single next bounded browser step that advances `goal`, using only the current observation and listed candidates. Select only a candidate that exists in this inspected page; do not infer selectors, coordinates, URLs, credentials, or approval. Prefer reinspecting stale or ambiguous state. Choose stop or handoff when a human challenge or high-impact action blocks safe progress. Runtime approval checks remain authoritative.",
     options,
     noneDescription: "No safe next step is clear; stop and let the supervisor handle recovery.",
     signal: input.signal,

@@ -371,7 +371,7 @@ export async function computeNativeToolRoute(query: string, tools: ToolSchema[],
   };
   const ranking = await rankOptions(client, {
     state,
-    instructions: "Which native Chusky tools should be available to the main agent for this request? Choose tools that directly help complete the work. Include only tools that are necessary or likely next steps; do not choose tools merely because they are broadly capable.",
+    instructions: "Which native Chusky tools should be exposed to the main agent to complete this request? Select tools whose described operation is necessary or a plausible next step for the stated outcome; exclude general-purpose tools that are merely capable. Choose __none__ if none directly applies. This controls availability only; the main agent and runtime still validate arguments, scope, and approval.",
     options: candidates.candidates.map((item) => ({
       id: item.slug,
       description: `${item.bundle} ${item.risk} tool: ${item.description}`,

@@ -371,7 +371,11 @@ function choiceQuestion(instructions: string, options: RankOption[], noneDescrip
   const criteria: Record<string, string> = {};
   for (const option of options) criteria[option.id] = jevText(option.description, 360) || option.id;
   criteria[NONE_OPTION] = noneDescription;
-  return { type: "choice", instructions, criteria };
+  return {
+    type: "choice",
+    instructions: `${instructions} Use only the supplied state and option descriptions. Match the option to the requested outcome by functional fit, not keyword overlap or broad capability. Choose __none__ when no option is a direct fit. This is routing only; do not infer connection, authorization, safety, or completion.`,
+    criteria,
+  };
 }
 
 /**
@@ -467,7 +471,11 @@ export async function verifyCandidates(client: JevClient, input: {
     ids.push(candidate.id);
     questions[key] = {
       type: "noul",
-      instructions: { candidate: { id: candidate.id, description: jevText(candidate.description, 600) }, question: input.question(candidate) },
+      instructions: {
+        candidate: { id: candidate.id, description: jevText(candidate.description, 600) },
+        question: input.question(candidate),
+        decision_rules: "Assess this candidate independently using only the supplied state and candidate description. Answer true only when it materially applies to the requested outcome; incidental keyword overlap or broad capability is insufficient. This assessment does not establish availability, authorization, or successful execution.",
+      },
       ...(input.criteria ? { criteria: input.criteria } : {}),
     };
   });
