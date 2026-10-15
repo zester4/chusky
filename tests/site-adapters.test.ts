@@ -3,13 +3,22 @@ import assert from "node:assert/strict";
 import { chuckTools, validateNativeToolArguments } from "../src/agentTools.js";
 import { buildSiteEntry, getSiteAdapter, SITE_ADAPTERS } from "../src/shopping/siteAdapters.js";
 
-test("the curated site-adapter matrix contains twenty unique HTTPS entry points", () => {
-  assert.equal(SITE_ADAPTERS.length, 20);
-  assert.equal(new Set(SITE_ADAPTERS.map((adapter) => adapter.id)).size, 20);
+test("the curated site-adapter matrix contains the sixty benchmark starters plus legacy workflows", () => {
+  assert.ok(SITE_ADAPTERS.length >= 92);
+  assert.equal(new Set(SITE_ADAPTERS.map((adapter) => adapter.id)).size, SITE_ADAPTERS.length);
   for (const adapter of SITE_ADAPTERS) {
     assert.match(adapter.origin, /^https:\/\//);
     assert.equal(new URL(adapter.origin).pathname, "/");
   }
+  const benchmarkStarterIds = [
+    "amazon", "target", "playwright", "ebay", "instacart", "doordash", "grubhub", "expedia", "booking-com", "airbnb",
+    "wikipedia", "chewy", "kayak", "ikea", "lenovo", "nike", "cvs", "pytest", "jumia-ghana", "bing",
+    "duckduckgo", "mozilla", "python", "nodejs", "react", "vue", "svelte", "typescript", "docker", "kubernetes",
+    "microsoft-learn", "stripe", "bbc", "guardian", "google-cloud", "supabase", "espn", "cnbc", "yahoo-finance", "coinmarketcap",
+    "redfin", "indeed", "coursera", "allrecipes", "foodnetwork", "aliexpress", "samsung", "autotrader", "cars",
+    "rust", "go", "ruby", "php", "perl", "swift", "kotlin", "dart", "flutter", "angular", "nextjs",
+  ];
+  for (const id of benchmarkStarterIds) assert.ok(getSiteAdapter(id), `missing benchmark starter ${id}`);
 });
 
 test("site adapters build bounded encoded search URLs without leaking intent into another origin", () => {
@@ -58,6 +67,14 @@ test("bootstrap plans use the browser runtime selector contract", () => {
       assert.ok(step.selector?.role || step.selector?.name || step.selector?.placeholder, `${plan.adapterId} ${step.action} selector must be addressable`);
     }
   }
+});
+
+test("direct-page starters give documentation and public content tasks a safe head start", () => {
+  const entry = buildSiteEntry({ site: "React" });
+  assert.equal(entry.adapterId, "react");
+  assert.equal(entry.strategy, "direct-page");
+  assert.equal(entry.url, "https://react.dev/learn");
+  assert.equal(entry.steps.length, 0);
 });
 
 test("site entry plans never include credential or payment fields", () => {

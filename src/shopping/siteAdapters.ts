@@ -35,7 +35,7 @@ export type SiteEntryAdapter = {
   name: string;
   origin: string;
   categories: readonly ShoppingCategory[];
-  strategy: "direct-search" | "bootstrap-search" | "direct-location";
+  strategy: "direct-search" | "bootstrap-search" | "direct-location" | "direct-page";
   buildUrl: (request: SiteEntryRequest) => URL;
   buildSteps: (request: SiteEntryRequest) => readonly SiteEntryStep[];
 };
@@ -203,6 +203,33 @@ function pathLocationAdapter(id: string, name: string, origin: string, category:
   };
 }
 
+function pathQueryAdapter(id: string, name: string, origin: string, category: ShoppingCategory, pathname: string): SiteEntryAdapter {
+  return {
+    id,
+    name,
+    origin,
+    categories: [category],
+    strategy: "direct-search",
+    buildUrl: (request) => {
+      const query = requiredText(cleanQuery(request), "query", QUERY_MAX);
+      return originUrl(origin, `${pathname.replace(/\/$/, "")}/${encodeURIComponent(query)}`);
+    },
+    buildSteps: () => [],
+  };
+}
+
+function pageAdapter(id: string, name: string, origin: string, category: ShoppingCategory, pathname = "/"): SiteEntryAdapter {
+  return {
+    id,
+    name,
+    origin,
+    categories: [category],
+    strategy: "direct-page",
+    buildUrl: () => originUrl(origin, pathname),
+    buildSteps: () => [],
+  };
+}
+
 /**
  * Fast entry points for the highest-value public shopping and service sites.
  * These adapters only choose the initial page. They never add payment data,
@@ -230,6 +257,78 @@ export const SITE_ADAPTERS: readonly SiteEntryAdapter[] = [
   bootstrapAdapter("delta", "Delta", "https://www.delta.com", "flights", (request) => travelSteps(request, "Find flights", false, { origin: "Origin", destination: "Destination" })),
   bootstrapAdapter("netflix", "Netflix", "https://www.netflix.com", "streaming", (request) => searchSteps(request, "Search")),
   bootstrapAdapter("disney-plus", "Disney+", "https://www.disneyplus.com", "streaming", (request) => searchSteps(request, "Search")),
+  queryAdapter("ebay", "eBay", "https://www.ebay.com", "other", "/sch/i.html", "_nkw"),
+  pathQueryAdapter("homedepot", "The Home Depot", "https://www.homedepot.com", "home", "/s"),
+  queryAdapter("lowes", "Lowe's", "https://www.lowes.com", "home", "/search", "searchTerm"),
+  pageAdapter("macys", "Macy's", "https://www.macys.com", "fashion", "/shop/featured/mens-shirts"),
+  queryAdapter("chewy", "Chewy", "https://www.chewy.com", "other", "/s", "query"),
+  queryAdapter("kohls", "Kohl's", "https://www.kohls.com", "fashion", "/search.jsp", "search"),
+  pageAdapter("kayak", "KAYAK", "https://www.kayak.com", "flights", "/flights"),
+  pageAdapter("skyscanner", "Skyscanner", "https://www.skyscanner.com", "flights", "/transport/flights/"),
+  pageAdapter("gitlab", "GitLab", "https://gitlab.com", "other", "/explore"),
+  queryAdapter("ikea", "IKEA", "https://www.ikea.com", "home", "/us/en/search/", "q"),
+  queryAdapter("bh-photo", "B&H Photo", "https://www.bhphotovideo.com", "electronics", "/c/search", "Ntt"),
+  queryAdapter("newegg", "Newegg", "https://www.newegg.com", "electronics", "/p/pl", "d"),
+  pathQueryAdapter("dell", "Dell", "https://www.dell.com", "electronics", "/en-us/search"),
+  queryAdapter("lenovo", "Lenovo", "https://www.lenovo.com", "electronics", "/us/en/search", "text"),
+  queryAdapter("nike", "Nike", "https://www.nike.com", "fashion", "/w", "q"),
+  queryAdapter("adidas", "adidas", "https://www.adidas.com", "fashion", "/us/search", "q"),
+  queryAdapter("uniqlo", "UNIQLO", "https://www.uniqlo.com", "fashion", "/us/en/search", "q"),
+  queryAdapter("sephora", "Sephora", "https://www.sephora.com", "health_beauty", "/search", "keyword"),
+  queryAdapter("ulta", "Ulta Beauty", "https://www.ulta.com", "health_beauty", "/search", "search"),
+  queryAdapter("cvs", "CVS", "https://www.cvs.com", "health_beauty", "/search", "searchTerm"),
+  queryAdapter("walgreens", "Walgreens", "https://www.walgreens.com", "health_beauty", "/search/results.jsp", "Ntt"),
+  queryAdapter("staples", "Staples", "https://www.staples.com", "household", "/search", "query"),
+  queryAdapter("office-depot", "Office Depot", "https://www.officedepot.com", "household", "/a/search/", "q"),
+  pathQueryAdapter("sainsburys", "Sainsbury's", "https://www.sainsburys.co.uk", "groceries", "/gol-ui/SearchResults"),
+  queryAdapter("takealot", "Takealot", "https://www.takealot.com", "other", "/all", "search"),
+  queryAdapter("google", "Google", "https://www.google.com", "other", "/search", "q"),
+  queryAdapter("bing", "Bing", "https://www.bing.com", "other", "/search", "q"),
+  queryAdapter("duckduckgo", "DuckDuckGo", "https://duckduckgo.com", "other", "/", "q"),
+  queryAdapter("mozilla", "MDN Search", "https://developer.mozilla.org", "other", "/en-US/search", "q"),
+  pageAdapter("mdn", "MDN Web API", "https://developer.mozilla.org", "other", "/en-US/docs/Web/API"),
+  queryAdapter("python", "Python", "https://www.python.org", "other", "/search/", "q"),
+  pageAdapter("nodejs", "Node.js", "https://nodejs.org", "other", "/en/learn/getting-started/introduction-to-nodejs"),
+  pageAdapter("react", "React", "https://react.dev", "other", "/learn"),
+  pageAdapter("vue", "Vue", "https://vuejs.org", "other", "/guide/introduction.html"),
+  pageAdapter("svelte", "Svelte", "https://svelte.dev", "other", "/docs/svelte/overview"),
+  pageAdapter("typescript", "TypeScript", "https://www.typescriptlang.org", "other", "/docs/handbook/intro.html"),
+  pageAdapter("docker", "Docker Docs", "https://docs.docker.com", "other", "/get-started/"),
+  pageAdapter("kubernetes", "Kubernetes", "https://kubernetes.io", "other", "/docs/home/"),
+  pageAdapter("cloudflare", "Cloudflare Developers", "https://developers.cloudflare.com", "other", "/"),
+  pageAdapter("bbc", "BBC News", "https://www.bbc.com", "other", "/news"),
+  pageAdapter("wikipedia", "Wikipedia", "https://en.wikipedia.org", "other", "/wiki/Browser_automation"),
+  pageAdapter("microsoft-learn", "Microsoft Learn", "https://learn.microsoft.com", "other", "/en-us/search/?terms=playwright"),
+  pageAdapter("stripe", "Stripe Docs", "https://docs.stripe.com", "other", "/"),
+  pageAdapter("guardian", "The Guardian", "https://www.theguardian.com", "other", "/international"),
+  pageAdapter("google-cloud", "Google Cloud", "https://cloud.google.com", "other", "/docs"),
+  pageAdapter("supabase", "Supabase", "https://supabase.com", "other", "/docs"),
+  pageAdapter("espn", "ESPN", "https://www.espn.com", "other", "/"),
+  pageAdapter("cnbc", "CNBC", "https://www.cnbc.com", "other", "/"),
+  pageAdapter("yahoo-finance", "Yahoo Finance", "https://finance.yahoo.com", "other", "/"),
+  pageAdapter("coinmarketcap", "CoinMarketCap", "https://coinmarketcap.com", "other", "/"),
+  pageAdapter("redfin", "Redfin", "https://www.redfin.com", "other", "/"),
+  pageAdapter("indeed", "Indeed", "https://www.indeed.com", "other", "/"),
+  pageAdapter("coursera", "Coursera", "https://www.coursera.org", "other", "/courses"),
+  pageAdapter("allrecipes", "Allrecipes", "https://www.allrecipes.com", "other", "/"),
+  pageAdapter("foodnetwork", "Food Network", "https://www.foodnetwork.com", "other", "/"),
+  pageAdapter("aliexpress", "AliExpress", "https://www.aliexpress.com", "other", "/"),
+  pageAdapter("samsung", "Samsung", "https://www.samsung.com", "other", "/us"),
+  pageAdapter("autotrader", "Autotrader", "https://www.autotrader.com", "other", "/cars-for-sale"),
+  pageAdapter("cars", "Cars.com", "https://www.cars.com", "other", "/"),
+  pageAdapter("rust", "Rust", "https://www.rust-lang.org", "other", "/learn"),
+  pageAdapter("go", "Go", "https://go.dev", "other", "/learn/"),
+  pageAdapter("ruby", "Ruby", "https://www.ruby-lang.org", "other", "/en/documentation/"),
+  pageAdapter("php", "PHP", "https://www.php.net", "other", "/docs.php"),
+  pageAdapter("perl", "Perl", "https://www.perl.org", "other", "/"),
+  pageAdapter("swift", "Swift", "https://www.swift.org", "other", "/documentation/"),
+  pageAdapter("kotlin", "Kotlin", "https://kotlinlang.org", "other", "/docs/home.html"),
+  pageAdapter("dart", "Dart", "https://dart.dev", "other", "/language"),
+  pageAdapter("flutter", "Flutter", "https://docs.flutter.dev", "other", "/get-started/learn-flutter"),
+  pageAdapter("angular", "Angular", "https://angular.dev", "other", "/overview"),
+  pageAdapter("nextjs", "Next.js", "https://nextjs.org", "other", "/docs"),
+  pageAdapter("playwright", "Playwright", "https://playwright.dev", "other", "/docs/intro"),
+  pageAdapter("pytest", "pytest", "https://docs.pytest.org", "other", "/en/stable/"),
 ] as const;
 
 const ADAPTERS_BY_KEY = new Map(SITE_ADAPTERS.flatMap((adapter) => [
