@@ -74,7 +74,7 @@ import type { SubagentActivityUpdate } from "./subagents/contracts.js";
 import { resolveComposioRoute } from "./composioRouting.js";
 import { buildArtifactEmailArguments, type ArtifactEmailFile } from "./artifactEmail.js";
 import { buildArtifactUploadArguments } from "./artifactBridge.js";
-import { compactModelMessages } from "./agentContext.js";
+import { compactModelMessages, compactModelMessagesWithSummary } from "./agentContext.js";
 import { ATTENTION_PULSE_IDENTITY, CAPABILITY_ROUTING_KERNEL, compactActionCustomization, compactConversationalCustomization, compactMissionCustomization, composeSystemPrompt } from "./prompt.js";
 import { contextPrompt } from "./contextGraph.js";
 import { withLatencyBudget } from "./voiceLatency.js";
@@ -3092,6 +3092,7 @@ export async function runAgent(
 
   const toolsUsed: string[] = [];
   const toolsSucceeded: string[] = [];
+  let inTurnContextSummary: string | undefined;
   const toolOutcomes: AgentResult["toolOutcomes"] = [];
   let toolCallsExecuted = 0;
   let browserToolCallsExecuted = 0;
@@ -3253,7 +3254,11 @@ export async function runAgent(
       return counts;
     }, { native: 0, composio: 0, mcp: 0, other: 0, schemaChars: 0 });
     logger.info({ round, finalModelToolCount: modelAvailableTools.length, ...toolCounts }, "Model tool payload prepared");
-    const modelMessages = compactModelMessages(messages);
+    const compactedContext = inTurnContextSummary
+      ? { messages: compactModelMessages(messages, undefined, undefined, `[ScaleDown in-turn context summary]\n${inTurnContextSummary}`), summary: inTurnContextSummary }
+      : await compactModelMessagesWithSummary(messages);
+    const modelMessages = compactedContext.messages;
+    inTurnContextSummary ??= compactedContext.summary;
     if (modelMessages.length !== messages.length || modelMessages.some((message, index) => message.content !== messages[index]?.content)) {
       const contextChars = (items: ApiMessage[]) => items.reduce((total, message) => total + (typeof message.content === "string" ? message.content.length : JSON.stringify(message.content ?? "").length), 0);
       logger.info({ round, originalMessages: messages.length, modelMessages: modelMessages.length, originalContextChars: contextChars(messages), modelContextChars: contextChars(modelMessages) }, "Compacted agent context for model round");

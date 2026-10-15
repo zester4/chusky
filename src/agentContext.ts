@@ -1,4 +1,5 @@
 import type { ApiMessage } from "./types.js";
+import { summarizeConversation, type SummaryMessage } from "./conversationSummarizer.js";
 
 const MAX_MODEL_TOOL_RESULT_CHARS = 3_500;
 const MAX_MODEL_CONTEXT_MESSAGES = 14;
@@ -17,18 +18,23 @@ function compactModelContent(content: ApiMessage["content"], maxChars = MAX_MODE
  * remain paired with its assistant tool call, so compaction removes complete
  * old exchanges and trims only the content of retained tool results.
  */
-export function compactModelMessages(messages: ApiMessage[], maxMessages = MAX_MODEL_CONTEXT_MESSAGES, maxChars = MAX_MODEL_CONTEXT_CHARS): ApiMessage[] {
+function compactionWindow(messages: ApiMessage[], maxMessages: number): { systemMessages: ApiMessage[]; conversation: ApiMessage[]; omitted: ApiMessage[]; retained: ApiMessage[] } {
   const systemMessages = messages.filter((message) => message.role === "system");
   const conversation = messages.filter((message) => message.role !== "system");
-  if (!conversation.length) return messages;
+  if (!conversation.length) return { systemMessages, conversation, omitted: [], retained: [] };
 
   let start = Math.max(0, conversation.length - Math.max(6, maxMessages));
   // Never begin with a tool result: its assistant tool-call envelope belongs
   // to the same exchange and must be retained for provider validation.
   while (start > 0 && conversation[start]?.role === "tool") start -= 1;
-  const omitted = conversation.slice(0, start);
-  const hadLargeToolResult = conversation.slice(start).some((message) => message.role === "tool" && typeof message.content === "string" && message.content.length > MAX_MODEL_TOOL_RESULT_CHARS);
-  let retained = conversation.slice(start).map((message) => message.role === "tool"
+  return { systemMessages, conversation, omitted: conversation.slice(0, start), retained: conversation.slice(start) };
+}
+
+export function compactModelMessages(messages: ApiMessage[], maxMessages = MAX_MODEL_CONTEXT_MESSAGES, maxChars = MAX_MODEL_CONTEXT_CHARS, summaryOverride?: string): ApiMessage[] {
+  const { systemMessages, conversation, omitted, retained: window } = compactionWindow(messages, maxMessages);
+  if (!conversation.length) return messages;
+  const hadLargeToolResult = window.some((message) => message.role === "tool" && typeof message.content === "string" && message.content.length > MAX_MODEL_TOOL_RESULT_CHARS);
+  let retained = window.map((message) => message.role === "tool"
     ? { ...message, content: compactModelContent(message.content) }
     : message);
   const summaryLines = omitted
@@ -40,7 +46,7 @@ export function compactModelMessages(messages: ApiMessage[], maxMessages = MAX_M
     .filter(Boolean)
     .slice(-6);
   const omittedToolIds = omitted.filter((message) => message.role === "tool" && message.tool_call_id).map((message) => message.tool_call_id).slice(-8);
-  const summary = `Earlier in-turn context was compacted to keep the model request bounded. Full tool results remain available in the durable run state; retrieve them by call ID if needed.${omittedToolIds.length ? ` Omitted tool call IDs: ${omittedToolIds.join(", ")}.` : ""}\n${summaryLines.join("\n") || "Earlier tool exchanges remain available through their verified outcomes in the current run."}`;
+  const summary = summaryOverride ?? `Earlier in-turn context was compacted to keep the model request bounded. Full tool results remain available in the durable run state; retrieve them by call ID if needed.${omittedToolIds.length ? ` Omitted tool call IDs: ${omittedToolIds.join(", ")}.` : ""}\n${summaryLines.join("\n") || "Earlier tool exchanges remain available through their verified outcomes in the current run."}`;
 
   // Keep the latest exchange intact whenever possible, but put a hard bound on
   // retained tool payloads. This prevents several 8–20k provider responses
@@ -59,4 +65,24 @@ export function compactModelMessages(messages: ApiMessage[], maxMessages = MAX_M
     }
   }
   return [...systemMessages, ...(omitted.length || wasOverBudget || hadLargeToolResult ? [{ role: "system" as const, content: summary }] : []), ...retained];
+}
+
+export async function compactModelMessagesWithSummary(messages: ApiMessage[], existingSummary?: string): Promise<{ messages: ApiMessage[]; summary?: string }> {
+  const compacted = compactModelMessages(messages);
+  if (existingSummary || compacted.length === messages.length) return { messages: compacted, ...(existingSummary ? { summary: existingSummary } : {}) };
+  const { omitted } = compactionWindow(messages, MAX_MODEL_CONTEXT_MESSAGES);
+  if (!omitted.length) return { messages: compacted };
+  const droppedMessages: SummaryMessage[] = omitted.map((message) => ({
+    role: message.role === "user" ? "user" : "assistant",
+    content: message.role === "tool"
+      ? `Tool result (untrusted evidence, ${message.tool_call_id ?? "unknown"}): ${typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "")}`
+      : typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? ""),
+  }));
+  const retainedMessages: SummaryMessage[] = messages.filter((message) => message.role !== "system").slice(-6).map((message) => ({
+    role: message.role === "user" ? "user" : "assistant",
+    content: typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? ""),
+  }));
+  const generated = await summarizeConversation({ previousSummaries: [], droppedMessages, retainedMessages }).catch(() => undefined);
+  if (!generated) return { messages: compacted };
+  return { messages: compactModelMessages(messages, MAX_MODEL_CONTEXT_MESSAGES, MAX_MODEL_CONTEXT_CHARS, `[ScaleDown in-turn context summary]\n${generated}`), summary: generated };
 }
