@@ -39,7 +39,7 @@ afterEach(() => {
 function app(): Hono { const value = new Hono(); registerSdkApi(value); return value; }
 function request(body: unknown, key = "idem_1") { return new Request("http://local/v1/threads", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(body) }); }
 
-test("stream sends and persists the opening before tool preparation finishes", { timeout: 8000 }, async () => {
+test("stream sends the opening before tool preparation finishes and persists it for recovery", { timeout: 8000 }, async () => {
   const originalFetch = globalThis.fetch;
   const enabled = config.turnOpeningEnabled;
   config.turnOpeningEnabled = true;

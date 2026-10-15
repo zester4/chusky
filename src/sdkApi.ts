@@ -3211,6 +3211,7 @@ export function registerSdkApi(app: Hono): void {
     } finally { await releaseUserLock(owner.userId, lockToken); }
   });
   app.post("/v1/threads/:threadId/runs/stream", async (c) => {
+    const requestStartedAt = performance.now();
     const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as RunBody;
     const policyError = validateRunPolicy(body); if (policyError) return apiError(c, 400, "invalid_run_policy", policyError);
     const companyPolicy = await applyCompanyRunPolicy(c, body);
@@ -3272,6 +3273,8 @@ export function registerSdkApi(app: Hono): void {
     const abort = new AbortController(); let clientDisconnected = false; const markClientDisconnected = () => { clientDisconnected = true; }; c.req.raw.signal.addEventListener("abort", markClientDisconnected, { once: true }); activeRuns.set(run.id, abort);
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({ start: async (controller) => {
+      const streamStartedAt = performance.now();
+      let openingFrameSent = false;
       const send = (event: unknown) => {
         if (clientDisconnected) return;
         try { controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`)); }
@@ -3300,16 +3303,24 @@ export function registerSdkApi(app: Hono): void {
         // only the admitted request. Existing run.status/progress contracts
         // keep older SDK clients compatible.
         if (config.turnOpeningEnabled && needsTurnOpening(resolved.input)) {
-          opening = createTurnOpening(resolved.input, async (text, signal) => {
+          opening = createTurnOpening(resolved.input, (text, signal) => {
             if (signal.aborted || abort.signal.aborted || run.status !== "running") return;
             const openingEvent = event("run.status", text);
             openingEvent.id = `evt_opening_${randomUUID()}`;
             run.events.push(openingEvent);
             run.updatedAt = openingEvent.at;
-            await persistSnapshot();
             if (signal.aborted || abort.signal.aborted || run.status !== "running") return;
+            // The opening is the latency-critical user-facing frame. Enqueue
+            // durable recovery after it is on the wire; waiting for Neon here
+            // turns a bounded 600 ms opening into a database round trip.
             send({ type: "run.status", runId: run.id, text });
-            await publishProgress({ phase: "planning", title: "Preparing your request", detail: text, evidence: [{ id: "turn-opening", kind: "note", label: "Initial response", detail: text }] });
+            if (!openingFrameSent) {
+              openingFrameSent = true;
+              logger.info({ runId: run.id, model: config.turnOpeningModel, streamElapsedMs: performance.now() - streamStartedAt, requestElapsedMs: performance.now() - requestStartedAt }, "Agent first response frame sent");
+            }
+            appendSdkRunProgress(run, { phase: "planning", title: "Preparing your request", detail: text, evidence: [{ id: "turn-opening", kind: "note", label: "Initial response", detail: text }] });
+            send({ type: "run.progress", runId: run.id, progress: run.progress });
+            void persistSnapshot().catch((error) => logger.warn({ err: error, runId: run.id }, "Could not persist the early opening immediately; terminal recovery will retry it"));
           }, abort.signal);
         }
         const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, async (text) => {

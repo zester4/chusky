@@ -36,16 +36,19 @@ Configuration (no new credentials required):
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `TURN_OPENING_ENABLED` | `true` | Rollout/rollback switch |
-| `TURN_OPENING_MODEL` | `google/gemini-2.5-flash-lite` | Separate verified low-latency text model |
-| `TURN_OPENING_DEADLINE_MS` | `1200` | Generation deadline, capped at 2500 ms |
+| `TURN_OPENING_MODEL` | `openai/gpt-4.1-nano` | Separate verified low-latency text model |
+| `TURN_OPENING_DEADLINE_MS` | `600` | Generation deadline, capped at 2500 ms |
 
-Delivery has a separate 1500 ms bound. These are server budgets after admission,
-not a guarantee of end-to-end latency: authentication, durable admission,
-provider queues, and client networking still affect what the user sees. Model
-usage reported for the opening contributes to the agent's total run cost and
-tool spend checks. Use `Agent first response latency` logs (outcome, elapsed
-milliseconds, model; no message text) to compare generated/fallback rates and
-p50/p95 latency before choosing a dedicated model or changing the deadline.
+The opening frame is sent before its durable run snapshot is written. The
+snapshot is queued immediately and terminal closeout waits for that queue, so a
+database round trip cannot block the first user-visible response. Delivery has
+a separate 1500 ms bound. These are server budgets after admission, not a
+guarantee of end-to-end latency: authentication, durable admission, provider
+queues, and client networking still affect what the user sees. Model usage
+reported for the opening contributes to the agent's total run cost and tool
+spend checks. Use `Agent first response latency` for generation/delivery and
+`Agent first response frame sent` for measured request-to-frame and
+stream-to-frame latency; neither log includes message text.
 
 Verification covers overlap with blocked preparation, opening-before-execution
 ordering, model failure/timeouts, late model completion, cancellation, transport

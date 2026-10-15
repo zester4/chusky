@@ -8,7 +8,7 @@ test("opening model request is small, tool-free, latency-routed, and reports usa
   const messages: string[] = [];
   globalThis.fetch = async (_url, init) => {
     const body = JSON.parse(String(init?.body));
-    assert.equal(body.model, "google/gemini-2.5-flash-lite");
+    assert.equal(body.model, "openai/gpt-4.1-nano");
     assert.equal(body.tools, undefined);
     assert.equal(body.messages.length, 2);
     assert.equal(body.messages[1].content.length, 3000);
