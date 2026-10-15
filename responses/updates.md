@@ -69,15 +69,7 @@ The fallback appeared for “well done” because the original `needsTurnOpening
 
 - Skips the opening model entirely for common acknowledgements: greetings, thanks, “well done,” “good/great job,” “great,” “perfect,” “awesome,” “got it,” “understood,” “sounds good,” and similar short confirmations.
 - Still triggers for a real request embedded after an acknowledgement, for example: “Thanks, can you summarize my last email?”
-- Uses bounded, truthful category fallbacks when the fast model misses its deadline:
-  - Email/inbox: check the relevant email information and work through the next step.
-  - Calendar/scheduling: check the relevant calendar details and work through the next step.
-  - Project/code/repository: inspect the relevant project context and work through the next step.
-  - Summary/recap: review the relevant material and pull together the key points.
-  - Planning/advice/tomorrow: weigh relevant options and suggest useful next steps.
-  - Writing/drafting: shape a clear draft and refine it to fit the goal.
-  - Research/search: gather relevant information and bring back useful findings.
-  - Contextual follow-up: connect the request with the earlier discussion and work through the next step.
+- Uses one neutral, truthful fallback when the fast model misses its deadline: `Just a moment — I’m working through that.` The fallback intentionally does not pretend to know whether the request is about email, planning, research, or another category.
 - Does not load memory merely to produce a fallback. That keeps the fallback fast and avoids implying that unavailable context has already been read.
 
 If the next agent adds limited context, it should remain a separate, explicitly bounded feature: at most the last one or two relevant turns, with sensitive data and tool results excluded from the opening prompt. Do not pass the full conversation or full memory store to the fast model.
@@ -172,5 +164,5 @@ The opening model call uses OpenRouter with provider latency sorting and fallbac
 - After deployment, test these cases:
   - “Well done” — no planning opening; normal conversational response only.
   - “Thanks, can you summarize my last email?” — opening allowed and email-specific.
-  - “What do you suggest I do tomorrow?” — planning-specific fallback if the opening model times out.
+  - “What do you suggest I do tomorrow?” — neutral fallback if the opening model times out; the main agent still handles the actual request.
   - A genuine tool request — opening appears before tool activity and final answer, without claiming completed work.
