@@ -1299,6 +1299,12 @@ function validateRunPolicy(body: RunBody): string | undefined {
 async function applyCompanyRunPolicy(c: any, body: RunBody): Promise<{ agent?: CompanyAgentProfile; error?: string }> {
   const principal = principalFromContext(c);
   body.organizationId = principal.organizationId;
+  // Cookie-authenticated dashboard owners use a virtual `web` principal. It
+  // has no backing SDK project in the control session, so reading that entire
+  // session on every chat turn adds latency without changing the policy result.
+  // Keep the lookup for agent-profile requests, which may still resolve a
+  // shared template through the normal policy path.
+  if (principal.projectId === "web" && !body.agentId) return {};
   const control = await getSession(0);
   const project = control.sdkProjects!.find((item) => item.id === principal.projectId && !item.revokedAt);
   let agent: CompanyAgentProfile | undefined;
@@ -3214,12 +3220,17 @@ export function registerSdkApi(app: Hono): void {
     const requestStartedAt = performance.now();
     const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as RunBody;
     const policyError = validateRunPolicy(body); if (policyError) return apiError(c, 400, "invalid_run_policy", policyError);
-    const companyPolicy = await applyCompanyRunPolicy(c, body);
+    // Policy, quota, and spend reads are independent. Resolve them together so
+    // dashboard runs don't pay one provider round-trip for each admission gate.
+    const [companyPolicy, quota, spendAllowed] = await Promise.all([
+      applyCompanyRunPolicy(c, body),
+      checkExecutionQuota(owner.userId, "sdk.run"),
+      canSpend(owner.userId),
+    ]);
     if (companyPolicy.error) return apiError(c, 403, "agent_policy_denied", companyPolicy.error);
-    const quota = await checkExecutionQuota(owner.userId, "sdk.run");
     if (!quota.allowed) return apiError(c, 429, "execution_quota_exceeded", quota.reason ?? "Execution quota exceeded.");
     if (!(await checkRateLimit(owner.userId))) { c.header("Retry-After", "60"); return apiError(c, 429, "rate_limited", "Rate limit exceeded."); }
-    if (!(await canSpend(owner.userId))) return apiError(c, 402, "spend_limit", "Usage cap reached.");
+    if (!spendAllowed) return apiError(c, 402, "spend_limit", "Usage cap reached.");
     let executionContext: Awaited<ReturnType<typeof loadSdkExecutionContext>>;
     try { executionContext = await loadSdkExecutionContext(owner.userId, c.req.param("threadId")); }
     catch (error) { if (error instanceof Error && error.message === "sdk_thread_not_found") return apiError(c, 404, "not_found", "Thread not found."); throw error; }
@@ -3385,7 +3396,7 @@ export function registerSdkApi(app: Hono): void {
         }
       }
     }, cancel: () => { clientDisconnected = true; } });
-    return new Response(stream, { headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff" } });
+    return new Response(stream, { headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache, no-store, no-transform", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff" } });
   });
    app.get("/v1/threads/:threadId/runs", async (c) => {
      const owner = sdkUser(c)!;
