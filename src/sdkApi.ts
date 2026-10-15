@@ -3277,10 +3277,18 @@ export function registerSdkApi(app: Hono): void {
         try { controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`)); }
         catch { clientDisconnected = true; }
       };
+      // Openings and preparation can publish concurrently. Drain these
+      // serialized snapshots before choosing the terminal run state.
+      let snapshotWrites: Promise<void> = Promise.resolve();
+      const persistSnapshot = (): Promise<void> => {
+        const write = snapshotWrites.then(() => persistSdkRunSnapshot(owner.userId, thread.id, run));
+        snapshotWrites = write.catch(() => undefined);
+        return write;
+      };
       const publishProgress = async (progress: SdkRunProgress): Promise<void> => {
         const progressEvent = appendSdkRunProgress(run, progress);
         if (!progressEvent) return;
-        await persistSdkRunSnapshot(owner.userId, thread.id, run);
+        await persistSnapshot();
         send({ type: "run.progress", runId: run.id, progress: run.progress });
       };
       let costIncrement = 0;
@@ -3298,7 +3306,7 @@ export function registerSdkApi(app: Hono): void {
             openingEvent.id = `evt_opening_${randomUUID()}`;
             run.events.push(openingEvent);
             run.updatedAt = openingEvent.at;
-            await persistSdkRunSnapshot(owner.userId, thread.id, run);
+            await persistSnapshot();
             if (signal.aborted || abort.signal.aborted || run.status !== "running") return;
             send({ type: "run.status", runId: run.id, text });
             await publishProgress({ phase: "planning", title: "Preparing your request", detail: text, evidence: [{ id: "turn-opening", kind: "note", label: "Initial response", detail: text }] });
@@ -3318,7 +3326,7 @@ export function registerSdkApi(app: Hono): void {
             run.events.push(activityEvent);
             run.updatedAt = activityEvent.at;
             thread.updatedAt = activityEvent.at;
-            return persistSdkRunSnapshot(owner.userId, thread.id, run)
+            return persistSnapshot()
               .then(() => publishProgress(progressFromSdkToolActivity(activity, run.progress)))
               .then(() => send({ runId: run.id, ...activityEvent }));
           },
@@ -3327,11 +3335,13 @@ export function registerSdkApi(app: Hono): void {
             run.events.push(activityEvent);
             run.updatedAt = activityEvent.at;
             thread.updatedAt = activityEvent.at;
-            return persistSdkRunSnapshot(owner.userId, thread.id, run)
+            return persistSnapshot()
               .then(() => publishProgress(progressFromSdkSubagentActivity(activity, run.progress)))
               .then(() => send({ runId: run.id, ...activityEvent }));
           },
         });
+        opening?.close();
+        await snapshotWrites;
         if (abort.signal.aborted) {
           run.status = "cancelled";
           await publishProgress(terminalSdkRunProgress("cancelled", { previous: run.progress }));
@@ -3341,6 +3351,8 @@ export function registerSdkApi(app: Hono): void {
           run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; costIncrement = result.cost ?? 0; await publishProgress(terminalSdkRunProgress("completed", { previous: run.progress, artifacts: run.artifacts })); run.events.push(event("run.completed")); send({ type: "run.completed", run: runView(thread.id, run, result.privateLinks) });
         }
       } catch (error) {
+        opening?.close();
+        await snapshotWrites;
         if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; await publishProgress({ phase: "waiting", title: "Approval needed to continue", detail: "Review the requested action and approve it before Chusky continues.", provider: run.progress?.provider, requiresApproval: true, evidence: run.progress?.evidence }); run.events.push(event("run.approval_required")); const approval = await getApproval(owner.userId, error.approvalId); send({ type: "run.approval_required", run: runView(thread.id, run), approval }); }
         else if (abort.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) { run.status = "cancelled"; await publishProgress(terminalSdkRunProgress("cancelled", { previous: run.progress })); run.events.push(event("run.cancelled")); send({ type: "run.cancelled", run: runView(thread.id, run) }); }
         else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; await publishProgress(terminalSdkRunProgress("failed", { previous: run.progress, error: run.error.message })); run.events.push(event("run.failed", run.error.message)); send({ type: "run.failed", run: runView(thread.id, run), error: run.error }); }
