@@ -777,6 +777,14 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // The workflow/task layers provide the outer retry boundary; a single model
   // turn should never be allowed to spin indefinitely.
   openRouterMaxAttempts: boundedInt("OPENROUTER_MAX_ATTEMPTS", 2, 1, 5),
+  // Dedicated low-cost model used to turn evicted private conversation history
+  // into durable continuity. The deterministic store summary remains the
+  // fallback when this provider is disabled or unavailable.
+  conversationSummaryEnabled: booleanOption("CONVERSATION_SUMMARY_ENABLED", true),
+  conversationSummaryModel: optional("CONVERSATION_SUMMARY_MODEL", "scaledown/summarize"),
+  conversationSummaryMaxTokens: boundedInt("CONVERSATION_SUMMARY_MAX_TOKENS", 900, 256, 2_000),
+  conversationSummaryTimeoutMs: boundedInt("CONVERSATION_SUMMARY_TIMEOUT_MS", 12_000, 2_000, 60_000),
+  conversationSummaryMaxAttempts: boundedInt("CONVERSATION_SUMMARY_MAX_ATTEMPTS", 2, 1, 3),
   // Structured artifact tool calls can contain many sections and otherwise
   // hit the provider's default output ceiling while serializing JSON.
   openRouterArtifactMaxTokens: positiveInt("OPENROUTER_ARTIFACT_MAX_TOKENS", 12_000),

@@ -5,6 +5,7 @@
 import Redis from "ioredis";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { config } from "./config.js";
+import { summarizeConversation } from "./conversationSummarizer.js";
 import { canonicalSdkFingerprint, stableSdkUserId } from "./sdkIdentity.js";
 import { withDistributedLease } from "./distributedLease.js";
 import { createNeonDurableState, durableSdkRunHash, DURABLE_SESSION_DOMAINS, type DurableConversationMessage, type DurableMissionEvent, type DurableMissionRecord, type DurableObjectMetadata, type DurableSessionDocument, type DurableSessionDomain, type DurableStateStatus, type DurableSdkTableChanges, type DurableSdkTableState, type NeonDurableState } from "./neonDurableState.js";
@@ -2633,7 +2634,10 @@ class RedisBackend implements Backend {
             ...Object.fromEntries([...latestPayloads].map(([domain, payload]) => [domain, structuredClone(payload)])),
           };
           const sdkState = { sdkThreads: withMessageIds.sdkThreads, sdkIdempotency: withMessageIds.sdkIdempotency, sdkAudit: withMessageIds.sdkAudit };
-          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads), sdkState, {
+          // Ordinary turns intentionally omit the SDK domain until an SDK
+          // operation asks for it. Reconciliation must preserve that partial
+          // load instead of treating the omitted domain as corruption.
+          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads, this.durableSdkTablesEnabled && sdkTablesLoaded), sdkState, {
             durableDomainVersions: { ...metadata.durableDomainVersions, ...latestVersions },
             durableDomainHashes: oldHashes,
             durableDomainSnapshots: oldSnapshots,
@@ -2665,7 +2669,7 @@ class RedisBackend implements Backend {
             domains.set(domain, merged);
           }
           const sdkState = { sdkThreads: withMessageIds.sdkThreads, sdkIdempotency: withMessageIds.sdkIdempotency, sdkAudit: withMessageIds.sdkAudit };
-          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads), sdkState);
+          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads, this.durableSdkTablesEnabled && sdkTablesLoaded), sdkState);
           ({ core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled || this.durableSdkTablesEnabled, this.durableSdkTablesEnabled));
           if (!sdkTablesLoaded) domains.delete("sdk");
           sdkTableChanges = this.durableSdkTablesEnabled ? durableSdkTableChanges(userId, withMessageIds, metadata.durableSdkTablesSnapshot) : undefined;
@@ -6659,7 +6663,7 @@ function applyPhoneCallPatch(current: PhoneCallRecord, patch: PhoneCallPatch): v
   });
 }
 
-function appendSessionHistory(session: UserSession, messages: Message[]): void {
+function appendSessionHistory(session: UserSession, messages: Message[]): Message[] {
   const stamped = messages.flatMap((message) => {
     const compacted = compactPersistedMessage({
       ...message,
@@ -6674,6 +6678,7 @@ function appendSessionHistory(session: UserSession, messages: Message[]): void {
   const fitted = fitPersistedHistory(session.history, Math.min(80, Math.max(2, config.maxHistory * 2)));
   addHistoryCompactionSummary(session, fitted.dropped);
   session.history = fitted.history;
+  return fitted.dropped;
 }
 
 /** Add one settled SDK turn to its thread and, for first-party web runs, the owner's canonical history. */
@@ -7766,9 +7771,23 @@ export async function claimRecallCopilotEvaluation(
 }
 
 export async function appendMessages(uid: number, msgs: Message[]): Promise<void> {
-  const s = await getSession(uid);
-  appendSessionHistory(s, msgs);
-  await saveSession(uid, s);
+  await mutateSession(uid, async (s) => {
+    const dropped = appendSessionHistory(s, msgs);
+    if (dropped.length && config.conversationSummaryEnabled) {
+      const mechanicalSummary = s.summaries.at(-1);
+      const generated = await summarizeConversation({
+        previousSummaries: s.summaries.slice(0, -1),
+        droppedMessages: dropped,
+        retainedMessages: s.history.slice(-6),
+      }).catch((error: unknown) => {
+        logger.warn({ err: error, userId: uid }, "Conversation summarization unavailable; keeping deterministic summary");
+        return undefined;
+      });
+      if (generated && mechanicalSummary) {
+        s.summaries[s.summaries.length - 1] = `[ScaleDown conversation summary]\n${generated}`;
+      }
+    }
+  });
   // Reflection is best-effort and asynchronous: a database outage must never
   // turn a successful chat turn into a failed response.
   if (durableMemoryConfigured()) {
