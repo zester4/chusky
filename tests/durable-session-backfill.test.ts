@@ -14,10 +14,11 @@ function session(): UserSession {
   } as unknown as UserSession;
 }
 
-function harness(options: { redisChanges?: boolean; initial?: Map<string, DurableSessionDocument> } = {}) {
+function harness(options: { redisChanges?: boolean; initial?: Map<string, DurableSessionDocument>; conflictOnce?: boolean } = {}) {
   const documents = options.initial ?? new Map<string, DurableSessionDocument>();
   const appended: unknown[][] = [];
   let writes = 0;
+  let conflictOnce = options.conflictOnce ?? false;
   let redisValue = "legacy";
   const state = {
     async readSessionDomains() { return new Map(documents) as Map<never, never>; },
@@ -25,6 +26,10 @@ function harness(options: { redisChanges?: boolean; initial?: Map<string, Durabl
     async writeSessionDomains(_userId: number, payloads: ReadonlyMap<string, unknown>, _runs: unknown[], expected: ReadonlyMap<string, number | undefined>) {
       writes += 1;
       assert.equal(expected.size, DURABLE_SESSION_DOMAINS.length);
+      if (conflictOnce) {
+        conflictOnce = false;
+        throw new Error("domain version conflict");
+      }
       for (const [domain, payload] of payloads) documents.set(domain, { domain, payload, version: 1, updatedAt: 1 } as DurableSessionDocument);
       return new Map(DURABLE_SESSION_DOMAINS.map((domain) => [domain, 1]));
     },
@@ -129,4 +134,14 @@ test("incomplete promoted sessions repair only missing durable domains", async (
   assert.deepEqual([...repaired.keys()].sort(), ["assets", "conversation", "memories", "profile", "sdk"]);
   assert.deepEqual(writes.sort(), ["assets", "conversation", "memories", "sdk"]);
   assert.deepEqual(repaired.get("profile")?.payload, { model: "existing/model" });
+});
+
+test("incomplete promoted sessions retry a concurrent domain-version race", async () => {
+  const snapshot = session();
+  const fixture = harness({ conflictOnce: true });
+
+  const repaired = await repairIncompleteDurableSession(820007, snapshot, fixture.dependencies);
+
+  assert.equal(fixture.writes, 2);
+  assert.deepEqual([...repaired.keys()].sort(), [...DURABLE_SESSION_DOMAINS].sort());
 });

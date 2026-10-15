@@ -1155,6 +1155,56 @@ export class NeonDurableState {
     return result.rows.map(toSdkThread);
   }
 
+  /**
+   * Recreate missing thread projections from their durable runs.
+   *
+   * Runs are the source of truth for execution history. A projection can be
+   * absent after an interrupted cutover or an older partial write; leaving it
+   * absent makes the dashboard hide otherwise durable history. This repair is
+   * deliberately insert-only and idempotent, and never rewrites run payloads.
+   */
+  async repairMissingSdkThreadProjections(userId: number, limit = 100, threadId?: string): Promise<number> {
+    assertUserId(userId);
+    const boundedLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(100, limit)) : 100;
+    if (threadId) assertSdkThreadIdentity(threadId);
+    const result = await this.measuredQuery<{ thread_id: string }>(this.database,
+      `WITH owner_identity AS (
+         SELECT external_id
+         FROM chusky_sdk_thread
+         WHERE user_id = $1 AND external_id <> ''
+         ORDER BY updated_at DESC, thread_id DESC
+         LIMIT 1
+       ), missing AS (
+         SELECT r.thread_id,
+           min(r.created_at) AS created_at,
+           max(r.updated_at) AS updated_at,
+           left(COALESCE(
+             (array_agg(NULLIF(r.payload->>'input', '') ORDER BY r.created_at))[1],
+             'Recovered conversation'
+           ), 120) AS title
+         FROM chusky_sdk_run r
+         LEFT JOIN chusky_sdk_thread t
+           ON t.user_id = r.user_id AND t.thread_id = r.thread_id
+         WHERE r.user_id = $1
+           AND t.thread_id IS NULL
+           AND ($2::text IS NULL OR r.thread_id = $2)
+         GROUP BY r.thread_id
+         ORDER BY max(r.updated_at) DESC, r.thread_id DESC
+         LIMIT $3
+       )
+       INSERT INTO chusky_sdk_thread (user_id, thread_id, external_id, metadata, history, created_at, updated_at)
+       SELECT $1, missing.thread_id,
+         COALESCE((SELECT external_id FROM owner_identity), 'recovered:' || $1::text),
+         jsonb_build_object('source', 'recovered-sdk-run', 'title', missing.title),
+         '[]'::jsonb, missing.created_at, missing.updated_at
+       FROM missing
+       ON CONFLICT (user_id, thread_id) DO NOTHING
+       RETURNING thread_id`,
+      [userId, threadId ?? null, boundedLimit],
+    );
+    return result.rows.length;
+  }
+
   /** Exact owner-scoped thread lookup for SDK mutations and polling. */
   async readSdkThread(userId: number, threadId: string): Promise<DurableSdkThread | undefined> {
     assertUserId(userId);

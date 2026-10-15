@@ -79,6 +79,23 @@ test("Neon session-domain reads can be narrowed to only the requested domains", 
   assert.deepEqual(read.values, [42, ["profile", "assets"]]);
 });
 
+test("SDK thread projection repair recreates only missing owner-scoped threads", async () => {
+  const pool = new FakePool();
+  pool.reads = [{ thread_id: "thread_recovered_1" }, { thread_id: "thread_recovered_2" }];
+  const state = new NeonDurableState(pool as never);
+
+  const repaired = await state.repairMissingSdkThreadProjections(42, 999);
+
+  assert.equal(repaired, 2);
+  const repair = pool.calls.at(-1)!;
+  assert.match(repair.text, /LEFT JOIN chusky_sdk_thread/);
+  assert.match(repair.text, /ON CONFLICT \(user_id, thread_id\) DO NOTHING/);
+  assert.match(repair.text, /r\.user_id = \$1/);
+  assert.equal(repair.values?.[0], 42);
+  assert.equal(repair.values?.[2], 100);
+  assert.doesNotMatch(repair.text, /UPDATE chusky_sdk_run|DELETE FROM chusky_sdk_run/);
+});
+
 function session(): UserSession {
   const now = Date.now();
   return {

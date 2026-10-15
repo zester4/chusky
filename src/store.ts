@@ -2784,7 +2784,14 @@ class RedisBackend implements Backend {
   async getSdkThread(userId: number, threadId: string): Promise<SdkThreadRecord | undefined> {
     await this.ensureSdkTablesMigrated(userId);
     if (this.durableState && this.durableSdkTablesEnabled) {
-      const durable = (await this.durableState.readSdkThread(userId, threadId));
+      let durable = await this.durableState.readSdkThread(userId, threadId);
+      if (!durable && this.durableSdkRunsEnabled) {
+        const repaired = await this.durableState.repairMissingSdkThreadProjections(userId, 1, threadId);
+        if (repaired) {
+          await this.invalidateSdkTableCaches(userId);
+          durable = await this.durableState.readSdkThread(userId, threadId);
+        }
+      }
       if (durable) return { id: durable.threadId, externalId: durable.externalId, metadata: durable.metadata, history: durable.history as Message[], runs: [], createdAt: durable.createdAt, updatedAt: durable.updatedAt };
     }
     const legacy = (await this.getSession(userId)).sdkThreads?.find((thread) => thread.id === threadId);
@@ -2793,6 +2800,14 @@ class RedisBackend implements Backend {
 
   async listSdkThreads(userId: number): Promise<SdkThreadRecord[]> {
     await this.ensureSdkTablesMigrated(userId);
+    if (this.durableState && this.durableSdkTablesEnabled && this.durableSdkRunsEnabled) {
+      const repairKey = `chuck:sdk-thread-projection-repair:${userId}`;
+      if (!(await this.r.get(repairKey))) {
+        const repaired = await this.durableState.repairMissingSdkThreadProjections(userId, 100);
+        await this.r.setex(repairKey, 60, "1");
+        if (repaired) await this.invalidateSdkTableCaches(userId);
+      }
+    }
     return (await this.readSdkThreads(userId)).map((thread) => structuredClone({ ...thread, runs: [] }));
   }
 

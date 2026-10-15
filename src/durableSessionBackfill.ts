@@ -43,23 +43,31 @@ export async function repairIncompleteDurableSession(
   dependencies: IncompleteDurableSessionRepairDependencies,
 ): Promise<Map<DurableSessionDomain, DurableSessionDocument>> {
   if (!Number.isSafeInteger(userId) || userId <= 0) throw new Error("A positive owner ID is required for session repair.");
-  const existing = await dependencies.state.readSessionDomains(userId);
-  const missing = DURABLE_SESSION_DOMAINS.filter((domain) => !existing.has(domain));
-  if (!missing.length) return existing;
-
   const history = legacyMessages(userId, session).map(({ id, role, content, createdAt, sourceId }) => ({
     id: id!, role, content, createdAt: createdAt ?? Date.now(), ...(sourceId ? { sourceId } : {}),
   }));
   const { domains } = splitSessionDomains({ ...session, history } as UserSession);
-  await dependencies.state.appendConversationMessages(userId, history);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const existing = await dependencies.state.readSessionDomains(userId);
+    const missing = DURABLE_SESSION_DOMAINS.filter((domain) => !existing.has(domain));
+    if (!missing.length) return existing;
 
-  const missingDocuments = new Map<DurableSessionDomain, unknown>(missing.map((domain) => [domain, domains.get(domain)!]));
-  await dependencies.state.writeSessionDomains(
-    userId,
-    missingDocuments,
-    [],
-    new Map(missing.map((domain) => [domain, undefined])),
-  );
+    // The append is idempotent. Keep it outside the domain write so a
+    // concurrent repair can safely retry after winning an INSERT race.
+    await dependencies.state.appendConversationMessages(userId, history);
+    const missingDocuments = new Map<DurableSessionDomain, unknown>(missing.map((domain) => [domain, domains.get(domain)!]));
+    try {
+      await dependencies.state.writeSessionDomains(
+        userId,
+        missingDocuments,
+        [],
+        new Map(missing.map((domain) => [domain, undefined])),
+      );
+    } catch (error) {
+      if (!(error instanceof Error) || !/domain version conflict/i.test(error.message) || attempt === 2) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+    }
+  }
   const repaired = await dependencies.state.readSessionDomains(userId);
   const stillMissing = DURABLE_SESSION_DOMAINS.filter((domain) => !repaired.has(domain));
   if (stillMissing.length) throw new Error(`Durable session repair did not produce all required domains: ${stillMissing.join(", ")}.`);
