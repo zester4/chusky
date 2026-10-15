@@ -6,16 +6,22 @@ export interface TurnOpening {
   close(): void;
 }
 
+const conversationalAcknowledgement = /^(?:hi|hey|hello|thanks|thank you|thx|ok|okay|yes|no|good (?:morning|afternoon|evening)|well done|(?:good|great) job|great|nice|perfect|awesome|excellent|brilliant|got it|understood|sounds good|that works|sure|alright|all right|noted|much appreciated|appreciate it|that's great|that is great)[\s!?.…]*$/i;
+
 export function openingFallback(text: string): string {
-  if (/\b(?:email|e-mail|inbox|gmail)\b/i.test(text)) return "I'll check the relevant email information first, then work through your request.";
-  if (/\b(?:calendar|schedule|appointment|availability)\b/i.test(text)) return "I'll check the relevant calendar details first, then work through your request.";
-  if (/\b(?:project|code|repository|repo)\b/i.test(text)) return "I'll inspect the relevant project context first, then work through your request.";
+  if (/\b(?:email|e-mail|inbox|gmail)\b/i.test(text)) return "I'll check the relevant email information and work through the next step.";
+  if (/\b(?:calendar|schedule|appointment|availability)\b/i.test(text)) return "I'll check the relevant calendar details and work through the next step.";
+  if (/\b(?:project|code|repository|repo)\b/i.test(text)) return "I'll inspect the relevant project context and work through the next step.";
   if (/\b(?:summari[sz]e|summary|recap)\b/i.test(text)) return "I'll review the relevant material and pull together the key points.";
-  return "I'll review your request and the relevant context, then work through the next steps.";
+  if (/\b(?:tomorrow|next week|next month|recommend|suggest|advice|should I|what do I do|what can I do)\b/i.test(text)) return "I'll weigh the relevant options and suggest the most useful next steps.";
+  if (/\b(?:write|draft|rewrite|compose|edit)\b/i.test(text)) return "I'll shape this into a clear draft and refine it to fit your goal.";
+  if (/\b(?:search|research|find|look up|investigate)\b/i.test(text)) return "I'll gather the relevant information and bring back the most useful findings.";
+  if (/\b(?:that|this|it|they|them)\b/i.test(text) && /\?|\b(?:about|with|on)\b/i.test(text)) return "I'll connect this with the earlier discussion and work through the next step.";
+  return "I'll identify the most useful next step for your request and work through it.";
 }
 
 export function needsTurnOpening(text: string): boolean {
-  return Boolean(text.trim()) && !/^(?:hi|hey|hello|thanks|thank you|ok|okay|yes|no|good (?:morning|afternoon|evening))[\s!?.…]*$/i.test(text.trim());
+  return Boolean(text.trim()) && !conversationalAcknowledgement.test(text.trim());
 }
 
 /** Start generation immediately; callers start expensive preparation without awaiting ready.

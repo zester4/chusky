@@ -108,6 +108,14 @@ test("simultaneous owners keep their responses and cancellation isolated", async
 });
 
 test("greetings and short confirmations do not pay for an extra model call", () => {
-  for (const text of ["Hey!", "Thanks", "ok", "yes", ""]) assert.equal(needsTurnOpening(text), false);
+  for (const text of ["Hey!", "Thanks", "ok", "yes", "Well done", "Great job!", "That's great", ""]) assert.equal(needsTurnOpening(text), false);
+  assert.equal(needsTurnOpening("Thanks, can you summarize my last email?"), true);
   assert.equal(needsTurnOpening("Hey, summarize my last email"), true);
+});
+
+test("fallbacks stay truthful while matching the request instead of using generic copy", () => {
+  assert.equal(openingFallback("What do you suggest I do tomorrow?"), "I'll weigh the relevant options and suggest the most useful next steps.");
+  assert.equal(openingFallback("Draft a reply to this email"), "I'll check the relevant email information and work through the next step.");
+  assert.equal(openingFallback("What about that?"), "I'll connect this with the earlier discussion and work through the next step.");
+  assert.notEqual(openingFallback("Help me plan a launch"), "I'll review your request and the relevant context, then work through the next steps.");
 });
