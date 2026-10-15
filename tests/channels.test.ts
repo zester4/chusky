@@ -354,6 +354,27 @@ class FakeAdapter implements ChannelAdapter {
 
 const inbound = (id: string, text = "hello") => ({ provider: "slack" as const, providerEventId: id, providerUserId: "U1", providerWorkspaceId: "T1", providerConversationId: "D1", text, attachments: [], receivedAt: Date.now(), scope: "private" as const });
 
+test("early channel replies are delivered before the final answer and remain deduplicated and owner-scoped", async () => {
+  await linkChannelIdentity(42, { provider: "slack", externalUserId: "U1", workspaceId: "T1" });
+  const adapter = new FakeAdapter();
+  const gateway = new ChannelGateway(async (_message, conversation, publish) => {
+    assert.ok(publish);
+    await publish({ accountId: "account_999", userId: 999, target: { provider: "slack", conversationId: "foreign" }, text: "I'll review your request.", idempotencyKey: "reply:early:opening" });
+    assert.equal(adapter.sent.length, 1, "the opening must arrive while the handler is still working");
+    return { accountId: conversation.accountId, userId: conversation.userId, target: conversation.replyTarget, text: "Final answer", idempotencyKey: "reply:early:final" };
+  });
+  gateway.register(adapter);
+  await gateway.processInbound(inbound("early"));
+  const replay = await gateway.processInbound(inbound("early"));
+  assert.equal(replay.duplicate, true);
+  assert.deepEqual(adapter.sent.map((message) => message.text), ["I'll review your request.", "Final answer"]);
+  for (const message of adapter.sent) {
+    assert.equal(message.accountId, "account_42");
+    assert.equal(message.userId, 42);
+    assert.equal(message.target.conversationId, "D1");
+  }
+});
+
 test("channel identity ownership and gateway event deduplication are durable boundaries", async () => {
   await linkChannelIdentity(42, { provider: "slack", externalUserId: "U1", workspaceId: "T1" });
   await assert.rejects(() => linkChannelIdentity(43, { provider: "slack", externalUserId: "U1", workspaceId: "T1" }), /already linked/);

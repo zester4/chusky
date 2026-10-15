@@ -12,6 +12,11 @@ const MAX_BULLET_LENGTH = 240;
  * omitted.
  */
 export const AGENT_UPGRADE_PRESETS = {
+  fastResponses: [
+    "Interactive requests now receive a short intent response while Chusky prepares the context and tools for the actual work.",
+    "The opening has a bounded model deadline and a local fallback; cancellation, account isolation, and tool approval checks still apply.",
+    "Telegram and linked channels show the opening separately; web chat preserves it alongside live activity and the final answer, including after reconnecting.",
+  ],
   kernelBrowser: [
     "Added an opt-in Kernel browser hosted remotely and controlled from E2B, with stealth, owner-scoped profiles, native visual controls, private live view, and replay recordings.",
     "Supported CAPTCHA challenges receive a bounded provider-solver wait and fresh page verification; unresolved challenges and MFA still require private owner takeover. Success is never guaranteed.",

@@ -7,7 +7,7 @@ import type { ChannelAdapter, ChuskyConversation, InboundMessage, OutboundMessag
 import { randomUUID } from "node:crypto";
 import { config } from "../config.js";
 
-export type ChannelMessageHandler = (message: InboundMessage, conversation: ChuskyConversation) => Promise<OutboundMessage[] | OutboundMessage | void>;
+export type ChannelMessageHandler = (message: InboundMessage, conversation: ChuskyConversation, publish?: (message: OutboundMessage) => Promise<string>) => Promise<OutboundMessage[] | OutboundMessage | void>;
 
 export interface ChannelProcessResult {
   duplicate: boolean;
@@ -251,7 +251,9 @@ export class ChannelGateway {
       if (adapter.typing) {
         try { await adapter.typing(conversation.replyTarget); } catch { /* typing is best-effort */ }
       }
-      const response = await this.handler(message, conversation);
+      const response = await this.handler(message, conversation, (outbound) => this.send({
+        ...outbound, accountId: conversation.accountId, userId: conversation.userId, target: conversation.replyTarget,
+      }));
       const responses = response ? (Array.isArray(response) ? response : [response]) : [];
       const delivered: string[] = [];
       for (const item of responses) {

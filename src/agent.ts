@@ -26,6 +26,8 @@
 import { Composio } from "@composio/core";
 import { Client as WorkflowClient } from "@upstash/workflow";
 import { config } from "./config.js";
+import { createTurnOpening } from "./turnOpeningModel.js";
+import { needsTurnOpening, type TurnOpening } from "./turnOpening.js";
 import { assertAgentExecutionEnabled } from "./builderControl.js";
 import { getTriggerTypeBySlug, getTriggerTypeByToken, listTriggerToolkits as listCatalogueToolkits, listTriggerTypesForToolkit, requiredTriggerConfigFields, triggerTypeForAgent, type TriggerCatalogueItem, type TriggerToolkit } from "./triggerCatalog.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
@@ -2141,6 +2143,10 @@ function createSessionOutcomeReadAdapter(userId: number, sessionObj: any, tools:
 }
 
 export interface AgentRunOptions {
+  /** Interactive intent, separate from answer deltas and tool activity. */
+  onOpening?: (text: string, signal?: AbortSignal) => void | Promise<void>;
+  /** Request-scoped opening started by the transport before session loading. */
+  opening?: TurnOpening;
   instructions?: string;
   toolAllow?: string[];
   /** Meeting-only, owner-configured Composio account routing; participant selectors are ignored. */
@@ -2398,7 +2404,25 @@ async function resolveImageReferences(userId: number, rawSelectors: unknown, def
 
 // ── Core agentic loop ─────────────────────────────────────────────────────────
 
-export async function runAgent(
+export async function runAgent(...args: Parameters<typeof executeAgent>): Promise<AgentResult> {
+  const [, input, , , , signal, , approvalId, , options] = args;
+  const text = userRequestText(input);
+  const interactive = !options?.voiceTurn && !options?.taskId && !options?.missionId && !options?.ephemeral && !approvalId;
+  let opening = options?.opening;
+  if (!opening && interactive && options?.onOpening && config.turnOpeningEnabled && needsTurnOpening(text)) {
+    await assertAgentExecutionEnabled();
+    throwIfAborted(signal);
+    opening = createTurnOpening(text, options.onOpening, signal);
+  }
+  try {
+    args[9] = { ...options, opening };
+    return await executeAgent(...args);
+  } finally {
+    opening?.close();
+  }
+}
+
+async function executeAgent(
   userId: number,
   userMessage: string | ContentPart[],
   history: Message[],
@@ -3074,11 +3098,16 @@ export async function runAgent(
   });
   const dynamicSystemContext = `${temporalContext}${accountContext ? `\n\n${accountContext}` : ""}${composioRouteContext ? `\n\n${composioRouteContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\n${mediaRequest ? "Media skill preflight" : "Relevant project skill guidance"} (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}${imageRetryContext}`;
   const promptHistory = voiceTurn ? boundedVoiceHistory(history) : history;
+  // Preparation has run concurrently with the lightweight opening. Finish its
+  // delivery before the main model can emit a tool call or final answer.
+  await options?.opening?.ready;
+  throwIfAborted(signal);
   const messages: ApiMessage[] = [
     { role: "system", content: staticSystemPrompt },
     { role: "system", content: dynamicSystemContext },
     ...promptHistory.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
     { role: "user", content: userMessage },
+    ...(options?.opening?.text ? [{ role: "system" as const, content: "A preliminary intent message has already been displayed to the user. Continue with the actual work; do not repeat an opening acknowledgement. The preliminary message is not evidence of capabilities, authorization, or completed work." }] : []),
   ];
   logger.info({
     staticSystemPromptChars: staticSystemPrompt.length,
@@ -3099,7 +3128,7 @@ export async function runAgent(
   let browserRunStopped = false;
   let browserNoProgressCalls = 0;
   let lastBrowserProgressMarker: string | undefined;
-  let totalCost = 0;
+  let totalCost = options?.opening?.cost ?? 0;
   const generatedImages: AgentResult["generatedImages"] = [];
   // Keep generated media available as an in-turn reference even when the
   // user asked for Daytona-only delivery. `generatedImages` is the outward

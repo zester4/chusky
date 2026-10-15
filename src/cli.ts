@@ -683,6 +683,7 @@ async function chat(): Promise<void> {
             }
           }
           else if (event.type === "start") process.stdout.write(`${formatStatus("Model", event.model || session.model, color)}\n`);
+          else if (event.type === "status" && event.text) process.stdout.write(`${renderMarkdown(event.text, color)}\n`);
           else if (event.type === "tool" && event.tool) process.stdout.write(`${formatToolActivity(event.tool, color)}\n`);
           else if (event.type === "approval_required" && event.approval) { pendingApproval = event.approval; }
           else if (event.type === "done") final = event;

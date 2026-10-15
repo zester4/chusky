@@ -1064,6 +1064,57 @@ test("image generation reports when the image could not be saved for reuse in la
   }
 });
 
+test("interactive opening arrives during blocked tool preparation without leaking history or executing tools", { timeout: 5000 }, async () => {
+  const userId = 839811;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const originalFetch = globalThis.fetch;
+  const previous = { turnOpeningEnabled: config.turnOpeningEnabled, jevMode: config.jevMode };
+  config.turnOpeningEnabled = true;
+  config.jevMode = "off";
+  const order: string[] = [];
+  let releaseTools!: () => void;
+  let openingDelivered!: () => void;
+  const toolsGate = new Promise<void>((resolve) => { releaseTools = resolve; });
+  const delivered = new Promise<void>((resolve) => { openingDelivered = resolve; });
+  const modelRequests: Array<Record<string, any>> = [];
+  setAgentDependenciesForTests({ composio: {
+    create: async () => ({ sessionId: "opening-overlap", tools: async () => { order.push("preparing"); await toolsGate; return []; }, execute: async () => assert.fail("no provider action should run") }),
+    connectedAccounts: { list: async () => ({ items: [] }) },
+  } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    modelRequests.push(body);
+    if (body.max_tokens === 96) {
+      assert.equal(body.messages.length, 2);
+      assert.equal(body.tools, undefined);
+      assert.doesNotMatch(JSON.stringify(body), /private-history-never-in-opening/);
+      return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { role: "assistant", content: "I'll review your request and relevant context." } }], usage: { cost: 0.001 } }), { status: 200 });
+    }
+    order.push("main-model");
+    assert.ok(order.includes("opening"));
+    return chatResponse({ role: "assistant", content: "Final answer." });
+  }) as typeof fetch;
+  try {
+    const resultPromise = runAgent(userId, "Explain this proposal", [{ role: "user", content: "private-history-never-in-opening" }], "test/model", undefined, undefined, undefined, undefined, undefined, {
+      onOpening: (text) => { order.push("opening"); assert.match(text, /review/); openingDelivered(); },
+    });
+    await delivered;
+    assert.ok(!order.includes("main-model"), "main execution must still be waiting for preparation");
+    releaseTools();
+    const result = await resultPromise;
+    assert.equal(result.text, "Final answer.");
+    assert.equal(result.cost, 0.001);
+    assert.equal(modelRequests.length, 2);
+    assert.deepEqual(result.toolsUsed, []);
+  } finally {
+    releaseTools();
+    globalThis.fetch = originalFetch;
+    Object.assign(config, previous);
+  }
+});
+
 test("agent uses the selected model for a normal text response", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830001);

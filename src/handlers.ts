@@ -1,5 +1,8 @@
 import { Bot, Context, InlineKeyboard, InputFile } from "grammy";
 import { config } from "./config.js";
+import { createTurnOpening } from "./turnOpeningModel.js";
+import { needsTurnOpening } from "./turnOpening.js";
+import { assertAgentExecutionEnabled } from "./builderControl.js";
 import {
   runAgent, fetchModels, getConnectionUrl, getReconnectUrl, getToolkitStates, listConnectedAccounts, disconnectConnectedAccount, invalidateSession, ApprovalRequiredError,
   transcribeAudio, generateImage, generateSpeech,
@@ -2827,13 +2830,26 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
 
-    const s = await getSession(userId);
-    const model = await telegramGroupModel(ctx, s.model);
-    posthog?.capture({ distinctId: String(userId), event: "telegram_message_received", properties: { model, message_length: text.length } });
     if (!(await canSpend(userId))) {
       await ctx.reply("💳 Your usage cap has been reached. Ask an administrator to increase it.");
       return;
     }
+
+    const openingController = new AbortController();
+    await assertAgentExecutionEnabled();
+    activeRequests.set(userId, openingController);
+    const opening = config.turnOpeningEnabled && needsTurnOpening(text)
+      ? createTurnOpening(text, async (content, signal) => {
+        // grammY types its older AbortSignal polyfill; the runtime only uses
+        // the standard aborted/addEventListener interface supported by Node.
+        await ctx.api.sendMessage(ctx.chat.id, content, {}, signal as unknown as Parameters<typeof ctx.api.sendMessage>[3]);
+      }, openingController.signal)
+      : undefined;
+    try {
+    const s = await getSession(userId);
+    openingController.signal.throwIfAborted();
+    const model = await telegramGroupModel(ctx, s.model);
+    posthog?.capture({ distinctId: String(userId), event: "telegram_message_received", properties: { model, message_length: text.length } });
 
     // Keep ordinary greetings conversational. They do not need a model/tool
     // round trip, and showing an internal progress card for "hello" makes the
@@ -2849,7 +2865,7 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
 
-    const controller = new AbortController();
+    const controller = openingController;
     const lockToken = randomUUID();
     activeRequests.set(userId, controller);
     try {
@@ -2906,7 +2922,10 @@ export function registerHandlers(bot: Bot): void {
             await editHtml(ctx, statusMsg.message_id, mdToTelegramHtml(streamedText));
           }
         },
-        undefined, telegramAgentChannelContext(ctx, userId), telegramAgentOptions(ctx, receivedAt, deliveredPrivateLinks)
+        undefined, telegramAgentChannelContext(ctx, userId), {
+          ...telegramAgentOptions(ctx, receivedAt, deliveredPrivateLinks),
+          opening,
+        }
       );
       clearInterval(typingInterval);
 
@@ -2974,6 +2993,10 @@ export function registerHandlers(bot: Bot): void {
     } finally {
       await releaseUserLock(userId, lockToken);
       activeRequests.delete(userId);
+    }
+    } finally {
+      opening?.close();
+      if (activeRequests.get(userId) === openingController) activeRequests.delete(userId);
     }
   });
 

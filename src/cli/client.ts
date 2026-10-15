@@ -68,7 +68,7 @@ export interface CliRun { id: string; threadId?: string; taskId?: string; status
 export interface CliWebhook { id: string; url: string; createdAt: string; disabledAt?: string; }
 export interface CliDelivery { id: string; provider: string; status: string; kind: string; attempts: number; providerStatus?: string; lastError?: string; createdAt: string; updatedAt: string; deliveredAt?: string; }
 export type CliToolActivity = { toolSlug: string; status: "started" | "completed" | "failed" | "approval_required" | "cancelled"; message?: string; summary?: string; durationMs?: number; actionLabel?: string; toolkitName?: string };
-export type CliStreamEvent = { type: "start" | "delta" | "tool" | "done" | "approval_required" | "error"; text?: string; error?: string; model?: string; toolsUsed?: string[]; cost?: number; tool?: CliToolActivity; approval?: { id: string; toolSlug: string; args: Record<string, unknown> }; images?: { data: string; mediaType: string }[]; files?: CliGeneratedFile[]; speech?: { data: string; mediaType: string } };
+export type CliStreamEvent = { type: "start" | "status" | "delta" | "tool" | "done" | "approval_required" | "error"; text?: string; error?: string; model?: string; toolsUsed?: string[]; cost?: number; tool?: CliToolActivity; approval?: { id: string; toolSlug: string; args: Record<string, unknown> }; images?: { data: string; mediaType: string }[]; files?: CliGeneratedFile[]; speech?: { data: string; mediaType: string } };
 
 const configPath = process.platform === "win32"
   ? join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "Chusky", "config.json")

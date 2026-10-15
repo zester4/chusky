@@ -164,6 +164,9 @@ export const config = {
   // ── OpenRouter (for LLM inference) ────────────────────────────────
   openRouterApiKey: required("OPENROUTER_API_KEY"),
   defaultModel,
+  turnOpeningEnabled: optional("TURN_OPENING_ENABLED", "true") === "true",
+  turnOpeningModel: optional("TURN_OPENING_MODEL", "").trim() || "google/gemini-2.5-flash-lite",
+  turnOpeningDeadlineMs: Math.min(2500, positiveInt("TURN_OPENING_DEADLINE_MS", 1200)),
   groupDefaultModel: optional("GROUP_DEFAULT_MODEL", defaultModel),
   // Live calls use a latency-oriented model instead of inheriting a possibly
   // slower general-purpose/reasoning model from the user's chat session.

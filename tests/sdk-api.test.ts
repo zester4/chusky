@@ -39,6 +39,60 @@ afterEach(() => {
 function app(): Hono { const value = new Hono(); registerSdkApi(value); return value; }
 function request(body: unknown, key = "idem_1") { return new Request("http://local/v1/threads", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(body) }); }
 
+test("stream sends and persists the opening before tool preparation finishes", { timeout: 8000 }, async () => {
+  const originalFetch = globalThis.fetch;
+  const enabled = config.turnOpeningEnabled;
+  config.turnOpeningEnabled = true;
+  let release!: () => void;
+  const preparing = new Promise<void>((resolve) => { release = resolve; });
+  let mainModelCalled = false;
+  const opening = "I'll review the relevant material and summarize the key points.";
+  setAgentDependenciesForTests({ composio: {
+    create: async () => ({ sessionId: "sdk-opening-session", tools: async () => { await preparing; return []; } }),
+    connectedAccounts: { list: async () => ({ items: [] }) },
+  } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    if (body.max_tokens === 96) return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: opening } }] }), { status: 200 });
+    mainModelCalled = true;
+    return new Response(`data: ${JSON.stringify({ choices: [{ delta: { role: "assistant", content: "Final answer." }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
+  }) as typeof fetch;
+  try {
+    const api = app();
+    const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "opening-owner", "Content-Type": "application/json" };
+    const created = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers: { ...headers, "Idempotency-Key": "opening-thread" }, body: "{}" }));
+    const thread = await created.json() as { id: string };
+    const response = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/stream`, { method: "POST", headers, body: JSON.stringify({ input: "Summarize the relevant material." }) }));
+    assert.equal(response.status, 200);
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    while (!text.includes(opening)) {
+      const chunk = await reader.read();
+      assert.equal(chunk.done, false, "the stream must deliver the opening before closing");
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+    assert.equal(mainModelCalled, false, "the client already has the opening while tools are still preparing");
+    release();
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+    const events = text.trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(events.filter((item) => item.type === "run.status" && item.text === opening).length, 1);
+    assert.match(events.find((item) => item.type === "run.completed")?.run.output ?? "", /Final answer\.$/);
+    const stored = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs`, { headers }));
+    const snapshot = await stored.json() as { data: Array<{ events: Array<{ id: string; type: string; text?: string }> }> };
+    assert.ok(snapshot.data[0].events.some((item) => item.id.startsWith("evt_opening_") && item.text === opening), "reconnecting clients must recover the opening from durable state");
+  } finally {
+    release();
+    globalThis.fetch = originalFetch;
+    config.turnOpeningEnabled = enabled;
+  }
+});
+
 test("onboarding website research rejects unsafe URLs before agent execution", async () => {
   const response = await app().fetch(new Request("http://local/v1/onboarding/site-summary", {
     method: "POST",

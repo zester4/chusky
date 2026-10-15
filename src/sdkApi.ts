@@ -5,6 +5,9 @@ import { Readable } from "node:stream";
 import { cors } from "hono/cors";
 import { routePath } from "hono/route";
 import { config } from "./config.js";
+import { createTurnOpening } from "./turnOpeningModel.js";
+import { needsTurnOpening, type TurnOpening } from "./turnOpening.js";
+import { assertAgentExecutionEnabled } from "./builderControl.js";
 import { canonicalSdkFingerprint, stableSdkUserId } from "./sdkIdentity.js";
 import { withNeonQueryMetricRoute, type DurableObjectMetadata } from "./neonDurableState.js";
 import { promoteSdkFileUpload } from "./sdkFilePromotion.js";
@@ -3281,8 +3284,26 @@ export function registerSdkApi(app: Hono): void {
         send({ type: "run.progress", runId: run.id, progress: run.progress });
       };
       let costIncrement = 0;
+      let opening: TurnOpening | undefined;
       send({ type: "run.started", run: runView(thread.id, run) });
       try {
+        await assertAgentExecutionEnabled();
+        // Start before skills/options and Composio/memory preparation, using
+        // only the admitted request. Existing run.status/progress contracts
+        // keep older SDK clients compatible.
+        if (config.turnOpeningEnabled && needsTurnOpening(resolved.input)) {
+          opening = createTurnOpening(resolved.input, async (text, signal) => {
+            if (signal.aborted || abort.signal.aborted || run.status !== "running") return;
+            const openingEvent = event("run.status", text);
+            openingEvent.id = `evt_opening_${randomUUID()}`;
+            run.events.push(openingEvent);
+            run.updatedAt = openingEvent.at;
+            await persistSdkRunSnapshot(owner.userId, thread.id, run);
+            if (signal.aborted || abort.signal.aborted || run.status !== "running") return;
+            send({ type: "run.status", runId: run.id, text });
+            await publishProgress({ phase: "planning", title: "Preparing your request", detail: text, evidence: [{ id: "turn-opening", kind: "note", label: "Initial response", detail: text }] });
+          }, abort.signal);
+        }
         const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, async (text) => {
           // Reuse the policy-owned status vocabulary that Telegram already
           // presents. Web and SDK consumers should not have to infer meaning
@@ -3291,6 +3312,7 @@ export function registerSdkApi(app: Hono): void {
           send({ type: "run.status", runId: run.id, text: text.slice(0, 4000) });
         }, abort.signal, (text) => { run.events.push(event("run.delta", text)); send({ type: "run.delta", runId: run.id, text }); }, undefined, undefined, {
           ...await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions, dashboardRequest(c), undefined, triggerEvent),
+          opening,
           onToolActivity: (activity: AgentToolActivity) => {
             const activityEvent = { id: `evt_${randomUUID()}`, type: "run.tool_activity", at: Date.now(), ...activity };
             run.events.push(activityEvent);
@@ -3323,6 +3345,7 @@ export function registerSdkApi(app: Hono): void {
         else if (abort.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) { run.status = "cancelled"; await publishProgress(terminalSdkRunProgress("cancelled", { previous: run.progress })); run.events.push(event("run.cancelled")); send({ type: "run.cancelled", run: runView(thread.id, run) }); }
         else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; await publishProgress(terminalSdkRunProgress("failed", { previous: run.progress, error: run.error.message })); run.events.push(event("run.failed", run.error.message)); send({ type: "run.failed", run: runView(thread.id, run), error: run.error }); }
       } finally {
+        opening?.close();
         c.req.raw.signal.removeEventListener("abort", markClientDisconnected);
         activeRuns.delete(run.id);
         run.updatedAt = Date.now();

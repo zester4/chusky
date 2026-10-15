@@ -5,6 +5,14 @@ import os from "node:os";
 import path from "node:path";
 import { AGENT_UPGRADE_PRESETS, formatAgentUpgradeNotice, getAgentUpgradePreset, loadAgentUpgrade, validateAgentUpgrade, writeAgentUpgrade } from "../src/upgradeNotice.js";
 
+test("fast response release states the bounded opening and continuing execution", () => {
+  const bullets = getAgentUpgradePreset("fastResponses");
+  assert.equal(bullets.length, 3);
+  assert.match(bullets[0], /while Chusky prepares/);
+  assert.match(bullets[1], /bounded model deadline.*local fallback/);
+  assert.match(bullets[2], /after reconnecting/);
+});
+
 test("Kernel upgrade describes provider limits and activation honestly", () => {
   const bullets = getAgentUpgradePreset("kernelBrowser");
   assert.equal(bullets.length, 3);
@@ -278,13 +286,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the browser platform accurately", async () => {
+test("current upgrade manifest announces concurrent early responses accurately", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.60.0");
-  assert.equal(notice?.version, "4.60.0");
-  assert.match(notice?.bullets[0] ?? "", /per-session Xvfb.*x11vnc.*websockify\/noVNC.*PNG fallback/);
-  assert.match(notice?.bullets[1] ?? "", /open-tab frontier.*active tab.*regional pools.*warm readiness.*CDP endpoints/);
-  assert.match(notice?.bullets[2] ?? "", /twenty public sites.*screenshot evidence.*challenge classification.*p50\/p95/);
+  assert.equal(notice?.id, "release-4.61.0");
+  assert.equal(notice?.version, "4.61.0");
+  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("fastResponses"));
 });
 
 test("lead campaign preset describes durable, discovery-first work and bounded enrichment", () => {

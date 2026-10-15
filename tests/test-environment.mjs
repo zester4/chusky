@@ -7,6 +7,9 @@ process.env.DOTENV_CONFIG_PATH = fileURLToPath(new URL("./empty.env", import.met
 process.env.TELEGRAM_BOT_TOKEN = "ci-test-telegram-token";
 process.env.COMPOSIO_API_KEY = "ci-test-composio-key";
 process.env.OPENROUTER_API_KEY = "ci-test-openrouter-key";
+// Existing provider fixtures target the main agent call. Early-response tests
+// explicitly enable their separate, mocked model boundary.
+process.env.TURN_OPENING_ENABLED = "false";
 
 // These tests are local by default. The crash proof may opt into its separate,
 // explicitly isolated MISSION_PROCESS_REDIS_URL; it never inherits REDIS_URL.

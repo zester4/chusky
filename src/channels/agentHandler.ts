@@ -212,7 +212,7 @@ async function handleApproval(message: InboundMessage, conversation: ChuskyConve
 }
 
 export function createAgentChannelHandler(): ChannelMessageHandler {
-  return async (message, conversation) => {
+  return async (message, conversation, publish) => {
     if (message.interaction?.kind === "approval") return handleApproval(message, conversation);
     const text = message.text?.trim();
     if (!text && !message.attachments.length) return reply(conversation, "I received that, but there was no text or supported attachment to work with.", message.providerEventId);
@@ -227,7 +227,12 @@ export function createAgentChannelHandler(): ChannelMessageHandler {
     try {
       const prepared = await buildAgentInput(normalizedMessage);
       await persistInboundImages(normalizedMessage, conversation.userId);
-      const result = await runAgent(conversation.userId, prepared.input, history, model, undefined, undefined, undefined, undefined, { accountId: conversation.accountId, provider: conversation.provider, conversationId: conversation.conversationId, scope: conversation.scope, deliveryTarget: conversation.replyTarget, runId: `channel_${message.provider}_${message.providerEventId}` }, channelAgentRunOptions(conversation, message.receivedAt));
+      const result = await runAgent(conversation.userId, prepared.input, history, model, undefined, undefined, undefined, undefined, { accountId: conversation.accountId, provider: conversation.provider, conversationId: conversation.conversationId, scope: conversation.scope, deliveryTarget: conversation.replyTarget, runId: `channel_${message.provider}_${message.providerEventId}` }, {
+        ...channelAgentRunOptions(conversation, message.receivedAt),
+        onOpening: publish ? async (opening) => {
+          await publish(reply(conversation, opening, `${message.providerEventId}:opening`, { kind: "notification" }));
+        } : undefined,
+      });
       await saveConversation(conversation, normalizedMessage, prepared.historyLabel, result.text);
       if (result.cost) await addUsage(conversation.userId, result.cost);
       const outboundImages = [...(result.generatedImages ?? []), ...(result.retrievedImages ?? [])];

@@ -2329,6 +2329,7 @@ async function main(): Promise<void> {
             send({ type: "start", model: s.model });
             const result = await runAgent(device.userId, message, s.history, s.model, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined, undefined, {
               ownerPrivateRun: true,
+              onOpening: (text, signal) => { if (!signal?.aborted) send({ type: "status", text }); },
               onToolActivity: (activity) => send({
                 type: "tool",
                 tool: {
