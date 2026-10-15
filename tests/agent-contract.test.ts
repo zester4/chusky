@@ -130,6 +130,9 @@ test("verified trigger runs execute an unfamiliar toolkit write and pause a refu
     assert.deepEqual(executed, ["ASHBY_CREATE_APPLICATION_NOTE"], "ordinary writes from a new toolkit execute during trigger handling");
     assert.equal(executionOptions[0]?.account, "ca_ashby", "source-toolkit writes are bound to the verified originating account");
     assert.match(String(requests[0]?.messages?.[0]?.content), /TRIGGER HANDLING/);
+    assert.match(String(requests[0]?.messages?.[0]?.content), /CAPABILITY ROUTING/);
+    assert.match(String(requests[0]?.messages?.[0]?.content), /CHUCK_PLAN_DELEGATION/);
+    assert.match(String(requests[0]?.messages?.[0]?.content), /COMPOSIO_GET_TOOL_SCHEMAS/);
 
     nextSlug = "STRIPE_CREATE_REFUND";
     nextArgs = { charge_id: "ch_123" };

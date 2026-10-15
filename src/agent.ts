@@ -75,7 +75,7 @@ import { resolveComposioRoute } from "./composioRouting.js";
 import { buildArtifactEmailArguments, type ArtifactEmailFile } from "./artifactEmail.js";
 import { buildArtifactUploadArguments } from "./artifactBridge.js";
 import { compactModelMessages } from "./agentContext.js";
-import { ATTENTION_PULSE_IDENTITY, compactActionCustomization, compactConversationalCustomization, compactMissionCustomization, composeSystemPrompt } from "./prompt.js";
+import { ATTENTION_PULSE_IDENTITY, CAPABILITY_ROUTING_KERNEL, compactActionCustomization, compactConversationalCustomization, compactMissionCustomization, composeSystemPrompt } from "./prompt.js";
 import { contextPrompt } from "./contextGraph.js";
 import { withLatencyBudget } from "./voiceLatency.js";
 import { AUTONOMY_OPERATING_KERNEL, needsAutonomyCloseoutNudge } from "./autonomy/operatingLoop.js";
@@ -3065,9 +3065,9 @@ export async function runAgent(
     mandatorySections: [
       config.elenaEnabled ? ATTENTION_PULSE_IDENTITY : ELENA_DISABLED_PROMPT,
       ...(noToolTurn ? [] : ownerPrivateRun
-        ? [AUTONOMY_OPERATING_KERNEL, ...(shoppingPromptRelevant ? [SHOPPING_AGENT_PLAYBOOK] : []), ...(meetingPromptRelevant ? [MEETING_MISSION_PLAYBOOK] : []), ...(triggerAutonomy ? [triggerAutonomy] : [])]
+        ? [AUTONOMY_OPERATING_KERNEL, CAPABILITY_ROUTING_KERNEL, ...(shoppingPromptRelevant ? [SHOPPING_AGENT_PLAYBOOK] : []), ...(meetingPromptRelevant ? [MEETING_MISSION_PLAYBOOK] : []), ...(triggerAutonomy ? [triggerAutonomy] : [])]
         : !voiceTurn && !sharedScope
-          ? [AUTONOMY_OPERATING_KERNEL, ...(shoppingPromptRelevant ? [SHOPPING_AGENT_PLAYBOOK] : []), ...(meetingPromptRelevant ? [MEETING_MISSION_PLAYBOOK] : []), ...(triggerAutonomy ? [triggerAutonomy] : [])]
+          ? [AUTONOMY_OPERATING_KERNEL, CAPABILITY_ROUTING_KERNEL, ...(shoppingPromptRelevant ? [SHOPPING_AGENT_PLAYBOOK] : []), ...(meetingPromptRelevant ? [MEETING_MISSION_PLAYBOOK] : []), ...(triggerAutonomy ? [triggerAutonomy] : [])]
           : []),
     ],
     developerInstructions: options?.instructions ? `Developer instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : undefined,
