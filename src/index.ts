@@ -272,7 +272,21 @@ async function main(): Promise<void> {
   const bot = new Bot(config.telegramToken);
   registerHandlers(bot);
   missionRecovery = setInterval(() => {
-    void recoverAllMissions(enqueueTaskWorkflow).catch((error) => logger.warn({ error }, "Mission recovery sweep failed"));
+    void recoverAllMissions(enqueueTaskWorkflow).then((report) => {
+      if (report.repaired || report.republished || report.timerWakes || report.quarantined || report.blocked || report.errors) {
+        logger.info({
+          ownersScanned: report.ownersScanned,
+          missionsScanned: report.missionsScanned,
+          repaired: report.repaired,
+          republished: report.republished,
+          timerWakes: report.timerWakes,
+          quarantined: report.quarantined,
+          blocked: report.blocked,
+          errors: report.errors,
+        }, "Mission recovery sweep completed");
+      }
+      if (report.leaseLost) logger.warn({ ownersScanned: report.ownersScanned }, "Mission recovery sweep stopped after losing its lease");
+    }).catch((error) => logger.warn({ errorClass: error instanceof Error ? error.name : "unknown" }, "Mission recovery sweep failed"));
   }, 120_000);
   if (typeof missionRecovery === "object" && "unref" in missionRecovery) missionRecovery.unref();
   let webSessionReconciliationRecoveryInFlight = false;

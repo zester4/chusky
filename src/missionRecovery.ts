@@ -1,11 +1,19 @@
+import { randomUUID } from "node:crypto";
 import {
+  acquireMissionRecoveryLease,
   blockMission,
   claimMissionAutomaticRepair,
   getMission,
+  getMissionRecoveryMissionCursor,
+  getMissionRecoveryOwnerCursor,
   listMissionOwnerIds,
   listMissions,
   listTasks,
   quarantineExpiredTask,
+  releaseMissionRecoveryLease,
+  renewMissionRecoveryLease,
+  setMissionRecoveryMissionCursor,
+  setMissionRecoveryOwnerCursor,
 } from "./store.js";
 import { reconcileMissionExecution, resumeMissionAndSchedule, type MissionTaskEnqueuer } from "./missionScheduler.js";
 import { logger } from "./logger.js";
@@ -19,12 +27,20 @@ export interface MissionRecoveryReport {
   quarantined: number;
   blocked: number;
   errors: number;
+  /** Set when another process currently owns the distributed sweep lease. */
+  skippedDueToLock?: boolean;
+  /** Set when this process could not renew the lease and stopped advancing cursors. */
+  leaseLost?: boolean;
 }
 
 export interface MissionRecoveryOptions {
   maxOwners?: number;
   maxMissionsPerOwner?: number;
   now?: number;
+  /** Internal lease guard used by the process-wide sweeper before cursor writes. */
+  shouldPersistCursor?: () => boolean;
+  /** Internal fencing token; cursor updates are atomic with lease ownership checks. */
+  recoveryLeaseToken?: string;
 }
 
 function expiredLeaseRecoveryText(task: Awaited<ReturnType<typeof listTasks>>[number]): { reason: string; nextAction: string } {
@@ -55,7 +71,16 @@ export async function recoverMissionsForOwner(
 ): Promise<MissionRecoveryReport> {
   const report: MissionRecoveryReport = { ownersScanned: 1, missionsScanned: 0, repaired: 0, republished: 0, timerWakes: 0, quarantined: 0, blocked: 0, errors: 0 };
   const now = options.now ?? Date.now();
-  const missions = (await listMissions(userId)).filter((mission) => ["running", "waiting", "failed"].includes(mission.status)).slice(0, options.maxMissionsPerOwner ?? 100);
+  const activeMissions = (await listMissions(userId))
+    .filter((mission) => ["running", "waiting", "failed"].includes(mission.status))
+    .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+  const maxMissions = Math.max(1, Math.floor(options.maxMissionsPerOwner ?? 100));
+  const missionCursor = await getMissionRecoveryMissionCursor(userId);
+  const cursorIndex = missionCursor ? activeMissions.findIndex((mission) => mission.id > missionCursor) : 0;
+  const startIndex = cursorIndex < 0 ? 0 : cursorIndex;
+  const missions = activeMissions.length <= maxMissions
+    ? activeMissions
+    : Array.from({ length: maxMissions }, (_, index) => activeMissions[(startIndex + index) % activeMissions.length]!);
   // Read the owner's task collection once per sweep. Loading it for every
   // mission makes recovery O(missions × tasks), which grows sharply for active
   // accounts with many long-running objectives.
@@ -133,16 +158,70 @@ export async function recoverMissionsForOwner(
       if (published || versionChangedMissionIds.has(missionId)) report.repaired++;
     }
   }
+  if (missions.length && (options.shouldPersistCursor?.() ?? true)) {
+    const persisted = await setMissionRecoveryMissionCursor(userId, missions[missions.length - 1]!.id, options.recoveryLeaseToken);
+    if (!persisted) report.errors++;
+  }
   return report;
 }
 
-/** Process-wide sweeper entry point. Owner IDs come from a durable index. */
+/**
+ * Process-wide sweeper entry point. A Redis lease protects the shared cursors;
+ * round-robin cursors prevent fixed batch limits from starving owners or older
+ * active missions. The lease is renewed while a slow provider enqueue runs.
+ */
 export async function recoverAllMissions(enqueue: MissionTaskEnqueuer, options: MissionRecoveryOptions = {}): Promise<MissionRecoveryReport> {
-  const ownerIds = (await listMissionOwnerIds()).slice(0, options.maxOwners ?? 1000);
+  const token = randomUUID();
   const total: MissionRecoveryReport = { ownersScanned: 0, missionsScanned: 0, repaired: 0, republished: 0, timerWakes: 0, quarantined: 0, blocked: 0, errors: 0 };
-  for (const userId of ownerIds) {
-    const report = await recoverMissionsForOwner(userId, enqueue, options);
-    for (const key of Object.keys(total) as Array<keyof MissionRecoveryReport>) total[key] += report[key];
+  const leaseSeconds = 120;
+  if (!await acquireMissionRecoveryLease(token, leaseSeconds)) return { ...total, skippedDueToLock: true };
+
+  let leaseLost = false;
+  let renewalInFlight: Promise<void> | undefined;
+  const renewalTimer = setInterval(() => {
+    if (renewalInFlight || leaseLost) return;
+    renewalInFlight = (async () => {
+      try {
+        if (!await renewMissionRecoveryLease(token, leaseSeconds)) leaseLost = true;
+      } catch (error) {
+        leaseLost = true;
+        logger.warn({ errorClass: error instanceof Error ? error.name : "unknown" }, "Mission recovery lease renewal failed");
+      }
+    })().finally(() => { renewalInFlight = undefined; });
+  }, 30_000);
+  if (typeof renewalTimer === "object" && "unref" in renewalTimer) renewalTimer.unref();
+
+  try {
+    const ownerIds = (await listMissionOwnerIds()).sort((left, right) => left - right);
+    const maxOwners = Math.max(1, Math.floor(options.maxOwners ?? 1000));
+    const ownerCursor = await getMissionRecoveryOwnerCursor();
+    const cursorIndex = ownerCursor === undefined ? 0 : ownerIds.findIndex((userId) => userId > ownerCursor);
+    const startIndex = cursorIndex < 0 ? 0 : cursorIndex;
+    const owners = ownerIds.length <= maxOwners
+      ? ownerIds
+      : Array.from({ length: maxOwners }, (_, index) => ownerIds[(startIndex + index) % ownerIds.length]!);
+    const countKeys = ["ownersScanned", "missionsScanned", "repaired", "republished", "timerWakes", "quarantined", "blocked", "errors"] as const;
+    for (const userId of owners) {
+      if (leaseLost) break;
+      try {
+        const report = await recoverMissionsForOwner(userId, enqueue, {
+          ...options,
+          shouldPersistCursor: () => !leaseLost,
+          recoveryLeaseToken: token,
+        });
+        for (const key of countKeys) total[key] += report[key];
+        if (report.errors && leaseLost) break;
+      } catch (error) {
+        total.errors++;
+        logger.warn({ userId, errorClass: error instanceof Error ? error.name : "unknown" }, "Mission recovery failed for owner");
+      }
+      if (!leaseLost && !await setMissionRecoveryOwnerCursor(userId, token)) leaseLost = true;
+    }
+    if (leaseLost) total.leaseLost = true;
+    return total;
+  } finally {
+    clearInterval(renewalTimer);
+    await renewalInFlight;
+    await releaseMissionRecoveryLease(token);
   }
-  return total;
 }

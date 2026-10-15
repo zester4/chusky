@@ -156,3 +156,75 @@ test("sweeper never auto-repairs a failed task with an uncertain provider outcom
   assert.equal(afterTask?.status, "failed");
   assert.match(after?.nextAction ?? "", /repair|replan/i);
 });
+
+test("recovery sweep rotates past owner batches so later owners are not starved", async () => {
+  const owners = [981020, 981021, 981022, 981023, 981024];
+  const taskOwners = new Map<string, number>();
+  for (const userId of owners) {
+    const mission = await runningMission(userId, `owner-fairness-${userId}`);
+    const task = (await listTasks(userId)).find((item) => item.missionId === mission.id)!;
+    taskOwners.set(task.id, userId);
+    await updateTask(userId, task.id, { workflowRunId: undefined, enqueueClaim: undefined });
+  }
+
+  const visited = new Set<number>();
+  const fairEnqueue = async (userId: number, taskId: string) => {
+    visited.add(taskOwners.get(taskId) ?? userId);
+    return `fair-owner-${taskId}-${++sequence}`;
+  };
+  for (let round = 0; round < 3; round++) {
+    const report = await recoverAllMissions(fairEnqueue, { maxOwners: 2 });
+    assert.equal(report.ownersScanned, Math.min(2, owners.length));
+  }
+  assert.deepEqual([...visited].sort((left, right) => left - right), owners);
+});
+
+test("owner recovery rotates through capped mission batches in stable ID order", async () => {
+  const userId = 981025;
+  const missionTaskIds: string[] = [];
+  for (let index = 0; index < 5; index++) {
+    const mission = await runningMission(userId, `mission-fairness-${index}`);
+    const task = (await listTasks(userId)).find((item) => item.missionId === mission.id)!;
+    missionTaskIds.push(task.id);
+    await updateTask(userId, task.id, { workflowRunId: undefined, enqueueClaim: undefined });
+  }
+
+  const visited = new Set<string>();
+  const fairEnqueue = async (_ownerId: number, taskId: string) => {
+    visited.add(taskId);
+    return `fair-mission-${taskId}-${++sequence}`;
+  };
+  const first = await recoverMissionsForOwner(userId, fairEnqueue, { maxMissionsPerOwner: 2 });
+  assert.equal(first.missionsScanned, 2);
+  assert.equal(visited.size, 2);
+  await recoverMissionsForOwner(userId, fairEnqueue, { maxMissionsPerOwner: 2 });
+  await recoverMissionsForOwner(userId, fairEnqueue, { maxMissionsPerOwner: 2 });
+  assert.deepEqual([...visited].sort(), missionTaskIds.sort());
+});
+
+test("only one process-wide recovery sweep advances cursors at a time", async () => {
+  const userId = 981026;
+  const mission = await runningMission(userId, "overlap-lease");
+  const task = (await listTasks(userId)).find((item) => item.missionId === mission.id)!;
+  await updateTask(userId, task.id, { workflowRunId: undefined, enqueueClaim: undefined });
+
+  let enteredEnqueue!: () => void;
+  let releaseEnqueue!: () => void;
+  const entered = new Promise<void>((resolve) => { enteredEnqueue = resolve; });
+  const blocked = new Promise<void>((resolve) => { releaseEnqueue = resolve; });
+  const firstSweep = recoverAllMissions(async (_ownerId, taskId) => {
+    enteredEnqueue();
+    await blocked;
+    return `overlap-${taskId}`;
+  });
+  await entered;
+
+  const secondSweep = await recoverAllMissions(async (_ownerId, taskId) => `duplicate-${taskId}`);
+  assert.equal(secondSweep.skippedDueToLock, true);
+  assert.equal(secondSweep.ownersScanned, 0);
+
+  releaseEnqueue();
+  const firstReport = await firstSweep;
+  assert.equal(firstReport.ownersScanned, 1);
+  assert.equal((await getTask(userId, task.id))?.workflowRunId, `overlap-${task.id}`);
+});

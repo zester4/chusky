@@ -227,6 +227,13 @@ Redis is required for production missions, task leases, workflow deduplication,
 approvals, and cross-process recovery. In-memory mode is for local development
 and tests only.
 
+The periodic recovery sweep uses a renewable Redis lease and persisted
+round-robin cursors for owners and active missions. Its batch limits therefore
+bound each pass without permanently excluding later owners or older active
+missions. If the lease is lost, the sweep stops advancing cursors; inspect the
+aggregate recovery logs for repaired, republished, quarantined, blocked, and
+failed counts.
+
 ## Budgets and proof
 
 Budgets are part of the execution contract, not display metadata. Check before

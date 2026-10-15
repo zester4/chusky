@@ -1870,6 +1870,10 @@ interface Backend {
   acquireKeyLock(key: string, token: string, leaseSeconds: number): Promise<boolean>;
   renewKeyLock(key: string, token: string, leaseSeconds: number): Promise<boolean>;
   releaseKeyLock(key: string, token: string): Promise<void>;
+  getMissionRecoveryOwnerCursor(): Promise<number | undefined>;
+  setMissionRecoveryOwnerCursor(userId: number, leaseToken?: string): Promise<boolean>;
+  getMissionRecoveryMissionCursor(userId: number): Promise<string | undefined>;
+  setMissionRecoveryMissionCursor(userId: number, missionId: string, leaseToken?: string): Promise<boolean>;
   claimTelegramUpdate(updateId: number, ttlSeconds: number): Promise<boolean>;
   hasAgentUpgrade(userId: number, upgradeId: string): Promise<boolean>;
   claimAgentUpgrade(userId: number, upgradeId: string): Promise<boolean>;
@@ -2309,6 +2313,8 @@ class RedisBackend implements Backend {
   private missionk = (id: number) => `chuck:missions:${id}`;
   private missionEventsKey = (userId: number, missionId: string) => `chuck:mission-events:${userId}:${createHash("sha256").update(missionId).digest("hex")}`;
   private missionOwnersKey = "chuck:missions:owners";
+  private missionRecoveryOwnerCursorKey = "chuck:missions:recovery:owner-cursor";
+  private missionRecoveryMissionCursorKey = (userId: number) => `chuck:missions:recovery:mission-cursor:${userId}`;
   private reminderk = (id: number) => `chuck:reminders:${id}`;
   private jobk = (id: number) => `chuck:jobs:${id}`;
   private attentionKey = (id: number, collection: AttentionCollection) => `chuck:attention:${collection}:${id}`;
@@ -3402,6 +3408,39 @@ class RedisBackend implements Backend {
   async releaseKeyLock(key: string, token: string): Promise<void> {
     await this.r.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end", 1, `chuck:key-lock:${key}`, token);
   }
+  async getMissionRecoveryOwnerCursor(): Promise<number | undefined> {
+    const value = await this.r.get(this.missionRecoveryOwnerCursorKey);
+    if (value === null) return undefined;
+    const cursor = Number(value);
+    return Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : undefined;
+  }
+  async setMissionRecoveryOwnerCursor(userId: number, leaseToken?: string): Promise<boolean> {
+    if (!leaseToken) { await this.r.set(this.missionRecoveryOwnerCursorKey, String(userId)); return true; }
+    const result = await this.r.eval(
+      "if redis.call('get', KEYS[1]) == ARGV[1] then redis.call('set', KEYS[2], ARGV[2]); return 1 else return 0 end",
+      2,
+      "chuck:key-lock:mission-recovery-sweeper",
+      this.missionRecoveryOwnerCursorKey,
+      leaseToken,
+      String(userId),
+    );
+    return Number(result) === 1;
+  }
+  async getMissionRecoveryMissionCursor(userId: number): Promise<string | undefined> {
+    return (await this.r.get(this.missionRecoveryMissionCursorKey(userId))) ?? undefined;
+  }
+  async setMissionRecoveryMissionCursor(userId: number, missionId: string, leaseToken?: string): Promise<boolean> {
+    if (!leaseToken) { await this.r.set(this.missionRecoveryMissionCursorKey(userId), missionId); return true; }
+    const result = await this.r.eval(
+      "if redis.call('get', KEYS[1]) == ARGV[1] then redis.call('set', KEYS[2], ARGV[2]); return 1 else return 0 end",
+      2,
+      "chuck:key-lock:mission-recovery-sweeper",
+      this.missionRecoveryMissionCursorKey(userId),
+      leaseToken,
+      missionId,
+    );
+    return Number(result) === 1;
+  }
   async claimTelegramUpdate(updateId: number, ttlSeconds: number): Promise<boolean> {
     return (await this.r.set(this.telegramUpdateKey(updateId), "1", "EX", ttlSeconds, "NX")) === "OK";
   }
@@ -4408,6 +4447,8 @@ class MemoryBackend implements Backend {
   private rates = new Map<number, { n: number; exp: number }>();
   private locks = new Map<number, { token: string; exp: number }>();
   private keyLocks = new Map<string, { token: string; exp: number }>();
+  private missionRecoveryOwnerCursor: number | undefined;
+  private missionRecoveryMissionCursors = new Map<number, string>();
   private pairings = new Map<string, CliPairingRecord>();
   private devices = new Map<string, CliDeviceRecord>();
   private telegramUpdates = new Map<number, number>();
@@ -4834,6 +4875,24 @@ class MemoryBackend implements Backend {
   }
   async releaseKeyLock(key: string, token: string): Promise<void> {
     if (this.keyLocks.get(key)?.token === token) this.keyLocks.delete(key);
+  }
+  async getMissionRecoveryOwnerCursor() { return this.missionRecoveryOwnerCursor; }
+  async setMissionRecoveryOwnerCursor(userId: number, leaseToken?: string) {
+    if (leaseToken) {
+      const lease = this.keyLocks.get("mission-recovery-sweeper");
+      if (!lease || lease.token !== leaseToken || lease.exp <= Date.now()) return false;
+    }
+    this.missionRecoveryOwnerCursor = userId;
+    return true;
+  }
+  async getMissionRecoveryMissionCursor(userId: number) { return this.missionRecoveryMissionCursors.get(userId); }
+  async setMissionRecoveryMissionCursor(userId: number, missionId: string, leaseToken?: string) {
+    if (leaseToken) {
+      const lease = this.keyLocks.get("mission-recovery-sweeper");
+      if (!lease || lease.token !== leaseToken || lease.exp <= Date.now()) return false;
+    }
+    this.missionRecoveryMissionCursors.set(userId, missionId);
+    return true;
   }
   async claimTelegramUpdate(updateId: number, ttlSeconds: number): Promise<boolean> {
     const expiresAt = this.telegramUpdates.get(updateId);
@@ -9086,6 +9145,35 @@ export async function updateMissionControl(userId: number, id: string, input: { 
 /** Owners with durable mission state; used by the recovery sweeper. */
 export async function listMissionOwnerIds(): Promise<number[]> {
   return backend.listMissionOwnerIds();
+}
+
+/** Durable fairness cursors and lease for the process-wide mission recovery sweep. */
+export async function getMissionRecoveryOwnerCursor(): Promise<number | undefined> {
+  return backend.getMissionRecoveryOwnerCursor();
+}
+
+export async function setMissionRecoveryOwnerCursor(userId: number, leaseToken?: string): Promise<boolean> {
+  return backend.setMissionRecoveryOwnerCursor(userId, leaseToken);
+}
+
+export async function getMissionRecoveryMissionCursor(userId: number): Promise<string | undefined> {
+  return backend.getMissionRecoveryMissionCursor(userId);
+}
+
+export async function setMissionRecoveryMissionCursor(userId: number, missionId: string, leaseToken?: string): Promise<boolean> {
+  return backend.setMissionRecoveryMissionCursor(userId, missionId, leaseToken);
+}
+
+export async function acquireMissionRecoveryLease(token: string, leaseSeconds: number): Promise<boolean> {
+  return backend.acquireKeyLock("mission-recovery-sweeper", token, leaseSeconds);
+}
+
+export async function renewMissionRecoveryLease(token: string, leaseSeconds: number): Promise<boolean> {
+  return backend.renewKeyLock("mission-recovery-sweeper", token, leaseSeconds);
+}
+
+export async function releaseMissionRecoveryLease(token: string): Promise<void> {
+  return backend.releaseKeyLock("mission-recovery-sweeper", token);
 }
 
 export async function migrateMissionOwnerToNeon(userId: number): Promise<{ status: "migrated" | "already_migrated"; missionCount: number; eventCount: number }> {
