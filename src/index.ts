@@ -3825,9 +3825,17 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             ])];
             if (!tools.length) return {};
             const followUpDecision = await decideFollowUp({
-              summary: `${outcome.summary} ${outcome.actionItems.length} structured action items; ${contacts.length} captured participant cards.`,
+              summary: outcome.summary,
               preferredChannel: contacts.some((contact) => contact.email && contact.contactPreference !== "phone") ? "email" : undefined,
               hasAgreedNextStep: outcome.actionItems.length > 0 || contacts.some((contact) => Boolean(contact.nextStep)),
+              outcome: {
+                title: outcome.title,
+                summary: outcome.summary,
+                decisions: outcome.decisions,
+                actionItems: outcome.actionItems,
+                openQuestions: outcome.openQuestions,
+                ...(outcome.escalation ? { escalation: { required: outcome.escalation.required, severity: outcome.escalation.severity, reason: outcome.escalation.reason } } : {}),
+              },
             });
             const followUpGuidance = followUpDecision.source === "jev"
               ? `\n\nTyped follow-up proposal (not authority): relevant=${followUpDecision.relevant}; channel=${followUpDecision.channel}; timing=${followUpDecision.timing}; message=${followUpDecision.messageType}. Use it only to prioritize the explicit structured outcome; do not contact anyone or create commitments outside the granted tools and agreed facts.`

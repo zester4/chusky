@@ -102,6 +102,16 @@ export interface AutonomyFollowUpDecision {
   costUsd: number;
 }
 
+/** Bounded structured evidence supplied to the follow-up router. */
+export interface AutonomyFollowUpOutcome {
+  title?: string;
+  summary?: string;
+  decisions?: string[];
+  actionItems?: Array<{ task: string; owner: string; dueDate?: string }>;
+  openQuestions?: string[];
+  escalation?: { required: boolean; severity?: string; reason?: string };
+}
+
 export interface AutonomyMemoryDecision {
   disposition: MemoryDisposition;
   reviewAtDays?: number;
@@ -403,20 +413,51 @@ export async function decideAutonomySignal(input: AutonomySignalInput, options: 
   return { triage: selected, priority: priorityAnswer.type === "score" ? priorityAnswer.score / 3 : fallback.priority, source: "jev", reason: `Jev classified the verified ${input.kind} signal as ${selected}.`, latencyMs: routed.value.latencyMs, costUsd: routed.value.costUsd ?? 0 };
 }
 
+function boundedFollowUpOutcome(outcome: AutonomyFollowUpOutcome | undefined): Record<string, unknown> | undefined {
+  if (!outcome) return undefined;
+  return {
+    ...(outcome.title ? { title: jevText(outcome.title, 240) } : {}),
+    ...(outcome.summary ? { summary: jevText(outcome.summary, 1_500) } : {}),
+    ...(outcome.decisions?.length ? { decisions: outcome.decisions.slice(0, 10).map((item) => jevText(item, 700)) } : {}),
+    ...(outcome.actionItems?.length ? {
+      action_items: outcome.actionItems.slice(0, 10).map((item) => ({
+        task: jevText(item.task, 700),
+        owner: jevText(item.owner, 160),
+        ...(item.dueDate ? { due_date: jevText(item.dueDate, 120) } : {}),
+      })),
+    } : {}),
+    ...(outcome.openQuestions?.length ? { open_questions: outcome.openQuestions.slice(0, 10).map((item) => jevText(item, 700)) } : {}),
+    ...(outcome.escalation ? {
+      escalation: {
+        required: outcome.escalation.required === true,
+        ...(outcome.escalation.severity ? { severity: jevText(outcome.escalation.severity, 40) } : {}),
+        ...(outcome.escalation.reason ? { reason: jevText(outcome.escalation.reason, 700) } : {}),
+      },
+    } : {}),
+  };
+}
+
 /** Decide whether a participant/contact still needs follow-up and how. */
-export async function decideFollowUp(input: { summary: string; preferredChannel?: string; dueAt?: string; hasAgreedNextStep?: boolean }, options: { client?: JevClient; signal?: AbortSignal; sessionId?: string; budgetMs?: number } = {}): Promise<AutonomyFollowUpDecision> {
+export async function decideFollowUp(input: { summary: string; preferredChannel?: string; dueAt?: string; hasAgreedNextStep?: boolean; outcome?: AutonomyFollowUpOutcome }, options: { client?: JevClient; signal?: AbortSignal; sessionId?: string; budgetMs?: number } = {}): Promise<AutonomyFollowUpDecision> {
   const fallback: AutonomyFollowUpDecision = { relevant: Boolean(input.hasAgreedNextStep), channel: input.preferredChannel === "email" || input.preferredChannel === "phone" ? input.preferredChannel : "message", timing: input.dueAt ? "scheduled" : "today", messageType: input.hasAgreedNextStep ? "check_in" : "none", source: "deterministic", reason: "Existing follow-up rules were preserved.", latencyMs: 0, costUsd: 0 };
   if (config.jevMode !== "enforce" || !jevEnabled("autonomy") || !input.summary.trim()) return fallback;
   const client = options.client ?? jevClient();
   if (!client.available()) return fallback;
-  const state = { summary: jevText(input.summary, 1_500), preferred_channel: jevText(input.preferredChannel, 80), due_at: jevText(input.dueAt, 80), agreed_next_step: Boolean(input.hasAgreedNextStep) };
+  const outcome = boundedFollowUpOutcome(input.outcome);
+  const state = {
+    summary: jevText(input.summary, 1_500),
+    preferred_channel: jevText(input.preferredChannel, 80),
+    due_at: jevText(input.dueAt, 80),
+    agreed_next_step: Boolean(input.hasAgreedNextStep),
+    ...(outcome ? { meeting_outcome: outcome } : {}),
+  };
   const deadline = createRoutingDeadline(options.budgetMs ?? config.jevTurnBudgetMs, options.signal);
   let routedAnswers: Record<string, unknown>;
   let routedLatencyMs = 0;
   let routedCostUsd = 0;
   try {
     const relevanceRoute = await routeAutonomyRequestWithinDeadline(client, state, {
-      relevance: { type: "noul", instructions: "Does the supplied summary describe a current, useful follow-up that is still outstanding? Answer yes only when an agreed or clearly necessary next step remains; answer no when it is already done, stale, speculative, or informational only.", criteria: { true: "A concrete, current, owner-scoped next step remains.", false: "No follow-up is needed, it is already handled, or the need is stale or speculative." } },
+      relevance: { type: "noul", instructions: "Does the supplied summary and structured meeting outcome describe a current, useful follow-up that is still outstanding? Inspect action items, open questions, decisions, explicit due dates, and escalation state. Answer yes only when an agreed or clearly necessary next step remains; answer no when it is already done, stale, speculative, or informational only. Do not invent a task from an unresolved discussion.", criteria: { true: "A concrete, current, owner-scoped next step remains in the supplied outcome.", false: "No follow-up is needed, it is already handled, or the need is stale or speculative." } },
     }, options, deadline);
     if (!relevanceRoute.value) return fallback;
     routedLatencyMs += relevanceRoute.value.latencyMs;
@@ -426,9 +467,9 @@ export async function decideFollowUp(input: { summary: string; preferredChannel?
 
     const followUpState = { ...state, follow_up_required: true };
     const followUpRoute = await routeAutonomyRequestWithinDeadline(client, followUpState, {
-      channel: { type: "choice", instructions: "A current follow-up is required. Choose the channel that fits the recipient and requested next step; honor `preferred_channel` when suitable. Choose none only if no listed channel can fulfill it.", criteria: { email: "Email is suitable for a considered or documented follow-up.", phone: "A call is needed for a time-sensitive or conversational follow-up.", calendar: "A calendar action is needed to schedule or record the agreed time.", message: "A concise direct message is the suitable channel.", none: "No listed channel is appropriate or enough information is available to select one." } },
-      timing: { type: "choice", instructions: "A current follow-up is required. Choose timing from `due_at` and the summary; preserve an explicit agreed time. Do not invent a deadline. Choose none only when timing cannot be determined.", criteria: { now: "The next step is due now or delay would harm the outcome.", today: "Complete it later today; no exact agreed time is supplied.", this_week: "It can safely wait until later this week.", scheduled: "Use the explicit due time or agreed schedule in the state.", none: "Timing is not needed or cannot be determined from the supplied state." } },
-      message_type: { type: "choice", instructions: "A current follow-up is required. Choose the message purpose that matches the outstanding next step in the summary; do not infer a commitment that is not stated. Choose none if no message is needed.", criteria: { answer: "Respond to an outstanding question.", reminder: "Remind someone about an agreed item or deadline.", proposal: "Provide or advance a requested proposal or offer.", check_in: "Ask for an agreed progress update.", none: "The next step requires no message." } },
+      channel: { type: "choice", instructions: "A current follow-up is required. Choose the channel that fits the recipient and the structured meeting outcome; honor `preferred_channel` when suitable. Choose none only if no listed channel can fulfill the explicit next step.", criteria: { email: "Email is suitable for a considered or documented follow-up.", phone: "A call is needed for a time-sensitive or conversational follow-up.", calendar: "A calendar action is needed to schedule or record the agreed time.", message: "A concise direct message is the suitable channel.", none: "No listed channel is appropriate or enough information is available to select one." } },
+      timing: { type: "choice", instructions: "A current follow-up is required. Choose timing from `due_at` and explicit dates in the structured meeting outcome; preserve an agreed time and never invent a deadline. Choose none only when timing cannot be determined.", criteria: { now: "The next step is due now or delay would harm the outcome.", today: "Complete it later today; no exact agreed time is supplied.", this_week: "It can safely wait until later this week.", scheduled: "Use the explicit due time or agreed schedule in the state.", none: "Timing is not needed or cannot be determined from the supplied state." } },
+      message_type: { type: "choice", instructions: "Choose the message purpose that matches the outstanding action item, open question, or decision in the structured meeting outcome; do not infer a commitment that is not stated. Choose none if no message is needed.", criteria: { answer: "Respond to an outstanding question.", reminder: "Remind someone about an agreed item or deadline.", proposal: "Provide or advance a requested proposal or offer.", check_in: "Ask for an agreed progress update.", none: "The next step requires no message." } },
     }, options, deadline);
     if (!followUpRoute.value) return fallback;
     routedAnswers = followUpRoute.value.answers;

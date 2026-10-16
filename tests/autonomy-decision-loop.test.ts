@@ -150,12 +150,26 @@ test("autonomy decision loop covers signal triage, follow-up, memory, and recove
 
 test("Jev only chooses follow-up details after the relevance decision says one is needed", async () => {
   await withJev(async (calls) => {
-    const result = await decideFollowUp({ summary: "Customer agreed to receive the proposal by email", hasAgreedNextStep: true, preferredChannel: "email", dueAt: "2026-10-01T09:00:00Z" });
+    const result = await decideFollowUp({
+      summary: "Customer agreed to receive the proposal by email",
+      hasAgreedNextStep: true,
+      preferredChannel: "email",
+      dueAt: "2026-10-01T09:00:00Z",
+      outcome: {
+        title: "Acme pilot onboarding",
+        summary: "Acme agreed to review the proposal.",
+        decisions: ["Pilot scope is approved."],
+        actionItems: [{ task: "Send the proposal", owner: "Chusky", dueDate: "2026-10-01T09:00:00Z" }],
+        openQuestions: ["Confirm the implementation start date."],
+      },
+    });
     assert.equal(result.relevant, true);
     assert.equal(calls.length, 2);
     assert.deepEqual(Object.keys(calls[0]?.questions as object), ["relevance"]);
     assert.deepEqual(Object.keys(calls[1]?.questions as object).sort(), ["channel", "message_type", "timing"]);
     assert.equal((calls[1]?.state as Record<string, unknown>).follow_up_required, true);
+    assert.deepEqual((calls[0]?.state as Record<string, any>).meeting_outcome.action_items, [{ task: "Send the proposal", owner: "Chusky", due_date: "2026-10-01T09:00:00Z" }]);
+    assert.deepEqual((calls[1]?.state as Record<string, any>).meeting_outcome.open_questions, ["Confirm the implementation start date."]);
   });
 });
 

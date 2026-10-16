@@ -256,6 +256,7 @@ test("mission provider allowlists receive the routed direct action schema", asyn
     const result = await runAgent(userId, "Read the owner's Gmail inbox", [], "test/model", undefined, undefined, undefined, undefined, undefined, {
       ephemeral: true,
       toolAllow: ["GMAIL_FETCH_EMAILS"],
+      meetingId: "mtg_mission_direct_schema",
       taskId: "task_mission_direct_schema",
       missionId: "mis_mission_direct_schema",
       missionStepId: "step-gmail",
