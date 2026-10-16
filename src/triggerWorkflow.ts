@@ -12,6 +12,11 @@ export { resolveWorkflowEndpoint } from "./workflowUrls.js";
 // original durable steps without a step-name or ordering mismatch.
 export const TRIGGER_WORKFLOW_VERSION = 3 as const;
 
+// WorkflowContext.call forwards duration strings to QStash. Keep the unit
+// explicit because the installed SDK's numeric timeout shorthand is passed
+// through as a unitless value and rejected by the workflow service.
+export const TRIGGER_AGENT_WORKFLOW_TIMEOUT = "900s" as const;
+
 export type TriggerWorkflowVersion = "legacy" | "v2" | "v3";
 
 export function triggerWorkflowVersionForPayload(version: unknown): TriggerWorkflowVersion {
