@@ -41,8 +41,8 @@ test("outcome packages plan typed work and expose missing inputs", () => {
 test("mission supports parallel ready steps, preflight budgets, and evidence verification", async () => {
   const userId = 972003;
   const mission = await createMission(userId, { title: "Launch", objective: "Prepare launch", definitionOfDone: "Two tracks are verified", requiredEvidence: ["source"], steps: [
-    { id: "research", title: "Research", objective: "Research", parallelGroup: "prep" },
-    { id: "design", title: "Design", objective: "Design", parallelGroup: "prep" },
+    { id: "research", title: "Research", objective: "Research", parallelGroup: "prep", dependsOn: [] },
+    { id: "design", title: "Design", objective: "Design", parallelGroup: "prep", dependsOn: [] },
     { id: "review", title: "Review", objective: "Review", dependsOn: ["research", "design"] },
   ] });
   const started = await startMission(userId, mission.id);
@@ -64,8 +64,8 @@ test("mission supports parallel ready steps, preflight budgets, and evidence ver
 test("mission scheduler materializes each parallel branch as an idempotent durable task", async () => {
   const userId = 972004;
   const mission = await createMission(userId, { title: "Parallel work", objective: "Run independent tracks", definitionOfDone: "Both tracks complete", steps: [
-    { id: "a", title: "Track A", objective: "A", allowedTools: ["GMAIL_SEND_EMAIL"] },
-    { id: "b", title: "Track B", objective: "B" },
+    { id: "a", title: "Track A", objective: "A", allowedTools: ["GMAIL_SEND_EMAIL"], dependsOn: [] },
+    { id: "b", title: "Track B", objective: "B", dependsOn: [] },
   ] });
   const started = await startMission(userId, mission.id);
   const enqueued: string[] = [];
@@ -285,7 +285,11 @@ test("replayed mission start calls in one agent run create and schedule only one
     title: "Idempotent mission start",
     objective: "Create one durable mission despite a retried tool call",
     definitionOfDone: "Exactly one mission and one initial task exist",
-    steps: [{ id: "only", title: "First step", objective: "Run once" }],
+    steps: [
+      { id: "first", title: "First step", objective: "Run once" },
+      { id: "second", title: "Second step", objective: "Run after the first step." },
+      { title: "Third step", objective: "Run after the second step." },
+    ],
   };
   const enqueued: string[] = [];
   const runtime = {
@@ -297,6 +301,10 @@ test("replayed mission start calls in one agent run create and schedule only one
   const replay = await nativeTool(userId, "CHUCK_MISSION_START", { ...args }, runtime) as { id: string };
 
   assert.equal(replay.id, first.id);
+  const created = (await listMissions(userId)).find((mission) => mission.id === first.id)!;
+  assert.deepEqual(created.steps.map((step) => step.dependsOn), [[], ["first"], ["second"]]);
+  assert.equal(created.steps[2]?.id, "mission_step_3");
+  assert.deepEqual(created.activeStepIds, ["first"]);
   assert.equal((await listMissions(userId)).filter((mission) => mission.title === args.title).length, 1);
   assert.equal((await listTasks(userId)).filter((task) => task.missionId === first.id).length, 1);
   assert.equal(enqueued.length, 1, "the repeated start must not enqueue a duplicate workflow");
@@ -394,6 +402,10 @@ test("mission provider-event waits require the owning durable mission task", asy
   }, { taskId: "task_mission_wait", missionId: mission.id, requestMissionWait: (request) => { captured = request; } }) as { status: string };
   assert.equal(result.status, "waiting");
   assert.deepEqual(captured && { provider: captured.provider, providerEventId: captured.providerEventId }, { provider: "crm", providerEventId: "event-1" });
+
+  await assert.rejects(() => nativeTool(userId, "CHUCK_MISSION_WAIT_EVENT", {
+    id: mission.id, provider: "MISSION_TIMER", providerEventId: "wait_2min_step2",
+  }, { taskId: "task_mission_wait", missionId: mission.id, requestMissionWait: () => undefined }), /cannot create a timer.*CHUCK_TASK_WAIT/i);
 });
 
 test("strict missions cannot be completed before independent verification", async () => {

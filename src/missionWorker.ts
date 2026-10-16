@@ -131,8 +131,8 @@ export function missionSliceHasPersistedProgress(before: MissionSliceState, afte
 }
 
 export function missionStepInstruction(step?: Pick<MissionStepRecord, "title" | "objective">): string {
-  if (!step) return "Determine the next concrete mission action from the persisted checkpoint, then execute it now.";
-  return `Execute only this mission step now: ${step.title}\nStep objective: ${step.objective}\nDo not summarize the remaining mission or defer this step to another worker. Persist the result, evidence, checkpoint, wait, block, or step completion before ending this slice.`;
+  if (!step) return "Determine the next concrete mission action from the persisted checkpoint, then execute it now. For a timer wait, use CHUCK_TASK_WAIT, never a fabricated provider event.";
+  return `Execute only this mission step now: ${step.title}\nStep objective: ${step.objective}\nIf this step needs a timed wait, use CHUCK_TASK_WAIT and include the post-wake verification/action in this same step; persist nextAction as the action after wake, never as another wait. Use CHUCK_MISSION_WAIT_EVENT only for a real external provider callback. Do not summarize the remaining mission or defer this step to another worker. Persist the result, evidence, checkpoint, wait, block, or step completion before ending this slice.`;
 }
 
 /** Resolve a timer wake target from the latest persisted mission frontier. */

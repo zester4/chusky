@@ -162,8 +162,12 @@ Telegram handler open while the work runs.
 6. Enqueues the task through the configured workflow provider.
 7. Links `taskId` and records a bounded `step_started` event.
 
-Independent steps may execute in parallel. A dependent step is not ready until
-every `dependsOn` step is completed. `CHUCK_MISSION_STEP_COMPLETE` and the
+Agent-authored plans fill in an omitted `dependsOn` with the previous plan step;
+the agent must use an explicit empty list for a genuinely independent branch.
+The authenticated SDK/API contract preserves caller-specified dependency
+semantics, so API clients should pass dependencies explicitly. Independent
+steps may execute in parallel. A dependent step is not ready until every
+`dependsOn` step is completed. `CHUCK_MISSION_STEP_COMPLETE` and the
 server-side completion path must enforce this invariant; never let a client
 complete a pending step merely by supplying its ID.
 
@@ -196,18 +200,23 @@ slice ends, the worker must persist:
 - tool/cost counters, and
 - whether it is ready, waiting, blocked, failed, or complete.
 
-Use `CHUCK_TASK_WAIT` for an internal continuation when an external service is
-still processing. It requires a future time between 60 seconds and 7 days, a
-checkpoint, and an exact next action. It does not notify the user, create a
-reminder, or create a recurring job. The workflow sleeps and wakes the same
-task; it must not create a new task or run a one-second polling loop.
+Use `CHUCK_TASK_WAIT` for any bounded internal timer/delay in a durable task or
+mission, including an intentional wait before continuing or an external service
+that is still processing. It requires a future time between 60 seconds and 7
+days, a checkpoint, and an exact post-wake action. It does not notify the user,
+create a reminder, or create a recurring job. The workflow sleeps and wakes the
+same task; it must not create a new task or run a polling loop. A timer pauses
+the active mission step, so keep the post-wake verification/action in that same
+step and never set the next action to schedule the wait again.
 
-Use `CHUCK_MISSION_WAIT_EVENT` when the mission is waiting for one exact
-provider event. Store the provider and stable event ID in `waiting`. A signed
-provider adapter should verify the raw request, persist/deduplicate the event,
-and resume only the matching owner mission. Replayed delivery must be harmless.
-The task worker blocks or sleeps until that callback (or an explicit expiry)
-instead of hot-polling.
+Use `CHUCK_MISSION_WAIT_EVENT` only when the mission is waiting for one exact
+event that a real external provider will send. It does not schedule a timer;
+never invent a provider such as `mission-timer` or a synthetic event ID. Store
+the real provider and stable event ID in `waiting`. A signed provider adapter
+should verify the raw request, persist/deduplicate the event, and resume only
+the matching owner mission. Replayed delivery must be harmless. The task worker
+blocks or sleeps until that callback (or an explicit expiry) instead of
+hot-polling.
 The generic authenticated mission event route is useful for providers without a
 dedicated signed adapter, but it is not a substitute for signature verification.
 

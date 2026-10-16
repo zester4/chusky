@@ -54,6 +54,18 @@ test("mission doctor distinguishes an exact provider wait from a stranded missio
   assert.ok(report.nextActions.some((action) => /exact signed provider event/i.test(action)));
 });
 
+test("mission doctor identifies a synthetic timer provider that cannot deliver a callback", () => {
+  const report = diagnoseMission({
+    mission: mission({ status: "waiting", waiting: { kind: "provider_event", provider: "mission_timer", providerEventId: "wait_2min_step2" } }),
+    tasks: [],
+    now: 1_000,
+  });
+  assert.equal(report.health, "stalled");
+  assert.ok(report.reasons.includes("synthetic_timer_provider_event"));
+  assert.match(report.summary, /cannot deliver an event/i);
+  assert.ok(report.nextActions.some((action) => /replan.*CHUCK_TASK_WAIT/i.test(action)));
+});
+
 test("mission doctor flags a timer wait whose saved step is already completed", () => {
   const report = diagnoseMission({
     mission: mission({

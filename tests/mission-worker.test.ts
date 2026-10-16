@@ -2,6 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { boundedMissionHistory, captureMissionSliceState, deriveMissionToolHints, missionHasTimerWakeContinuation, missionNeedsLifecycleCloseoutNudge, missionNoProgressNextAction, missionPostWakeNextAction, missionSliceHasPersistedProgress, missionStepInstruction, missionTimerResumeStep, missionWakeNeedsRecovery, missionWorkerToolAllowlist, MISSION_WORKER_CONTROL_TOOLS } from "../src/missionWorker.js";
 
+test("mission instructions keep timer waits inside a step and reserve event waits for real providers", () => {
+  const instruction = missionStepInstruction({ title: "Wait and verify", objective: "Wait two minutes, then reload and verify the saved checkpoint." });
+  assert.match(instruction, /use CHUCK_TASK_WAIT/i);
+  assert.match(instruction, /post-wake verification\/action in this same step/i);
+  assert.match(instruction, /never as another wait/i);
+  assert.match(instruction, /real external provider callback/i);
+});
+
 test("bounded mission history keeps only a recent bounded text frontier", () => {
   const history = Array.from({ length: 12 }, (_, index) => ({ role: index % 2 ? "assistant" as const : "user" as const, content: `message-${index}-${"x".repeat(900)}` }));
   const bounded = boundedMissionHistory(history);

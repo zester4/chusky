@@ -220,6 +220,17 @@ test("internal task wait requires a checkpoint and an exact next action", () => 
   assert.equal(properties.delaySeconds?.minimum, 60);
   assert.equal(properties.delaySeconds?.maximum, 7 * 24 * 60 * 60);
   assert.match(wait?.function.description ?? "", /does not notify the user/i);
+  assert.match(wait?.function.description ?? "", /any bounded internal delay/i);
+  assert.match(wait?.function.description ?? "", /include its post-wake work in that step/i);
+  assert.match(wait?.function.description ?? "", /CHUCK_MISSION_WAIT_EVENT instead/i);
+  const eventWait = chuckTools.find((item) => item.function.name === "CHUCK_MISSION_WAIT_EVENT");
+  assert.match(eventWait?.function.description ?? "", /does not create a timer/i);
+  assert.match(eventWait?.function.description ?? "", /never invent providers such as mission-timer/i);
+  const missionStart = chuckTools.find((item) => item.function.name === "CHUCK_MISSION_START");
+  assert.match(missionStart?.function.description ?? "", /sequential by default when dependsOn is omitted/i);
+  assert.match(missionStart?.function.description ?? "", /explicit dependsOn: \[\] only for genuinely independent parallel work/i);
+  assert.match(missionStart?.function.description ?? "", /use CHUCK_TASK_WAIT, never a fabricated provider event/i);
+  assert.match(missionStart?.function.description ?? "", /keep the timer and post-wake verification in the same executable step/i);
 });
 
 test("connected-account discovery is bounded and supports optional toolkit filtering", () => {

@@ -97,6 +97,8 @@ export function diagnoseMission(input: { mission: MissionRecord; tasks: TaskReco
   const expiredLeases = missionTasks.filter((task) => task.lease && task.lease.expiresAt <= now);
   const failedTasks = missionTasks.filter((task) => task.status === "failed" || task.status === "blocked");
   const waiting = mission.waiting ? { ...mission.waiting, overdue: (mission.waiting.expiresAt ?? Number.POSITIVE_INFINITY) <= now || (mission.waiting.runAt ?? Number.POSITIVE_INFINITY) <= now } : undefined;
+  const syntheticTimerProvider = waiting?.kind === "provider_event"
+    && String(waiting.provider ?? "").toLowerCase().replace(/[\s_]+/g, "-") === "mission-timer";
   const queuedOrRunning = missionTasks.filter((task) => task.status === "queued" || task.status === "running");
   const budget = mission.budget;
   const elapsed = elapsedSeconds(mission, now);
@@ -141,7 +143,12 @@ export function diagnoseMission(input: { mission: MissionRecord; tasks: TaskReco
   }
   if (waiting) {
     reasons.push(waiting.overdue ? "wait_is_due_or_expired" : `waiting_for_${waiting.kind}`);
-    nextActions.push(waiting.kind === "provider_event" ? "Deliver the exact signed provider event, or inspect the provider state if the event is lost." : waiting.kind === "approval" ? "Approve or deny the pending mission action." : waiting.kind === "timer" ? "Resume the mission after the durable timer wake." : "Provide the requested human input, then resume the mission.");
+    if (syntheticTimerProvider) {
+      reasons.push("synthetic_timer_provider_event");
+      nextActions.push("This mission used a reserved synthetic timer provider and will not receive a provider callback. Replan the unfinished steps to use CHUCK_TASK_WAIT, then verify the persisted checkpoint after wake.");
+    } else {
+      nextActions.push(waiting.kind === "provider_event" ? "Deliver the exact signed provider event, or inspect the provider state if the event is lost." : waiting.kind === "approval" ? "Approve or deny the pending mission action." : waiting.kind === "timer" ? "Resume the mission after the durable timer wake." : "Provide the requested human input, then resume the mission.");
+    }
     if (waitingStepMismatch) {
       reasons.push("mission_wait_step_mismatch");
       nextActions.push("Repair the saved wait continuation: its step is missing, completed, or no longer active.");
@@ -154,7 +161,7 @@ export function diagnoseMission(input: { mission: MissionRecord; tasks: TaskReco
     reasons.push("mission_budget_exhausted");
     nextActions.push("Reduce the remaining plan or request an approved budget extension before resuming.");
   }
-  const health: MissionDoctorReport["health"] = mission.status === "blocked" || mission.status === "failed" || blockedCompensations ? "blocked" : waitingStepMismatch ? "stalled" : waiting ? "waiting" : reasons.length ? "stalled" : "healthy";
-  const summary = waitingStepMismatch ? "Mission wait points to a step that is no longer active; repair the saved continuation." : health === "healthy" ? "Mission has a live executable path." : health === "waiting" ? `Mission is waiting for ${waiting?.kind ?? "an external condition"}.` : health === "stalled" ? "Mission is active but has no healthy forward execution path." : "Mission requires intervention before it can safely continue.";
+  const health: MissionDoctorReport["health"] = mission.status === "blocked" || mission.status === "failed" || blockedCompensations ? "blocked" : waitingStepMismatch || syntheticTimerProvider ? "stalled" : waiting ? "waiting" : reasons.length ? "stalled" : "healthy";
+  const summary = syntheticTimerProvider ? "Mission is waiting on a synthetic timer provider that cannot deliver an event; replan the wait." : waitingStepMismatch ? "Mission wait points to a step that is no longer active; repair the saved continuation." : health === "healthy" ? "Mission has a live executable path." : health === "waiting" ? `Mission is waiting for ${waiting?.kind ?? "an external condition"}.` : health === "stalled" ? "Mission is active but has no healthy forward execution path." : "Mission requires intervention before it can safely continue.";
   return { missionId: mission.id, status: mission.status, generatedAt: now, health, summary, reasons: [...new Set(reasons)].slice(0, 20), nextActions: [...new Set(nextActions)].slice(0, 10), readyStepIds: ready.slice(0, 200), activeStepIds: (mission.activeStepIds ?? []).slice(0, 200), ...(waiting ? { waiting } : {}), tasks, compensation: { pending: pendingCompensations, blocked: blockedCompensations }, budget: reportBudget, ...(mission.workSchedule ? { workSchedule: mission.workSchedule } : {}) };
 }

@@ -322,6 +322,30 @@ function missionText(value: unknown, field: string, max: number): string {
   return result;
 }
 
+/** Agent-authored plans are ordered by default; explicit dependencies retain DAG/parallel control. */
+function orderedAgentMissionSteps(value: unknown): unknown[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const raw = value.filter((step): step is Record<string, unknown> => Boolean(step) && typeof step === "object" && !Array.isArray(step));
+  if (raw.length !== value.length || raw.some((step) => step.id !== undefined && (typeof step.id !== "string" || !step.id.trim()))) return value;
+  const reservedIds = new Set(raw.flatMap((step) => typeof step.id === "string" && step.id.trim() ? [step.id.trim()] : []));
+  const ids = raw.map((step, index) => {
+    if (typeof step.id === "string") return step.id.trim();
+    const base = `mission_step_${index + 1}`;
+    let id = base;
+    let suffix = 1;
+    while (reservedIds.has(id)) id = `${base}_${suffix++}`;
+    reservedIds.add(id);
+    return id;
+  });
+  let validIndex = 0;
+  return value.map((step) => {
+    if (!step || typeof step !== "object" || Array.isArray(step)) return step;
+    const index = validIndex++;
+    const record = step as Record<string, unknown>;
+    return { ...record, id: ids[index], dependsOn: record.dependsOn === undefined ? index > 0 ? [ids[index - 1]] : [] : record.dependsOn };
+  });
+}
+
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (value && typeof value === "object") {
@@ -2508,7 +2532,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     }
     case "CHUCK_MISSION_START": {
       if (Number(args.maxAutomaticExtensions ?? 0) > 0 && !runtime.approvedApprovalId) throw new Error("Automatic mission extensions require owner approval of the initial allowance.");
-      const missionSteps = stripSupervisorOwnedMissionStepTools(args.steps);
+      const missionSteps = orderedAgentMissionSteps(stripSupervisorOwnedMissionStepTools(args.steps));
       const invalidSteps = validateMissionStepsPayload(missionSteps);
       if (invalidSteps) throw new Error(invalidSteps);
       const mission = await createMission(userId, {
@@ -2528,7 +2552,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
           cadenceSeconds: Number(schedule.cadenceSeconds),
           };
         })() : undefined,
-        steps: Array.isArray(missionSteps) ? missionSteps.map((step: Record<string, unknown>) => ({
+        steps: Array.isArray(missionSteps) ? (missionSteps as Record<string, unknown>[]).map((step) => ({
           id: typeof step.id === "string" ? step.id : undefined,
           title: missionText(step.title, "step title", 240),
           objective: missionText(step.objective, "step objective", 4000),
@@ -2672,6 +2696,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const provider = text(args.provider).trim().slice(0, 120);
       const providerEventId = text(args.providerEventId).trim().slice(0, 240);
       if (!provider || !providerEventId) throw new Error("provider and providerEventId must be non-empty");
+      const normalizedProvider = provider.toLowerCase().replace(/[\s_]+/g, "-");
+      if (normalizedProvider === "mission-timer") throw new Error("CHUCK_MISSION_WAIT_EVENT requires a real external provider callback and cannot create a timer. Use CHUCK_TASK_WAIT with a verified checkpoint and the exact post-wake action.");
       const stepId = args.stepId ? text(args.stepId, 160) : mission.currentStepId;
       const active = new Set(mission.activeStepIds?.length ? mission.activeStepIds : mission.currentStepId ? [mission.currentStepId] : []);
       if (!stepId || !active.has(stepId) || mission.steps.find((step) => step.id === stepId)?.status !== "running") throw new Error("The provider wait must belong to an active mission step");
@@ -2844,10 +2870,10 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_OUTCOME_PLAN": return planOutcome(text(args.slug), args.input && typeof args.input === "object" ? args.input as Record<string, unknown> : {});
     case "CHUCK_LEAD_CAMPAIGN": return leadCampaignTool(userId, args, runtime);
     case "CHUCK_MISSION_REPLAN": {
-      const missionSteps = stripSupervisorOwnedMissionStepTools(args.steps);
+      const missionSteps = orderedAgentMissionSteps(stripSupervisorOwnedMissionStepTools(args.steps));
       const invalidSteps = validateMissionStepsPayload(missionSteps, { requireNonEmpty: true });
       if (invalidSteps) throw new Error(invalidSteps);
-      const steps = Array.isArray(missionSteps) ? missionSteps.map((step: Record<string, unknown>) => ({
+      const steps = Array.isArray(missionSteps) ? (missionSteps as Record<string, unknown>[]).map((step) => ({
         id: typeof step.id === "string" ? text(step.id, 160) : undefined,
         title: text(step.title, 240),
         objective: text(step.objective, 4000),
