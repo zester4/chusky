@@ -363,6 +363,18 @@ test("contextual reminder runs the bounded agent before delivering its result", 
   assert.match(state.sent[0].text, /still waiting on QA/);
 });
 
+test("reminder delivery projects the bounded result for web chat before channel delivery", async () => {
+  const projected: Array<{ executionKey: string; result: string; status: string }> = [];
+  const state = deps({
+    getReminder: async () => ({ ...deps().reminder, mode: "check_in", text: "Check the launch task" }),
+    runReminder: async () => ({ text: "The launch task is still waiting on QA." }),
+    projectReminder: async ({ executionKey, result, status }) => { projected.push({ executionKey, result, status }); },
+  });
+  const result = await deliverReminder({ reminderId: "rem-1", userId: 1, attemptId: "attempt-7" }, state);
+  assert.deepEqual(result, { delivered: true });
+  assert.deepEqual(projected, [{ executionKey: "attempt-7", result: "The launch task is still waiting on QA.", status: "completed" }]);
+});
+
 test("approval or a blocked contextual reminder is persisted as waiting without a false notification", async () => {
   const state = deps({
     getReminder: async () => ({ ...deps().reminder, mode: "act", text: "Update the CRM" }),

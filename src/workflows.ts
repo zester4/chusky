@@ -28,6 +28,7 @@ export interface WorkflowDependencies {
   sendChannelMessage?(target: ReminderDeliveryTarget, text: string, idempotencyKey: string): Promise<unknown>;
   rescheduleReminder?(reminder: ReminderRecord, runAt: number): Promise<void>;
   runReminder?(reminder: ReminderRecord): Promise<WorkflowExecutionResult>;
+  projectReminder?(input: { reminder: ReminderRecord; executionKey: string; result: string; status: "running" | "completed" | "failed" | "requires_approval"; reminderStatus?: ReminderRecord["status"] }): Promise<unknown>;
   runAgent?(job: JobRecord): Promise<WorkflowExecutionResult>;
   runWorker?(job: JobRecord, payload?: JobWorkflowPayload): Promise<WorkflowExecutionResult>;
   getJobOccurrence?(userId: number, jobId: string, occurrenceId: string): Promise<JobOccurrenceRecord | undefined>;
@@ -99,7 +100,9 @@ export async function deliverReminder(payload: ReminderWorkflowPayload, deps: Wo
     const result = reminder.mode && reminder.mode !== "notify" && deps.runReminder
       ? await deps.runReminder(reminder)
       : { text: reminder.text };
+    const executionKey = payload.attemptId ?? "initial";
     if (result.status === "waiting" || result.status === "blocked") {
+      if (deps.projectReminder) await deps.projectReminder({ reminder, executionKey, result: result.nextAction || result.waitReason || "This reminder is waiting for its configured condition or approval.", status: result.waitReason?.toLowerCase().includes("approval") ? "requires_approval" : "completed", reminderStatus: "waiting" });
       const retryAt = result.retryAt ?? (reminder.mode === "wait_until" && reminder.pollEverySeconds ? Date.now() + reminder.pollEverySeconds * 1000 : undefined);
       if (retryAt && retryAt > Date.now() && deps.rescheduleReminder) await deps.rescheduleReminder(reminder, retryAt);
       else await deps.updateReminder(payload.userId, payload.reminderId, { status: "waiting", nextAction: result.nextAction ?? reminder.nextAction, deliveryError: result.waitReason });
@@ -112,6 +115,7 @@ export async function deliverReminder(payload: ReminderWorkflowPayload, deps: Wo
       return { skipped: true, delivered: false };
     }
     const response = result.text.trim() || "Reminder check-in completed.";
+    if (deps.projectReminder) await deps.projectReminder({ reminder, executionKey, result: response, status: "completed", reminderStatus: "sent" });
     if (target && target.provider !== "telegram") {
       await deps.sendChannelMessage!(target, `⏰ Chusky reminder\n\n${response}`, `reminder:${payload.reminderId}`);
     } else {
@@ -125,6 +129,7 @@ export async function deliverReminder(payload: ReminderWorkflowPayload, deps: Wo
     await deps.updateReminder(payload.userId, payload.reminderId, { status: "sent" });
     posthog?.capture({ distinctId: String(payload.userId), event: "reminder_delivered", properties: { reminder_id: payload.reminderId } });
   } catch (error) {
+    if (deps.projectReminder) await deps.projectReminder({ reminder, executionKey: payload.attemptId ?? "initial", result: error instanceof Error ? error.message : "Reminder execution failed.", status: "failed", reminderStatus: "failed" }).catch(() => undefined);
     await deps.updateReminder(payload.userId, payload.reminderId, { status: "failed", deliveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
     throw error;
   }

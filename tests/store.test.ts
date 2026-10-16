@@ -10,7 +10,7 @@ import {
   claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease,
   type DaytonaWorkspaceRecord, type SdkRunRecord, type TriggerEventRecord,
   createTriggerEvent, getTriggerEvent, listTriggerEvents, updateTriggerEvent,
-  backfillSdkPrivateRunHistory, createWebTelegramLinkCode, ensureTriggerWebProjection, getTelegramUserIdForWebAuth, markTriggerWebApprovalResuming, mergeLinkedWebSession, mutateSession, redeemWebTelegramLinkCode,
+  backfillSdkPrivateRunHistory, createWebTelegramLinkCode, ensureReminderWebProjection, ensureTriggerWebProjection, getTelegramUserIdForWebAuth, markTriggerWebApprovalResuming, mergeLinkedWebSession, mutateSession, redeemWebTelegramLinkCode,
   createVideoJob, getVideoJob, listVideoJobs, updatePhoneCall, updateVideoJob,
   addRecallMeeting, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, updateRecallMeeting, claimRecallCopilotEvaluation,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
@@ -618,6 +618,20 @@ test("trigger web projections are owner-private and idempotent", async () => {
   assert.equal(thread?.runs[0]?.metadata?.triggerEventId, input.eventId);
   const other = await getSession(810102);
   assert.equal(other.sdkThreads?.some((item) => item.id === first.threadId), false);
+});
+
+test("reminder web projections are owner-private and idempotent per execution", async () => {
+  const reminder = { id: "rem_web_projection", userId: 810103, text: "Follow up after the meeting", runAt: Date.now(), status: "scheduled" as const, createdAt: Date.now() };
+  const first = await ensureReminderWebProjection({ reminder, executionKey: "attempt-1", result: "I checked the meeting outcome and scheduled the next step.", status: "completed", reminderStatus: "sent" });
+  const retry = await ensureReminderWebProjection({ reminder, executionKey: "attempt-1", result: "Updated result after retry.", status: "completed", reminderStatus: "sent" });
+  assert.deepEqual({ ...retry, created: true }, first);
+  const session = await getSession(reminder.userId);
+  const thread = session.sdkThreads?.find((item) => item.id === first.threadId);
+  assert.equal(thread?.metadata.source, "reminder-notifications");
+  assert.equal(thread?.runs.length, 1);
+  assert.equal(thread?.runs[0]?.metadata?.reminderId, reminder.id);
+  assert.equal(thread?.runs[0]?.output, "Updated result after retry.");
+  assert.notEqual((await getSession(810105)).sdkThreads?.some((item) => item.id === first.threadId), true);
 });
 
 test("trigger approvals stay paused in web chat and resume the same projected run", async () => {

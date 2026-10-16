@@ -1,7 +1,8 @@
 export interface WebNotificationEvent {
   userId: number;
   eventId: string;
-  kind?: "run" | "call" | "mission";
+  kind?: "run" | "call" | "mission" | "reminder";
+  reminderId?: string;
   callId?: string;
   missionId?: string;
   threadId?: string;

@@ -1299,6 +1299,11 @@ export interface ReminderRecord {
   /** Durable channel destination captured when the reminder is created. */
   deliveryTarget?: ReminderDeliveryTarget;
   deliveryError?: string;
+  /** Latest owner-private dashboard projection for this reminder's execution. */
+  webThreadId?: string;
+  webRunId?: string;
+  webNotificationAt?: number;
+  webReadAt?: number;
   createdAt: number;
 }
 
@@ -6814,6 +6819,63 @@ export async function ensureTriggerWebProjection(input: {
     thread.updatedAt = now;
     return { threadId: thread.id, runId: run.id };
   }) as Promise<{ threadId: string; runId: string }>;
+}
+
+/**
+ * Materialize one reminder execution as an owner-private dashboard chat run.
+ * The execution key is the durable workflow attempt, so retries update the
+ * same run instead of creating duplicate chat notifications.
+ */
+export async function ensureReminderWebProjection(input: {
+  reminder: ReminderRecord;
+  executionKey: string;
+  result: string;
+  status: "running" | "completed" | "failed" | "requires_approval";
+  reminderStatus?: ReminderRecord["status"];
+}): Promise<{ threadId: string; runId: string; eventId: string; created: boolean }> {
+  const { reminder } = input;
+  if (!Number.isSafeInteger(reminder.userId) || reminder.userId <= 0 || !/^rem_[A-Za-z0-9_-]{1,120}$/.test(reminder.id)) {
+    throw new Error("A valid owner-scoped reminder is required for its web notification.");
+  }
+  const executionKey = input.executionKey.slice(0, 180);
+  const eventId = `reminder:${reminder.id}:${executionKey}`;
+  const threadId = "thr_reminder_updates";
+  const runId = `run_reminder_${createHash("sha256").update(eventId).digest("hex").slice(0, 32)}`;
+  const now = Date.now();
+  const projection = await mutateSession(reminder.userId, (session) => {
+    session.sdkThreads = session.sdkThreads ?? [];
+    let thread = session.sdkThreads.find((item) => item.id === threadId && item.metadata.source === "reminder-notifications");
+    if (!thread) {
+      thread = { id: threadId, externalId: "reminder-updates", metadata: { source: "reminder-notifications", title: "Reminder updates" }, history: [], runs: [], createdAt: now, updatedAt: now };
+      session.sdkThreads.push(thread);
+    }
+    const existing = thread.runs.find((run) => run.metadata?.reminderEventId === eventId);
+    const run: SdkRunRecord = existing ?? {
+      id: runId,
+      ownerPrivateRun: true,
+      status: input.status === "requires_approval" ? "requires_approval" : input.status === "failed" ? "failed" : input.status === "running" ? "running" : "completed",
+      input: `[Reminder] ${reminder.text}`.slice(0, 12_000),
+      model: session.model,
+      metadata: { source: "reminder", reminderId: reminder.id, reminderEventId: eventId, executionKey, ...(input.reminderStatus ? { reminderStatus: input.reminderStatus } : {}) },
+      events: [{ id: `evt_${runId}_started`, type: "run.started", at: now, text: "Scheduled reminder execution started." }],
+      createdAt: now,
+      updatedAt: now,
+    };
+    run.status = input.status === "requires_approval" ? "requires_approval" : input.status === "failed" ? "failed" : input.status === "running" ? "running" : "completed";
+    run.output = input.result.slice(0, 12_000);
+    run.metadata = { ...(run.metadata ?? {}), ...(input.reminderStatus ? { reminderStatus: input.reminderStatus } : {}) };
+    run.updatedAt = now;
+    const terminalType = input.status === "requires_approval" ? "run.approval_required" : input.status === "failed" ? "run.failed" : input.status === "completed" ? "run.completed" : "run.status";
+    const terminalId = `evt_${runId}_${terminalType.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+    if (!run.events.some((event) => event.id === terminalId)) run.events.push({ id: terminalId, type: terminalType, at: now, text: input.result.slice(0, 2_000) });
+    if (!existing) thread.runs.push(run);
+    thread.updatedAt = now;
+    return { threadId: thread.id, runId: run.id, eventId, created: !existing };
+  }, { sdkThreadId: threadId });
+  if (!projection) throw new Error("Reminder notification could not be saved to the owner session.");
+  await updateReminder(reminder.userId, reminder.id, { webThreadId: projection.threadId, webRunId: projection.runId, webNotificationAt: now });
+  if (projection.created) publishWebNotification({ userId: reminder.userId, eventId, kind: "reminder", reminderId: reminder.id, threadId: projection.threadId, runId: projection.runId });
+  return projection;
 }
 
 /**

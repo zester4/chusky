@@ -6,7 +6,7 @@ import { serve, type ServerType } from "@hono/node-server";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
-import { appendSdkRunHistoryToSession, ensureTriggerWebProjection, claimRecallCopilotEvaluation, getMeetingRepresentativeProfile, listMeetingContacts, getAttentionRecord } from "./store.js";
+import { appendSdkRunHistoryToSession, ensureReminderWebProjection, ensureTriggerWebProjection, claimRecallCopilotEvaluation, getMeetingRepresentativeProfile, listMeetingContacts, getAttentionRecord } from "./store.js";
 import { getJobOccurrence, listJobOccurrences, createJobOccurrence, updateJobOccurrence } from "./store.js";
 import { createAttentionRecord } from "./store.js";
 import { registerHandlers } from "./handlers.js";
@@ -2521,6 +2521,7 @@ async function main(): Promise<void> {
       try { payload = parseReminderWorkflowPayload(workflow.requestPayload); } catch (error) { throw new WorkflowNonRetryableError(error instanceof Error ? error.message : "Invalid reminder workflow payload"); }
       await workflow.run("deliver-reminder", () => deliverReminder(payload, {
         getReminder, updateReminder, getJob, updateJob, getTelegramChatId, claimDelivery, completeDelivery,
+        projectReminder: ensureReminderWebProjection,
         runReminder: async (reminder) => withCliLock(payload.userId, undefined, async () => {
           const session = await getSession(payload.userId);
           const context = await buildAutonomyContextBundle(payload.userId, { objective: reminder.text, links: reminder.links, snapshot: reminder.contextSnapshot });

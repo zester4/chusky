@@ -1907,7 +1907,7 @@ export function registerSdkApi(app: Hono): void {
         };
       }) : [],
       channels: channels.filter((item) => !item.disabledAt).map((item) => ({ id: identityFingerprint(item), provider: item.provider, externalUserId: item.externalUserId, workspaceId: item.workspaceId, displayName: item.displayName, verifiedAt: new Date(item.verifiedAt).toISOString(), proactiveOptIn: item.proactiveOptIn !== false })),
-      reminders: reminders.map((item) => ({ ...item, runAt: new Date(item.runAt).toISOString(), createdAt: new Date(item.createdAt).toISOString() })),
+      reminders: reminders.map((item) => ({ ...item, runAt: new Date(item.runAt).toISOString(), createdAt: new Date(item.createdAt).toISOString(), ...(item.webNotificationAt ? { webNotificationAt: new Date(item.webNotificationAt).toISOString() } : {}), ...(item.webReadAt ? { webReadAt: new Date(item.webReadAt).toISOString() } : {}), ...(item.webThreadId ? { webThreadId: item.webThreadId } : {}), ...(item.webRunId ? { webRunId: item.webRunId } : {}), ...(item.webNotificationAt && item.webReadAt !== item.webNotificationAt ? { needsAttention: true } : {}) })),
       jobs: visibleJobs.map((item) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
       attentionPulse: config.elenaEnabled && pulseOccurrence ? { lastOccurrence: occurrenceView(pulseOccurrence) } : undefined,
       memory: memoryProjectionResult.memory.map(memoryView),
@@ -1944,9 +1944,9 @@ export function registerSdkApi(app: Hono): void {
     return streamSSE(c, async (stream) => {
       let closed = false;
       let wake: (() => void) | undefined;
-      const queue: Array<{ eventId: string; kind?: "run" | "call" | "mission"; callId?: string; missionId?: string; threadId?: string; runId?: string }> = [];
+      const queue: Array<{ eventId: string; kind?: "run" | "call" | "mission" | "reminder"; callId?: string; missionId?: string; reminderId?: string; threadId?: string; runId?: string }> = [];
       const unsubscribe = subscribeWebNotifications(userId, (event) => {
-        queue.push({ eventId: event.eventId, ...(event.kind ? { kind: event.kind } : {}), ...(event.callId ? { callId: event.callId } : {}), ...(event.missionId ? { missionId: event.missionId } : {}), ...(event.threadId ? { threadId: event.threadId } : {}), ...(event.runId ? { runId: event.runId } : {}) });
+        queue.push({ eventId: event.eventId, ...(event.kind ? { kind: event.kind } : {}), ...(event.callId ? { callId: event.callId } : {}), ...(event.missionId ? { missionId: event.missionId } : {}), ...(event.reminderId ? { reminderId: event.reminderId } : {}), ...(event.threadId ? { threadId: event.threadId } : {}), ...(event.runId ? { runId: event.runId } : {}) });
         wake?.();
       });
       const abort = () => { closed = true; wake?.(); };
@@ -1965,6 +1965,16 @@ export function registerSdkApi(app: Hono): void {
         c.req.raw.signal.removeEventListener("abort", abort);
       }
     });
+  });
+
+  app.post("/v1/reminders/:id/notification/read", async (c) => {
+    const userId = sdkUser(c)!.userId;
+    const reminder = await getReminder(userId, c.req.param("id"));
+    if (!reminder) return apiError(c, 404, "not_found", "Reminder not found.");
+    if (!reminder.webNotificationAt) return apiError(c, 409, "reminder_not_projected", "This reminder has not produced a dashboard notification.");
+    const updated = await updateReminder(userId, reminder.id, { webReadAt: reminder.webNotificationAt });
+    if (!updated) return apiError(c, 409, "reminder_changed", "The reminder changed while its notification was being marked read. Refresh and try again.");
+    return c.json({ ok: true, reminderId: reminder.id, readAt: reminder.webNotificationAt });
   });
 
   app.post("/v1/account/trigger-events/:eventId/read", async (c) => {
