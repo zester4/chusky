@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, normalizeDelegationToolScopes, validateDelegationTarget } from "./capabilities.js";
+import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, normalizeDelegationToolScopes, objectiveRequiresNoraResearch, validateDelegationTarget } from "./capabilities.js";
 import { cancelSubagentWorkflow, enqueueSubagentApprovalContinuation, enqueueSubagentContinuation } from "./workflow.js";
 import { memoryRouter } from "../memory/router.js";
 import { nativeTool } from "../nativeTools.js";
@@ -325,6 +325,15 @@ export async function executeDelegation(
     const toolkitPresentations = collectComposioToolPresentations(scopedComposio.tools);
     const toolkitMetadataFor = (slug: string) => options?.getComposioToolPresentation?.(slug) ?? toolkitPresentations.get(slug) ?? {};
     const workerTools = [...nativeWorkerTools, ...scopedComposio.tools];
+    const noraResearchCapabilityMissing = workerName === "nora"
+      && objectiveRequiresNoraResearch(contract.objective)
+      && !workerTools.some((tool: any) => [
+        "COMPOSIO_SEARCH_WEB",
+        "COMPOSIO_SEARCH_FETCH_URL_CONTENT",
+        "CHUCK_TINYFISH_SEARCH",
+        "CHUCK_TINYFISH_FETCH",
+        "CHUCK_TINYFISH_RESEARCH",
+      ].includes(String(tool?.function?.name ?? tool?.name ?? "")));
     if (actionPayload) {
       // ── Explicit Tool Call Execution (Direct Action Payload) ────────────────
       if (!allowedToolNames.has(actionPayload.name)) {
@@ -461,6 +470,18 @@ export async function executeDelegation(
           }
         }
       }
+    } else if (noraResearchCapabilityMissing) {
+      status = "requires_tool_request";
+      toolRequest = {
+        intent: "A verified public-web research action for Nora",
+        reason: "This research objective reached Nora without COMPOSIO_SEARCH_WEB, COMPOSIO_SEARCH_FETCH_URL_CONTENT, or a configured native web-research fallback.",
+        preferredToolkit: "web research",
+      };
+      outputSummary = `${manifest.displayName} is waiting for a verified public-web research capability before starting. No unsupported tool was attempted.`;
+      logs.push(safeToolAudit({ tool: "NORA_RESEARCH_PREFLIGHT", args: {}, userId, runId: handoffRecord.delegation.runId, status: "failed", error: outputSummary }));
+      await blockTask(userId, durableTask.id, outputSummary, "Awaiting Chusky to verify and grant a public-web research action");
+      await emitActivity({ activityId: `worker:${handoffRecord.id}:preflight`, kind: "worker", status: "waiting", message: `${manifest.displayName} is waiting for a research capability`, summary: "No verified research tool was available" });
+      await options?.onStatus?.(`⏸️ ${manifest.displayName} is waiting for a verified research capability.`);
     } else if (canRunModel) {
       // ── Autonomous OpenRouter Worker Model Loop ─────────────────────────────
       let skillContext = "";
@@ -476,10 +497,10 @@ Do not attempt a tool outside those lists. Destructive, financial, permission-ch
 deployment, remote Git push, and other high-impact external actions remain
 approval-gated; validated outbound calls are autonomous under the current policy.
 For research, use the scoped COMPOSIO_SEARCH_WEB and COMPOSIO_SEARCH_FETCH_URL_CONTENT
-tools directly when available. If an integration action is unavailable or its slug
-appears wrong, do not guess or retry variants. Use COMPOSIO_SEARCH_TOOLS, inspect
-the schema, and ask Chusky to delegate
-one exact verified slug.
+tools directly when available, or the exposed CHUCK_TINYFISH_SEARCH/FETCH fallback.
+If no research action is available, call CHUCK_REQUEST_ADDITIONAL_TOOLS with the
+capability you need. Do not call COMPOSIO_SEARCH_TOOLS from a worker: discovery
+belongs to Chusky, which must verify one exact replacement before resuming you.
 ${options?.resume ? `This is durable continuation #${(options.resume.resumeCount ?? 0) + 1} of the same task. Preserve the earlier objective and report only new work performed after the capability was granted.` : ""}
 
 Delegation Context:
