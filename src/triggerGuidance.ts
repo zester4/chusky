@@ -42,6 +42,14 @@ export function triggerWorkflowExhaustion(input: { status: string; result?: stri
   error: string;
 } | undefined {
   if (input.status === "completed" || input.status === "awaiting_approval") return undefined;
+  if (input.status === "failed" && input.result?.trim()) {
+    return {
+      status: "failed",
+      result: input.result,
+      notificationStatus: "unknown",
+      error: "The trigger failed and its result was saved, but notification delivery did not finish. Review the saved result before retrying any external action.",
+    };
+  }
   if (input.result?.trim()) {
     return {
       status: "completed",

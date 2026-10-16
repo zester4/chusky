@@ -605,6 +605,14 @@ export interface OrChatOptions {
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 }
 
+/** The bounded OpenRouter attempts all expired before a model response arrived. */
+export class OpenRouterTimeoutError extends Error {
+  constructor(readonly modelId: string, readonly attempts: number) {
+    super("OpenRouter model request timed out after bounded retries.");
+    this.name = "OpenRouterTimeoutError";
+  }
+}
+
 export async function orChat(
   model: string,
   messages: ApiMessage[],
@@ -652,6 +660,7 @@ export async function orChat(
   }
 
   let lastError: unknown;
+  let timedOut = false;
   let streamedOutputExposed = false;
   for (let attempt = 0; attempt < config.openRouterMaxAttempts; attempt++) {
     if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
@@ -685,11 +694,22 @@ export async function orChat(
       // safe to retry because no action has executed yet.
       if (streamedOutputExposed) throw e;
       lastError = e;
+      if (e instanceof Error && e.name === "TimeoutError") timedOut = true;
     }
     if (attempt + 1 < config.openRouterMaxAttempts) {
       logger.debug({ model, attempt: attempt + 1, timeoutMs: openRouterAttemptTimeoutMs(attempt + 1) }, "Retrying OpenRouter request after a transient failure");
       await new Promise((resolve) => setTimeout(resolve, 400 * 2 ** attempt + Math.random() * 250));
     }
+  }
+  if (timedOut && lastError instanceof Error && lastError.name === "TimeoutError") {
+    const attempts = Math.min(config.openRouterMaxAttempts, 5);
+    logger.warn({
+      model: model.slice(0, 160),
+      attempts,
+      attemptTimeoutsMs: Array.from({ length: attempts }, (_, index) => openRouterAttemptTimeoutMs(index)),
+      failureClass: "OpenRouterTimeoutError",
+    }, "OpenRouter model request timed out after bounded retries");
+    throw new OpenRouterTimeoutError(model, attempts);
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
@@ -3320,7 +3340,7 @@ async function executeAgent(
         } as ChatResponse;
       } else {
         await persistRun("running", "run.model_requested", undefined, { model: requestModel, round, messageCount: messages.length });
-        response = await orChat(requestModel, modelMessages, modelAvailableTools, signal, streamModelText, undefined, voiceTurn ? {
+        const runRoutingOptions: OrChatOptions | undefined = voiceTurn ? {
           preferredMaxLatencySeconds: 2,
           preferredMinThroughput: 50,
           fallbackModels: config.voiceFallbackModels,
@@ -3328,7 +3348,11 @@ async function executeAgent(
           sessionId: options?.voiceSessionId,
           latencyOptimized: true,
           reasoningEffort: "minimal",
-        } : (structuredArtifactRequest || malformedToolCallPending ? { maxTokens: config.openRouterArtifactMaxTokens } : undefined));
+        } : channelContext?.triggerEventId ? {
+          fallbackModels: config.openRouterFallbackModels,
+          latencyOptimized: true,
+        } : (structuredArtifactRequest || malformedToolCallPending ? { maxTokens: config.openRouterArtifactMaxTokens } : undefined);
+        response = await orChat(requestModel, modelMessages, modelAvailableTools, signal, streamModelText, undefined, runRoutingOptions);
       }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -3338,7 +3362,7 @@ async function executeAgent(
         requestModel = config.visionModel;
         if (onStatus) await onStatus(`👁️ I’m switching to a model that can understand ${modality} input…`);
         logger.warn({ requestedModel: model, requestModel, modality }, "Selected model rejected media input; using fallback");
-        response = await orChat(requestModel, modelMessages, modelAvailableTools, signal, streamModelText, undefined, voiceTurn ? {
+        const runRoutingOptions: OrChatOptions | undefined = voiceTurn ? {
           preferredMaxLatencySeconds: 2,
           preferredMinThroughput: 50,
           fallbackModels: config.voiceFallbackModels,
@@ -3346,7 +3370,11 @@ async function executeAgent(
           sessionId: options?.voiceSessionId,
           latencyOptimized: true,
           reasoningEffort: "minimal",
-        } : (structuredArtifactRequest || malformedToolCallPending ? { maxTokens: config.openRouterArtifactMaxTokens } : undefined));
+        } : channelContext?.triggerEventId ? {
+          fallbackModels: config.openRouterFallbackModels,
+          latencyOptimized: true,
+        } : (structuredArtifactRequest || malformedToolCallPending ? { maxTokens: config.openRouterArtifactMaxTokens } : undefined);
+        response = await orChat(requestModel, modelMessages, modelAvailableTools, signal, streamModelText, undefined, runRoutingOptions);
       } else {
         if (generatedImages.length && !modelTextStreamed && /OpenRouter|in-stream|stream ended/i.test(message)) {
           const models = [...new Set(generatedImages.map((image) => image.model).filter((value): value is string => Boolean(value)))];
