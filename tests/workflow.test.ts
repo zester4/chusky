@@ -4,7 +4,7 @@ import { deliverJob, deliverReminder, parseJobWorkflowPayload, parseReminderWork
 import type { JobRecord, ReminderRecord } from "../src/store.js";
 import type { JobOccurrenceRecord } from "../src/autonomy/types.js";
 import { resolveWorkflowEndpoint } from "../src/workflowUrls.js";
-import { parseWorkflowFailureRequestPayload, triggerAgentWorkflowRunId, triggerWorkflowVersionForPayload, TRIGGER_WORKFLOW_VERSION } from "../src/triggerWorkflow.js";
+import { parseWorkflowFailureRequestPayload, triggerAgentWorkflowRunId, triggerWorkflowVersionForPayload, TRIGGER_AGENT_WORKFLOW_TIMEOUT, TRIGGER_WORKFLOW_VERSION } from "../src/triggerWorkflow.js";
 
 function deps(overrides: Partial<Parameters<typeof deliverReminder>[1]> = {}) {
   const sent: { chatId: number; text: string }[] = [];
@@ -41,6 +41,11 @@ test("trigger workflow payloads keep old runs on the legacy step graph and pin n
   assert.throws(() => triggerWorkflowVersionForPayload(4), /Unsupported trigger workflow version/);
   assert.equal(triggerAgentWorkflowRunId("evt_123"), triggerAgentWorkflowRunId("evt_123"));
   assert.notEqual(triggerAgentWorkflowRunId("evt_123"), triggerAgentWorkflowRunId("evt_456"));
+});
+
+test("trigger agent callback timeout is an explicit Upstash duration", () => {
+  assert.equal(TRIGGER_AGENT_WORKFLOW_TIMEOUT, "900s");
+  assert.match(TRIGGER_AGENT_WORKFLOW_TIMEOUT, /^\d+[smhd]$/);
 });
 
 test("QStash failure payload parser reads the documented base64 source body", () => {

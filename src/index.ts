@@ -46,7 +46,7 @@ import { ensureXchatActivitySubscriptions, type XchatSetupStatus } from "./chann
 import { XAdapter, type XSetupStatus } from "./channels/x.js";
 import { TelegramAdapter } from "./channels/telegram.js";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "./telegramWebhook.js";
-import { enqueueAutonomyApprovalResume, enqueueTaskWorkflow, parseWorkflowFailureRequestPayload, triggerWorkflowVersionForPayload, TRIGGER_WORKFLOW_VERSION, triggerAgentWorkflowRunId, triggerAgentWorkflowUrl, triggerWorkflowUrl, workflowClient, workflowFailureUrl } from "./triggerWorkflow.js";
+import { enqueueAutonomyApprovalResume, enqueueTaskWorkflow, parseWorkflowFailureRequestPayload, triggerWorkflowVersionForPayload, TRIGGER_AGENT_WORKFLOW_TIMEOUT, TRIGGER_WORKFLOW_VERSION, triggerAgentWorkflowRunId, triggerAgentWorkflowUrl, triggerWorkflowUrl, workflowClient, workflowFailureUrl } from "./triggerWorkflow.js";
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
 import type { TinyFishResearchRunRecord } from "./store.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
@@ -3334,7 +3334,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
               headers: { "content-type": "application/json" },
               retries: 1,
               retryDelay: "1000 * (1 + retried)",
-              timeout: 900,
+              timeout: TRIGGER_AGENT_WORKFLOW_TIMEOUT,
             });
             if (response.status < 200 || response.status >= 300) throw new Error(`Trigger agent callback returned HTTP ${response.status}`);
             return response.body;
@@ -3425,7 +3425,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                 headers: { "content-type": "application/json" },
                 retries: 1,
                 retryDelay: "1000 * (1 + retried)",
-                timeout: 900,
+                timeout: TRIGGER_AGENT_WORKFLOW_TIMEOUT,
               });
               if (response.status < 200 || response.status >= 300) throw new Error(`Trigger agent resume callback returned HTTP ${response.status}`);
               const outcome = response.body;
