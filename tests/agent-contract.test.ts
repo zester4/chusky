@@ -2781,34 +2781,6 @@ test("agent retries transient OpenRouter responses with a bounded retry", async 
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test("trigger model request budget prevents sequential model timeouts from stretching a turn", async () => {
-  const originalFetch = globalThis.fetch;
-  const originalTimeout = config.openRouterTimeoutMs;
-  const originalAttempts = config.openRouterMaxAttempts;
-  let chatAttempts = 0;
-  config.openRouterTimeoutMs = 1_000;
-  config.openRouterMaxAttempts = 2;
-  globalThis.fetch = (async (_input, init) => {
-    chatAttempts++;
-    const signal = init?.signal as AbortSignal;
-    return await new Promise<Response>((_resolve, reject) => {
-      if (signal.aborted) reject(signal.reason);
-      else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-    });
-  }) as typeof fetch;
-  try {
-    await assert.rejects(
-      () => orChat("test/model", [{ role: "user", content: "hello" }], [], undefined, undefined, undefined, { maxTotalElapsedMs: 20 }),
-      (error: unknown) => error instanceof OpenRouterTimeoutError && error.modelId === "test/model" && error.attempts === 1,
-    );
-    assert.equal(chatAttempts, 1);
-  } finally {
-    globalThis.fetch = originalFetch;
-    config.openRouterTimeoutMs = originalTimeout;
-    config.openRouterMaxAttempts = originalAttempts;
-  }
-});
-
 test("OpenRouter reports a typed timeout after its bounded model attempts", async () => {
   const originalFetch = globalThis.fetch;
   const originalTimeout = config.openRouterTimeoutMs;

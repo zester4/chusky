@@ -601,8 +601,6 @@ export interface OrChatOptions {
   sessionId?: string;
   /** Ask OpenRouter to route across the selected model set by recent latency. */
   latencyOptimized?: boolean;
-  /** Total elapsed-time budget shared across all HTTP attempts for this turn. */
-  maxTotalElapsedMs?: number;
   /** Safe trigger correlation for timing logs; contains no prompt or user content. */
   triggerEventId?: string;
   /** Agent loop round for trigger timing logs. */
@@ -667,26 +665,16 @@ export async function orChat(
 
   let lastError: unknown;
   let timedOut = false;
-  let budgetExhausted = false;
   let attemptsMade = 0;
   const requestStartedAt = Date.now();
-  const maxTotalElapsedMs = routing.maxTotalElapsedMs
-    ? Math.max(1, Math.min(routing.maxTotalElapsedMs, 120_000))
-    : undefined;
-  const deadlineAt = maxTotalElapsedMs ? requestStartedAt + maxTotalElapsedMs : undefined;
   const trace = routing.triggerEventId
     ? { triggerEventId: routing.triggerEventId, round: routing.triggerRound }
     : undefined;
   let streamedOutputExposed = false;
   for (let attempt = 0; attempt < config.openRouterMaxAttempts; attempt++) {
     if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
-    const remainingMs = deadlineAt ? deadlineAt - Date.now() : Number.POSITIVE_INFINITY;
-    if (remainingMs <= 0) {
-      budgetExhausted = true;
-      break;
-    }
     try {
-      const attemptTimeoutMs = Math.max(1, Math.min(openRouterAttemptTimeoutMs(attempt), remainingMs));
+      const attemptTimeoutMs = openRouterAttemptTimeoutMs(attempt);
       attemptsMade += 1;
       if (trace) logger.info({ ...trace, model: model.slice(0, 160), attempt: attemptsMade, timeoutMs: attemptTimeoutMs }, "Trigger model request attempt started");
       const attemptSignal = requestSignal(signal, attemptTimeoutMs);
@@ -724,26 +712,19 @@ export async function orChat(
     }
     if (attempt + 1 < config.openRouterMaxAttempts) {
       const retryDelayMs = 400 * 2 ** attempt + Math.random() * 250;
-      const retryRemainingMs = deadlineAt ? deadlineAt - Date.now() : Number.POSITIVE_INFINITY;
-      if (retryRemainingMs <= retryDelayMs) {
-        budgetExhausted = true;
-        break;
-      }
       logger.debug({ model, attempt: attempt + 1, timeoutMs: openRouterAttemptTimeoutMs(attempt + 1) }, "Retrying OpenRouter request after a transient failure");
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
   }
   const elapsedMs = Date.now() - requestStartedAt;
-  const exhaustedBudget = budgetExhausted || Boolean(deadlineAt && elapsedMs >= maxTotalElapsedMs!);
-  if ((timedOut && lastError instanceof Error && lastError.name === "TimeoutError") || exhaustedBudget) {
+  if (timedOut && lastError instanceof Error && lastError.name === "TimeoutError") {
     logger.warn({
       model: model.slice(0, 160),
       attempts: attemptsMade,
       elapsedMs,
-      maxTotalElapsedMs,
       ...(trace ?? {}),
       failureClass: "OpenRouterTimeoutError",
-    }, "OpenRouter model request exhausted its bounded time budget");
+    }, "OpenRouter model request exhausted its bounded attempt timeouts");
     throw new OpenRouterTimeoutError(model, attemptsMade, elapsedMs);
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -3386,7 +3367,6 @@ async function executeAgent(
         } : channelContext?.triggerEventId ? {
           fallbackModels: config.openRouterFallbackModels,
           latencyOptimized: true,
-          maxTotalElapsedMs: config.triggerModelRequestBudgetMs,
           triggerEventId: channelContext.triggerEventId,
           triggerRound: round,
         } : (structuredArtifactRequest || malformedToolCallPending ? { maxTokens: config.openRouterArtifactMaxTokens } : undefined);
@@ -3411,7 +3391,6 @@ async function executeAgent(
         } : channelContext?.triggerEventId ? {
           fallbackModels: config.openRouterFallbackModels,
           latencyOptimized: true,
-          maxTotalElapsedMs: config.triggerModelRequestBudgetMs,
           triggerEventId: channelContext.triggerEventId,
           triggerRound: round,
         } : (structuredArtifactRequest || malformedToolCallPending ? { maxTokens: config.openRouterArtifactMaxTokens } : undefined);
