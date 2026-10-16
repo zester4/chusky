@@ -9404,6 +9404,10 @@ export async function resumeMissionFromProviderEvent(userId: number, id: string,
     const waiting = mission.waiting;
     if (mission.status !== "waiting" || waiting?.kind !== "provider_event" || waiting.provider !== provider || waiting.providerEventId !== providerEventId) return undefined;
     const now = Date.now();
+    // A callback arriving after the configured deadline is stale. The recovery
+    // sweep owns timeout closeout; accepting it here would silently revive an
+    // expired wait and skip the required provider reconciliation.
+    if (typeof waiting.expiresAt === "number" && waiting.expiresAt <= now) return undefined;
     return { status: "running", waiting: undefined, error: undefined, nextAction: "Continue from the provider event checkpoint.", events: [...mission.events, { ...missionEvent("resumed", `Provider event ${providerEventId} received from ${provider}.`, now), provider, providerEventId }] };
   });
 }

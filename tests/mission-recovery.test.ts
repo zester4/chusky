@@ -9,6 +9,7 @@ import {
   listTasks,
   startMission,
   settleTaskRun,
+  resumeMissionFromProviderEvent,
   updateTask,
   waitMission,
 } from "../src/store.js";
@@ -62,6 +63,67 @@ test("sweeper resumes an overdue timer without creating a replacement task", asy
   assert.equal(after?.status, "running");
   assert.equal((await listTasks(userId)).filter((item) => item.missionId === mission.id).length, 1);
   assert.equal((await getTask(userId, task.id))?.id, task.id);
+});
+
+test("sweeper blocks an undeliverable synthetic timer provider wait with a repair action", async () => {
+  const userId = 981008;
+  const mission = await runningMission(userId, "synthetic-timer-repair");
+  await waitMission(userId, mission.id, {
+    kind: "provider_event",
+    provider: "mission_timer",
+    providerEventId: "wait_2min_step2",
+    stepId: "step-1",
+  }, "checkpoint before the bad wait", "resume after timer");
+
+  const report = await recoverMissionsForOwner(userId, enqueue);
+  const repaired = await getMission(userId, mission.id);
+  assert.equal(report.blocked, 1);
+  assert.equal(repaired?.status, "blocked");
+  assert.equal(repaired?.waiting, undefined);
+  assert.match(repaired?.error ?? "", /synthetic timer provider/i);
+  assert.match(repaired?.nextAction ?? "", /CHUCK_TASK_WAIT/i);
+  assert.equal(repaired?.checkpoint, "checkpoint before the bad wait");
+});
+
+test("sweeper blocks an expired provider wait only if its exact wait is still current", async () => {
+  const userId = 981009;
+  const mission = await runningMission(userId, "expired-provider-wait");
+  const expiresAt = Date.now() - 1;
+  await waitMission(userId, mission.id, {
+    kind: "provider_event",
+    provider: "fixture",
+    providerEventId: "evt-expired",
+    stepId: "step-1",
+    expiresAt,
+  }, "provider request submitted", "reconcile provider outcome");
+
+  const lateCallback = await resumeMissionFromProviderEvent(userId, mission.id, "fixture", "evt-expired");
+  assert.equal(lateCallback, undefined, "a late provider callback cannot revive an expired wait");
+
+  const report = await recoverMissionsForOwner(userId, enqueue);
+  const blocked = await getMission(userId, mission.id);
+  assert.equal(report.blocked, 1);
+  assert.equal(blocked?.status, "blocked");
+  assert.equal(blocked?.waiting, undefined);
+  assert.match(blocked?.nextAction ?? "", /Reconcile the provider state/i);
+
+  const callback = await resumeMissionFromProviderEvent(userId, mission.id, "fixture", "evt-expired");
+  assert.equal(callback, undefined, "an expired wait cannot be resumed after recovery has blocked it");
+});
+
+test("sweeper closes an expired approval wait when its timer delivery was lost", async () => {
+  const userId = 981010;
+  const mission = await runningMission(userId, "expired-approval-wait");
+  const expiresAt = Date.now() - 1;
+  await waitMission(userId, mission.id, { kind: "approval", key: "approval-expired", stepId: "step-1", expiresAt }, "approval checkpoint", "await owner decision");
+
+  const report = await recoverMissionsForOwner(userId, enqueue);
+  const recovered = await getMission(userId, mission.id);
+  assert.equal(report.blocked, 1);
+  assert.equal(recovered?.status, "blocked");
+  assert.equal(recovered?.waiting, undefined);
+  assert.match(recovered?.nextAction ?? "", /renew its approval/i);
+  assert.equal(recovered?.checkpoint, "approval checkpoint");
 });
 
 test("sweeper quarantines an expired in-flight lease instead of replaying uncertain work", async () => {

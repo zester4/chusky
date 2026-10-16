@@ -2710,7 +2710,11 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const active = new Set(mission.activeStepIds?.length ? mission.activeStepIds : mission.currentStepId ? [mission.currentStepId] : []);
       if (!stepId || !active.has(stepId) || mission.steps.find((step) => step.id === stepId)?.status !== "running") throw new Error("The provider wait must belong to an active mission step");
       if (!runtime.missionStepId || stepId !== runtime.missionStepId) throw new Error("A provider wait must be owned by the active durable task for that exact mission step. Resume or schedule the step's own task before waiting.");
-      const request: MissionWaitRequest = { provider, providerEventId, stepId, checkpoint: args.checkpoint ? text(args.checkpoint, 8000) : mission.checkpoint, nextAction: args.nextAction ? text(args.nextAction, 2000) : `Waiting for ${provider} event ${providerEventId}.`, timeoutSeconds: args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds) };
+      const timeoutSeconds = args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds);
+      if (timeoutSeconds !== undefined && (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 60 || timeoutSeconds > 30 * 24 * 60 * 60)) {
+        throw new Error("Provider-event timeoutSeconds must be a whole number between 60 seconds and 30 days.");
+      }
+      const request: MissionWaitRequest = { provider, providerEventId, stepId, checkpoint: args.checkpoint ? text(args.checkpoint, 8000) : mission.checkpoint, nextAction: args.nextAction ? text(args.nextAction, 2000) : `Waiting for ${provider} event ${providerEventId}.`, timeoutSeconds };
       runtime.requestMissionWait(request);
       return { status: "waiting", provider, providerEventId, nextAction: request.nextAction };
     }

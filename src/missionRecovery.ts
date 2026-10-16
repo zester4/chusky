@@ -14,6 +14,7 @@ import {
   renewMissionRecoveryLease,
   setMissionRecoveryMissionCursor,
   setMissionRecoveryOwnerCursor,
+  updateMission,
 } from "./store.js";
 import { reconcileMissionExecution, resumeMissionAndSchedule, type MissionTaskEnqueuer } from "./missionScheduler.js";
 import { logger } from "./logger.js";
@@ -98,7 +99,89 @@ export async function recoverMissionsForOwner(
     try {
       const tasks = tasksByMission.get(mission.id) ?? [];
       if (mission.status === "waiting") {
-        if (mission.waiting?.kind !== "timer" || !mission.waiting.runAt || mission.waiting.runAt > now) continue;
+        const waiting = mission.waiting;
+        const syntheticTimerProvider = waiting?.kind === "provider_event"
+          && String(waiting.provider ?? "").toLowerCase().replace(/[\s_]+/g, "-") === "mission-timer";
+        const expiredProviderEvent = waiting?.kind === "provider_event"
+          && typeof waiting.expiresAt === "number"
+          && Number.isFinite(waiting.expiresAt)
+          && waiting.expiresAt <= now;
+        const expiredApproval = waiting?.kind === "approval"
+          && typeof waiting.expiresAt === "number"
+          && Number.isFinite(waiting.expiresAt)
+          && waiting.expiresAt <= now;
+        const malformedTimer = waiting?.kind === "timer"
+          && (typeof waiting.runAt !== "number" || !Number.isFinite(waiting.runAt));
+        const malformedWait = !waiting
+          || waiting.kind === "provider_event" && (!waiting.provider?.trim() || !waiting.providerEventId?.trim())
+          || waiting.kind === "approval" && !waiting.key?.trim();
+        if (syntheticTimerProvider || expiredProviderEvent || expiredApproval || malformedTimer || malformedWait) {
+          const reason = syntheticTimerProvider
+            ? "Mission is waiting for a synthetic timer provider event that cannot be delivered."
+            : expiredProviderEvent
+              ? "The provider-event wait expired before its expected event arrived."
+              : expiredApproval
+                ? "The mission approval wait expired before the owner recorded a decision."
+                : malformedTimer
+                  ? "Mission timer wait has no valid persisted wake-up time."
+                  : "Mission has a missing or malformed persisted wait condition.";
+          const nextAction = syntheticTimerProvider
+            ? "Inspect the saved checkpoint and replan this wait as CHUCK_TASK_WAIT with a real future deadline; do not replay completed steps."
+            : expiredProviderEvent
+              ? "Reconcile the provider state, then resume or replan this same mission from its saved checkpoint."
+              : expiredApproval
+                ? "Review the exact action, renew its approval if still appropriate, then resume this same mission."
+                : malformedTimer
+                  ? "Inspect the saved checkpoint and repair or replan the timer wait; do not invent a wake-up time."
+                  : "Inspect the saved checkpoint and repair or replan the mission wait before resuming.";
+          const blocked = await updateMission(userId, mission.id, (latest) => {
+            // A provider callback or owner action may have changed the wait
+            // after this sweep's read. Block only the exact still-invalid wait
+            // observed above; never overwrite a concurrent successful resume.
+            if (latest.status !== "waiting" || latest.waiting?.kind !== waiting?.kind) return undefined;
+            if (!waiting && latest.waiting !== undefined) return undefined;
+            if (syntheticTimerProvider && (latest.waiting?.kind !== "provider_event"
+              || latest.waiting.provider !== waiting?.provider
+              || latest.waiting.providerEventId !== waiting?.providerEventId
+              || latest.waiting.stepId !== waiting?.stepId)) return undefined;
+            if (expiredProviderEvent && (latest.waiting?.kind !== "provider_event"
+              || latest.waiting.provider !== waiting?.provider
+              || latest.waiting.providerEventId !== waiting?.providerEventId
+              || latest.waiting.stepId !== waiting?.stepId
+              || latest.waiting.expiresAt !== waiting?.expiresAt
+              || typeof latest.waiting.expiresAt !== "number"
+              || latest.waiting.expiresAt > now)) return undefined;
+            if (expiredApproval && (latest.waiting?.kind !== "approval"
+              || latest.waiting.key !== waiting?.key
+              || latest.waiting.expiresAt !== waiting?.expiresAt
+              || typeof latest.waiting.expiresAt !== "number"
+              || latest.waiting.expiresAt > now)) return undefined;
+            if (malformedTimer && (latest.waiting?.kind !== "timer"
+              || latest.waiting.runAt !== waiting?.runAt
+              || latest.waiting.stepId !== waiting?.stepId)) return undefined;
+            if (malformedWait && waiting?.kind === "provider_event" && (latest.waiting?.kind !== "provider_event"
+              || latest.waiting.provider !== waiting.provider
+              || latest.waiting.providerEventId !== waiting.providerEventId)) return undefined;
+            if (malformedWait && waiting?.kind === "approval" && (latest.waiting?.kind !== "approval"
+              || latest.waiting.key !== waiting.key)) return undefined;
+            return {
+              status: "blocked" as const,
+              waiting: undefined,
+              error: reason,
+              nextAction,
+              events: [...latest.events, {
+                id: `misevt_${randomUUID()}`,
+                type: "blocked" as const,
+                message: reason,
+                at: now,
+                ...(latest.waiting?.stepId ? { stepId: latest.waiting.stepId } : {}),
+              }],
+            };
+          });
+          if (blocked?.status === "blocked") report.blocked++;
+          continue;
+        }
+        if (waiting?.kind !== "timer" || waiting.runAt! > now) continue;
         const resumed = await resumeMissionAndSchedule(userId, mission.id, enqueue);
         if (resumed?.status === "running") report.timerWakes++;
         if (resumed?.status === "running") report.repaired++;

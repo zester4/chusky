@@ -136,3 +136,25 @@ test("mission block accepts verbose recovery diagnostics and persists a bounded 
   assert.ok((blocked.error?.length ?? 0) <= 2000);
   assert.match(blocked.error ?? "", /Provider verification failed/);
 });
+
+test("provider-event wait validates timeout limits at the runtime boundary", async () => {
+  const userId = 951106;
+  const mission = await createMission(userId, {
+    title: "Provider wait timeout boundary",
+    objective: "Wait for a real provider event.",
+    definitionOfDone: "The event wait request is valid.",
+    steps: [{ id: "wait", title: "Wait", objective: "Wait for the provider callback." }],
+  });
+  await startMission(userId, mission.id);
+  const runtime = {
+    taskId: "task_provider_wait_timeout",
+    missionId: mission.id,
+    missionStepId: "wait",
+    requestMissionWait: () => undefined,
+  };
+  const base = { id: mission.id, stepId: "wait", provider: "fixture", providerEventId: "evt-timeout-boundary" };
+
+  await assert.rejects(nativeTool(userId, "CHUCK_MISSION_WAIT_EVENT", { ...base, timeoutSeconds: Number.NaN }, runtime), /timeoutSeconds/i);
+  await assert.rejects(nativeTool(userId, "CHUCK_MISSION_WAIT_EVENT", { ...base, timeoutSeconds: 60.5 }, runtime), /timeoutSeconds/i);
+  await assert.rejects(nativeTool(userId, "CHUCK_MISSION_WAIT_EVENT", { ...base, timeoutSeconds: 2_592_001 }, runtime), /timeoutSeconds/i);
+});

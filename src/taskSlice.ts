@@ -469,9 +469,51 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
         ? await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMission.checkpoint ?? result.missionWait.checkpoint, nextAction: result.missionWait.nextAction, toolCalls: missionToolCallCount(result), cost: result.cost })
         : currentMission;
       if (!accounted || accounted.status === "blocked") return { status: "blocked" as const, message: accounted?.error ?? "Autonomous mission could not record its progress before waiting.", checkpoint: accounted?.checkpoint, nextAction: accounted?.nextAction };
-      const timeoutSeconds = result.missionWait.timeoutSeconds === undefined ? undefined : Math.min(30 * 24 * 60 * 60, Math.max(60, result.missionWait.timeoutSeconds));
-      const expiresAt = timeoutSeconds === undefined ? undefined : Date.now() + timeoutSeconds * 1000;
-      await waitMission(task.userId, mission.id, { kind: "provider_event", provider: result.missionWait.provider, providerEventId: result.missionWait.providerEventId, stepId: result.missionWait.stepId, expiresAt }, result.missionWait.checkpoint, result.missionWait.nextAction);
+      const timeoutSeconds = result.missionWait.timeoutSeconds;
+      if (timeoutSeconds !== undefined && (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 60 || timeoutSeconds > 30 * 24 * 60 * 60)) {
+        const blocked = await updateMission(task.userId, mission.id, (current) => current.status !== "running"
+          || !(current.activeStepIds?.length ? current.activeStepIds : current.currentStepId ? [current.currentStepId] : []).includes(task.missionStepId ?? "")
+          || current.steps.find((step) => step.id === task.missionStepId)?.status !== "running"
+          ? undefined
+          : {
+            status: "blocked" as const,
+            error: "The provider-event wait had an invalid timeout and was not scheduled.",
+            nextAction: "Retry with a whole-number timeout between 60 seconds and 30 days, or wait without an expiry.",
+          });
+        return { status: "blocked" as const, message: blocked?.error ?? "Invalid provider-event timeout.", checkpoint: blocked?.checkpoint ?? currentMission?.checkpoint, nextAction: blocked?.nextAction };
+      }
+      let expiresAt = timeoutSeconds === undefined ? undefined : Date.now() + timeoutSeconds * 1000;
+      const requestedWait = { kind: "provider_event" as const, provider: result.missionWait.provider, providerEventId: result.missionWait.providerEventId, stepId: result.missionWait.stepId, expiresAt };
+      const persistedWait = await waitMission(task.userId, mission.id, requestedWait, result.missionWait.checkpoint, result.missionWait.nextAction);
+      const latestMission = persistedWait ?? await getMission(task.userId, mission.id);
+      const waitIsPersisted = latestMission?.status === "waiting"
+        && latestMission.waiting?.kind === "provider_event"
+        && latestMission.waiting.provider === requestedWait.provider
+        && latestMission.waiting.providerEventId === requestedWait.providerEventId
+        && latestMission.waiting.stepId === requestedWait.stepId;
+      if (!waitIsPersisted) {
+        const currentStep = latestMission?.steps.find((step) => step.id === task.missionStepId);
+        if (latestMission?.status === "running" && currentStep?.status === "completed") {
+          await reconcileMissionExecution(task.userId, mission.id, enqueueMissionTask, task.id);
+          return { status: "completed" as const, message: "Provider wait was not persisted because its mission step had already completed.", checkpoint: latestMission.checkpoint, nextAction: latestMission.nextAction };
+        }
+        if (latestMission?.status === "running" && currentStep?.status === "running") {
+          const blocked = await updateMission(task.userId, mission.id, (current) => current.status !== "running"
+            || current.steps.find((step) => step.id === task.missionStepId)?.status !== "running"
+            ? undefined
+            : {
+              status: "blocked" as const,
+              error: "The provider-event wait could not be confirmed in persisted mission state.",
+              nextAction: "Inspect the provider state and mission checkpoint, then resume or replan. Do not repeat a dispatched provider action without read-back.",
+              events: [...current.events, { id: `misevt_${randomUUID()}`, type: "blocked" as const, message: "Provider-event wait persistence could not be confirmed.", at: Date.now(), stepId: task.missionStepId }],
+            });
+          return { status: "blocked" as const, message: blocked?.error ?? "Provider-event wait persistence could not be confirmed.", checkpoint: blocked?.checkpoint ?? latestMission.checkpoint, nextAction: blocked?.nextAction ?? "Inspect the provider state and mission checkpoint before resuming." };
+        }
+        return { status: "blocked" as const, message: "Provider-event wait was not persisted; mission state changed before the wait could be recorded.", checkpoint: latestMission?.checkpoint ?? currentMission?.checkpoint, nextAction: latestMission?.nextAction ?? "Inspect the current mission state before resuming." };
+      }
+      // An idempotent replay may have encountered the already-persisted wait.
+      // Use its deadline, not a newly computed one, for the workflow wake.
+      expiresAt = latestMission?.waiting?.kind === "provider_event" ? latestMission.waiting.expiresAt : expiresAt;
       // An event with no expiry has no safe polling deadline. Leave
       // the task blocked until the signed provider callback wakes
       // the exact mission branch; an expiry gets one durable wake
