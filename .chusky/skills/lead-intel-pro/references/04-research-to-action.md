@@ -1,5 +1,9 @@
 # Research → Action
 
+Use one route bundle for the research objective, then hand off to the exact
+connected system of record. Keep research, qualification, drafts, sends, CRM
+writes, and reminders as separate verified phases.
+
 Intelligence without action is a hobby. Close the loop.
 
 ## Pipeline
@@ -64,3 +68,6 @@ Treg spend this run: $…
 ```
 
 **Longer memo:** account table + qualification cards + next actions.
+
+If a write or send fails, preserve the research receipt and report the unresolved
+action; never rerun enrichment just because the downstream app was unavailable.

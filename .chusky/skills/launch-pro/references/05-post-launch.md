@@ -1,5 +1,9 @@
 # Post-launch
 
+Use live provider and product analytics evidence, not planned metrics or model
+estimates. Tie every follow-up to the launch record and keep unresolved issues
+as explicit owners/dates rather than silently calling the launch complete.
+
 Within 24–72h:
 
 - Metric vs target

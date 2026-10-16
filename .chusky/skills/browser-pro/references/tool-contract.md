@@ -3,6 +3,10 @@
 This is the agent-facing sequence for the current Chusky browser tools. Tool
 names are stable `CHUCK_*` slugs; do not substitute provider or invented names.
 
+The sequence consumes the route and capability grant prepared for this run.
+These references define procedure, not authority: the runtime's session scope,
+account binding, approval policy, and returned tool schemas remain authoritative.
+
 ## Canonical sequence
 
 1. `CHUCK_BROWSER_PLAN`
@@ -102,3 +106,7 @@ specific.
 
 The repository’s installed E2B version is authoritative; check
 `package-lock.json` before changing SDK calls.
+
+When a route is already prepared, do not call separate browser discovery or
+capability questions for the same step. Re-plan only after a material change in
+objective, origin, identity, or verified browser state.

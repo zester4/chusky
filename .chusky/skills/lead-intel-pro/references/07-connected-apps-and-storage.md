@@ -1,5 +1,9 @@
 # Connected Apps & Storage
 
+Use Jev's selected system-of-record route and exact connected account. Read
+before write, deduplicate by stable identity, and verify the resulting ID or
+row/page state. A notification channel is not a source of truth.
+
 Enrichment is useless if leads die in chat. Persist them in systems the company already runs.
 
 ## Pick the system (default guidance)

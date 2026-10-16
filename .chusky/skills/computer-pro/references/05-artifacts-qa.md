@@ -2,6 +2,10 @@
 
 Produce and verify high-quality outputs from the private computer.
 
+Use the owner-scoped workspace and exact artifact route supplied by the runtime.
+An artifact path, registration response, or preview URL is not by itself proof
+that the deliverable is complete or usable.
+
 ## Mindset
 
 - An artifact that cannot be found, opened, or trusted is not done.
@@ -38,6 +42,7 @@ Produce and verify high-quality outputs from the private computer.
 - Wrong paths or missing dependencies
 - “Success” messages with no real output, render evidence, artifact registration, or preview URL
 - Artifacts that only work on the current machine with hidden local state
+- Hidden local state, guessed paths, or a successful generator exit with no opened/rendered output
 
 ## Mind-Blowing Standard
 

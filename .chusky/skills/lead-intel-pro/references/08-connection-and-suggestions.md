@@ -1,5 +1,9 @@
 # Connections & App Suggestions
 
+When the routed action lacks a usable account, stop at the connection boundary.
+Do not substitute an unapproved account or claim that a downstream write
+succeeded; continue from the existing research receipt after connection.
+
 If the owner wants leads **saved or emailed** and the right app is not connected, do not fake success. Guide them to connect.
 
 ## Detect missing access

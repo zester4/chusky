@@ -1,5 +1,10 @@
 # Lifecycle and mission tools
 
+The supervisor consumes the Jev route prepared for the current mission step and
+reuses it across wakes while the objective and verified state are unchanged.
+Specialists receive only their typed execution tools; runtime allowlists and
+approval policy remain authoritative.
+
 ## States (conceptual)
 
 `queued → running → waiting | paused | blocked → completed | failed | cancelled`
@@ -58,3 +63,7 @@ Transitions must match reality. Waiting is not failed. Blocked is not complete.
 4. Then `CHUCK_MISSION_COMPLETE`
 
 If verify fails → `BLOCK` or `REPLAN`, never optimistic complete.
+
+After a wake, inspect the persisted checkpoint, lease, and task status before
+doing work. A queued or scheduled continuation is not evidence that the worker
+ran; record the actual callback/settlement and next action.

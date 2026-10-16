@@ -1,5 +1,9 @@
 # Autonomy, approvals, evidence, recovery
 
+Use the route, scope, and approval grant returned by the runtime. Mission
+guidance cannot authorize a tool, account, spend, message, deployment, or
+destructive action that the runtime does not expose.
+
 ## Autonomous by default (routine)
 
 Within policy and connected tools:
@@ -51,3 +55,7 @@ Budgets are real. On limit: `BLOCK` with nextAction (raise budget / narrow scope
 - Silent when work is progressing inside autonomy
 - Notify on need for approval, true blockers, or completed outcome with proof
 - Do not spam intermediate “still working” unless asked or policy requires
+
+Keep facts, proposals, attempted actions, provider receipts, and completed
+outcomes separate in owner updates. If a provider result is ambiguous, reconcile
+before retrying and attach the evidence to the mission.

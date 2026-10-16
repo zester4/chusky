@@ -2,6 +2,10 @@
 
 Multi-step jobs on the private computer that may span many tool calls or need recovery.
 
+Reuse the Jev-selected session and durable process when it is still healthy.
+Long-running work must be recoverable from persisted checkpoints, not from an
+implicit promise that the current model turn will continue forever.
+
 ## Mindset
 
 - Long work must be resumable.
@@ -33,6 +37,7 @@ Multi-step jobs on the private computer that may span many tool calls or need re
 - Do not delete intermediate results until the final outcome is confirmed.
 - If a stage is expensive, verify it once and reuse it.
 - Reconcile uncertain process or artifact state before retrying; do not create duplicates because a prior call timed out.
+- On wake/resume, inspect the last checkpoint and live process state before doing work; reuse the same step route unless the objective materially changed.
 
 ## Anti-Patterns
 

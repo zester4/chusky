@@ -2,6 +2,10 @@
 
 Clean transfer of control when the private computer hits a human-only gate (CAPTCHA, 2FA, complex verification, or fragile UI).
 
+The handoff preserves the current scoped session; it does not transfer secrets,
+approval, or ownership to the agent. For website challenges, use the browser
+handoff boundary rather than asking the owner to paste credentials into chat.
+
 ## Mindset
 
 - Some gates are designed for humans. Do not fight them endlessly.
@@ -36,6 +40,7 @@ Clean transfer of control when the private computer hits a human-only gate (CAPT
 - Confirm the blocker is cleared from a fresh desktop or browser observation.
 - Resume from the verified state.
 - Avoid re-triggering the same gate carelessly.
+- Record the fresh post-handoff observation and the exact action that is now safe; do not infer success from the owner's statement alone.
 
 ## Mind-Blowing Standard
 

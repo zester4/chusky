@@ -1,5 +1,9 @@
 # When to use a mission
 
+Use Jev's route bundle to classify the current objective once. Routing guidance
+does not replace the mission decision: durability, dependencies, waits, proof,
+budget, and approval boundaries still determine the execution primitive.
+
 ## Decision tree
 
 ```text
@@ -48,3 +52,6 @@ Is it recurring proactive review of open loops / standing orders?
 - Mission with no definition of done
 - “Keep working forever” without budgets or done criteria
 - Using mission status as a substitute for doing the work
+
+If a mission is started, the initiating turn should return the persisted mission
+identity and status; actual work belongs to durable slices and wakes.

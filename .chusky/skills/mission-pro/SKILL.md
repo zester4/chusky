@@ -6,7 +6,9 @@ description: >
   the chat turn; when waiting on humans, providers, or tools; or when mapping
   real business/life outcomes onto autonomous steps with evidence. Teaches when
   to use missions vs tasks vs pulse vs one-shot tools, and how to drive the
-  full CHUCK_MISSION_* / task / delegate / wait stack.
+  full CHUCK_MISSION_* / task / delegate / wait stack. Uses Jev routing as
+  bounded preload guidance and reuses a verified mission-step route until the
+  objective materially changes.
 ---
 
 # Mission Pro
@@ -52,6 +54,33 @@ Read the reference that matches the job:
 6. **Respect autonomy policy** — routine work runs; money, destructive, permission, production deploy, remote push stay approval-gated.
 7. **Mission tools are supervisor-owned** — never put `CHUCK_MISSION_*` in a specialist’s `allowedTools`.
 8. **Idempotent recovery** — resume from checkpoint/lease; never invent progress.
+
+## Runtime contract
+
+- A mission is a durable outcome contract, not a longer chat reply. Define the
+  owner-visible objective, definition of done, scope, dependencies, budgets,
+  approval gates, evidence requirements, and next action before starting.
+- Use the Jev route for the current step when it is supplied. Cache and reuse
+  the route for the same step/objective; do not call separate routing searches
+  on every wake. Re-route only when verified facts or the unfinished objective
+  materially change.
+- After `CHUCK_MISSION_START` succeeds in an interactive turn, report the
+  persisted mission ID/status and let the durable worker execute. Do not perform
+  mission work in the initiating chat turn or simulate future wakes in prose.
+- Each worker slice must make one bounded unit of progress, persist a factual
+  checkpoint, and record an exact post-wake next action. QStash/task wake and
+  lease behavior belong to the runtime; never busy-poll, self-schedule the same
+  wait, or claim a wake happened without persisted evidence.
+- Retries must be idempotent. After an ambiguous provider write, inspect the
+  provider or persisted tool receipt before replaying it. Use mission doctor/
+  status tools to distinguish waiting, leased, failed, blocked, and stalled.
+- Keep supervisor lifecycle tools out of specialist allowlists. Specialists may
+  execute only their typed domain step and return bounded evidence; the
+  supervisor owns joins, replans, approvals, verification, and closeout.
+- Post-mission follow-up is part of the outcome when requested: capture the
+  result, decision, owner, due date, and evidence, then draft or execute the
+  next authorized action. Never call a mission complete merely because all
+  planned tool calls returned.
 
 ## Default operating loop
 

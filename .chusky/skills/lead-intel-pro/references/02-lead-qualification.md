@@ -1,5 +1,9 @@
 # Lead Qualification
 
+Qualification must use the current owner ICP, explicit evidence, and a bounded
+route. Separate fit, need, authority, timing, and missing data; enrichment or
+a model score never creates buying intent.
+
 ## Purpose
 
 Qualification decides **who deserves time and spend** — not who looks interesting
@@ -76,3 +80,6 @@ When talking to the owner:
 - Call out when enrichment is strong but **need** is still unknown  
 
 Unknown need is not automatic DQ — it is a research or discovery gap.
+
+Do not send, sequence, or update a CRM stage from a qualification card alone;
+those are separate authorized actions with provider read-back.

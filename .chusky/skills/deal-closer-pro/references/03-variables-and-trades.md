@@ -1,5 +1,9 @@
 # Variables and trades
 
+Treat every proposed movement as a draft until the owner policy and authority
+boundary allow it. Tool or CRM data can inform the package, but only confirmed
+commercial terms and a provider/source read-back establish the current deal.
+
 Price is one lever. Professionals negotiate a **package**.
 
 ## Expand the pie (variables)
@@ -49,3 +53,7 @@ Open with a **credible** commercial structure tied to value — not a weak
 “we’re flexible.” Whoever sets the first serious frame shapes the zone.
 If they anchor extremely low, do not split the difference blindly; re-anchor
 on packages and outcomes.
+
+Do not convert an unverified margin, term, implementation capacity, or legal
+constraint into a hard number. Ask one focused question or present a bounded
+option set.

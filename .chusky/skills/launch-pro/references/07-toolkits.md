@@ -1,5 +1,9 @@
 # Toolkits for launches
 
+Use the Jev-selected toolkit/account and exact action schema. Separate build,
+review, deploy, and publish; production or public writes remain approval- and
+policy-gated and require a provider/deployment read-back.
+
 | Need | Toolkit family |
 |------|----------------|
 | Product ship | `GITHUB_`, `VERCEL_`, `LINEAR_` |

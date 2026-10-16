@@ -1,5 +1,9 @@
 # Never-dos
 
+The lead-intel route is for bounded evidence and planning. It never grants
+permission to contact a person, write a CRM, spend beyond policy, or expose
+provider data outside the authorized scope.
+
 1. **Never invent** emails, phones, titles, funding amounts, or headcount.  
 2. **Never** use Treg to send email or write CRM — that is Composio / connections.  
 3. **Never** present empty enrichment as a full profile.  
