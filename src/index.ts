@@ -3265,7 +3265,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           return c.json({ ok: true, kind: "approval_required", approvalId: error.approvalId, toolSlug: error.toolSlug });
         }
         if (error instanceof OpenRouterTimeoutError) {
-          logger.warn({ errorName: error.name, failureCode: "model_timeout", model: error.modelId, attempts: error.attempts, eventId, workflowRunId }, "Trigger agent stopped after bounded model request timeouts");
+          logger.warn({ errorName: error.name, failureCode: "model_timeout", model: error.modelId, attempts: error.attempts, elapsedMs: error.elapsedMs, eventId, workflowRunId }, "Trigger agent stopped after its model request budget was exhausted");
           return c.json({ ok: true, kind: "failed", failureCode: "model_timeout" });
         }
         logger.warn({ errorName: error instanceof Error ? error.name : "UnknownError", eventId, userId, workflowRunId }, "Trigger agent callback failed; QStash may retry the stable run");
