@@ -211,6 +211,8 @@ test("Link outcome reporting is published to native routing as a shopping write 
   assert.equal(descriptor.bundle, "shopping");
   assert.equal(descriptor.risk, "write");
   assert.equal(descriptor.alwaysAvailable, false);
+  assert.ok(descriptor.capabilities?.includes("shop"));
+  assert.ok(!descriptor.aliases?.includes("saas"), "capability aliases stay specific to the tool family");
 });
 
 test("enforce routing always retains attention state, even below the core-tool candidate budget", async () => {

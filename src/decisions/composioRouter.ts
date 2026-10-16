@@ -316,6 +316,88 @@ export async function computeJevComposioDecision(objective: string, input: {
   return decision;
 }
 
+/**
+ * Complete the dependent Composio phase from a turn-wide stage-1 decision.
+ * Toolkit/app selection has already happened in the shared Jev request; only
+ * the exact action catalogue, which may not exist until the toolkit is known,
+ * is ranked here.
+ */
+export async function completeJevComposioActions(objective: string, input: {
+  accounts: Array<{ toolkit: string; status?: string }>;
+  listActions: ComposioActionLister;
+  client?: JevClient;
+  signal?: AbortSignal;
+  recentContext?: string;
+  sessionId?: string;
+}, stage1: ComposioDecision): Promise<ComposioDecision> {
+  if (stage1.noAppNeeded || !stage1.toolkits.length) return stage1;
+  const client = input.client ?? jevClient();
+  const connectedSet = new Set(activeToolkits(input.accounts).map(toolkitKey));
+  const selected = stage1.toolkits
+    .filter((item) => item.probability >= config.jevToolkitMinProbability && item.connected !== false && connectedSet.has(toolkitKey(item.id)))
+    .slice(0, 2)
+    .map((item) => item.id);
+  if (!selected.length) return stage1;
+  const state = {
+    request: jevText(objective, 3_000),
+    connected_toolkits: activeToolkits(input.accounts),
+    ...(input.recentContext ? { recent_conversation: jevText(input.recentContext, 1_200) } : {}),
+  };
+  const catalogues = await Promise.all(selected.map(async (toolkit) => {
+    try { return await cachedToolkitActions(toolkit, input.listActions, input.signal); }
+    catch (error) { logger.debug({ err: error, toolkit }, "Composio action catalogue unavailable for batched route"); return []; }
+  }));
+  const actions = catalogues.flat();
+  if (!actions.length) return stage1;
+  const bySlug = new Map(actions.map((action) => [action.slug, action]));
+  const ranking = await rankOptions(client, {
+    state,
+    instructions: "Choose the single first app action that most directly advances `request`, based on each action's name and description. Prefer a necessary, specific read or write over a broad or indirect action. Choose __none__ if none is a meaningful step. This only routes the action; runtime schema, account, approval, and result checks still govern execution.",
+    options: actions.map((action) => ({ id: action.slug, description: `${action.name}: ${action.description}` })),
+    noneDescription: "None of these actions fits the request.",
+    signal: input.signal,
+    sessionId: input.sessionId,
+  });
+  const candidates = ranking.ranked.filter((item) => item.probability >= 0.01).slice(0, 6);
+  const verification = candidates.length
+    ? await verifyCandidates(client, {
+      state,
+      candidates: candidates.map((item) => ({ id: item.id, description: `${bySlug.get(item.id)?.name ?? item.id}: ${bySlug.get(item.id)?.description ?? ""}` })),
+      question: () => "Would calling `candidate` materially help complete the requested outcome, either as a necessary read or a required action step?",
+      criteria: { true: "The described action directly supports a required or strongly useful step toward the requested outcome.", false: "The action is unrelated, redundant, unsafe to infer, or only superficially similar to the request." },
+      signal: input.signal,
+      sessionId: input.sessionId,
+    })
+    : { scores: {} as Record<string, number>, latencyMs: 0, costUsd: 0 };
+  const decision: ComposioDecision = {
+    ...stage1,
+    toolkits: stage1.toolkits,
+    actions: candidates
+      .filter((item, index) => index === 0 ? (verification.scores[item.id] ?? 0) >= config.jevActionVerifyThreshold || item.probability >= config.jevInjectActionMinProbability : (verification.scores[item.id] ?? 0) >= config.jevActionVerifyThreshold)
+      .slice(0, 4)
+      .map((item) => {
+        const action = bySlug.get(item.id);
+        return { ...item, verified: verification.scores[item.id], toolkit: action?.toolkit ?? "", description: action?.description ?? "", connected: connectedSet.has(toolkitKey(action?.toolkit ?? "")) };
+      }),
+    directTools: [],
+  };
+  decision.directTools = decision.actions
+    .filter((item) => item.connected)
+    .filter((item) => item.probability >= config.jevInjectActionMinProbability || (item.verified ?? 0) >= 0.75)
+    .slice(0, 3)
+    .map((item) => bySlug.get(item.id))
+    .map((action) => action ? directTool(action) : undefined)
+    .filter(Boolean) as unknown[];
+  if (!decision.actions.length && ranking.confidence < config.jevMinConfidence) decision.fallbackReason = "low_confidence_actions";
+  const base = stage1.telemetry ?? { latencyMs: 0, costUsd: 0, calls: 1 };
+  decision.telemetry = {
+    latencyMs: base.latencyMs + ranking.latencyMs + verification.latencyMs,
+    costUsd: base.costUsd + ranking.costUsd + verification.costUsd,
+    calls: base.calls + ranking.calls + (candidates.length ? 1 : 0),
+  };
+  return decision;
+}
+
 /** Model-facing routing context. Contains no private account aliases. */
 export function composioDecisionContext(decision: ComposioDecision): string {
   if (decision.noAppNeeded) return "";
@@ -359,13 +441,17 @@ export async function routeComposioForTurn(objective: string, input: {
   sessionId?: string;
   budgetMs?: number;
   deadline?: RoutingDeadline;
+  /** Reuse the shared turn batch and skip the duplicate stage-1 request. */
+  stage1?: ComposioDecision;
 }): Promise<ComposioDecision> {
   const baseline = keywordComposioDecision(objective, input.accounts);
   if (!objective.trim() || !jevEnabled("composio")) return baseline;
   const client = input.client ?? jevClient();
   if (!client.available()) return { ...baseline, fallbackReason: "jev_unavailable" };
   const enforce = config.jevMode === "enforce";
-  const run = computeJevComposioDecision(objective, { ...input, client, signal: enforce && input.deadline ? input.deadline.signal : input.signal });
+  const run = input.stage1
+    ? completeJevComposioActions(objective, { ...input, client, signal: enforce && input.deadline ? input.deadline.signal : input.signal }, input.stage1)
+    : computeJevComposioDecision(objective, { ...input, client, signal: enforce && input.deadline ? input.deadline.signal : input.signal });
   const log = (decision: ComposioDecision | undefined, applied: boolean, reason?: string) => {
     const mode = config.jevMode === "enforce" ? "enforce" : "shadow";
     recordDecision({

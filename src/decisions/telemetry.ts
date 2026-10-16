@@ -1,10 +1,13 @@
 import { logger } from "../logger.js";
 
-export type DecisionSurface = "skills" | "composio_toolkit" | "composio_action" | "treg_tool" | "treg_endpoint" | "autonomy" | "browser" | "memory" | "native_tool" | "turn_action" | "turn_mode";
+export type DecisionSurface = "skills" | "composio_toolkit" | "composio_action" | "treg_tool" | "treg_endpoint" | "monid_tool" | "external_data_backend" | "autonomy" | "browser" | "memory" | "native_tool" | "turn_action" | "turn_mode";
 
 type SurfaceStats = { decisions: number; applied: number; fallbacks: number; agreements: number; comparisons: number; latencyMsTotal: number; costUsdTotal: number };
 
 const stats = new Map<DecisionSurface, SurfaceStats>();
+type RouteOutcomeSurface = "treg" | "monid";
+type RouteOutcome = "success" | "pending" | "failure";
+const routeOutcomes = new Map<RouteOutcomeSurface, { attempts: number; successes: number; pending: number; failures: number; latencyMsTotal: number }>();
 
 function bucket(surface: DecisionSurface): SurfaceStats {
   let current = stats.get(surface);
@@ -35,6 +38,8 @@ export function recordDecision(input: {
   preserveAll?: boolean;
   noTool?: boolean;
   noNativeTool?: boolean;
+  selectedRoute?: string;
+  candidateCount?: number;
 }): void {
   const current = bucket(input.surface);
   current.decisions += 1;
@@ -71,7 +76,34 @@ export function recordDecision(input: {
     ...(input.preserveAll === undefined ? {} : { preserveAll: input.preserveAll }),
     ...(input.noTool === undefined ? {} : { noTool: input.noTool }),
     ...(input.noNativeTool === undefined ? {} : { noNativeTool: input.noNativeTool }),
+    ...(input.selectedRoute ? { selectedRoute: input.selectedRoute } : {}),
+    ...(input.candidateCount === undefined ? {} : { candidateCount: input.candidateCount }),
   }, "Jev routing decision");
+}
+
+/** Record the bounded result of a routed gateway execution without payloads. */
+export function recordRouteOutcome(input: {
+  surface: RouteOutcomeSurface;
+  route: string;
+  outcome: RouteOutcome;
+  latencyMs: number;
+  errorClass?: string;
+}): void {
+  const current = routeOutcomes.get(input.surface) ?? { attempts: 0, successes: 0, pending: 0, failures: 0, latencyMsTotal: 0 };
+  current.attempts += 1;
+  current.latencyMsTotal += Math.max(0, input.latencyMs);
+  if (input.outcome === "success") current.successes += 1;
+  else if (input.outcome === "pending") current.pending += 1;
+  else current.failures += 1;
+  routeOutcomes.set(input.surface, current);
+  logger.info({
+    event: "jev.route_outcome",
+    surface: input.surface,
+    route: input.route.slice(0, 120),
+    outcome: input.outcome,
+    latencyMs: Math.max(0, input.latencyMs),
+    ...(input.errorClass ? { errorClass: input.errorClass.slice(0, 80) } : {}),
+  }, "Jev routed gateway outcome");
 }
 
 export function recordTurnMode(input: {
@@ -115,8 +147,8 @@ export function recordMeetingTurn(input: {
   }, "Meeting turn telemetry");
 }
 
-export function jevRoutingStats(): Record<string, SurfaceStats & { meanAgreement?: number; meanLatencyMs?: number }> {
-  const out: Record<string, SurfaceStats & { meanAgreement?: number; meanLatencyMs?: number }> = {};
+export function jevRoutingStats(): Record<string, SurfaceStats & { meanAgreement?: number; meanLatencyMs?: number; pending?: number }> {
+  const out: Record<string, SurfaceStats & { meanAgreement?: number; meanLatencyMs?: number; pending?: number }> = {};
   for (const [surface, value] of stats) {
     out[surface] = {
       ...value,
@@ -124,7 +156,20 @@ export function jevRoutingStats(): Record<string, SurfaceStats & { meanAgreement
       ...(value.decisions ? { meanLatencyMs: value.latencyMsTotal / value.decisions } : {}),
     };
   }
+  for (const [surface, value] of routeOutcomes) {
+    out[`${surface}_outcomes`] = {
+      decisions: value.attempts,
+      applied: value.successes,
+      fallbacks: value.failures,
+      agreements: 0,
+      comparisons: 0,
+      latencyMsTotal: value.latencyMsTotal,
+      costUsdTotal: 0,
+      pending: value.pending,
+      ...(value.attempts ? { meanLatencyMs: value.latencyMsTotal / value.attempts } : {}),
+    };
+  }
   return out;
 }
 
-export function resetJevRoutingStats(): void { stats.clear(); }
+export function resetJevRoutingStats(): void { stats.clear(); routeOutcomes.clear(); }

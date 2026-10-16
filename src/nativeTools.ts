@@ -98,6 +98,7 @@ import { buildMonidPlan } from "./monid/engine.js";
 import { MonidSpendGuard } from "./monid/spend.js";
 import { decideMemoryDisposition } from "./autonomy/decisionLoop.js";
 import { routeBrowserNext } from "./decisions/browserRouter.js";
+import { recordRouteOutcome } from "./decisions/telemetry.js";
 import { buildBrowserCandidates } from "./vault/browserObservation.js";
 import { beginLinkOAuth, cancelLinkSpendRequest, completeApprovedLinkCheckout, completeLinkUcpCheckout, confirmLinkMerchantOrder, createLinkSpendRequest, createLinkUcpCheckout, discoverLinkMppPayment, disconnectLinkWallet, executeLinkPayment, inspectLinkPayTokenCheckout, linkPaymentMethods, linkSpendReceipt, linkSpendStatus, linkWalletStatus, listLinkSpendRequestViews, payLinkMppRequest, reportLinkOutcome, searchLinkUcpCatalog, waitForLinkSpendApproval } from "./link/agentWallet.js";
 
@@ -1739,7 +1740,35 @@ async function resumeBrowserHandoff(userId: number, id: string, ownerPrivateRun:
   return { id, status: "completed", handoffCompleted: true };
 }
 
+function gatewaySurface(slug: string): "treg" | "monid" | undefined {
+  if (/(?:^|_)PLAN$|(?:^|_)USAGE$/.test(slug)) return undefined;
+  if (/^CHUCK_MONID_/.test(slug)) return "monid";
+  if (/^CHUCK_TREG_/.test(slug)) return "treg";
+  return undefined;
+}
+
+function gatewayOutcome(value: unknown): "success" | "pending" {
+  if (!value || typeof value !== "object") return "success";
+  const row = value as Record<string, unknown>;
+  const status = String(row.status ?? row.outcome ?? "").toLowerCase();
+  return /pending|queued|running|async/.test(status) ? "pending" : "success";
+}
+
 export async function nativeTool(userId: number, slug: string, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<unknown> {
+  const surface = gatewaySurface(canonicalNativeToolSlug(slug));
+  if (!surface) return nativeToolInternal(userId, slug, args, runtime);
+  const startedAt = Date.now();
+  try {
+    const result = await nativeToolInternal(userId, slug, args, runtime);
+    recordRouteOutcome({ surface, route: canonicalNativeToolSlug(slug), outcome: gatewayOutcome(result), latencyMs: Date.now() - startedAt });
+    return result;
+  } catch (error) {
+    recordRouteOutcome({ surface, route: canonicalNativeToolSlug(slug), outcome: "failure", latencyMs: Date.now() - startedAt, errorClass: error instanceof Error ? error.name : "unknown" });
+    throw error;
+  }
+}
+
+async function nativeToolInternal(userId: number, slug: string, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<unknown> {
   const canonicalSlug = canonicalNativeToolSlug(slug);
   if (canonicalSlug !== slug) return nativeTool(userId, canonicalSlug, args, runtime);
   if (!config.elenaEnabled && isElenaToolSlug(slug)) throw new Error(elenaDisabledMessage());

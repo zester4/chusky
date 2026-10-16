@@ -292,7 +292,7 @@ export const config = {
   jevApiKey: optional("JEV_API_KEY", ""),
   // Pin a versioned model. Defaults: typesafe/jev-1.13 (OpenRouter), jev-1.13.0 (TypeSafe).
   jevModel: optional("JEV_MODEL", ""),
-  jevSurfaces: new Set(optional("JEV_SURFACES", "skills,composio,treg,autonomy,browser,memory").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean)),
+  jevSurfaces: new Set(optional("JEV_SURFACES", "skills,composio,treg,monid,autonomy,browser,memory").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean)),
   memoryClassificationEnabled: optional("MEMORY_CLASSIFICATION_ENABLED", "false") === "true",
   meetingDisclosureGateEnabled: optional("MEETING_DISCLOSURE_GATE", "false") === "true",
   meetingDisclosureGateMode: oneOf("MEETING_DISCLOSURE_GATE_MODE", "shadow", ["shadow", "enforce"] as const),
@@ -312,6 +312,11 @@ export const config = {
   jevTurnBudgetMs: boundedInt("JEV_TURN_BUDGET_MS", 3_000, 300, 15_000),
   jevMaxRequestTokens: boundedInt("JEV_MAX_REQUEST_TOKENS", 24_000, 2_000, 60_000),
   jevMaxOptionsPerQuestion: boundedInt("JEV_MAX_OPTIONS_PER_QUESTION", 120, 8, 255),
+  // One turn-wide Jev request handles independent routing questions. The
+  // bounded candidate count keeps the request compact; dependent catalogue
+  // lookups (for example exact Composio actions) remain a later stage.
+  jevTurnBatchRouting: optional("JEV_TURN_BATCH_ROUTING", "true") === "true",
+  jevTurnPlanMaxCandidates: boundedInt("JEV_TURN_PLAN_MAX_CANDIDATES", 48, 8, 120),
   jevMinConfidence: unitInterval("JEV_MIN_CONFIDENCE", 0.45),
   jevSkillMinProbability: unitInterval("JEV_SKILL_MIN_PROBABILITY", 0.2),
   jevSkillVerifyThreshold: unitInterval("JEV_SKILL_VERIFY_THRESHOLD", 0.5),

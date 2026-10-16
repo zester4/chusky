@@ -34,12 +34,14 @@ and Treg spend guards are unchanged.
   filters, and budgets stay deterministic.
 - `src/decisions/nativeToolRouter.ts` — builds a compact metadata index for
   native `CHUCK_*` tools and, when explicitly enabled, lets Jev select the
-  schemas exposed to the main model. Full schemas never go to Jev. The native
-  dispatcher, argument validation, account scope, and approvals remain the
-  authority.
+  schemas exposed to the main model. Capability cards include bounded aliases
+  and capability terms for safer pre-Jev candidate recall; full schemas never
+  go to Jev. The native dispatcher, argument validation, account scope, and
+  approvals remain the authority.
 - `src/decisions/telemetry.ts` — `jev.shadow` / `jev.enforce` log events with
   identifiers, probabilities, agreement with keyword routing, latency, and
-  cost. User text, arguments, and provider payloads are never logged.
+  cost. Gateway outcomes separately record success, pending, failure, and
+  latency. User text, arguments, and provider payloads are never logged.
 - `src/autonomy/decisionLoop.ts` — typed autonomy decisions for next-action
   planning, attention-pulse priority, mission progression, signal triage,
   follow-up timing/channel, memory retention, delegation, and failure recovery.
@@ -62,18 +64,26 @@ and Treg spend guards are unchanged.
   errors, invalid answers, an open breaker, or low confidence fall back to
   keyword routing for that turn.
 
-Skill, Treg, Composio, and native-tool routing start concurrently and share
-one per-turn deadline (`JEV_TURN_BUDGET_MS`). Their first independent Jev
-questions can be coalesced into one provider request when they share the same
-durable run ID and abort signal, have compatible state, and fit the request
-token budget. Questions retain separate IDs and explicit `__none__` choices;
-dependent follow-ups (for example action ranking after fetching an app's
-schema) remain separate. Conflicting state, missing run/signal identity,
-different turns, or a full token budget prevents coalescing. Per-surface cost
-and token telemetry is apportioned from the shared provider usage. The shared
-signal aborts in-flight Jev and catalogue requests, so routing adds at most
-the configured budget to the critical path. Deadline aborts do not open the
-breaker.
+In enforce mode, the normal owner-private text path builds one explicit
+turn-wide Jev plan. It asks the independent action, skill, native-tool,
+Composio toolkit, Treg, and Monid questions together against one bounded state
+and adds a mutually exclusive external-data backend decision so one request
+does not expose both overlapping gateways. `JEV_TURN_BATCH_ROUTING=false`
+restores the older independent-router path. The plan is bounded by
+`JEV_TURN_PLAN_MAX_CANDIDATES` and `JEV_MAX_REQUEST_TOKENS`; full native
+schemas, account aliases, credentials, and tool arguments never go to Jev.
+
+Exact Composio action selection can remain a dependent follow-up because the
+action catalogue may not be known until a toolkit is selected. Treg endpoint
+selection is similarly dependent on its live catalogue. Monid uses
+`discover -> inspect -> run` when explicitly requested or selected for a Treg
+coverage gap, and only exposes selected Monid tools when `MONID_ENABLED=true`;
+it never authorizes a paid run. These follow-ups receive already-computed
+stage-one decisions and do not repeat independent routing questions. Mission,
+approval-resume, shared, media, voice, trigger, and other special paths retain
+their existing routing behavior. The shared
+signal aborts in-flight Jev and catalogue requests, so routing remains within
+the configured per-turn budget. Deadline aborts do not open the breaker.
 
 Browser routing is used only when `CHUCK_BROWSER_NEXT` is called for an
 inspected E2B browser page. It does not add a Jev request to ordinary chat or
@@ -98,8 +108,8 @@ no valid work item; observe/read-only authority cannot authorize generic
 `act_now`, retry, or provider-switch proposals. Fuzzy skill search stays
 available unless the user explicitly selected a skill.
 
-`JEV_SURFACES` limits routing to `skills`, `composio`, `treg`, `autonomy`,
-and/or `browser`. `JEV_MODE=off` disables every Jev surface and preserves the
+`JEV_SURFACES` limits routing to `skills`, `composio`, `treg`, `monid`,
+`autonomy`, and/or `browser`. `JEV_MODE=off` disables every Jev surface and preserves the
 deterministic behavior used before Jev. Autonomy decisions are applied only
 in `enforce`; `shadow` and `off` preserve the existing runtime path. Autonomy
 calls are only made for durable/proactive work; ordinary chat does not incur
