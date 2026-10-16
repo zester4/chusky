@@ -1,0 +1,267 @@
+import { config as loadDotenv } from "dotenv";
+import { serve } from "@hono/node-server";
+import { Hono } from "hono";
+import { serve as serveWorkflow } from "@upstash/workflow/hono";
+import { WorkflowNonRetryableError } from "@upstash/workflow";
+import type { TaskWaitRequest } from "../src/types.js";
+import type { TaskSliceContext } from "../src/taskSlice.js";
+
+/**
+ * Real QStash/Redis/Neon mission smoke test.
+ *
+ * The callback server is intentionally separate from src/index.ts so this
+ * script never initializes Telegram polling or exposes the rest of Chusky.
+ * The only injected fake is the model boundary.
+ *
+ * Required:
+ *   WEBHOOK_URL=https://<temporary-public-tunnel>
+ *
+ * Optional:
+ *   LIVE_MISSION_PORT=8091
+ *   LIVE_MISSION_DELAYS_SECONDS=5,10,15
+ */
+
+// Keep the tunnel URL and timing overrides supplied on the command line while
+// making the checked-in local .env authoritative for service credentials. This
+// avoids an injected shell environment accidentally pointing the smoke test at
+// production resources.
+const suppliedWebhookUrl = process.env.WEBHOOK_URL;
+const suppliedPort = process.env.LIVE_MISSION_PORT;
+const suppliedDelays = process.env.LIVE_MISSION_DELAYS_SECONDS;
+loadDotenv({ override: true });
+if (suppliedWebhookUrl) process.env.WEBHOOK_URL = suppliedWebhookUrl;
+if (suppliedPort) process.env.LIVE_MISSION_PORT = suppliedPort;
+if (suppliedDelays) process.env.LIVE_MISSION_DELAYS_SECONDS = suppliedDelays;
+
+const publicUrl = (process.env.WEBHOOK_URL ?? "").replace(/\/+$/, "");
+if (!publicUrl) throw new Error("Set WEBHOOK_URL to the temporary public tunnel URL.");
+const publicTarget = new URL(publicUrl);
+if (publicTarget.protocol !== "https:") throw new Error("WEBHOOK_URL must use HTTPS.");
+if (publicTarget.hostname.endsWith(".up.railway.app")) {
+  throw new Error("This smoke test requires a local tunnel, not a Railway destination.");
+}
+for (const key of ["QSTASH_TOKEN", "QSTASH_CURRENT_SIGNING_KEY", "QSTASH_NEXT_SIGNING_KEY", "REDIS_URL"]) {
+  if (!process.env[key]) throw new Error("Missing " + key + ".");
+}
+
+const port = Number(process.env.LIVE_MISSION_PORT ?? "8091");
+if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("LIVE_MISSION_PORT is invalid.");
+const delays = (process.env.LIVE_MISSION_DELAYS_SECONDS ?? "5,10,15")
+  .split(",")
+  .map((value) => Number(value.trim()))
+  .filter((value) => Number.isInteger(value) && value >= 1 && value <= 3600);
+if (delays.length !== 3) throw new Error("LIVE_MISSION_DELAYS_SECONDS must contain exactly three values from 1 to 3600.");
+
+async function main(): Promise<void> {
+console.error("[live-smoke] loading durable store and workflow modules");
+const [
+  { initStore, createMission, startMission, getMission, listTasks, acquireUserLock, releaseUserLock },
+  { reconcileMissionExecution },
+  { executeDurableTask },
+  { executeTaskSlice },
+  { nativeTool },
+  { enqueueTaskWorkflow },
+  { parseTaskWorkflowPayload },
+] = await Promise.all([
+  import("../src/store.js"),
+  import("../src/missionScheduler.js"),
+  import("../src/taskRunner.js"),
+  import("../src/taskSlice.js"),
+  import("../src/nativeTools.js"),
+  import("../src/triggerWorkflow.js"),
+  import("../src/workflows.js"),
+]);
+console.error("[live-smoke] modules loaded");
+
+type ScriptedOptions = {
+  taskId?: string;
+  missionId?: string;
+  missionStepId?: string;
+  missionTimerResumed?: boolean;
+};
+
+let missionId = "";
+let modelCalls = 0;
+const stages = delays.map((delaySeconds, index) => ({
+  id: "live-stage-" + (index + 1),
+  title: "Live QStash stage " + (index + 1),
+  delaySeconds,
+}));
+
+const scriptedAgent: NonNullable<TaskSliceContext["runAgent"]> = async (...args) => {
+  const options = args[9] as ScriptedOptions | undefined;
+  if (!options?.taskId || options.missionId !== missionId || !options.missionStepId) {
+    throw new Error("The scripted model received an unexpected mission context.");
+  }
+  const stage = stages.find((candidate) => candidate.id === options.missionStepId);
+  if (!stage) throw new Error("Unknown mission step: " + options.missionStepId);
+  modelCalls += 1;
+  const runtime = {
+    taskId: options.taskId,
+    missionId,
+    missionStepId: stage.id,
+    enqueueMissionTask: enqueueTaskWorkflow,
+  };
+  const userId = Number(process.env.LIVE_MISSION_USER_ID);
+
+  if (!options.missionTimerResumed) {
+    let request: TaskWaitRequest | undefined;
+    await nativeTool(
+      userId,
+      "CHUCK_TASK_WAIT",
+      {
+        delaySeconds: stage.delaySeconds,
+        checkpoint: stage.title + " checkpoint saved before sleep",
+        nextAction: "Verify " + stage.title + " after the QStash wake",
+      },
+      { ...runtime, requestTaskWait: (value: TaskWaitRequest) => { request = value; } },
+    );
+    if (!request) throw new Error("CHUCK_TASK_WAIT did not return a wait request.");
+    return {
+      text: stage.title + " is sleeping on a real QStash timer.",
+      toolsUsed: ["CHUCK_TASK_WAIT"],
+      toolsSucceeded: ["CHUCK_TASK_WAIT"],
+      taskWait: request,
+    };
+  }
+
+  await nativeTool(
+    userId,
+    "CHUCK_MISSION_CHECKPOINT",
+    {
+      id: missionId,
+      checkpoint: stage.title + " checkpoint verified after wake",
+      nextAction: "Complete " + stage.title,
+    },
+    runtime,
+  );
+  await nativeTool(
+    userId,
+    "CHUCK_MISSION_STEP_COMPLETE",
+    {
+      id: missionId,
+      stepId: stage.id,
+      result: stage.title + " completed after a real QStash wake",
+    },
+    runtime,
+  );
+  return {
+    text: stage.title + " completed after the real QStash wake.",
+    toolsUsed: ["CHUCK_MISSION_CHECKPOINT", "CHUCK_MISSION_STEP_COMPLETE"],
+    toolsSucceeded: ["CHUCK_MISSION_CHECKPOINT", "CHUCK_MISSION_STEP_COMPLETE"],
+  };
+};
+
+const app = new Hono();
+app.get("/health", (c) => c.json({ ok: true, service: "live-mission-qstash-smoke" }));
+app.post(
+  "/workflows/task",
+  serveWorkflow(async (workflow) => {
+    let payload: { taskId: string; userId: number };
+    try {
+      payload = parseTaskWorkflowPayload(workflow.requestPayload);
+    } catch (error) {
+      throw new WorkflowNonRetryableError(error instanceof Error ? error.message : "Invalid task workflow payload");
+    }
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const run = await workflow.run("execute-task-" + attempt, async () => executeDurableTask(payload, {
+        workerId: "live-qstash-smoke:" + (workflow.workflowRunId ?? "task") + ":" + attempt,
+        execute: (task, leaseSignal) => executeTaskSlice(task, leaseSignal, {
+          workflowRunId: workflow.workflowRunId,
+          attempt,
+          sdkTaskMessage: async (current) => current?.objective ?? "",
+          sdkTaskSkillInstructions: async () => undefined,
+          sdkDurationSeconds: () => undefined,
+          sendMessage: async () => undefined,
+          withUserLock: async <T>(userId: number, _signal: AbortSignal | undefined, work: () => Promise<T>) => {
+            const token = "live-qstash-smoke:" + userId;
+            if (!(await acquireUserLock(userId, token))) throw new Error("Could not acquire the local smoke-test owner lock.");
+            try { return await work(); } finally { await releaseUserLock(userId, token); }
+          },
+          runAgent: scriptedAgent,
+          enqueueMissionTask: enqueueTaskWorkflow,
+        }),
+      }));
+
+      if (!run.claimed && run.task?.status === "queued") {
+        const now = Date.now();
+        const wakeAt = Math.max(run.task.runAt ?? now, now + 1000);
+        if (attempt >= 9) {
+          if (run.task.id) await enqueueTaskWorkflow(payload.userId, run.task.id, wakeAt);
+          break;
+        }
+        await workflow.sleep("retry-claim-" + attempt, Math.max(1, Math.ceil((wakeAt - now) / 1000)));
+        continue;
+      }
+      if (run.task?.status !== "queued" || !run.task.runAt || run.task.runAt <= Date.now()) break;
+      if (attempt >= 9) {
+        await enqueueTaskWorkflow(payload.userId, run.task.id, run.task.runAt);
+        break;
+      }
+      await workflow.sleep("retry-delay-" + attempt, Math.max(1, Math.ceil((run.task.runAt - Date.now()) / 1000)));
+    }
+  }, { url: publicUrl + "/workflows/task" }),
+);
+
+await initStore();
+console.error("[live-smoke] staging Redis/Neon store initialized");
+const userId = Number(process.env.LIVE_MISSION_USER_ID ?? String(7_906_000_000 + (Date.now() % 900_000)));
+if (!Number.isSafeInteger(userId) || userId < 1) throw new Error("LIVE_MISSION_USER_ID is invalid.");
+process.env.LIVE_MISSION_USER_ID = String(userId);
+
+const server = await new Promise<ReturnType<typeof serve>>((resolve, reject) => {
+  const instance = serve({ fetch: app.fetch, port }, () => resolve(instance));
+  instance.once("error", reject);
+});
+console.error("[live-smoke] callback server listening on port " + port);
+
+try {
+  const health = await fetch("http://127.0.0.1:" + port + "/health");
+  if (!health.ok) throw new Error("Local callback server health check failed with " + health.status + ".");
+
+  const mission = await createMission(userId, {
+    title: "Real QStash mission smoke test",
+    objective: "Exercise three durable sleep/wake continuations through real QStash delivery.",
+    definitionOfDone: "All three stages complete after real QStash wakes without a model-provider call.",
+    steps: stages.map((stage, index) => ({
+      id: stage.id,
+      title: stage.title,
+      objective: "Wait " + stage.delaySeconds + " seconds, wake through QStash, verify the checkpoint, and complete this stage.",
+      ...(index ? { dependsOn: [stages[index - 1].id] } : {}),
+    })),
+  });
+  missionId = mission.id;
+  await startMission(userId, mission.id);
+  const scheduled = await reconcileMissionExecution(userId, mission.id, enqueueTaskWorkflow);
+  if (!scheduled) throw new Error("Mission could not be scheduled.");
+  console.error("[live-smoke] mission " + mission.id + " scheduled through QStash");
+
+  const deadline = Date.now() + 180_000;
+  let finalMission = await getMission(userId, mission.id);
+  while (finalMission && !["completed", "blocked", "cancelled"].includes(finalMission.status) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    finalMission = await getMission(userId, mission.id);
+  }
+  console.error("[live-smoke] mission terminal state: " + (finalMission?.status ?? "missing"));
+  const tasks = (await listTasks(userId)).filter((task) => task.missionId === mission.id);
+  const result = {
+    ok: finalMission?.status === "completed",
+    missionId: mission.id,
+    userId,
+    status: finalMission?.status,
+    modelCalls,
+    taskStatuses: tasks.map((task) => ({ id: task.id, stepId: task.missionStepId, status: task.status, attempts: task.attempt })),
+    delays,
+  };
+  console.log(JSON.stringify(result, null, 2));
+  if (!result.ok) process.exitCode = 1;
+} finally {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+}
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : error);
+  process.exitCode = 1;
+});
