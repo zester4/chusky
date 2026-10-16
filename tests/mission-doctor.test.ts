@@ -38,6 +38,25 @@ test("mission doctor reports a running mission with a live queued task as health
   assert.equal(report.budget.remainingSlices, 19);
 });
 
+test("mission doctor exposes a retryable worker failure instead of reporting healthy", () => {
+  const report = diagnoseMission({
+    mission: mission({ consumedSlices: 0, toolCalls: 0, cost: 0 }),
+    tasks: [task({
+      status: "queued",
+      attempt: 1,
+      maxAttempts: 3,
+      runAt: 5_000,
+      lastFailureClass: "worker",
+      error: "TimeoutError",
+    })],
+    now: 1_000,
+  });
+  assert.equal(report.health, "stalled");
+  assert.equal(report.summary, "Mission worker encountered a recoverable failure and is retrying the saved step.");
+  assert.ok(report.reasons.includes("worker_retry_scheduled"));
+  assert.ok(report.nextActions.some((action) => /attempt 1 of 3 failed.*queued for retry/i.test(action)));
+});
+
 test("mission doctor identifies an expired lease and gives a recovery action", () => {
   const report = diagnoseMission({ mission: mission(), tasks: [task({ status: "running", lease: { token: "redacted", workerId: "worker-1", acquiredAt: 1, expiresAt: 900 } })], now: 1_000 });
   assert.equal(report.health, "stalled");

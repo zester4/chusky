@@ -96,6 +96,12 @@ export function diagnoseMission(input: { mission: MissionRecord; tasks: TaskReco
   }));
   const expiredLeases = missionTasks.filter((task) => task.lease && task.lease.expiresAt <= now);
   const failedTasks = missionTasks.filter((task) => task.status === "failed" || task.status === "blocked");
+  // A retryable worker failure is persisted as a queued task. It is still
+  // executable, but presenting it as simply "healthy" hides the failure and
+  // makes a mission with zero successful slices look like it is progressing.
+  const retryingTasks = missionTasks.filter((task) =>
+    task.status === "queued" && task.attempt > 0 && Boolean(task.lastFailureClass),
+  );
   const waiting = mission.waiting ? { ...mission.waiting, overdue: (mission.waiting.expiresAt ?? Number.POSITIVE_INFINITY) <= now || (mission.waiting.runAt ?? Number.POSITIVE_INFINITY) <= now } : undefined;
   const syntheticTimerProvider = waiting?.kind === "provider_event"
     && String(waiting.provider ?? "").toLowerCase().replace(/[\s_]+/g, "-") === "mission-timer";
@@ -141,6 +147,11 @@ export function diagnoseMission(input: { mission: MissionRecord; tasks: TaskReco
       ? "Review the saved checkpoint and task events, then repair or resume the native-only step explicitly; no provider receipt is expected."
       : "Run mission recovery to reclaim the expired lease and reschedule the saved slice only after provider state is reconciled.");
   }
+  if (retryingTasks.length) {
+    reasons.push("worker_retry_scheduled");
+    const retrying = retryingTasks[0]!;
+    nextActions.push(`Worker attempt ${retrying.attempt} of ${retrying.maxAttempts} failed; the saved step is queued for retry.`);
+  }
   if (waiting) {
     reasons.push(waiting.overdue ? "wait_is_due_or_expired" : `waiting_for_${waiting.kind}`);
     if (syntheticTimerProvider) {
@@ -162,6 +173,6 @@ export function diagnoseMission(input: { mission: MissionRecord; tasks: TaskReco
     nextActions.push("Reduce the remaining plan or request an approved budget extension before resuming.");
   }
   const health: MissionDoctorReport["health"] = mission.status === "blocked" || mission.status === "failed" || blockedCompensations ? "blocked" : waitingStepMismatch || syntheticTimerProvider ? "stalled" : waiting ? "waiting" : reasons.length ? "stalled" : "healthy";
-  const summary = syntheticTimerProvider ? "Mission is waiting on a synthetic timer provider that cannot deliver an event; replan the wait." : waitingStepMismatch ? "Mission wait points to a step that is no longer active; repair the saved continuation." : health === "healthy" ? "Mission has a live executable path." : health === "waiting" ? `Mission is waiting for ${waiting?.kind ?? "an external condition"}.` : health === "stalled" ? "Mission is active but has no healthy forward execution path." : "Mission requires intervention before it can safely continue.";
+  const summary = syntheticTimerProvider ? "Mission is waiting on a synthetic timer provider that cannot deliver an event; replan the wait." : waitingStepMismatch ? "Mission wait points to a step that is no longer active; repair the saved continuation." : retryingTasks.length ? "Mission worker encountered a recoverable failure and is retrying the saved step." : health === "healthy" ? "Mission has a live executable path." : health === "waiting" ? `Mission is waiting for ${waiting?.kind ?? "an external condition"}.` : health === "stalled" ? "Mission is active but has no healthy forward execution path." : "Mission requires intervention before it can safely continue.";
   return { missionId: mission.id, status: mission.status, generatedAt: now, health, summary, reasons: [...new Set(reasons)].slice(0, 20), nextActions: [...new Set(nextActions)].slice(0, 10), readyStepIds: ready.slice(0, 200), activeStepIds: (mission.activeStepIds ?? []).slice(0, 200), ...(waiting ? { waiting } : {}), tasks, compensation: { pending: pendingCompensations, blocked: blockedCompensations }, budget: reportBudget, ...(mission.workSchedule ? { workSchedule: mission.workSchedule } : {}) };
 }

@@ -5,6 +5,18 @@ const MAX_MODEL_TOOL_RESULT_CHARS = 3_500;
 const MAX_MODEL_CONTEXT_MESSAGES = 14;
 const MAX_MODEL_CONTEXT_CHARS = 30_000;
 
+/** Prefer the active mission step over its large continuation prompt for owner-context retrieval. */
+export function contextSearchQuery(userMessage: string, missionStepObjective?: string): string {
+  return (missionStepObjective?.trim() || userMessage.trim()).slice(0, 2_000);
+}
+
+/** Keep worker-only reference context bounded without trimming its source prefix. */
+export function boundMissionContext(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  const marker = "\n[… mission context shortened; retrieve exact source details if needed …]";
+  return `${value.slice(0, Math.max(0, maxChars - marker.length))}${marker}`;
+}
+
 function compactModelContent(content: ApiMessage["content"], maxChars = MAX_MODEL_TOOL_RESULT_CHARS): ApiMessage["content"] {
   if (typeof content !== "string" || content.length <= maxChars) return content;
   const head = Math.floor(maxChars * 0.62);
