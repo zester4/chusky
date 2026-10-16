@@ -3647,6 +3647,8 @@ async function executeAgent(
             ? { kind: "mission", id: options.missionId, missionStepId: options.missionStepId }
             : options?.taskId
               ? { kind: "task", id: options.taskId }
+              : channelContext?.triggerEventId
+                ? { kind: "trigger", id: channelContext.triggerEventId }
               : undefined;
         if (autonomySource && isExternalWriteTool(slug)) {
           externalClaim = await beginExternalAction({ userId, provider: slug.startsWith("MCP_") ? "mcp" : slug.startsWith("CHUCK_") ? "native" : "composio", tool: slug, args: executionArgs, runId: options?.runId ?? durableRunId, source: autonomySource });
