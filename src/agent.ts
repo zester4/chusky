@@ -601,14 +601,20 @@ export interface OrChatOptions {
   sessionId?: string;
   /** Ask OpenRouter to route across the selected model set by recent latency. */
   latencyOptimized?: boolean;
+  /** Total elapsed-time budget shared across all HTTP attempts for this turn. */
+  maxTotalElapsedMs?: number;
+  /** Safe trigger correlation for timing logs; contains no prompt or user content. */
+  triggerEventId?: string;
+  /** Agent loop round for trigger timing logs. */
+  triggerRound?: number;
   /** Keep live voice turns on the model's lowest-latency reasoning lane. */
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 }
 
-/** The bounded OpenRouter attempts all expired before a model response arrived. */
+/** A model request exhausted its bounded attempt or total elapsed-time budget. */
 export class OpenRouterTimeoutError extends Error {
-  constructor(readonly modelId: string, readonly attempts: number) {
-    super("OpenRouter model request timed out after bounded retries.");
+  constructor(readonly modelId: string, readonly attempts: number, readonly elapsedMs: number) {
+    super("OpenRouter model request exhausted its bounded time budget.");
     this.name = "OpenRouterTimeoutError";
   }
 }
@@ -661,11 +667,28 @@ export async function orChat(
 
   let lastError: unknown;
   let timedOut = false;
+  let budgetExhausted = false;
+  let attemptsMade = 0;
+  const requestStartedAt = Date.now();
+  const maxTotalElapsedMs = routing.maxTotalElapsedMs
+    ? Math.max(1, Math.min(routing.maxTotalElapsedMs, 120_000))
+    : undefined;
+  const deadlineAt = maxTotalElapsedMs ? requestStartedAt + maxTotalElapsedMs : undefined;
+  const trace = routing.triggerEventId
+    ? { triggerEventId: routing.triggerEventId, round: routing.triggerRound }
+    : undefined;
   let streamedOutputExposed = false;
   for (let attempt = 0; attempt < config.openRouterMaxAttempts; attempt++) {
     if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
+    const remainingMs = deadlineAt ? deadlineAt - Date.now() : Number.POSITIVE_INFINITY;
+    if (remainingMs <= 0) {
+      budgetExhausted = true;
+      break;
+    }
     try {
-      const attemptTimeoutMs = openRouterAttemptTimeoutMs(attempt);
+      const attemptTimeoutMs = Math.max(1, Math.min(openRouterAttemptTimeoutMs(attempt), remainingMs));
+      attemptsMade += 1;
+      if (trace) logger.info({ ...trace, model: model.slice(0, 160), attempt: attemptsMade, timeoutMs: attemptTimeoutMs }, "Trigger model request attempt started");
       const attemptSignal = requestSignal(signal, attemptTimeoutMs);
       const res = await fetch(OR_URL, {
         method: "POST",
@@ -679,8 +702,11 @@ export async function orChat(
         signal: attemptSignal,
       });
       if (res.ok) {
-        if (onDelta) return await readStreamingChat(res, async (text) => { streamedOutputExposed = true; await onDelta(text); });
-        return await res.json() as ChatResponse;
+        const response = onDelta
+          ? await readStreamingChat(res, async (text) => { streamedOutputExposed = true; await onDelta(text); })
+          : await res.json() as ChatResponse;
+        if (trace) logger.info({ ...trace, model: model.slice(0, 160), finishReason: response.choices[0]?.finish_reason, attempt: attemptsMade, elapsedMs: Date.now() - requestStartedAt }, "Trigger model response received");
+        return response;
       }
       const err = await res.text().catch(() => res.statusText);
       if (![408, 429, 500, 502, 503, 504].includes(res.status)) {
@@ -697,19 +723,28 @@ export async function orChat(
       if (e instanceof Error && e.name === "TimeoutError") timedOut = true;
     }
     if (attempt + 1 < config.openRouterMaxAttempts) {
+      const retryDelayMs = 400 * 2 ** attempt + Math.random() * 250;
+      const retryRemainingMs = deadlineAt ? deadlineAt - Date.now() : Number.POSITIVE_INFINITY;
+      if (retryRemainingMs <= retryDelayMs) {
+        budgetExhausted = true;
+        break;
+      }
       logger.debug({ model, attempt: attempt + 1, timeoutMs: openRouterAttemptTimeoutMs(attempt + 1) }, "Retrying OpenRouter request after a transient failure");
-      await new Promise((resolve) => setTimeout(resolve, 400 * 2 ** attempt + Math.random() * 250));
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
   }
-  if (timedOut && lastError instanceof Error && lastError.name === "TimeoutError") {
-    const attempts = Math.min(config.openRouterMaxAttempts, 5);
+  const elapsedMs = Date.now() - requestStartedAt;
+  const exhaustedBudget = budgetExhausted || Boolean(deadlineAt && elapsedMs >= maxTotalElapsedMs!);
+  if ((timedOut && lastError instanceof Error && lastError.name === "TimeoutError") || exhaustedBudget) {
     logger.warn({
       model: model.slice(0, 160),
-      attempts,
-      attemptTimeoutsMs: Array.from({ length: attempts }, (_, index) => openRouterAttemptTimeoutMs(index)),
+      attempts: attemptsMade,
+      elapsedMs,
+      maxTotalElapsedMs,
+      ...(trace ?? {}),
       failureClass: "OpenRouterTimeoutError",
-    }, "OpenRouter model request timed out after bounded retries");
-    throw new OpenRouterTimeoutError(model, attempts);
+    }, "OpenRouter model request exhausted its bounded time budget");
+    throw new OpenRouterTimeoutError(model, attemptsMade, elapsedMs);
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
@@ -3351,6 +3386,9 @@ async function executeAgent(
         } : channelContext?.triggerEventId ? {
           fallbackModels: config.openRouterFallbackModels,
           latencyOptimized: true,
+          maxTotalElapsedMs: config.triggerModelRequestBudgetMs,
+          triggerEventId: channelContext.triggerEventId,
+          triggerRound: round,
         } : (structuredArtifactRequest || malformedToolCallPending ? { maxTokens: config.openRouterArtifactMaxTokens } : undefined);
         response = await orChat(requestModel, modelMessages, modelAvailableTools, signal, streamModelText, undefined, runRoutingOptions);
       }
@@ -3373,6 +3411,9 @@ async function executeAgent(
         } : channelContext?.triggerEventId ? {
           fallbackModels: config.openRouterFallbackModels,
           latencyOptimized: true,
+          maxTotalElapsedMs: config.triggerModelRequestBudgetMs,
+          triggerEventId: channelContext.triggerEventId,
+          triggerRound: round,
         } : (structuredArtifactRequest || malformedToolCallPending ? { maxTokens: config.openRouterArtifactMaxTokens } : undefined);
         response = await orChat(requestModel, modelMessages, modelAvailableTools, signal, streamModelText, undefined, runRoutingOptions);
       } else {
