@@ -4,7 +4,7 @@ import { deliverJob, deliverReminder, parseJobWorkflowPayload, parseReminderWork
 import type { JobRecord, ReminderRecord } from "../src/store.js";
 import type { JobOccurrenceRecord } from "../src/autonomy/types.js";
 import { resolveWorkflowEndpoint } from "../src/workflowUrls.js";
-import { parseWorkflowFailureRequestPayload, triggerWorkflowVersionForPayload, TRIGGER_WORKFLOW_VERSION } from "../src/triggerWorkflow.js";
+import { parseWorkflowFailureRequestPayload, triggerAgentWorkflowRunId, triggerWorkflowVersionForPayload, TRIGGER_WORKFLOW_VERSION } from "../src/triggerWorkflow.js";
 
 function deps(overrides: Partial<Parameters<typeof deliverReminder>[1]> = {}) {
   const sent: { chatId: number; text: string }[] = [];
@@ -36,8 +36,11 @@ test("workflow endpoints always use the configured public HTTPS URL", () => {
 
 test("trigger workflow payloads keep old runs on the legacy step graph and pin new runs", () => {
   assert.equal(triggerWorkflowVersionForPayload(undefined), "legacy");
-  assert.equal(triggerWorkflowVersionForPayload(TRIGGER_WORKFLOW_VERSION), "v2");
-  assert.throws(() => triggerWorkflowVersionForPayload(3), /Unsupported trigger workflow version/);
+  assert.equal(triggerWorkflowVersionForPayload(2), "v2");
+  assert.equal(triggerWorkflowVersionForPayload(TRIGGER_WORKFLOW_VERSION), "v3");
+  assert.throws(() => triggerWorkflowVersionForPayload(4), /Unsupported trigger workflow version/);
+  assert.equal(triggerAgentWorkflowRunId("evt_123"), triggerAgentWorkflowRunId("evt_123"));
+  assert.notEqual(triggerAgentWorkflowRunId("evt_123"), triggerAgentWorkflowRunId("evt_456"));
 });
 
 test("QStash failure payload parser reads the documented base64 source body", () => {

@@ -13,6 +13,25 @@ test("autonomous external action receipts make successful provider writes idempo
   assert.match(replay.receipt?.resultSummary ?? "", /providerId/);
 });
 
+test("trigger external action receipts prevent duplicate writes after workflow replay", async () => {
+  await initStore({ memoryOnly: true });
+  const input = {
+    userId: 950006,
+    provider: "composio" as const,
+    tool: "GMAIL_SEND_EMAIL",
+    args: { to: "owner@example.com", subject: "Trigger update" },
+    runId: "trigger-agent-event-1",
+    source: { kind: "trigger", id: "evt_replayed_1" },
+  };
+  const first = await beginExternalAction(input);
+  assert.equal(first.state, "new");
+  await finishExternalAction(input.userId, first.logicalActionId, "provider accepted the message", "msg_trigger_1");
+
+  const replay = await beginExternalAction({ ...input, runId: "trigger-agent-event-1-retry" });
+  assert.equal(replay.state, "succeeded");
+  assert.equal(replay.receipt?.providerId, "msg_trigger_1");
+});
+
 test("an uncertain external-write failure is quarantined instead of replayed", async () => {
   await initStore({ memoryOnly: true });
   const input = { userId: 950003, provider: "composio" as const, tool: "GMAIL_SEND_EMAIL", args: { to: "a@example.com", subject: "May already have sent" }, runId: "run-ambiguous", source: { kind: "mission", id: "mis_ambiguous", missionStepId: "send" } };

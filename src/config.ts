@@ -218,6 +218,7 @@ export const config = {
   // credentials and never expose it to model or tenant context.
   providerSmokeSigningSecret: optional("PROVIDER_SMOKE_SIGNING_SECRET", ""),
   triggerWorkflowUrl: optional("TRIGGER_WORKFLOW_URL", ""),
+  triggerAgentWorkflowUrl: optional("TRIGGER_AGENT_WORKFLOW_URL", ""),
   videoWorkflowUrl: optional("VIDEO_WORKFLOW_URL", ""),
   reminderWorkflowUrl: optional("REMINDER_WORKFLOW_URL", ""),
   jobWorkflowUrl: optional("JOB_WORKFLOW_URL", ""),

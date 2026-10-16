@@ -7,11 +7,17 @@ import { createHash } from "node:crypto";
 
 export { resolveWorkflowEndpoint } from "./workflowUrls.js";
 
-export const TRIGGER_WORKFLOW_VERSION = 2 as const;
+// v3 moves the long-running agent execution behind WorkflowContext.call. Keep
+// v2 and legacy graphs readable so an already queued workflow can replay its
+// original durable steps without a step-name or ordering mismatch.
+export const TRIGGER_WORKFLOW_VERSION = 3 as const;
 
-export function triggerWorkflowVersionForPayload(version: unknown): "legacy" | "v2" {
+export type TriggerWorkflowVersion = "legacy" | "v2" | "v3";
+
+export function triggerWorkflowVersionForPayload(version: unknown): TriggerWorkflowVersion {
   if (version === undefined) return "legacy";
-  if (version === TRIGGER_WORKFLOW_VERSION) return "v2";
+  if (version === 2) return "v2";
+  if (version === TRIGGER_WORKFLOW_VERSION) return "v3";
   throw new Error("Unsupported trigger workflow version.");
 }
 
@@ -34,6 +40,16 @@ export function parseWorkflowFailureRequestPayload(body: Record<string, unknown>
 
 export function triggerWorkflowUrl(): string {
   return resolveWorkflowEndpoint(config.triggerWorkflowUrl, config.webhookUrl, "/workflows/trigger-event", "Trigger workflows");
+}
+
+/** Public callback used by QStash for the long-running trigger agent step. */
+export function triggerAgentWorkflowUrl(): string {
+  return resolveWorkflowEndpoint(config.triggerAgentWorkflowUrl, config.webhookUrl, "/internal/workflows/trigger-agent", "Trigger agent workflows");
+}
+
+/** Stable across QStash retries so a timed-out call can resume the same run. */
+export function triggerAgentWorkflowRunId(eventId: string): string {
+  return `trigger-agent-${eventId}`;
 }
 
 export function workflowClient(): WorkflowClient {
