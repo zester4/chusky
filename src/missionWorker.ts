@@ -242,6 +242,11 @@ export function missionHasTimerWakeContinuation(
   // incorrectly make a future slice look like the first post-wake slice.
   for (const event of [...mission.events].reverse()) {
     if (!matchesStep(event)) continue;
+    // Reconciliation records that a dependency-ready task was published, but
+    // it does not represent new mission progress. The scheduler can append
+    // this event immediately after resumeMissionFromTimer and before the same
+    // durable task is claimed; keep the wake marker visible to that worker.
+    if (event.type === "step_started" && /^Reconciled\b/i.test(event.message)) continue;
     if (event.type === "resumed" && /^Timer wait reached\b/i.test(event.message)) return true;
     if (terminalOrProgressEvents.has(event.type)) return false;
   }

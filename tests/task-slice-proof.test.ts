@@ -79,6 +79,299 @@ test("full production slice parks an early timer wake without invoking the model
   assert.equal((await getMission(userId, mission.id))?.status, "waiting");
 });
 
+test("production mission lifecycle starts, sleeps, wakes, and continues the same task", async () => {
+  const userId = 982006;
+  const clock = new MissionFakeClock();
+  clock.install();
+  try {
+    const queue = new MissionFakeQStash();
+    const mission = await createMission(userId, {
+      title: "Timer continuation proof",
+      objective: "Persist a timer, wake, and verify the post-wake action",
+      definitionOfDone: "The post-wake verification is persisted as the completed step result",
+      steps: [{ id: "sleep-check", title: "Sleep and verify", objective: "Wait for the bounded timer, then verify the resumed state" }],
+    });
+    await startMission(userId, mission.id);
+    await reconcileMissionExecution(userId, mission.id, queue.enqueue);
+    const task = (await listTasks(userId)).find((candidate) => candidate.missionId === mission.id && candidate.missionStepId === "sleep-check");
+    assert.ok(task);
+    assert.ok(queue.deliveries.some((delivery) => delivery.taskId === task.id && delivery.runAt <= clock.now));
+
+    let modelCalls = 0;
+    let firstTaskId: string | undefined;
+    const dependencies = context(queue, async (...args) => {
+      modelCalls++;
+      const options = args[9]!;
+      firstTaskId ??= options.taskId;
+      assert.equal(options.taskId, task.id);
+      assert.equal(options.missionId, mission.id);
+      assert.equal(options.missionStepId, "sleep-check");
+      const runtime = {
+        taskId: options.taskId,
+        missionId: mission.id,
+        missionStepId: "sleep-check",
+        enqueueMissionTask: queue.enqueue,
+      };
+
+      if (modelCalls === 1) {
+        let request: TaskWaitRequest | undefined;
+        await nativeTool(userId, "CHUCK_TASK_WAIT", {
+          delaySeconds: 60,
+          checkpoint: "Pre-wake state verified",
+          nextAction: "Verify the resumed state and complete the step",
+        }, { ...runtime, requestTaskWait: (value) => { request = value; } });
+        assert.ok(request);
+        return {
+          text: "The state is verified; I will continue after the timer.",
+          toolsUsed: ["CHUCK_TASK_WAIT"],
+          toolsSucceeded: ["CHUCK_TASK_WAIT"],
+          taskWait: request,
+        };
+      }
+
+      assert.equal(options.missionTimerResumed, true);
+      await nativeTool(userId, "CHUCK_MISSION_CHECKPOINT", {
+        id: mission.id,
+        checkpoint: "Post-wake state verified",
+        nextAction: "Complete the active step",
+      }, runtime);
+      await nativeTool(userId, "CHUCK_MISSION_STEP_COMPLETE", {
+        id: mission.id,
+        stepId: "sleep-check",
+        result: "Post-wake verification completed",
+      }, runtime);
+      return {
+        text: "The timer completed and the resumed state is verified.",
+        toolsUsed: ["CHUCK_MISSION_CHECKPOINT", "CHUCK_MISSION_STEP_COMPLETE"],
+        toolsSucceeded: ["CHUCK_MISSION_CHECKPOINT", "CHUCK_MISSION_STEP_COMPLETE"],
+      };
+    });
+
+    const initialDelivery = queue.deliveries.findIndex((delivery) => delivery.taskId === task.id && delivery.runAt <= clock.now);
+    queue.deliveries.splice(initialDelivery, 1);
+    const firstRun = await executeDurableTask({ userId, taskId: task.id }, {
+      workerId: "timer-lifecycle-start-worker",
+      execute: (claimed, signal) => executeTaskSlice(claimed, signal, dependencies),
+    });
+    assert.equal(firstRun.task?.id, task.id);
+    assert.equal(firstRun.task?.status, "queued");
+    assert.equal(firstRun.task?.runAt, clock.now + 60000);
+    assert.match(firstRun.task?.nextAction ?? "", /After the durable timer wakes.*Do not call CHUCK_TASK_WAIT again/);
+    assert.equal(modelCalls, 1);
+    assert.equal((await getMission(userId, mission.id))?.status, "waiting");
+    assert.equal((await getMission(userId, mission.id))?.waiting?.kind, "timer");
+    assert.equal((await getMission(userId, mission.id))?.waiting?.runAt, clock.now + 60000);
+    await queue.enqueue(userId, task.id, firstRun.task!.runAt!);
+
+    const early = await resumeMissionAndSchedule(userId, mission.id, queue.enqueue);
+    assert.equal(early?.status, "waiting");
+    assert.equal(modelCalls, 1, "A future timer must not invoke the model early");
+
+    const wakeAt = firstRun.task!.runAt!;
+    clock.advance(wakeAt - clock.now);
+    const resumed = await resumeMissionAndSchedule(userId, mission.id, queue.enqueue);
+    assert.equal(resumed?.status, "running");
+    assert.equal(resumed?.waiting, undefined);
+    assert.ok(resumed?.events.some((event) => event.type === "resumed" && event.metadata?.timerRunAt === wakeAt));
+
+    const wakeDelivery = queue.deliveries.findIndex((delivery) => delivery.taskId === task.id && delivery.runAt <= clock.now);
+    assert.ok(wakeDelivery >= 0, "The resumed mission must publish a due continuation for the same task");
+    queue.deliveries.splice(wakeDelivery, 1);
+    const continued = await executeDurableTask({ userId, taskId: task.id }, {
+      workerId: "timer-lifecycle-wake-worker",
+      execute: (claimed, signal) => executeTaskSlice(claimed, signal, dependencies),
+    });
+    assert.equal(firstTaskId, task.id);
+    assert.equal(modelCalls, 2);
+    assert.equal(continued.task?.id, task.id);
+    assert.equal(continued.task?.status, "completed", continued.task?.error ?? JSON.stringify(continued.task?.events.at(-1)));
+    const completed = await getMission(userId, mission.id);
+    assert.equal(completed?.status, "completed");
+    assert.equal(completed?.steps.find((step) => step.id === "sleep-check")?.result, "Post-wake verification completed");
+  } finally {
+    clock.restore();
+  }
+});
+
+test("production mission repeats sleep and wake across steps until completion", async () => {
+  const userId = 982007;
+  const clock = new MissionFakeClock();
+  clock.install();
+  try {
+    const queue = new MissionFakeQStash();
+    const mission = await createMission(userId, {
+      title: "Repeated timer lifecycle proof",
+      objective: "Sleep and wake twice, completing one verified step after each wake",
+      definitionOfDone: "Both timer-backed steps are completed after their post-wake verification",
+      steps: [
+        { id: "first-wait", title: "First wait", objective: "Wait, wake, and verify the first state" },
+        { id: "second-wait", title: "Second wait", objective: "Wait again, wake, and verify the final state", dependsOn: ["first-wait"] },
+      ],
+    });
+    await startMission(userId, mission.id);
+    await reconcileMissionExecution(userId, mission.id, queue.enqueue);
+    const firstTask = (await listTasks(userId)).find((candidate) => candidate.missionId === mission.id && candidate.missionStepId === "first-wait");
+    assert.ok(firstTask);
+
+    let modelCalls = 0;
+    const dependencies = context(queue, async (...args) => {
+      modelCalls++;
+      const options = args[9]!;
+      const stepId = options.missionStepId!;
+      const runtime = { taskId: options.taskId, missionId: mission.id, missionStepId: stepId, enqueueMissionTask: queue.enqueue };
+      const waitRequest = async (checkpoint: string, nextAction: string) => {
+        let request: TaskWaitRequest | undefined;
+        await nativeTool(userId, "CHUCK_TASK_WAIT", { delaySeconds: 60, checkpoint, nextAction }, { ...runtime, requestTaskWait: (value) => { request = value; } });
+        assert.ok(request);
+        return { text: "The current state is verified; I will continue after the timer.", toolsUsed: ["CHUCK_TASK_WAIT"], toolsSucceeded: ["CHUCK_TASK_WAIT"], taskWait: request };
+      };
+      const completeAfterWake = async (result: string) => {
+        assert.equal(options.missionTimerResumed, true);
+        await nativeTool(userId, "CHUCK_MISSION_CHECKPOINT", { id: mission.id, checkpoint: `Verified ${stepId} after wake`, nextAction: `Complete ${stepId}` }, runtime);
+        await nativeTool(userId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId, result }, runtime);
+        return { text: result, toolsUsed: ["CHUCK_MISSION_CHECKPOINT", "CHUCK_MISSION_STEP_COMPLETE"], toolsSucceeded: ["CHUCK_MISSION_CHECKPOINT", "CHUCK_MISSION_STEP_COMPLETE"] };
+      };
+
+      assert.equal(options.missionTimerResumed, modelCalls % 2 === 0);
+      if (!options.missionTimerResumed) return waitRequest(`Before wake ${stepId}`, `Resume ${stepId} after the timer`);
+      return completeAfterWake(`Verified ${stepId} after its timer`);
+    });
+
+    const runTimerCycle = async (taskId: string, expectedStepId: string) => {
+      const due = queue.deliveries.findIndex((delivery) => delivery.taskId === taskId && delivery.runAt <= clock.now);
+      assert.ok(due >= 0, `Expected a due delivery for ${expectedStepId}`);
+      queue.deliveries.splice(due, 1);
+      const sleeping = await executeDurableTask({ userId, taskId }, {
+        workerId: `${expectedStepId}-sleep-worker`,
+        execute: (claimed, signal) => executeTaskSlice(claimed, signal, dependencies),
+      });
+      assert.equal(sleeping.task?.id, taskId);
+      assert.equal(sleeping.task?.status, "queued");
+      assert.equal((await getMission(userId, mission.id))?.status, "waiting");
+      assert.equal((await getMission(userId, mission.id))?.waiting?.kind, "timer");
+      await queue.enqueue(userId, taskId, sleeping.task!.runAt!);
+
+      const early = await resumeMissionAndSchedule(userId, mission.id, queue.enqueue);
+      assert.equal(early?.status, "waiting");
+      const wakeAt = sleeping.task!.runAt!;
+      clock.advance(wakeAt - clock.now);
+      const resumed = await resumeMissionAndSchedule(userId, mission.id, queue.enqueue);
+      assert.equal(resumed?.status, "running");
+      assert.ok(resumed?.events.some((event) => event.type === "resumed" && event.metadata?.timerRunAt === wakeAt));
+
+      const wake = queue.deliveries.findIndex((delivery) => delivery.taskId === taskId && delivery.runAt <= clock.now);
+      assert.ok(wake >= 0, `Expected the resumed ${expectedStepId} task to be published`);
+      queue.deliveries.splice(wake, 1);
+      const completed = await executeDurableTask({ userId, taskId }, {
+        workerId: `${expectedStepId}-wake-worker`,
+        execute: (claimed, signal) => executeTaskSlice(claimed, signal, dependencies),
+      });
+      assert.equal(completed.task?.id, taskId);
+      assert.equal(completed.task?.status, "completed");
+    };
+
+    await runTimerCycle(firstTask.id, "first-wait");
+    const secondTask = (await listTasks(userId)).find((candidate) => candidate.missionId === mission.id && candidate.missionStepId === "second-wait");
+    assert.ok(secondTask);
+    await runTimerCycle(secondTask.id, "second-wait");
+
+    assert.equal(modelCalls, 4);
+    const completed = await getMission(userId, mission.id);
+    assert.equal(completed?.status, "completed");
+    assert.deepEqual(completed?.steps.map((step) => step.status), ["completed", "completed"]);
+  } finally {
+    clock.restore();
+  }
+});
+
+test("production mission handles staged 5-minute, 30-minute, and 1-hour wakes", async () => {
+  const userId = 982008;
+  const clock = new MissionFakeClock();
+  clock.install();
+  try {
+    const queue = new MissionFakeQStash();
+    const stages = [
+      { id: "five-minute", title: "Five-minute wait", delaySeconds: 5 * 60 },
+      { id: "thirty-minute", title: "Thirty-minute wait", delaySeconds: 30 * 60 },
+      { id: "one-hour", title: "One-hour wait", delaySeconds: 60 * 60 },
+    ];
+    const mission = await createMission(userId, {
+      title: "Staged long timer proof",
+      objective: "Sleep and wake after five minutes, thirty minutes, and one hour",
+      definitionOfDone: "All three staged waits wake on time and their steps complete",
+      steps: stages.map((stage, index) => ({
+        id: stage.id,
+        title: stage.title,
+        objective: `Wait ${stage.delaySeconds} seconds, wake, and verify the staged state`,
+        ...(index ? { dependsOn: [stages[index - 1].id] } : {}),
+      })),
+    });
+    await startMission(userId, mission.id);
+    await reconcileMissionExecution(userId, mission.id, queue.enqueue);
+
+    let modelCalls = 0;
+    const dependencies = context(queue, async (...args) => {
+      modelCalls++;
+      const options = args[9]!;
+      const stage = stages.find((candidate) => candidate.id === options.missionStepId);
+      assert.ok(stage);
+      const runtime = { taskId: options.taskId, missionId: mission.id, missionStepId: stage.id, enqueueMissionTask: queue.enqueue };
+      if (!options.missionTimerResumed) {
+        let request: TaskWaitRequest | undefined;
+        await nativeTool(userId, "CHUCK_TASK_WAIT", {
+          delaySeconds: stage.delaySeconds,
+          checkpoint: `${stage.title} state saved before sleep`,
+          nextAction: `Verify ${stage.title} after wake`,
+        }, { ...runtime, requestTaskWait: (value) => { request = value; } });
+        assert.ok(request);
+        return { text: `${stage.title} is sleeping until its durable timer wakes.`, toolsUsed: ["CHUCK_TASK_WAIT"], toolsSucceeded: ["CHUCK_TASK_WAIT"], taskWait: request };
+      }
+      await nativeTool(userId, "CHUCK_MISSION_CHECKPOINT", { id: mission.id, checkpoint: `${stage.title} state verified after wake`, nextAction: `Complete ${stage.title}` }, runtime);
+      await nativeTool(userId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId: stage.id, result: `${stage.title} completed after wake` }, runtime);
+      return { text: `${stage.title} completed after wake.`, toolsUsed: ["CHUCK_MISSION_CHECKPOINT", "CHUCK_MISSION_STEP_COMPLETE"], toolsSucceeded: ["CHUCK_MISSION_CHECKPOINT", "CHUCK_MISSION_STEP_COMPLETE"] };
+    });
+
+    for (const stage of stages) {
+      const task = (await listTasks(userId)).find((candidate) => candidate.missionId === mission.id && candidate.missionStepId === stage.id);
+      assert.ok(task, `Expected a task for ${stage.id}`);
+      const due = queue.deliveries.findIndex((delivery) => delivery.taskId === task.id && delivery.runAt <= clock.now);
+      assert.ok(due >= 0, `Expected ${stage.id} to start immediately`);
+      queue.deliveries.splice(due, 1);
+      const sleeping = await executeDurableTask({ userId, taskId: task.id }, {
+        workerId: `${stage.id}-sleep-worker`,
+        execute: (claimed, signal) => executeTaskSlice(claimed, signal, dependencies),
+      });
+      assert.equal(sleeping.task?.status, "queued");
+      const wakeAt = clock.now + stage.delaySeconds * 1000;
+      assert.equal(sleeping.task?.runAt, wakeAt);
+      assert.equal((await getMission(userId, mission.id))?.waiting?.runAt, wakeAt);
+      await queue.enqueue(userId, task.id, wakeAt);
+
+      assert.equal((await resumeMissionAndSchedule(userId, mission.id, queue.enqueue))?.status, "waiting");
+      clock.advance(stage.delaySeconds * 1000);
+      const resumed = await resumeMissionAndSchedule(userId, mission.id, queue.enqueue);
+      assert.equal(resumed?.status, "running");
+      const wakeEvent = resumed?.events.find((event) => event.type === "resumed" && event.metadata?.timerRunAt === wakeAt);
+      assert.equal(wakeEvent?.metadata?.scheduledDelayMs, stage.delaySeconds * 1000);
+
+      const wake = queue.deliveries.findIndex((delivery) => delivery.taskId === task.id && delivery.runAt <= clock.now);
+      assert.ok(wake >= 0, `Expected ${stage.id} to publish its wake continuation`);
+      queue.deliveries.splice(wake, 1);
+      const completed = await executeDurableTask({ userId, taskId: task.id }, {
+        workerId: `${stage.id}-wake-worker`,
+        execute: (claimed, signal) => executeTaskSlice(claimed, signal, dependencies),
+      });
+      assert.equal(completed.task?.status, "completed");
+    }
+
+    assert.equal(modelCalls, stages.length * 2);
+    assert.equal(clock.now, Date.UTC(2026, 0, 1) + (5 + 30 + 60) * 60 * 1000);
+    assert.equal((await getMission(userId, mission.id))?.status, "completed");
+  } finally {
+    clock.restore();
+  }
+});
+
 test("a completed step cannot schedule a timer for its successor", async () => {
   const userId = 982020;
   const queue = new MissionFakeQStash();
