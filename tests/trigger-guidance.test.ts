@@ -22,6 +22,14 @@ test("exhausted trigger workflow makes an unsaved run visibly failed without exp
   assert.equal(triggerWorkflowExhaustion({ status: "completed", result: "Done" }), undefined);
 });
 
+test("exhausted notification delivery cannot turn a saved failed trigger into success", () => {
+  const failure = triggerWorkflowExhaustion({ status: "failed", result: "The model timed out and the provider outcome is uncertain." });
+  assert.equal(failure?.status, "failed");
+  assert.equal(failure?.result, "The model timed out and the provider outcome is uncertain.");
+  assert.equal(failure?.notificationStatus, "unknown");
+  assert.match(failure?.error ?? "", /notification delivery did not finish/i);
+});
+
 test("default trigger policy requires end-to-end execution and provider-specific handling", () => {
   assert.match(TRIGGER_DEFAULT_HANDLING, /An enabled trigger assigns you the matching event/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /A notification or summary alone is not completion/i);

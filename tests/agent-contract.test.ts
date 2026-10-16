@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { addRecallMeeting, claimAgentUpgrade, completeMissionStep, createMission, createWebTelegramLinkCode, finalizeMissionIfReady, getApproval, getMission, getSession, initStore, listAgentRuns, listMissions, listTasks, redeemWebTelegramLinkCode, saveSession, setApprovalStatus, startMission, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { stableSdkUserId } from "../src/sdkIdentity.js";
-import { appendPreviewLinks, cleanModelText, getReconnectUrl, getToolkitStatesPage, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, searchTools, transcriptionFormatForMimeType, voiceComposioToolSlugs, voiceFastLaneEligible, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
+import { appendPreviewLinks, cleanModelText, getReconnectUrl, getToolkitStatesPage, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, OpenRouterTimeoutError, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, searchTools, transcriptionFormatForMimeType, voiceComposioToolSlugs, voiceFastLaneEligible, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { formatAgentUpgradeNotice, loadAgentUpgrade } from "../src/upgradeNotice.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -2779,6 +2779,34 @@ test("agent retries transient OpenRouter responses with a bounded retry", async 
     assert.equal(result.text, "retried");
     assert.equal(chatAttempts, 2);
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test("OpenRouter reports a typed timeout after its bounded model attempts", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalTimeout = config.openRouterTimeoutMs;
+  const originalAttempts = config.openRouterMaxAttempts;
+  let chatAttempts = 0;
+  config.openRouterTimeoutMs = 5;
+  config.openRouterMaxAttempts = 2;
+  globalThis.fetch = (async (_input, init) => {
+    chatAttempts++;
+    const signal = init?.signal as AbortSignal;
+    return await new Promise<Response>((_resolve, reject) => {
+      if (signal.aborted) reject(signal.reason);
+      else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      () => orChat("test/model", [{ role: "user", content: "hello" }], []),
+      (error: unknown) => error instanceof OpenRouterTimeoutError && error.modelId === "test/model" && error.attempts === 2,
+    );
+    assert.equal(chatAttempts, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    config.openRouterTimeoutMs = originalTimeout;
+    config.openRouterMaxAttempts = originalAttempts;
+  }
 });
 
 test("agent keeps the selected model when it accepts media despite incomplete metadata", async () => {

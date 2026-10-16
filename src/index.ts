@@ -15,7 +15,7 @@ import { updateAttentionRecord } from "./store.js";
 import type { AttentionCandidateRecord, AutonomyProfileRecord, DeliveryPreferenceRecord, ObservationRecord, AutonomyWatchRecord, TriggerEventRecord } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
 import { initStore, getTelegramChatId, createTriggerEventIfAbsent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkRunById, listSdkRunsForUser, saveSdkRun, saveSdkThread, deleteSdkThread, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, appendPhoneCallEvent, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, saveRecallMeetingMissionState, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
-import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcriptionFormatForMimeType, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
+import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, OpenRouterTimeoutError, invalidateSession, transcriptionFormatForMimeType, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
 import type { AgentResult } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -695,7 +695,11 @@ async function main(): Promise<void> {
 
     type TriggerAgentExecutionResponse =
       | { kind: "completed"; result: Pick<AgentResult, "text" | "toolsUsed" | "toolsSucceeded" | "cost"> }
-      | { kind: "approval_required"; approvalId: string; toolSlug: string };
+      | { kind: "approval_required"; approvalId: string; toolSlug: string }
+      | { kind: "failed"; failureCode: "model_timeout" };
+
+    const triggerModelTimeoutNotice = "I received this connected-app event, but the model request timed out before I could finish checking it. I can't confirm whether an external action completed. Check the connected app's activity before retrying.";
+    const triggerModelTimeoutError = "The model request timed out before this trigger produced a verified closeout; an external action may need verification.";
 
     const compactTriggerAgentResult = (result: AgentResult): Pick<AgentResult, "text" | "toolsUsed" | "toolsSucceeded" | "cost"> => ({
       text: result.text,
@@ -3264,6 +3268,10 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
         if (error instanceof ApprovalRequiredError) {
           return c.json({ ok: true, kind: "approval_required", approvalId: error.approvalId, toolSlug: error.toolSlug });
         }
+        if (error instanceof OpenRouterTimeoutError) {
+          logger.warn({ errorName: error.name, failureCode: "model_timeout", model: error.modelId, attempts: error.attempts, eventId, workflowRunId }, "Trigger agent stopped after bounded model request timeouts");
+          return c.json({ ok: true, kind: "failed", failureCode: "model_timeout" });
+        }
         logger.warn({ errorName: error instanceof Error ? error.name : "UnknownError", eventId, userId, workflowRunId }, "Trigger agent callback failed; QStash may retry the stable run");
         return c.json({ ok: false, error: "trigger agent execution failed", retryable: true }, 503);
       }
@@ -3356,6 +3364,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             }
           });
         let result: Pick<AgentResult, "text" | "toolsUsed" | "toolsSucceeded" | "cost">;
+        let modelTimedOut = false;
         if (workflowVersion === "legacy") {
           result = workflowResult as AgentResult;
         } else {
@@ -3363,22 +3372,29 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           if (outcome.kind === "approval_required") {
             throw new ApprovalRequiredError(outcome.approvalId, outcome.toolSlug, {});
           }
-          result = outcome.result;
+          if (outcome.kind === "failed") {
+            modelTimedOut = true;
+            result = { text: triggerModelTimeoutNotice, toolsUsed: [], toolsSucceeded: [] };
+          } else {
+            result = outcome.result;
+          }
         }
         const closeout = ensureTriggerCloseout({ triggerSlug: event.triggerSlug, summary: event.summary, text: redactMeetingLinks(result.text), toolsUsed: result.toolsUsed, toolsSucceeded: result.toolsSucceeded });
         const actionPlan = parseTriggerSuggestedActions(closeout.text);
         const safeResult = redactMeetingLinks(actionPlan.text);
-        await saveEventStep("save-trigger-agent-result", { status: "running", notificationStatus: "pending", result: safeResult.slice(0, 12000), ...(actionPlan.actions.length ? { suggestedActions: actionPlan.actions } : {}), error: closeout.reportMissing ? "Agent returned no owner-facing closeout; a transparent fallback notice will be delivered." : undefined });
-        if (!closeout.reportMissing) await workflow.run("save-trigger-outcome-memory", async () => saveTriggerOutcomeMemory({ userId: event.userId, eventId: event.eventId, triggerSlug: event.triggerSlug, result: safeResult }));
+        const finalTriggerStatus = modelTimedOut || closeout.reportMissing ? "failed" : "completed";
+        const finalTriggerError = modelTimedOut ? triggerModelTimeoutError : closeout.reportMissing ? "Agent returned no owner-facing closeout; a transparent fallback notice will be delivered." : undefined;
+        await saveEventStep("save-trigger-agent-result", { status: finalTriggerStatus === "failed" ? "failed" : "running", notificationStatus: "pending", result: safeResult.slice(0, 12000), ...(actionPlan.actions.length ? { suggestedActions: actionPlan.actions } : {}), error: finalTriggerError });
+        if (!modelTimedOut && !closeout.reportMissing) await workflow.run("save-trigger-outcome-memory", async () => saveTriggerOutcomeMemory({ userId: event.userId, eventId: event.eventId, triggerSlug: event.triggerSlug, result: safeResult }));
         await workflow.run("append-trigger-history", async () => appendMessages(event.userId, [{ role: "user", content: `[Trigger ${event.triggerSlug}] ${event.summary}` }, { role: "assistant", content: safeResult }]));
         const triggerCost = result.cost;
         if (triggerCost) await workflow.run("record-trigger-usage", async () => addUsage(event.userId, triggerCost));
-        const webProjection = await workflow.run("project-trigger-web", async () => ensureTriggerWebProjection({ userId: event.userId, eventId: event.eventId, triggerSlug: event.triggerSlug, summary: event.summary, result: safeResult, status: closeout.reportMissing ? "failed" : "completed" }));
+        const webProjection = await workflow.run("project-trigger-web", async () => ensureTriggerWebProjection({ userId: event.userId, eventId: event.eventId, triggerSlug: event.triggerSlug, summary: event.summary, result: safeResult, status: finalTriggerStatus }));
         await saveEventStep("save-trigger-web-projection", { webThreadId: webProjection.threadId, webRunId: webProjection.runId });
         await workflow.run("publish-trigger-web-notification", async () => publishWebNotification({ userId: event.userId, eventId: event.eventId, threadId: webProjection.threadId, runId: webProjection.runId }));
         const chatId = await workflow.run("get-trigger-delivery-target", () => getTelegramChatId(event.userId));
         if (!chatId) {
-          await saveEventStep("complete-trigger-without-telegram", { status: closeout.reportMissing ? "failed" : "completed", notificationStatus: "unavailable", error: "No private Telegram destination is linked; the result remains available in the dashboard." });
+          await saveEventStep("complete-trigger-without-telegram", { status: finalTriggerStatus, notificationStatus: "unavailable", error: modelTimedOut ? triggerModelTimeoutError : closeout.reportMissing ? "Agent returned no owner-facing closeout; review the saved result in the dashboard." : "No private Telegram destination is linked; the result remains available in the dashboard." });
           return;
         }
         await workflow.run("deliver-trigger-result", async () => {
@@ -3386,7 +3402,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             await channelGateway.send({ accountId: `account_${event.userId}`, userId: event.userId, target: { provider: "telegram", conversationId: String(chatId) }, text: chunk, idempotencyKey: `trigger:${event.eventId}:telegram:${chatId}:${index}`, correlationId: event.eventId, kind: "notification" });
           }
         });
-        await saveEventStep("complete-trigger-after-delivery", { status: closeout.reportMissing ? "failed" : "completed", notificationStatus: "delivered", result: safeResult.slice(0, 12000), error: closeout.reportMissing ? "Agent returned no owner-facing closeout; transparent fallback notice delivered." : undefined });
+        await saveEventStep("complete-trigger-after-delivery", { status: finalTriggerStatus, notificationStatus: "delivered", result: safeResult.slice(0, 12000), error: modelTimedOut ? triggerModelTimeoutError : closeout.reportMissing ? "Agent returned no owner-facing closeout; transparent fallback notice delivered." : undefined });
       } catch (error) {
         // `workflow.run`, `sleep`, and `waitForEvent` deliberately throw this
         // after persisting a step. Do not mark the trigger failed; the Upstash
@@ -3420,6 +3436,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             await workflow.run("publish-denied-trigger-web-notification", async () => publishWebNotification({ userId: event.userId, eventId: event.eventId, threadId: denialProjection.threadId, runId: denialProjection.runId }));
             return;
           }
+          let resumedModelTimedOut = false;
           const resumed = workflowVersion === "v3"
             ? await (async (): Promise<Awaited<ReturnType<typeof runAgent>>> => {
               const response = await workflow.call<{ ok?: boolean } & TriggerAgentExecutionResponse>("resume-trigger-agent", {
@@ -3434,6 +3451,10 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
               if (response.status < 200 || response.status >= 300) throw new Error(`Trigger agent resume callback returned HTTP ${response.status}`);
               const outcome = response.body;
               if (outcome.kind === "approval_required") throw new ApprovalRequiredError(outcome.approvalId, outcome.toolSlug, {});
+              if (outcome.kind === "failed") {
+                resumedModelTimedOut = true;
+                return { text: triggerModelTimeoutNotice, toolsUsed: [], toolsSucceeded: [], toolOutcomes: [] };
+              }
               return outcome.result as Awaited<ReturnType<typeof runAgent>>;
             })()
             : await workflow.run("resume-trigger-agent", async () => {
@@ -3446,17 +3467,19 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           const resumedCloseout = ensureTriggerCloseout({ triggerSlug: event.triggerSlug, summary: event.summary, text: redactMeetingLinks(resumed.text), toolsUsed: resumed.toolsUsed, toolsSucceeded: resumed.toolsSucceeded });
           const resumedActionPlan = parseTriggerSuggestedActions(resumedCloseout.text);
           const safeResumed = redactMeetingLinks(resumedActionPlan.text);
-          await saveEventStep("save-resumed-trigger-result", { status: "running", notificationStatus: "pending", result: safeResumed.slice(0, 12000), ...(resumedActionPlan.actions.length ? { suggestedActions: resumedActionPlan.actions } : {}), error: resumedCloseout.reportMissing ? "Agent returned no owner-facing closeout; a transparent fallback notice will be delivered." : undefined });
-          if (!resumedCloseout.reportMissing) await workflow.run("save-resumed-trigger-outcome-memory", async () => saveTriggerOutcomeMemory({ userId: event.userId, eventId: event.eventId, triggerSlug: event.triggerSlug, result: safeResumed }));
+          const resumedFinalStatus = resumedModelTimedOut || resumedCloseout.reportMissing ? "failed" : "completed";
+          const resumedFinalError = resumedModelTimedOut ? triggerModelTimeoutError : resumedCloseout.reportMissing ? "Agent returned no owner-facing closeout; a transparent fallback notice will be delivered." : undefined;
+          await saveEventStep("save-resumed-trigger-result", { status: resumedFinalStatus === "failed" ? "failed" : "running", notificationStatus: "pending", result: safeResumed.slice(0, 12000), ...(resumedActionPlan.actions.length ? { suggestedActions: resumedActionPlan.actions } : {}), error: resumedFinalError });
+          if (!resumedModelTimedOut && !resumedCloseout.reportMissing) await workflow.run("save-resumed-trigger-outcome-memory", async () => saveTriggerOutcomeMemory({ userId: event.userId, eventId: event.eventId, triggerSlug: event.triggerSlug, result: safeResumed }));
           await workflow.run("append-resumed-trigger-history", async () => appendMessages(event.userId, [{ role: "user", content: `[Trigger ${event.triggerSlug}] ${event.summary}` }, { role: "assistant", content: safeResumed }]));
           const resumedTriggerCost = resumed.cost;
           if (resumedTriggerCost) await workflow.run("record-resumed-trigger-usage", async () => addUsage(event.userId, resumedTriggerCost));
-          const resumedWebProjection = await workflow.run("project-resumed-trigger-web", async () => ensureTriggerWebProjection({ userId: event.userId, eventId: event.eventId, triggerSlug: event.triggerSlug, summary: event.summary, result: safeResumed, status: resumedCloseout.reportMissing ? "failed" : "completed" }));
+          const resumedWebProjection = await workflow.run("project-resumed-trigger-web", async () => ensureTriggerWebProjection({ userId: event.userId, eventId: event.eventId, triggerSlug: event.triggerSlug, summary: event.summary, result: safeResumed, status: resumedFinalStatus }));
           await saveEventStep("save-resumed-trigger-web-projection", { webThreadId: resumedWebProjection.threadId, webRunId: resumedWebProjection.runId });
           await workflow.run("publish-resumed-trigger-web-notification", async () => publishWebNotification({ userId: event.userId, eventId: event.eventId, threadId: resumedWebProjection.threadId, runId: resumedWebProjection.runId }));
           const resumedChatId = await workflow.run("get-resumed-trigger-delivery-target", () => getTelegramChatId(event.userId));
           if (!resumedChatId) {
-            await saveEventStep("complete-resumed-trigger-without-telegram", { status: resumedCloseout.reportMissing ? "failed" : "completed", notificationStatus: "unavailable", error: "No private Telegram destination is linked; the result remains available in the dashboard." });
+            await saveEventStep("complete-resumed-trigger-without-telegram", { status: resumedFinalStatus, notificationStatus: "unavailable", error: resumedModelTimedOut ? triggerModelTimeoutError : resumedCloseout.reportMissing ? "Agent returned no owner-facing closeout; review the saved result in the dashboard." : "No private Telegram destination is linked; the result remains available in the dashboard." });
             return;
           }
           await workflow.run("deliver-resumed-trigger-result", async () => {
@@ -3464,7 +3487,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
               await channelGateway.send({ accountId: `account_${event.userId}`, userId: event.userId, target: { provider: "telegram", conversationId: String(resumedChatId) }, text: chunk, idempotencyKey: `trigger:${event.eventId}:telegram:${resumedChatId}:${index}`, correlationId: event.eventId, kind: "notification" });
             }
           });
-          await saveEventStep("complete-resumed-trigger-after-delivery", { status: resumedCloseout.reportMissing ? "failed" : "completed", notificationStatus: "delivered", result: safeResumed.slice(0, 12000), error: resumedCloseout.reportMissing ? "Agent returned no owner-facing closeout; transparent fallback notice delivered." : undefined });
+          await saveEventStep("complete-resumed-trigger-after-delivery", { status: resumedFinalStatus, notificationStatus: "delivered", result: safeResumed.slice(0, 12000), error: resumedModelTimedOut ? triggerModelTimeoutError : resumedCloseout.reportMissing ? "Agent returned no owner-facing closeout; transparent fallback notice delivered." : undefined });
           return;
         }
         // Never add a new workflow step from this catch: the failed step is
