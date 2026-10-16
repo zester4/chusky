@@ -123,6 +123,14 @@ export function splitSessionDomains(session: UserSession, separateSdkRuns = fals
   return { core, domains, sdkRuns };
 }
 
+/** Split a durable write without inventing an SDK baseline for partial reads. */
+export function splitSessionDomainsForSave(session: UserSession, separateSdkRuns = false, separateSdkTables = false): ReturnType<typeof splitSessionDomains> {
+  const split = splitSessionDomains(session, separateSdkRuns, separateSdkTables);
+  const snapshots = (session as UserSession & { durableDomainSnapshots?: Partial<Record<DurableSessionDomain, unknown>> }).durableDomainSnapshots;
+  if (!snapshots || !Object.hasOwn(snapshots, "sdk")) split.domains.delete("sdk");
+  return split;
+}
+
 function object(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 
 /** Rehydrate a normal UserSession only when all canonical Neon documents exist. */
