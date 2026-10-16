@@ -1,4 +1,5 @@
 import { Client as WorkflowClient } from "@upstash/workflow";
+import { Client as QStashClient, Receiver } from "@upstash/qstash";
 import { config } from "./config.js";
 import { getTriggerEvent } from "./store.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
@@ -57,9 +58,38 @@ export function triggerAgentWorkflowRunId(eventId: string): string {
   return `trigger-agent-${eventId}`;
 }
 
+let configuredWorkflowClient: WorkflowClient | undefined;
+let configuredQStashClient: QStashClient | undefined;
+
 export function workflowClient(): WorkflowClient {
   if (!config.qstashToken) throw new Error("QStash is not configured. Set QSTASH_TOKEN.");
-  return new WorkflowClient({ token: config.qstashToken, baseUrl: config.qstashUrl || undefined });
+  configuredWorkflowClient ??= new WorkflowClient({ token: config.qstashToken, baseUrl: config.qstashUrl || undefined });
+  return configuredWorkflowClient;
+}
+
+/**
+ * Keep workflow publishers and callback handlers on the same explicit QStash
+ * client. The workflow SDK otherwise constructs a second client from process
+ * environment variables, which can diverge from the validated application
+ * config during a deployment or credential rotation.
+ */
+export function workflowServeOptions(url: string): {
+  url: string;
+  qstashClient?: QStashClient;
+  receiver?: { verify: Receiver["verify"] };
+} {
+  const options: ReturnType<typeof workflowServeOptions> = { url };
+  if (config.qstashToken) {
+    configuredQStashClient ??= new QStashClient({ token: config.qstashToken, baseUrl: config.qstashUrl || undefined });
+    options.qstashClient = configuredQStashClient;
+  }
+  if (config.qstashCurrentSigningKey && config.qstashNextSigningKey) {
+    options.receiver = new Receiver({
+      currentSigningKey: config.qstashCurrentSigningKey,
+      nextSigningKey: config.qstashNextSigningKey,
+    });
+  }
+  return options;
 }
 
 export function workflowFailureUrl(): string | undefined {

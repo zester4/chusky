@@ -5,6 +5,7 @@ import { serve as serveWorkflow } from "@upstash/workflow/hono";
 import { WorkflowNonRetryableError } from "@upstash/workflow";
 import type { TaskWaitRequest } from "../src/types.js";
 import type { TaskSliceContext } from "../src/taskSlice.js";
+import { TASK_WAIT_MIN_SECONDS } from "../src/taskWait.js";
 
 /**
  * Real QStash/Redis/Neon mission smoke test.
@@ -18,7 +19,8 @@ import type { TaskSliceContext } from "../src/taskSlice.js";
  *
  * Optional:
  *   LIVE_MISSION_PORT=8091
- *   LIVE_MISSION_DELAYS_SECONDS=5,10,15
+ *   LIVE_MISSION_DELAYS_SECONDS=60,60,60
+ *   LIVE_MISSION_TIMEOUT_MS=300000
  */
 
 // Keep the tunnel URL and timing overrides supplied on the command line while
@@ -28,10 +30,12 @@ import type { TaskSliceContext } from "../src/taskSlice.js";
 const suppliedWebhookUrl = process.env.WEBHOOK_URL;
 const suppliedPort = process.env.LIVE_MISSION_PORT;
 const suppliedDelays = process.env.LIVE_MISSION_DELAYS_SECONDS;
+const suppliedTimeout = process.env.LIVE_MISSION_TIMEOUT_MS;
 loadDotenv({ override: true });
 if (suppliedWebhookUrl) process.env.WEBHOOK_URL = suppliedWebhookUrl;
 if (suppliedPort) process.env.LIVE_MISSION_PORT = suppliedPort;
 if (suppliedDelays) process.env.LIVE_MISSION_DELAYS_SECONDS = suppliedDelays;
+if (suppliedTimeout) process.env.LIVE_MISSION_TIMEOUT_MS = suppliedTimeout;
 
 const publicUrl = (process.env.WEBHOOK_URL ?? "").replace(/\/+$/, "");
 if (!publicUrl) throw new Error("Set WEBHOOK_URL to the temporary public tunnel URL.");
@@ -46,11 +50,19 @@ for (const key of ["QSTASH_TOKEN", "QSTASH_CURRENT_SIGNING_KEY", "QSTASH_NEXT_SI
 
 const port = Number(process.env.LIVE_MISSION_PORT ?? "8091");
 if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("LIVE_MISSION_PORT is invalid.");
-const delays = (process.env.LIVE_MISSION_DELAYS_SECONDS ?? "5,10,15")
+const delays = (process.env.LIVE_MISSION_DELAYS_SECONDS ?? "60,60,60")
   .split(",")
   .map((value) => Number(value.trim()))
   .filter((value) => Number.isInteger(value) && value >= 1 && value <= 3600);
 if (delays.length !== 3) throw new Error("LIVE_MISSION_DELAYS_SECONDS must contain exactly three values from 1 to 3600.");
+if (delays.some((delay) => delay < TASK_WAIT_MIN_SECONDS)) {
+  throw new Error(`LIVE_MISSION_DELAYS_SECONDS values must be at least ${TASK_WAIT_MIN_SECONDS} seconds because CHUCK_TASK_WAIT enforces the production minimum.`);
+}
+const defaultTimeoutMs = Math.max(180_000, delays.reduce((total, delay) => total + delay, 0) * 1000 + 120_000);
+const timeoutMs = Number(process.env.LIVE_MISSION_TIMEOUT_MS ?? String(defaultTimeoutMs));
+if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 30_000 || timeoutMs > 3_600_000) {
+  throw new Error("LIVE_MISSION_TIMEOUT_MS must be a whole number from 30000 to 3600000.");
+}
 
 async function main(): Promise<void> {
 console.error("[live-smoke] loading durable store and workflow modules");
@@ -60,7 +72,7 @@ const [
   { executeDurableTask },
   { executeTaskSlice },
   { nativeTool },
-  { enqueueTaskWorkflow },
+  { enqueueTaskWorkflow, workflowServeOptions },
   { parseTaskWorkflowPayload },
 ] = await Promise.all([
   import("../src/store.js"),
@@ -194,14 +206,17 @@ app.post(
         await workflow.sleep("retry-claim-" + attempt, Math.max(1, Math.ceil((wakeAt - now) / 1000)));
         continue;
       }
-      if (run.task?.status !== "queued" || !run.task.runAt || run.task.runAt <= Date.now()) break;
+      if (run.task?.status !== "queued" || !run.task.runAt) break;
       if (attempt >= 9) {
         await enqueueTaskWorkflow(payload.userId, run.task.id, run.task.runAt);
         break;
       }
       await workflow.sleep("retry-delay-" + attempt, Math.max(1, Math.ceil((run.task.runAt - Date.now()) / 1000)));
+      // The named sleep is complete when QStash replays this workflow. Move
+      // to a new execution step instead of registering the same sleep again.
+      continue;
     }
-  }, { url: publicUrl + "/workflows/task" }),
+  }, workflowServeOptions(publicUrl + "/workflows/task")),
 );
 
 await initStore();
@@ -237,7 +252,7 @@ try {
   if (!scheduled) throw new Error("Mission could not be scheduled.");
   console.error("[live-smoke] mission " + mission.id + " scheduled through QStash");
 
-  const deadline = Date.now() + 180_000;
+  const deadline = Date.now() + timeoutMs;
   let finalMission = await getMission(userId, mission.id);
   while (finalMission && !["completed", "blocked", "cancelled"].includes(finalMission.status) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -253,6 +268,7 @@ try {
     modelCalls,
     taskStatuses: tasks.map((task) => ({ id: task.id, stepId: task.missionStepId, status: task.status, attempts: task.attempt })),
     delays,
+    timeoutMs,
   };
   console.log(JSON.stringify(result, null, 2));
   if (!result.ok) process.exitCode = 1;
