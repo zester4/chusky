@@ -39,6 +39,33 @@ values.
 - Diff checks: passed.
 - Full suite: 1,839 passed, 1 unrelated peer-worker handoff test failed, and 4 were skipped.
 
+## Extended wait verification
+
+A second real staging run used longer waits of 120 seconds, 5 minutes, and
+10 minutes:
+
+```text
+LIVE_MISSION_DELAYS_SECONDS=120,300,600
+```
+
+The run used real staging Neon, Redis, and QStash with the fake model boundary
+and no Telegram delivery. Mission `mis_facb30de-6977-4182-9a9f-3b7f27b723dc`
+completed successfully with:
+
+```json
+{
+  "ok": true,
+  "status": "completed",
+  "modelCalls": 6,
+  "delays": [120, 300, 600]
+}
+```
+
+All three durable tasks completed once with one attempt each. The final task
+settlement arrived after the terminal mission snapshot, confirming that the
+10-minute stage also completed successfully. No QStash timeout, duplicate
+task, Redis contention, or replay-step error occurred.
+
 The wait-and-continue fix is committed and pushed to `origin/main` in
 `b9d7315` (`fix durable mission QStash replay`). Deployment still needs to be
 confirmed independently on the target environment.

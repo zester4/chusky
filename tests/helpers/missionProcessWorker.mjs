@@ -9,6 +9,19 @@ const runtime = (module) => require(resolve(root, `${module}.js`));
 let probing = false;
 let sequence = 0;
 const permits = new Map();
+
+async function closeProofStore(store) {
+  let timer;
+  try {
+    await Promise.race([
+      store.closeStore(),
+      new Promise((resolve) => { timer = setTimeout(resolve, 5000); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 process.on("message", (message) => {
   if (message?.kind !== "continue") return;
   const permit = permits.get(message.sequence);
@@ -137,7 +150,9 @@ async function main() {
     }),
   });
   probing = false;
-  return { fixture, missionStatus: (await store.getMission(fixture.userId, fixture.missionId))?.status, taskStatus: (await store.getTask(fixture.userId, fixture.taskId))?.status };
+  const result = { fixture, missionStatus: (await store.getMission(fixture.userId, fixture.missionId))?.status, taskStatus: (await store.getTask(fixture.userId, fixture.taskId))?.status };
+  await closeProofStore(store);
+  return result;
 }
 
 main().then((result) => {
@@ -146,5 +161,10 @@ main().then((result) => {
   // Never serialize Redis/client errors, URLs, command arguments or credentials.
   const frames = String(error?.stack ?? "").split("\n").slice(1, 4).map((frame) => frame.replace(/rediss?:\/\/\S+/g, "[redacted-connection]"));
   const missingModule = error?.code === "MODULE_NOT_FOUND" ? /Cannot find module '([^']+)'/.exec(error.message)?.[1] : undefined;
-  process.send({ kind: "failed", errorClass: error?.name, code: error?.code, missingModule, frames }, () => process.exit(1));
+  const closeStore = (() => {
+    try { return runtime("store").closeStore; } catch { return undefined; }
+  })();
+  Promise.resolve(closeStore ? closeProofStore(runtime("store")) : undefined).finally(() => {
+    process.send({ kind: "failed", errorClass: error?.name, code: error?.code, missingModule, frames }, () => process.exit(1));
+  });
 });
