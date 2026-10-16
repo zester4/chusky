@@ -399,13 +399,16 @@ test("mission provider-event waits require the owning durable mission task", asy
   let captured: { provider: string; providerEventId: string } | undefined;
   const result = await nativeTool(userId, "CHUCK_MISSION_WAIT_EVENT", {
     id: mission.id, provider: "crm", providerEventId: "event-1",
-  }, { taskId: "task_mission_wait", missionId: mission.id, requestMissionWait: (request) => { captured = request; } }) as { status: string };
+  }, { taskId: "task_mission_wait", missionId: mission.id, missionStepId: mission.currentStepId, requestMissionWait: (request) => { captured = request; } }) as { status: string };
   assert.equal(result.status, "waiting");
   assert.deepEqual(captured && { provider: captured.provider, providerEventId: captured.providerEventId }, { provider: "crm", providerEventId: "event-1" });
 
   await assert.rejects(() => nativeTool(userId, "CHUCK_MISSION_WAIT_EVENT", {
     id: mission.id, provider: "MISSION_TIMER", providerEventId: "wait_2min_step2",
-  }, { taskId: "task_mission_wait", missionId: mission.id, requestMissionWait: () => undefined }), /cannot create a timer.*CHUCK_TASK_WAIT/i);
+  }, { taskId: "task_mission_wait", missionId: mission.id, missionStepId: mission.currentStepId, requestMissionWait: () => undefined }), /cannot create a timer.*CHUCK_TASK_WAIT/i);
+  await assert.rejects(() => nativeTool(userId, "CHUCK_MISSION_WAIT_EVENT", {
+    id: mission.id, provider: "crm", providerEventId: "event-2", stepId: "not-the-owned-step",
+  }, { taskId: "task_mission_wait", missionId: mission.id, missionStepId: mission.currentStepId, requestMissionWait: () => undefined }), /active mission step/i);
 });
 
 test("strict missions cannot be completed before independent verification", async () => {

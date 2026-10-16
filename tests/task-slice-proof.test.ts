@@ -79,7 +79,7 @@ test("full production slice parks an early timer wake without invoking the model
   assert.equal((await getMission(userId, mission.id))?.status, "waiting");
 });
 
-test("timer wait targets the next active step when the model completes its current step first", async () => {
+test("a completed step cannot schedule a timer for its successor", async () => {
   const userId = 982020;
   const queue = new MissionFakeQStash();
   const mission = await createMission(userId, {
@@ -95,22 +95,62 @@ test("timer wait targets the next active step when the model completes its curre
   await reconcileMissionExecution(userId, mission.id, queue.enqueue);
   const task = (await listTasks(userId)).find((candidate) => candidate.missionId === mission.id && candidate.missionStepId === "initialize")!;
   const runAt = Date.now() + 120_000;
+  let rejectedCrossStepWait = false;
   const dependencies = context(queue, async () => {
-    const runtime = { taskId: task.id, missionId: mission.id, enqueueMissionTask: queue.enqueue };
+    const runtime = { taskId: task.id, missionId: mission.id, missionStepId: "initialize", enqueueMissionTask: queue.enqueue };
     await nativeTool(userId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId: "initialize", result: "Initial checkpoint persisted" }, runtime);
-    let request: TaskWaitRequest | undefined;
-    await nativeTool(userId, "CHUCK_TASK_WAIT", { runAt: new Date(runAt).toISOString(), checkpoint: "Initialization verified", nextAction: "Continue the plan after the timer" }, { ...runtime, requestTaskWait: (value) => { request = value; } });
-    assert.ok(request);
-    return { text: "Waiting", toolsUsed: ["CHUCK_MISSION_STEP_COMPLETE", "CHUCK_TASK_WAIT"], toolsSucceeded: ["CHUCK_MISSION_STEP_COMPLETE", "CHUCK_TASK_WAIT"], taskWait: request };
+    try {
+      await nativeTool(userId, "CHUCK_TASK_WAIT", { runAt: new Date(runAt).toISOString(), checkpoint: "Initialization verified", nextAction: "Continue the plan after the timer" }, { ...runtime, requestTaskWait: () => { throw new Error("A completed step must not capture its successor's timer."); } });
+    } catch (error) {
+      rejectedCrossStepWait = error instanceof Error && /active running step/i.test(error.message);
+    }
+    return { text: "Initialization completed; the successor owns its timer.", toolsUsed: ["CHUCK_MISSION_STEP_COMPLETE", "CHUCK_TASK_WAIT"], toolsSucceeded: ["CHUCK_MISSION_STEP_COMPLETE"] };
   });
   const run = await executeDurableTask({ userId, taskId: task.id }, { workerId: "step-transition-wait-worker", execute: (claimed, signal) => executeTaskSlice(claimed, signal, dependencies) });
   const persisted = await getMission(userId, mission.id);
-  assert.equal(run.task?.status, "queued");
-  assert.equal(persisted?.status, "waiting", JSON.stringify({ task: run.task, mission: persisted }));
-  assert.equal(persisted?.waiting?.stepId, "resume-check");
-  assert.match(persisted?.nextAction ?? "", /Resume check/);
-  assert.match(persisted?.nextAction ?? "", /Verify state after the timer/);
-  assert.doesNotMatch(persisted?.nextAction ?? "", /Initialize/);
+  assert.equal(rejectedCrossStepWait, true);
+  assert.equal(run.task?.status, "completed");
+  assert.equal(persisted?.status, "running");
+  assert.equal(persisted?.waiting, undefined);
+  assert.equal(persisted?.steps.find((step) => step.id === "initialize")?.status, "completed");
+  assert.equal(persisted?.steps.find((step) => step.id === "resume-check")?.status, "running");
+});
+
+test("a completed step task cannot execute the successor under the old step lease", async () => {
+  const userId = 982021;
+  const queue = new MissionFakeQStash();
+  const mission = await createMission(userId, {
+    title: "Stale step task handoff",
+    objective: "Complete initialization then continue the next step",
+    definitionOfDone: "Both steps complete",
+    steps: [
+      { id: "initialize", title: "Initialize", objective: "Persist initial checkpoint" },
+      { id: "resume-check", title: "Resume check", objective: "Verify resumed state", dependsOn: ["initialize"] },
+    ],
+  });
+  await startMission(userId, mission.id);
+  await reconcileMissionExecution(userId, mission.id, queue.enqueue);
+  const initializeTask = (await listTasks(userId)).find((candidate) => candidate.missionId === mission.id && candidate.missionStepId === "initialize")!;
+  await nativeTool(userId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId: "initialize", result: "Initialization verified" }, {
+    taskId: initializeTask.id,
+    missionId: mission.id,
+    missionStepId: "initialize",
+    enqueueMissionTask: queue.enqueue,
+  });
+  let modelCalls = 0;
+  const dependencies = context(queue, async () => {
+    modelCalls++;
+    return { text: "Incorrectly executed the successor", toolsUsed: [], toolsSucceeded: [] };
+  });
+  const run = await executeDurableTask({ userId, taskId: initializeTask.id }, {
+    workerId: "stale-step-handoff-worker",
+    execute: (claimed, signal) => executeTaskSlice(claimed, signal, dependencies),
+  });
+  assert.equal(modelCalls, 0, "The completed task must hand off without invoking the model for another step.");
+  assert.equal(run.task?.status, "completed");
+  assert.equal(run.task?.missionStepId, "initialize");
+  assert.ok((await listTasks(userId)).some((candidate) => candidate.missionId === mission.id && candidate.missionStepId === "resume-check"));
+  assert.equal((await getMission(userId, mission.id))?.steps.find((step) => step.id === "resume-check")?.status, "running");
 });
 
 test("full production slice does not run a model during a human-input wait", async () => {
@@ -188,7 +228,7 @@ test("200-step production-coordinator soak mixes joins, waits, approvals, replan
         const options = args[9]!;
         const stepId = options.missionStepId!;
         const ordinal = Number(stepId.split("-")[1]);
-        const runtime = { taskId: options.taskId, missionId: mission.id, enqueueMissionTask: queue.enqueue };
+        const runtime = { taskId: options.taskId, missionId: mission.id, missionStepId: options.missionStepId, enqueueMissionTask: queue.enqueue };
         const once = (kind: string) => { const key = `${stepId}:${kind}`; if (attempted.has(key)) return false; attempted.add(key); return true; };
         if (ordinal % 37 === 11 && once("failure")) return { text: "I will do it later", toolsUsed: [], toolsSucceeded: [] };
         if (ordinal % 17 === 4 && once("timer")) {

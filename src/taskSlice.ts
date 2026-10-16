@@ -8,6 +8,7 @@ import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
 import { requestMissionDurationApproval } from "./missionApproval.js";
 import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
+import { reconcileMissionExecution } from "./missionScheduler.js";
 import { executeScheduledMeetingFollowUp } from "./meetings/outcome.js";
 import { decideAutonomyStep } from "./autonomy/decisionLoop.js";
 import { boundedMissionHistory, captureMissionSliceState, missionHasTimerWakeContinuation, missionNeedsLifecycleCloseoutNudge, missionPostWakeNextAction, missionStepInstruction, missionTimerResumeStep, missionWakeNeedsRecovery, missionWorkerToolAllowlist } from "./missionWorker.js";
@@ -47,6 +48,31 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
   let mission: Awaited<ReturnType<typeof getMission>>;
   try {
     mission = task.missionId ? await getMission(task.userId, task.missionId) : undefined;
+    if (mission && ["running", "waiting"].includes(mission.status) && task.missionStepId) {
+      const boundStep = mission.steps.find((step) => step.id === task.missionStepId);
+      if (boundStep?.status === "completed") {
+        if (mission.status === "waiting" && mission.waiting?.stepId === task.missionStepId) {
+          const blocked = await updateMission(task.userId, mission.id, {
+            status: "blocked",
+            error: "A mission timer is bound to a step that was already completed.",
+            nextAction: "Inspect the saved checkpoint, then resume or replan from the active step. The completed step will not be replayed.",
+            waiting: undefined,
+          });
+          return { status: "blocked" as const, message: blocked?.error ?? "Mission timer step was already completed.", checkpoint: blocked?.checkpoint ?? mission.checkpoint, nextAction: blocked?.nextAction };
+        }
+        // Completing a step can enqueue its successor before the original
+        // worker returns. Never let that old task execute the successor under
+        // the completed step's lease; the successor has its own deterministic
+        // task and lease.
+        if (mission.status === "running") await reconcileMissionExecution(task.userId, mission.id, enqueueMissionTask, task.id);
+        return {
+          status: "completed" as const,
+          message: `Mission step ${boundStep.title} was already completed; its task handed off to the active step scheduler.`,
+          checkpoint: mission.checkpoint,
+          nextAction: mission.nextAction,
+        };
+      }
+    }
     let missionTimerResumed = false;
     let missionWakeCheckpoint: string | undefined;
     let missionWakeNextAction: string | undefined;
@@ -120,7 +146,11 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
       await checkpointMission(task.userId, mission.id, mission.checkpoint ?? "The previous mission slice completed.", mission.nextAction);
     }
     const activeMission = mission;
-    const currentMissionStep = activeMission ? activeMission.steps.find((step) => step.id === task.missionStepId && activeMission.activeStepIds?.includes(step.id)) ?? activeMission.steps.find((step) => activeMission.activeStepIds?.includes(step.id)) ?? activeMission.steps.find((step) => step.id === activeMission.currentStepId) : undefined;
+    const currentMissionStep = activeMission
+      ? task.missionStepId
+        ? activeMission.steps.find((step) => step.id === task.missionStepId && step.status === "running" && activeMission.activeStepIds?.includes(step.id))
+        : activeMission.steps.find((step) => step.status === "running" && activeMission.activeStepIds?.includes(step.id)) ?? activeMission.steps.find((step) => step.id === activeMission.currentStepId && step.status === "running")
+      : undefined;
     const autonomyDecision = await decideAutonomyStep({
       objective: mission?.objective ?? task.objective,
       items: [{
@@ -359,6 +389,20 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
       let postWakeNextAction = result.taskWait.nextAction;
       if (mission) {
         const currentMission = await getMission(task.userId, mission.id);
+        const activeStepIds = new Set(currentMission?.activeStepIds?.length ? currentMission.activeStepIds : currentMission?.currentStepId ? [currentMission.currentStepId] : []);
+        const boundStep = task.missionStepId ? currentMission?.steps.find((step) => step.id === task.missionStepId) : undefined;
+        if (task.missionStepId && (!activeStepIds.has(task.missionStepId) || boundStep?.status !== "running")) {
+          if (boundStep?.status === "completed" && currentMission && currentMission.status === "running") {
+            await reconcileMissionExecution(task.userId, mission.id, enqueueMissionTask, task.id);
+            return { status: "completed" as const, message: `Timer request was discarded because task ${task.id} no longer owns an active mission step.`, checkpoint: currentMission.checkpoint, nextAction: currentMission.nextAction };
+          }
+          const blocked = await updateMission(task.userId, mission.id, {
+            status: "blocked",
+            error: "A timer wait was requested by a task that does not own an active running mission step.",
+            nextAction: "Inspect the mission task and active step, then resume or replan. The timer was not persisted.",
+          });
+          return { status: "blocked" as const, message: blocked?.error ?? "Timer wait ownership check failed.", checkpoint: blocked?.checkpoint ?? currentMission?.checkpoint, nextAction: blocked?.nextAction };
+        }
         const accounted = currentMission && ["running", "waiting"].includes(currentMission.status)
           ? await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMission.checkpoint ?? result.taskWait.checkpoint, nextAction: postWakeNextAction, toolCalls: missionToolCallCount(result), cost: result.cost })
           : currentMission;
@@ -404,6 +448,23 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
     }
     if (result.missionWait && mission) {
       const currentMission = await getMission(task.userId, mission.id);
+      const activeStepIds = new Set(currentMission?.activeStepIds?.length ? currentMission.activeStepIds : currentMission?.currentStepId ? [currentMission.currentStepId] : []);
+      const requestedStepId = result.missionWait.stepId;
+      const requestedStep = requestedStepId ? currentMission?.steps.find((step) => step.id === requestedStepId) : undefined;
+      const eventStepIsOwned = Boolean(task.missionStepId && requestedStepId === task.missionStepId && activeStepIds.has(task.missionStepId) && requestedStep?.status === "running");
+      if (!eventStepIsOwned) {
+        const boundStep = task.missionStepId ? currentMission?.steps.find((step) => step.id === task.missionStepId) : undefined;
+        if (boundStep?.status === "completed" && currentMission?.status === "running") {
+          await reconcileMissionExecution(task.userId, mission.id, enqueueMissionTask, task.id);
+          return { status: "completed" as const, message: `Provider wait was discarded because task ${task.id} no longer owns an active step.`, checkpoint: currentMission.checkpoint, nextAction: currentMission.nextAction };
+        }
+        const blocked = await updateMission(task.userId, mission.id, {
+          status: "blocked",
+          error: "A provider-event wait was requested by a task that does not own that active mission step.",
+          nextAction: "Inspect the mission task and active step, then resume or replan. The event wait was not persisted.",
+        });
+        return { status: "blocked" as const, message: blocked?.error ?? "Provider-event wait ownership check failed.", checkpoint: blocked?.checkpoint ?? currentMission?.checkpoint, nextAction: blocked?.nextAction };
+      }
       const accounted = currentMission && ["running", "waiting"].includes(currentMission.status)
         ? await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMission.checkpoint ?? result.missionWait.checkpoint, nextAction: result.missionWait.nextAction, toolCalls: missionToolCallCount(result), cost: result.cost })
         : currentMission;

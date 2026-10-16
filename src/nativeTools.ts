@@ -2527,6 +2527,14 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       if (!runtime.taskId || !runtime.requestTaskWait) throw new Error("CHUCK_TASK_WAIT is only available inside an active durable task");
       const request: TaskWaitRequest = createTaskWaitRequest(args);
       if (runtime.missionTimerResumed) throw new Error("This mission timer already completed; execute the persisted post-wake action instead of waiting again.");
+      if (runtime.missionId) {
+        const mission = await getMission(userId, runtime.missionId);
+        const stepId = runtime.missionStepId;
+        const active = new Set(mission?.activeStepIds?.length ? mission.activeStepIds : mission?.currentStepId ? [mission.currentStepId] : []);
+        if (!mission || mission.status !== "running" || !stepId || !active.has(stepId) || mission.steps.find((step) => step.id === stepId)?.status !== "running") {
+          throw new Error("A mission timer must be scheduled by the durable task that owns the active running step. Keep the wait and post-wake work inside that same step.");
+        }
+      }
       runtime.requestTaskWait(request);
       return { waiting: true, taskId: runtime.taskId, runAt: new Date(request.runAt).toISOString(), checkpoint: request.checkpoint, nextAction: request.nextAction, ...(request.reason ? { reason: request.reason } : {}) };
     }
@@ -2701,6 +2709,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const stepId = args.stepId ? text(args.stepId, 160) : mission.currentStepId;
       const active = new Set(mission.activeStepIds?.length ? mission.activeStepIds : mission.currentStepId ? [mission.currentStepId] : []);
       if (!stepId || !active.has(stepId) || mission.steps.find((step) => step.id === stepId)?.status !== "running") throw new Error("The provider wait must belong to an active mission step");
+      if (!runtime.missionStepId || stepId !== runtime.missionStepId) throw new Error("A provider wait must be owned by the active durable task for that exact mission step. Resume or schedule the step's own task before waiting.");
       const request: MissionWaitRequest = { provider, providerEventId, stepId, checkpoint: args.checkpoint ? text(args.checkpoint, 8000) : mission.checkpoint, nextAction: args.nextAction ? text(args.nextAction, 2000) : `Waiting for ${provider} event ${providerEventId}.`, timeoutSeconds: args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds) };
       runtime.requestMissionWait(request);
       return { status: "waiting", provider, providerEventId, nextAction: request.nextAction };

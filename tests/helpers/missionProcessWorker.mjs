@@ -97,7 +97,7 @@ async function main() {
         try { return await work(); } finally { await store.releaseUserLock(owner, token); }
       },
       runAgent: async () => {
-        const nativeContext = { taskId: task.id, missionId: fixture.missionId, enqueueMissionTask: enqueue };
+        const nativeContext = { taskId: task.id, missionId: fixture.missionId, missionStepId: task.missionStepId, enqueueMissionTask: enqueue };
         if (input.mode !== "recover") {
           if (fixture.scenario === "timer") {
             let taskWait;
