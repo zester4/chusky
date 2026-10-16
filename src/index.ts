@@ -3379,7 +3379,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             result = outcome.result;
           }
         }
-        const closeout = ensureTriggerCloseout({ triggerSlug: event.triggerSlug, summary: event.summary, text: redactMeetingLinks(result.text), toolsUsed: result.toolsUsed, toolsSucceeded: result.toolsSucceeded });
+        const closeout = ensureTriggerCloseout({ text: redactMeetingLinks(result.text), toolsUsed: result.toolsUsed });
         const actionPlan = parseTriggerSuggestedActions(closeout.text);
         const safeResult = redactMeetingLinks(actionPlan.text);
         const finalTriggerStatus = modelTimedOut || closeout.reportMissing ? "failed" : "completed";
@@ -3416,7 +3416,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             eventId: event.eventId,
             triggerSlug: event.triggerSlug,
             summary: event.summary,
-            result: `Approval needed before this trigger can continue. Review the requested action: ${error.toolSlug}. Approval ID: ${error.approvalId}`,
+            result: "This event needs your approval before the requested action can continue.",
             status: "requires_approval",
             approvalId: error.approvalId,
           }));
@@ -3426,7 +3426,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           if (!chatId) {
             await saveEventStep("mark-trigger-approval-undeliverable", { notificationStatus: "unavailable" });
           }
-          if (chatId && approvalExists) await workflow.run("request-trigger-approval", async () => bot.api.sendMessage(chatId, `⚠️ <b>Approval needed</b>\n\nI need your approval to run <code>${error.toolSlug}</code>.\nApproval ID: <code>${error.approvalId}</code>`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Approve", `appr:approve:${error.approvalId}`).text("🛑 Deny", `appr:deny:${error.approvalId}`) }));
+          if (chatId && approvalExists) await workflow.run("request-trigger-approval", async () => bot.api.sendMessage(chatId, "⚠️ <b>Approval needed</b>\n\nThis event needs your approval before the requested action can continue. Approving runs the exact saved action; denying leaves it undone.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Approve", `appr:approve:${error.approvalId}`).text("🛑 Deny", `appr:deny:${error.approvalId}`) }));
           const decision = await workflow.waitForEvent<{ approved: boolean }>("trigger-approval", workflowEventId("trigger-approval", error.approvalId), { timeout: "24h" });
           if (decision.timeout || !decision.eventData?.approved) {
             const denialResult = "The requested triggered action was denied or expired.";
@@ -3464,7 +3464,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
               // second external-action sequence.
               return executeTriggerAgentForEvent(event, error.approvalId);
             });
-          const resumedCloseout = ensureTriggerCloseout({ triggerSlug: event.triggerSlug, summary: event.summary, text: redactMeetingLinks(resumed.text), toolsUsed: resumed.toolsUsed, toolsSucceeded: resumed.toolsSucceeded });
+          const resumedCloseout = ensureTriggerCloseout({ text: redactMeetingLinks(resumed.text), toolsUsed: resumed.toolsUsed });
           const resumedActionPlan = parseTriggerSuggestedActions(resumedCloseout.text);
           const safeResumed = redactMeetingLinks(resumedActionPlan.text);
           const resumedFinalStatus = resumedModelTimedOut || resumedCloseout.reportMissing ? "failed" : "completed";

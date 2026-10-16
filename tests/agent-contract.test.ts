@@ -65,9 +65,10 @@ test("verified triggers receive executor framing while ordinary conversations do
   assert.equal(triggerAutonomyInstructions(undefined), undefined);
   const instructions = triggerAutonomyInstructions("evt_trigger_1");
   assert.match(instructions ?? "", /TRIGGER HANDLING/);
-  assert.match(instructions ?? "", /An enabled trigger assigns you the matching event/i);
-  assert.match(instructions ?? "", /answer a clear ordinary email question.*send the reply/i);
+  assert.match(instructions ?? "", /Inspect the source event and relevant record/i);
+  assert.match(instructions ?? "", /answer an ordinary email in its original thread/i);
   assert.match(instructions ?? "", /existing approval boundary/i);
+  assert.match(instructions ?? "", /Identify the source and relevant person or place when available/i);
   assert.match(instructions ?? "", /provider receipt or read the changed record/i);
   assert.doesNotMatch(instructions ?? "", /return exactly NO_ACTION/i);
 });

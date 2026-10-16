@@ -31,18 +31,20 @@ test("exhausted notification delivery cannot turn a saved failed trigger into su
 });
 
 test("default trigger policy requires end-to-end execution and provider-specific handling", () => {
-  assert.match(TRIGGER_DEFAULT_HANDLING, /An enabled trigger assigns you the matching event/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /A notification or summary alone is not completion/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /answer a clear ordinary email question.*send the reply/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /do not stop at a draft/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /routine Slack conversations, CRM updates, scheduling, and other provider events/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /inspect the source event and relevant record/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /A notification alone is not completion/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /answer an ordinary email in its original thread/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /routine Slack, CRM, scheduling, and other provider events/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /provider receipt or read the changed record/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /starts with "Action taken:"/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /not by quoting internal rules or narrating policy/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /Identify the source and relevant person or place when available/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /what happened, what you did, and whether the result was verified/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /Do not expose event slugs, tool names, internal triage/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /an optional follow-up button is never approval/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /Never return NO_ACTION for a verified trigger/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /<example>.*A sender asks a clear, routine question/s);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /<example>.*Dana asks a routine question in Gmail/s);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /<example>.*Morgan requests a routine correction in Slack #billing/s);
   assert.match(TRIGGER_DEFAULT_HANDLING, /<example>.*A promotional newsletter arrives/s);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /<example>.*material financial or otherwise critical decision/s);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /<example>.*payment that requires owner approval/s);
 });
 
 test("trigger Telegram heading uses Markdown that renders as bold HTML", () => {
@@ -53,42 +55,35 @@ test("trigger Telegram heading uses Markdown that renders as bold HTML", () => {
 
 test("trigger closeout preserves a real agent answer", () => {
   assert.deepEqual(ensureTriggerCloseout({
-    triggerSlug: "GMAIL_NEW_GMAIL_MESSAGE",
-    summary: "subject: Quick question",
     text: "I replied in the original thread with the confirmed meeting time.",
     toolsUsed: ["GMAIL_SEND_EMAIL"],
-    toolsSucceeded: ["GMAIL_SEND_EMAIL"],
   }), { text: "I replied in the original thread with the confirmed meeting time.", reportMissing: false });
 });
 
 test("trigger closeout converts NO_ACTION into a delivered honest report without retrying side effects", () => {
   const fallback = ensureTriggerCloseout({
-    triggerSlug: "GMAIL_NEW_GMAIL_MESSAGE",
-    summary: "subject: Please confirm tomorrow's time",
     text: "NO_ACTION",
     toolsUsed: ["GMAIL_GET_MESSAGE", "GMAIL_SEND_EMAIL"],
-    toolsSucceeded: ["GMAIL_GET_MESSAGE", "GMAIL_SEND_EMAIL"],
   });
   assert.equal(fallback.reportMissing, true);
-  assert.match(fallback.text, /did not produce a usable report/i);
-  assert.match(fallback.text, /will not replay the event automatically/i);
-  assert.match(fallback.text, /connected-app tools were attempted/i);
+  assert.match(fallback.text, /could not produce a reliable report/i);
+  assert.match(fallback.text, /check the connected app before retrying/i);
   assert.doesNotMatch(fallback.text, /GMAIL_SEND_EMAIL/);
   assert.doesNotMatch(fallback.text, /GMAIL_NEW_GMAIL_MESSAGE/);
-  assert.match(fallback.text, /Please confirm tomorrow's time/);
+  assert.doesNotMatch(fallback.text, /Please confirm tomorrow's time/);
 });
 
 test("trigger closeout reports an empty, no-tool run without claiming an external action", () => {
-  const fallback = ensureTriggerCloseout({ triggerSlug: "SLACK_MESSAGE", summary: "text: Status update", text: "", toolsUsed: [], toolsSucceeded: [] });
+  const fallback = ensureTriggerCloseout({ text: "", toolsUsed: [] });
   assert.equal(fallback.reportMissing, true);
-  assert.match(fallback.text, /No external action was attempted/i);
-  assert.match(fallback.text, /Status update/);
+  assert.match(fallback.text, /did not attempt an external action/i);
+  assert.doesNotMatch(fallback.text, /Status update/);
 });
 
 test("trigger closeouts expose bounded prepared actions without treating them as authorization", () => {
   const parsed = parseTriggerSuggestedActions(`I found a newsletter backlog.\n\n<chusky_actions>[{"label":"Archive","prompt":"Archive the newsletters I described, then verify the inbox."},{"label":"Clear","prompt":"Clear the unread newsletter messages after showing me what will change."}]</chusky_actions>`);
   assert.equal(parsed.text, "I found a newsletter backlog.");
-  assert.deepEqual(parsed.actions.map(({ id, label }) => ({ id, label })), [{ id: "action-1", label: "Archive" }, { id: "action-2", label: "Clear" }]);
+  assert.deepEqual(parsed.actions.map(({ id, label }) => ({ id, label })), [{ id: "action-1", label: "Archive" }]);
   const bounded = parseTriggerSuggestedActions(`<chusky_actions>[{"label":"${"x".repeat(100)}","prompt":"${"y".repeat(1000)}"}]</chusky_actions>`);
   assert.equal(bounded.actions[0]?.label.length, 32);
   assert.equal(bounded.actions[0]?.prompt.length, 600);
