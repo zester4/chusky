@@ -4,7 +4,7 @@ import { createTregEndpointJudge } from "./decisions/tregRouter.js";
 import { Client as WorkflowClient } from "@upstash/workflow";
 import { enqueueTaskWorkflow, enqueueTinyFishResearchWorkflow, workflowFailureUrl } from "./triggerWorkflow.js";
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
-import { MissionDurationApprovalRequiredError, requestMissionDurationApproval, resumeMissionTaskAfterApproval } from "./missionApproval.js";
+import { resumeMissionTaskAfterApproval } from "./missionApproval.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { createHash, randomUUID } from "node:crypto";
 import { classifyMemory } from "./memory/classifier.js";
@@ -2679,16 +2679,6 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
       const existing = await getMission(userId, missionId);
       const workerBudget = args.budget && typeof args.budget === "object" && !Array.isArray(args.budget) ? args.budget as Record<string, unknown> : undefined;
       const budgetPatch = workerBudget ? Object.fromEntries(["maxDurationSeconds", "maxSteps", "maxSlices", "maxToolCalls", "maxCost"].filter((key) => workerBudget[key] !== undefined).map((key) => [key, Number(workerBudget[key])])) : undefined;
-      if (args.maxDurationSeconds !== undefined && !runtime.approvedApprovalId) {
-        // A model must never create a second prose-driven approval for an
-        // exhausted mission. Reuse the canonical owner approval so the UI
-        // and the durable worker share one exact resume action.
-        const requested = existing
-          ? await requestMissionDurationApproval(userId, missionId, { taskId: runtime.taskId, model: runtime.model })
-          : undefined;
-        if (requested) throw new MissionDurationApprovalRequiredError(requested.approval.id, requested.approval.args);
-        throw new Error("Extending a mission duration requires exact owner approval of the resume arguments.");
-      }
       const overdueTimer = existing?.status === "waiting"
         && existing.waiting?.kind === "timer"
         && typeof existing.waiting.runAt === "number"
@@ -2700,13 +2690,6 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
         if (resumed.status === "enqueue_failed") throw new Error("The approved mission action is saved, but its original task could not be queued. Retry after the workflow service recovers.");
         if (resumed.status === "task_running") throw new Error("The approved mission task is already running; wait for that worker to settle.");
         throw new Error("The mission approval no longer matches a resumable task. Inspect the mission checkpoint before retrying.");
-      }
-      if (existing && args.maxDurationSeconds === undefined) {
-        const preflight = missionBudgetPreflight(existing, { steps: 1, toolCalls: 1, cost: 0.0001, durationSeconds: 1 });
-        if (!preflight.allowed && preflight.reason === "Mission duration budget would be exceeded.") {
-          const requested = await requestMissionDurationApproval(userId, missionId, { taskId: runtime.taskId, model: runtime.model });
-          if (requested) throw new MissionDurationApprovalRequiredError(requested.approval.id, requested.approval.args);
-        }
       }
       const mission = await resumeMissionAndSchedule(userId, missionId, runtime.enqueueMissionTask ?? enqueueTaskWorkflow, args.maxDurationSeconds === undefined ? undefined : Number(args.maxDurationSeconds), budgetPatch as any);
       if (!mission) throw new Error("Only paused, blocked, failed, or already-running missions you own can be resumed");

@@ -56,7 +56,7 @@ import { confirmRecallMeetingParticipant } from "./meetings/service.js";
 import { defaultMediaInstruction } from "./mediaInput.js";
 import { fetchPublicWebsite, normalizePublicWebsiteUrl } from "./onboardingWebsite.js";
 import { displayTriggerSummary } from "./triggerEventSummary.js";
-import { initialSdkRunProgress, normalizeSdkRunProgress, progressFromSdkStatus, progressFromSdkSubagentActivity, progressFromSdkToolActivity, terminalSdkRunProgress, type SdkRunProgress } from "./sdkRunProgress.js";
+import { initialSdkRunProgress, normalizeSdkRunProgress, progressFromSdkStatus, progressFromSdkSubagentActivity, progressFromSdkToolActivity, progressFromSdkToolCheckpoint, terminalSdkRunProgress, type SdkProgressActivity, type SdkRunProgress } from "./sdkRunProgress.js";
 
 import { validateNativeToolArguments } from "./agentTools.js";
 import { chuckTools } from "./agentTools.js";
@@ -3529,6 +3529,12 @@ export function registerSdkApi(app: Hono): void {
         send({ type: "run.progress", runId: run.id, progress: run.progress });
       };
       let costIncrement = 0;
+      const progressCheckpointEvery = 4;
+      let terminalToolActivityCount = 0;
+      const checkpointActivities: SdkProgressActivity[] = [];
+      const activeToolActivities = new Map<string, SdkProgressActivity>();
+      const activityKey = (activity: SdkProgressActivity): string => activity.callId || activity.toolSlug;
+      const latestActiveTool = (): SdkProgressActivity | undefined => [...activeToolActivities.values()].at(-1);
       let opening: TurnOpening | undefined;
       send({ type: "run.started", run: runView(thread.id, run) });
       try {
@@ -3552,7 +3558,8 @@ export function registerSdkApi(app: Hono): void {
               openingFrameSent = true;
               logger.info({ runId: run.id, model: config.turnOpeningModel, streamElapsedMs: performance.now() - streamStartedAt, requestElapsedMs: performance.now() - requestStartedAt }, "Agent first response frame sent");
             }
-            appendSdkRunProgress(run, { phase: "planning", title: "Preparing your request", detail: text, evidence: [{ id: "turn-opening", kind: "note", label: "Initial response", detail: text }] });
+            const openingProgress = progressFromSdkStatus(text, run.progress);
+            appendSdkRunProgress(run, { ...openingProgress, phase: "planning", evidence: [{ id: "turn-opening", kind: "note", label: "Initial response", detail: text }] });
             send({ type: "run.progress", runId: run.id, progress: run.progress });
             void persistSnapshot().catch((error) => logger.warn({ err: error, runId: run.id }, "Could not persist the early opening immediately; terminal recovery will retry it"));
           }, abort.signal);
@@ -3571,9 +3578,24 @@ export function registerSdkApi(app: Hono): void {
             run.events.push(activityEvent);
             run.updatedAt = activityEvent.at;
             thread.updatedAt = activityEvent.at;
+            const activityForProgress: SdkProgressActivity = activity;
+            if (activity.status === "started") {
+              activeToolActivities.set(activityKey(activityForProgress), activityForProgress);
+            } else if (activity.status === "completed" || activity.status === "failed" || activity.status === "cancelled") {
+              activeToolActivities.delete(activityKey(activityForProgress));
+              terminalToolActivityCount += 1;
+              checkpointActivities.push(activityForProgress);
+              if (checkpointActivities.length > progressCheckpointEvery) checkpointActivities.shift();
+            }
+            const checkpoint = terminalToolActivityCount > 0 && terminalToolActivityCount % progressCheckpointEvery === 0
+              ? progressFromSdkToolCheckpoint(checkpointActivities, latestActiveTool(), run.progress)
+              : undefined;
             return persistSnapshot()
-              .then(() => publishProgress(progressFromSdkToolActivity(activity, run.progress)))
-              .then(() => send({ runId: run.id, ...activityEvent }));
+              // Put the raw lifecycle row on the wire first. The following
+              // progress projection then becomes the visible headline rather
+              // than being overwritten by the activity reducer in the web UI.
+              .then(() => send({ runId: run.id, ...activityEvent }))
+              .then(() => publishProgress(checkpoint ?? progressFromSdkToolActivity(activity, run.progress)));
           },
           onSubagentActivity: (activity: SubagentActivityUpdate & { parentToolCallId: string }) => {
             const activityEvent = { id: `evt_${randomUUID()}`, type: "run.subagent_activity", at: Date.now(), ...activity };

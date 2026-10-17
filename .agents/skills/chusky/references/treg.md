@@ -119,12 +119,14 @@ status, and connection listing are bounded autonomous operations. The gateway
 still enforces account scope, spend reservations, rate limits, provider
 balance/capacity, and registered-tool checks.
 
-Catalog provider calls through `CHUCK_TREG_CALL` are autonomous within the
-gateway's spend reservations, daily/mission/per-call budgets, rate limits,
-capacity checks, and idempotency rules. Calls to registered organization-owned
-tools remain approval-gated because they can change company systems. OAuth
-start and revoke remain approval-gated because they change an external account
-authorization.
+The gateway verifies that a catalog call's requested method matches inspected
+endpoint metadata before reserving spend or dispatching. GET/HEAD/OPTIONS
+catalog reads are autonomous within the gateway's spend reservations,
+daily/mission/per-call budgets, rate limits, capacity checks, and idempotency
+rules. POST/PUT/PATCH/DELETE catalog calls require owner approval because they
+may create or change provider data. Calls to registered organization-owned
+tools remain approval-gated. OAuth start and revoke remain approval-gated
+because they change an external account authorization.
 
 `CHUCK_TREG_ADMIN` management reads are owner-scoped and autonomous. Every
 management write is approval-gated, including reversible changes; billing,

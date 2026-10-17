@@ -1,11 +1,11 @@
 {
-  "id": "release-4.62.0",
-  "version": "4.62.0",
+  "id": "release-4.63.0",
+  "version": "4.63.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Expanded Treg beyond provider search with owner-scoped organization, member, invite, project, agent and API-key metadata, billing, usage, audit, health, connection/resource, tool, bundle and Hub operations.",
-    "Added explicit Treg policy controls for tag budgets, deny rules, capability pins, organization settings and access changes; every change requires approval of the exact operation and arguments.",
-    "Treg organizations are checked against the authenticated account, management responses are bounded and credential-redacted, and one-time API keys or secret values are never returned to the model."
+    "Added Treg playbooks for bulk enrichment, SEO, social, competitor ad research, and guarded ad operations alongside company, people, and lead workflows.",
+    "Generic Treg calls verify endpoint methods before dispatch; catalog writes require owner approval, and pending jobs remain inspectable without duplicate runs.",
+    "Research preserves identity, source, async status, and spend limits; owner-connected account actions remain separately authorized."
   ],
-  "createdAt": "2026-10-17T15:26:12.913Z"
+  "createdAt": "2026-10-17T16:21:34.465Z"
 }

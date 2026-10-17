@@ -179,7 +179,11 @@ function isAutonomousTregCatalogCall(args: Record<string, unknown>): boolean {
   const endpointId = String(args.endpointId ?? "").trim();
   // Match TregGateway's boundary: catalog IDs are opaque IDs without a path;
   // slash targets and absolute URLs are registered organization tools.
-  return Boolean(endpointId) && !/^https:\/\//i.test(endpointId) && !endpointId.includes("/");
+  const method = String(args.method ?? "POST").trim().toUpperCase();
+  return Boolean(endpointId)
+    && !/^https:\/\//i.test(endpointId)
+    && !endpointId.includes("/")
+    && ["GET", "HEAD", "OPTIONS"].includes(method);
 }
 
 function composioActionPolicy(slug: string): ToolApprovalPolicy {
@@ -211,7 +215,6 @@ function composioActionPolicy(slug: string): ToolApprovalPolicy {
 export function toolApprovalPolicy(slug: string, args: Record<string, unknown> = {}): ToolApprovalPolicy {
   slug = canonicalPolicySlug(slug);
   if (slug === "CHUCK_TREG_ADMIN") return isTregAdminReadAction(String(args.action ?? "")) ? "private" : "approval_required";
-  if (slug === "CHUCK_MISSION_RESUME" && args.maxDurationSeconds !== undefined) return "approval_required";
   if (slug === "CHUCK_MISSION_START" && Number(args.maxAutomaticExtensions ?? 0) > 0) return "approval_required";
   if (TINYFISH_AUTONOMOUS_TOOLS.has(slug)) return "private";
   if (slug === "CHUCK_BROWSER") {

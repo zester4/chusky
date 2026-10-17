@@ -30,7 +30,6 @@ import { WorkflowNonRetryableError } from "@upstash/workflow";
 import { executeDurableTask } from "./taskRunner.js";
 import { executeTaskSlice } from "./taskSlice.js";
 import { executeWebSessionReconciliationTask, recoverWebSessionReconciliationTasks } from "./webSessionReconciliation.js";
-import { requestMissionDurationApproval } from "./missionApproval.js";
 import { reconcileTinyFishResearchRun } from "./tinyfishResearch.js";
 import { completeMissionStepAndAdvance, finalizeMissionCloseout, MissionEnqueueError, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, rescheduleQueuedMissionTasks, resumeMissionAndSchedule, validateMissionStepsPayload } from "./missionScheduler.js";
 import { onComposerTaskSettled } from "./workflows/composer.js";

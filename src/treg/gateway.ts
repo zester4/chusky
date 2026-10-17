@@ -793,7 +793,16 @@ export class TregGateway {
     }
     const isOwnTarget = /^https:\/\//i.test(target) || target.includes("/");
     if (options.endpointMetadata && (isOwnTarget || options.endpointMetadata.id !== target)) throw new Error("Pre-inspected Treg endpoint metadata does not match the requested catalog endpoint");
-    const metadata = isOwnTarget ? undefined : options.endpointMetadata ?? await this.getEndpoint(target, options.organizationId).catch(() => undefined);
+    const metadata = isOwnTarget ? undefined : options.endpointMetadata ?? await this.getEndpoint(target, options.organizationId);
+    const method = (options.method ?? "POST").toUpperCase();
+    if (!["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+      throw new Error("Unsupported Treg call method; no provider call was made.");
+    }
+    if (!isOwnTarget) {
+      if (!metadata || metadata.id !== target) throw new Error("Treg catalog endpoint metadata could not be verified; inspect the endpoint and retry.");
+      if (!metadata.method) throw new Error("Treg catalog endpoint method is unknown; no provider call was made.");
+      if (metadata.method !== method) throw new Error(`Treg catalog endpoint requires ${metadata.method}; requested ${method}. No provider call was made.`);
+    }
     if (metadata?.strictQuery && options.body !== undefined) throw new Error("strict-query catalog endpoint requires declared query parameters; omit the request body");
     if (isOwnTarget) {
       const tools = await this.myTools(options.organizationId);
@@ -819,7 +828,6 @@ export class TregGateway {
         : options.estimateUsd ?? (isRoutedEndpoint ? routeMaxCostUsd ?? config.tregPerCallSoftCapUsd : undefined);
     if (estimate === undefined) throw new Error("Treg endpoint price is unavailable; inspect the endpoint or provide an owner-approved estimate");
     const reservation = await this.deps.spend.reserve(options.userId, Math.max(estimate, routeMaxCostUsd ?? 0), options.missionId);
-    const method = (options.method ?? "POST").toUpperCase();
     const idempotencyKey = options.idempotencyKey?.trim() || randomUUID();
     if (idempotencyKey.length > 200) throw new Error("Treg idempotency key is too long");
     const callPath = `/call/${encodeURI(target.replace(/^\/+/, ""))}`;

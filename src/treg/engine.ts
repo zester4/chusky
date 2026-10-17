@@ -7,6 +7,11 @@ export type TregPlaybookId =
   | "hiring_signals"
   | "technology_research"
   | "market_map"
+  | "bulk_enrichment"
+  | "seo_research"
+  | "social_intelligence"
+  | "ads_intelligence"
+  | "ads_operations"
   | "general_research";
 
 export interface TregPlaybook {
@@ -266,6 +271,76 @@ const PLAYBOOKS: Record<TregPlaybookId, TregPlaybook> = {
       "Keep enrichment and signals within the user's aggregate cap and the runtime's stricter configured limits.",
     ],
   },
+  bulk_enrichment: {
+    id: "bulk_enrichment",
+    label: "Bulk company and people enrichment",
+    requiredContext: [
+      "a bounded, owner-provided input list with stable company domains or person identifiers",
+      "the exact output fields needed and whether missing fields should be skipped",
+      "a maximum record count, aggregate spend ceiling, and acceptable provider/BYOK requirements",
+      "whether the provider runs synchronously or creates a durable asynchronous job",
+    ],
+    discoveryQueries: [
+      "bulk company enrichment by domain with firmographics, funding, employees, technology, or hiring fields",
+      "bulk people enrichment or work-contact lookup for supplied, qualified identities",
+      "async bulk job status and result retrieval for the selected provider endpoint",
+    ],
+    tools: ["CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_CALL", "CHUCK_TREG_CALL_STATUS", "CHUCK_TREG_USAGE"],
+    workflow: [
+      "Inspect endpoint schema, batch limits, price unit, max rows, account requirement, HTTP method, and async behavior before choosing the provider.",
+      "Estimate maximum spend from the endpoint's actual per-call, per-result, per-row, or target unit and the requested batch size; stop when the charge cannot be bounded under the effective cap.",
+      "Start with the smallest useful batch. For an async response, persist the call/job ID and inspect that same job until completion; never start a duplicate job to poll faster.",
+      "Normalize results to the submitted identities, retain provider/source and no-match states, and report requested, completed, matched, and failed counts.",
+    ],
+    validation: [
+      "Reject rows that cannot be matched to a submitted stable identity; do not join on name alone.",
+      "Keep estimate versus settled spend, partial results, async state, and provider-side errors distinct.",
+    ],
+    guardrails: [
+      "Do not use bulk jobs to bypass result caps, campaign qualification, privacy controls, or aggregate budgets.",
+      "Generic POST/PUT/PATCH/DELETE calls require owner approval; no list, CRM, or outreach writes are authorized by enrichment.",
+    ],
+  },
+  seo_research: {
+    id: "seo_research",
+    label: "SEO, search visibility, and AI discovery",
+    requiredContext: ["target domains or keywords", "search engine, geography, language, device, and date range", "the decision and result depth", "aggregate spend ceiling"],
+    discoveryQueries: ["keyword research, search volume, difficulty, and SERP results", "domain backlinks, authority, competitors, and traffic estimates", "AI-search or answer-engine visibility and cited sources"],
+    tools: ["CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_CALL", "CHUCK_TREG_CALL_STATUS"],
+    workflow: ["Translate the question into a precise keyword/domain and geography; inspect which provider supports the needed date and device filters.", "Compare providers only when coverage, freshness, or price differs materially; select one bounded endpoint and inspect its schema and price units.", "Run a small sample, then expand only to close an evidence gap within the remaining budget.", "Report source, engine, geography, date, units, and whether volume/rank/traffic is provider-estimated."],
+    validation: ["Preserve provider units and date semantics; do not combine incompatible keyword metrics.", "An empty result is not proof of zero search demand or absence of backlinks."],
+    guardrails: ["Keep competitor and traffic figures attributed to their provider and observation date.", "Do not claim rankings or analytics access that the selected endpoint did not return."],
+  },
+  social_intelligence: {
+    id: "social_intelligence",
+    label: "Social audience and public conversation research",
+    requiredContext: ["platforms, accounts, keywords, or public URLs", "geography, time window, and audience or outcome", "whether the request concerns public content or owner-authenticated analytics", "aggregate spend ceiling"],
+    discoveryQueries: ["public posts, mentions, engagement, and account analytics for the named platform", "creator or audience discovery with audience and engagement fields", "social listening for the named brand, product, or buying problem"],
+    tools: ["CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_CALL", "CHUCK_TREG_CALL_STATUS"],
+    workflow: ["Separate public third-party data from analytics that require the owner's connected account or BYOK.", "Inspect platform coverage, date window, pagination, rate limits, and per-result pricing before calling.", "Collect only the requested public/authorized data; preserve post/account URLs, timestamps, and provider metrics.", "Summarize observed conversation and reach with the platform and sampling window; keep interpretation separate."],
+    validation: ["Check platform identity, timestamp, source URL, and provider-reported metric definitions.", "Do not treat sampled mentions or engagement as a representative survey or verified buyer intent."],
+    guardrails: ["Research does not authorize liking, following, posting, messaging, or ad/account changes.", "POST/PUT/PATCH/DELETE catalog calls require owner approval even when the provider endpoint resembles a search."],
+  },
+  ads_intelligence: {
+    id: "ads_intelligence",
+    label: "Advertising intelligence and competitor research",
+    requiredContext: ["advertiser, brand, domain, product, or ad-library query", "platforms and geography", "date range and the question (creative, spend estimate, placement, or activity)", "aggregate spend ceiling"],
+    discoveryQueries: ["public ad-library creatives and advertiser activity for the target brand/domain", "competitor advertising research by platform and geography", "ad creative, landing-page, and campaign trend data with dates and sources"],
+    tools: ["CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_CALL", "CHUCK_TREG_CALL_STATUS"],
+    workflow: ["Use public ad-library or market-intelligence endpoints for competitor research; verify that the endpoint provides the requested platform, date, and geography.", "Inspect whether spend/reach is directly reported or modeled, along with price unit, pagination, and account requirements.", "Run a narrow query, preserve ad/creative and landing-page source links, then expand only within the cap.", "Report advertiser, platform, observed dates, creative themes, and the source; label modeled metrics as estimates."],
+    validation: ["Distinguish ad-library records, provider estimates, and owner-account campaign metrics.", "A missing ad in one library or period does not prove that a brand is not advertising."],
+    guardrails: ["This playbook is research-only and cannot launch, edit, pause, target, or fund campaigns.", "Authenticated ad-account metrics require the owner's connected account; do not use an arbitrary provider key or account ID."],
+  },
+  ads_operations: {
+    id: "ads_operations",
+    label: "Advertising account operations",
+    requiredContext: ["the owner's connected ad platform and account", "the exact campaign/ad-set/ad change and intended outcome", "the proposed budget, targeting, dates, and creative", "an explicit approval for the exact mutation"],
+    discoveryQueries: ["owner-connected advertising account and campaign inventory", "platform documentation and constraints for the requested change", "campaign state and spend evidence needed to verify a proposed action"],
+    tools: ["CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_MY_TOOLS", "CHUCK_TREG_CALL"],
+    workflow: ["Prefer the authenticated owner-connected platform integration for account-specific operations; Treg public catalog data does not grant access to the account.", "Inspect the exact endpoint, HTTP method, account scope, schema, and consequences; build a concrete proposed change and expected cost.", "Pause for owner approval of the exact write arguments before POST/PUT/PATCH/DELETE; never reinterpret broad approval as permission to change additional campaigns.", "After execution, read the campaign back from the same account and report the resulting state and any provider receipt/error."],
+    validation: ["Verify campaign/account identity and read-back state; a success response alone is not proof of the intended final configuration.", "Confirm the owner-approved values match the final provider state and report any partial or rejected fields."],
+    guardrails: ["Never launch, pause, edit, target, or increase ad spend without exact owner approval.", "Do not expose credentials, spend tokens, or private account payloads to the model or another account."],
+  },
   general_research: {
     id: "general_research",
     label: "Structured external-data research",
@@ -296,6 +371,11 @@ const PLAYBOOKS: Record<TregPlaybookId, TregPlaybook> = {
 const PLAYBOOK_IDS = new Set<string>(Object.keys(PLAYBOOKS));
 
 function inferPlaybook(task: string): TregPlaybookId {
+  if (/\b(advertising operations?|launch|edit|pause|target|campaign budget|ad spend)\b/i.test(task) && /\b(campaign|ads?|advertising)\b/i.test(task)) return "ads_operations";
+  if (/\b(bulk|batch|async(?:hronous)? job|large list)\b/i.test(task) && /\b(enrich|companies|people|contacts|leads?)\b/i.test(task)) return "bulk_enrichment";
+  if (/\b(seo|serp|backlinks?|keyword research|search visibility|ai visibility|answer engine)\b/i.test(task)) return "seo_research";
+  if (/\b(social listening|social intelligence|social mentions?|creator discovery|influencer|public posts?)\b/i.test(task)) return "social_intelligence";
+  if (/\b(ad intelligence|ad library|competitor ads?|advertising research|creative research)\b/i.test(task)) return "ads_intelligence";
   if (/\b(hiring signals?|job postings?|job listings?|workforce|headcount changes?)\b/i.test(task)) return "hiring_signals";
   if (/\b(technology adoption|tech stack|technographics?|technology changes?|tools? (?:they|companies) use)\b/i.test(task)) return "technology_research";
   if (/\b(?:(?:buying|buyer|purchase)[ -]intent|intent)[ -]signals?\b|\b(buying|buyer|purchase) signals?\b|\b(in-market|trigger events?|why now|public requests? for help)\b/i.test(task)) return "buying_signals";

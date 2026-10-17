@@ -4,9 +4,10 @@ import { humanProgressStatus, humanToolStatus, isReadOnlyToolSlug, isRiskyToolSl
 import { clearComposioToolMetadata, registerComposioToolMetadata } from "../src/composioRisk.js";
 import { isSharedChannelToolDenied } from "../src/sharedChannelPolicy.js";
 
-test("duration extensions require owner approval while ordinary mission resume stays autonomous", () => {
+test("mission resume stays autonomous, including bounded duration continuation", () => {
   assert.equal(toolApprovalPolicy("CHUCK_MISSION_RESUME", { id: "mis_existing" }), "private");
-  assert.equal(requiresToolApproval("CHUCK_MISSION_RESUME", { id: "mis_existing", maxDurationSeconds: 3600 }, false, true), true);
+  assert.equal(toolApprovalPolicy("CHUCK_MISSION_RESUME", { id: "mis_existing", maxDurationSeconds: 3600 }), "private");
+  assert.equal(requiresToolApproval("CHUCK_MISSION_RESUME", { id: "mis_existing", maxDurationSeconds: 3600 }, false, true), false);
   assert.equal(requiresToolApproval("CHUCK_MISSION_START", { maxAutomaticExtensions: 2, automaticExtensionSeconds: 300 }, false, true), true);
   assert.equal(toolApprovalPolicy("CHUCK_MISSION_START", { maxAutomaticExtensions: 0 }), "private");
 });
@@ -194,7 +195,7 @@ test("owner-private MCP runs do not inherit a server-wide approval gate but keep
   assert.equal(requiresToolApproval("MCP_private_create_ticket_1234567890", { title: "Follow up" }, true, false), true, "restricted runs keep the connected server's configured approval policy");
 });
 
-test("bounded Treg intelligence and catalog calls are autonomous while company tools and OAuth changes stay gated", () => {
+test("bounded Treg research and catalog reads are autonomous while catalog writes, company tools, and OAuth changes stay gated", () => {
   const autonomous = [
     "CHUCK_TREG_PLAN", "CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_MY_TOOLS",
     "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_COMPANY_JOBS_SEARCH", "CHUCK_TREG_RESOLVE",
@@ -206,10 +207,14 @@ test("bounded Treg intelligence and catalog calls are autonomous while company t
     assert.equal(requiresToolApproval(slug, {}, true), false, `${slug} should ignore a generic strict-run prompt`);
   }
   assert.equal(isReadOnlyToolSlug("CHUCK_TREG_PLAN"), true);
-  assert.equal(toolApprovalPolicy("CHUCK_TREG_CALL", { endpointId: "treg.companies.enrich" }), "private");
-  assert.equal(requiresToolApproval("CHUCK_TREG_CALL", { endpointId: "treg.companies.enrich" }), false);
-  assert.equal(requiresToolApproval("CHUCK_TREG_CALL", { endpointId: "treg.companies.enrich" }, true), false);
-  for (const args of [{}, { endpointId: "stripe/charges" }, { endpointId: "https://api.example.com/charge" }]) {
+  assert.equal(toolApprovalPolicy("CHUCK_TREG_CALL", { endpointId: "treg.companies.search", method: "GET" }), "private");
+  assert.equal(requiresToolApproval("CHUCK_TREG_CALL", { endpointId: "treg.companies.search", method: "GET" }), false);
+  assert.equal(requiresToolApproval("CHUCK_TREG_CALL", { endpointId: "treg.companies.search", method: "GET" }, true), false);
+  for (const args of [
+    {}, { endpointId: "treg.companies.enrich" }, { endpointId: "treg.ads.campaign.update", method: "PATCH" },
+    { endpointId: "treg.ads.campaign.create", method: "POST" }, { endpointId: "stripe/charges" },
+    { endpointId: "https://api.example.com/charge", method: "GET" },
+  ]) {
     assert.equal(toolApprovalPolicy("CHUCK_TREG_CALL", args), "approval_required");
     assert.equal(requiresToolApproval("CHUCK_TREG_CALL", args), true);
   }

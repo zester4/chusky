@@ -77,7 +77,9 @@ function describeHit(hit: TregEndpointHit): string {
     `provider ${hit.provider}`,
     `category ${hit.category}`,
     hit.inputFields?.length ? `inputs ${hit.inputFields.slice(0, 12).join(", ")}` : "",
-    hit.priceUsd === undefined ? "" : `price $${hit.priceUsd}`,
+    hit.priceVaries
+      ? `price varies${hit.priceReferenceUsd === undefined ? "" : `; catalog reference $${hit.priceReferenceUsd}`}`
+      : hit.priceUsd === undefined ? "" : `price $${hit.priceUsd}`,
     hit.successRate === undefined ? "" : `success ${Math.round(hit.successRate * 100)}%`,
     /bulk|batch/i.test(`${hit.id} ${hit.title}`) ? "mode: bulk" : /status|job|async/i.test(`${hit.id} ${hit.title}`) ? "mode: asynchronous job" : "",
   ].filter(Boolean).join("; "), 360);

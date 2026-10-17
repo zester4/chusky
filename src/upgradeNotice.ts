@@ -148,9 +148,9 @@ export const AGENT_UPGRADE_PRESETS = {
     "Treg organizations are checked against the authenticated account, management responses are bounded and credential-redacted, and one-time API keys or secret values are never returned to the model.",
   ],
   tregIntelligence: [
-    "Added reusable, read-only Treg research playbooks for account research, people discovery, qualified lead enrichment and generation, buying signals, hiring, technology, and market mapping, plus general research; endpoint choices and prices remain discovered live.",
-    "People search distinguishes provider-returned email from explicitly verified email and reports ignored filters, pending jobs, and incomplete results; pending calls can be inspected without blind retries.",
-    "Lead campaigns can use bounded Treg discovery within their own reserved allowance; signal watches now record new and changed evidence while keeping buying signals separate from confirmed purchase intent.",
+    "Added Treg playbooks for bulk enrichment, SEO, social, competitor ad research, and guarded ad operations alongside company, people, and lead workflows.",
+    "Generic Treg calls verify endpoint methods before dispatch; catalog writes require owner approval, and pending jobs remain inspectable without duplicate runs.",
+    "Research preserves identity, source, async status, and spend limits; owner-connected account actions remain separately authorized.",
   ],
   leadCampaigns: [
     "Owners can start an idempotent, multi-day lead campaign that researches, deduplicates, qualifies, and tracks source-linked candidates in private durable state, with an honest shortfall report and verifiable closeout.",

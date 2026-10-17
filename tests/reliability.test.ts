@@ -21,22 +21,23 @@ import { buildReadinessReport } from "../src/reliability/readiness.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "../src/reliability/quotas.js";
 import { MissionFakeClock } from "./helpers/missionKernelHarness.js";
 
-test("native expired resume creates a visible duration approval without enqueueing", async () => {
+test("native expired resume does not create an approval loop", async () => {
   await initStore({ memoryOnly: true });
   const ownerId = 9824;
   const mission = await createMission(ownerId, { title: "Expired recovery", objective: "Recover existing work", definitionOfDone: "Verified closeout", budget: { maxDurationSeconds: 60, durationMode: "wall_clock" }, steps: [{ id: "verify", title: "Verify", objective: "Verify the existing result" }] });
   await startMission(ownerId, mission.id);
   await updateMission(ownerId, mission.id, { startedAt: Date.now() - 120_000 });
   let enqueues = 0;
-  await assert.rejects(nativeTool(ownerId, "CHUCK_MISSION_RESUME", { id: mission.id }, { enqueueMissionTask: async () => { enqueues += 1; return "unused"; } }), /Approval required before extending mission duration/);
-  assert.equal(enqueues, 0);
+  const resumed = await nativeTool(ownerId, "CHUCK_MISSION_RESUME", { id: mission.id, maxDurationSeconds: 300 }, { enqueueMissionTask: async () => { enqueues += 1; return "unused"; } }) as { status: string; budget: { maxDurationSeconds: number } };
+  assert.equal(resumed.status, "running");
+  assert.equal(resumed.budget.maxDurationSeconds, 300);
+  assert.equal(enqueues, 1, "A safe autonomous resume should schedule the saved mission task immediately.");
   const waiting = await getMission(ownerId, mission.id);
-  assert.equal(waiting?.status, "waiting");
-  assert.equal(waiting?.waiting?.kind, "approval");
-  const completion = await nativeTool(ownerId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId: "verify", result: "Existing result checked" });
-  assert.equal((completion as { stepCompletion: string }).stepCompletion, "not_ready");
-  await assert.rejects(nativeTool(ownerId, "CHUCK_MISSION_RESUME", { id: mission.id, maxDurationSeconds: 300 }), /Approval required before extending mission duration/);
-  assert.equal((await listApprovals(ownerId)).filter((item) => item.toolSlug === "CHUCK_MISSION_RESUME").length, 1);
+  assert.equal(waiting?.status, "running");
+  assert.equal((await listApprovals(ownerId)).filter((item) => item.toolSlug === "CHUCK_MISSION_RESUME").length, 0);
+  const completion = await nativeTool(ownerId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId: "verify", result: "Existing result checked" }) as { stepCompletion?: string; status?: string };
+  assert.ok(completion.stepCompletion === "not_ready" || completion.status === "completed");
+  assert.equal((await listApprovals(ownerId)).filter((item) => item.toolSlug === "CHUCK_MISSION_RESUME").length, 0);
 });
 
 test("receipt checks resolve exact owned trusted evidence and reject forged or mismatched references", async () => {

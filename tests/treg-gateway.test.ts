@@ -53,7 +53,7 @@ test("TregGateway uses the server token and preserves idempotency across transie
     const fetchImpl = async (_url: string, init: RequestInit) => {
       calls.push(init);
       callsCount += 1;
-      if (callsCount === 1) return new Response(JSON.stringify({ id: "endpoint-1", price_usd: 0.05, provider: "test" }), { status: 200 });
+      if (callsCount === 1) return new Response(JSON.stringify({ id: "endpoint-1", method: "POST", price_usd: 0.05, provider: "test" }), { status: 200 });
       if (callsCount === 2) return new Response("busy", { status: 503 });
       return new Response(JSON.stringify({ id: "call-1", cost_usd: 0.05, result: { ok: true } }), { status: 200 });
     };
@@ -69,6 +69,30 @@ test("TregGateway uses the server token and preserves idempotency across transie
       config.tregToken = previous.token;
       config.tregMaxRetries = previous.retries;
     }
+});
+
+test("TregGateway rejects a method that differs from inspected catalog metadata before reserving or calling", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  const requests: string[] = [];
+  let reservations = 0;
+  try {
+    const gateway = new TregGateway({
+      spend: { reserve: async () => { reservations += 1; throw new Error("must not reserve"); } } as unknown as TregSpendGuard,
+      recordReceipt: async () => {},
+      fetchImpl: async (url) => {
+        requests.push(new URL(url).pathname);
+        return new Response(JSON.stringify({ id: "provider.search", method: "GET", price_usd: 0.01, price_unit: "call" }), { status: 200 });
+      },
+    });
+    await assert.rejects(gateway.call({ userId: 1, endpointId: "provider.search", method: "POST", body: { q: "test" }, estimateUsd: 0.01 }), /requires GET; requested POST/i);
+    assert.deepEqual(requests, ["/catalog/endpoints/provider.search"]);
+    assert.equal(reservations, 0);
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+  }
 });
 
 test("read-only Treg resolution inspects methods and skips write endpoints", async () => {
@@ -163,7 +187,7 @@ test("TregGateway accepts a caller idempotency key and settles the documented re
       recordReceipt: async () => {},
       fetchImpl: async (_url, init) => {
         calls += 1;
-        if (calls === 1) return new Response(JSON.stringify({ id: "endpoint-1", price_usd: 0.05 }), { status: 200 });
+        if (calls === 1) return new Response(JSON.stringify({ id: "endpoint-1", method: "POST", price_usd: 0.05 }), { status: 200 });
         assert.equal((init.headers as Record<string, string>)["Idempotency-Key"], "same-request-retry");
         return new Response(JSON.stringify({ result: { ok: true } }), { status: 200, headers: { "X-Treg-Call-Id": "call_123", "X-Treg-Cost-Micro": "7000", "X-Treg-Idempotent-Replay": "true" } });
       },
@@ -193,7 +217,7 @@ test("generic Treg call results are bounded and redact credential-shaped fields"
       recordReceipt: async () => {},
       fetchImpl: async () => {
         calls += 1;
-        if (calls === 1) return new Response(JSON.stringify({ id: "endpoint-1", price_usd: 0.01, price_unit: "call" }));
+        if (calls === 1) return new Response(JSON.stringify({ id: "endpoint-1", method: "POST", price_usd: 0.01, price_unit: "call" }));
         return new Response(JSON.stringify({ result: { title: "safe", token: "private-token-value", nested: { authorization: "Bearer abcdefghijklmnop" }, url: "https://example.test/path?api_key=private" } }));
       },
     });
@@ -219,7 +243,7 @@ test("routed people search enforces a hard route cost cap and preserves evidence
       recordReceipt: async () => {},
       fetchImpl: async (url, init) => {
         requests.push({ url, init });
-        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "treg.people.search", title: "People search", price_usd: 0.01 }), { status: 200 });
+        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "treg.people.search", method: "POST", title: "People search", price_usd: 0.01 }), { status: 200 });
         return new Response(JSON.stringify({ result: { people: [{ full_name: "Ada Lovelace", title: "VP Sales", company_domain: "example.com", email: "ada@example.com", email_verification_status: "verified", source_url: "https://example.com/profile", confidence: 92 }, { full_name: "Grace Hopper", company_domain: "example.com", email: "grace@example.com" }] }, _treg: { served_by: "provider-a", tried: ["provider-a"] } }), { status: 200, headers: { "X-Treg-Cost-Micro": "12000", "X-Treg-Ignored-Filters": "title" } });
       },
     });
@@ -254,7 +278,7 @@ test("TregGateway records charged upstream failures returned with HTTP 2xx", asy
       recordReceipt: async (next) => { receipt = next; },
       fetchImpl: async () => {
         calls += 1;
-        if (calls === 1) return new Response(JSON.stringify({ id: "endpoint-1", price_usd: 0.05 }), { status: 200 });
+        if (calls === 1) return new Response(JSON.stringify({ id: "endpoint-1", method: "POST", price_usd: 0.05 }), { status: 200 });
         return new Response(JSON.stringify({ result: null, _treg: { call_id: "call_paid_failure", charged_micro: 7000, upstream_failed: "status=500" } }), { status: 200, headers: { "X-Treg-Cost-Micro": "7000", "X-Treg-Call-Id": "call_paid_failure" } });
       },
     });
@@ -280,7 +304,7 @@ test("routed async Treg calls are marked pending and reserve their capped budget
       spend: new TregSpendGuard({ getSnap: async () => snapshot, saveSnap: async (next) => { snapshot = next; } }),
       recordReceipt: async (next) => { receipt = next; },
       fetchImpl: async (url) => url.includes("/catalog/endpoints/")
-        ? new Response(JSON.stringify({ id: "treg.people.search" }), { status: 200 })
+        ? new Response(JSON.stringify({ id: "treg.people.search", method: "POST" }), { status: 200 })
         : new Response(JSON.stringify({ call_id: "async-call-1", _treg: { outcome: "pending", reserved_micro: 10000 } }), { status: 202 }),
     });
     const result = await gateway.searchPeople({ userId: 6, query: "founders at climate software companies", maxSpendUsd: 0.03 });
@@ -302,7 +326,7 @@ test("Treg email verification keeps unknown states explicit and never authorizes
       recordReceipt: async () => {},
       fetchImpl: async (url, init) => {
         requests.push(init);
-        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "treg.people.email.verify", price_usd: 0.01 }), { status: 200 });
+        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "treg.people.email.verify", method: "POST", price_usd: 0.01 }), { status: 200 });
         return new Response(JSON.stringify({ result: { status: "unknown", catch_all: true } }), { status: 200, headers: { "X-Treg-Cost-Micro": "0" } });
       },
     });
@@ -420,8 +444,8 @@ test("Treg normalization preserves provider scores without inventing confidence"
       recordReceipt: async () => {},
       fetchImpl: async (url) => {
         callCount += 1;
-        if (url.includes("/catalog/search")) return new Response(JSON.stringify({ results: [{ id: "person-email", title: "Work email", provider: "hunter", price_usd: 0.01 }] }), { status: 200 });
-        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "person-email", title: "Work email", provider: "hunter", price_usd: 0.01 }), { status: 200 });
+        if (url.includes("/catalog/search")) return new Response(JSON.stringify({ results: [{ id: "person-email", method: "POST", title: "Work email", provider: "hunter", price_usd: 0.01 }] }), { status: 200 });
+        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "person-email", method: "POST", title: "Work email", provider: "hunter", price_usd: 0.01 }), { status: 200 });
         return new Response(JSON.stringify({ result: { email: "person@example.com", full_name: "A Person", confidence: 0.92 } }), { status: 200 });
       },
     });
@@ -435,8 +459,8 @@ test("Treg normalization preserves provider scores without inventing confidence"
       spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
       recordReceipt: async () => {},
       fetchImpl: async (url) => {
-        if (url.includes("/catalog/search")) return new Response(JSON.stringify({ results: [{ id: "person-email", title: "Work email", provider: "hunter", price_usd: 0.01 }] }), { status: 200 });
-        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "person-email", title: "Work email", provider: "hunter", price_usd: 0.01 }), { status: 200 });
+        if (url.includes("/catalog/search")) return new Response(JSON.stringify({ results: [{ id: "person-email", method: "POST", title: "Work email", provider: "hunter", price_usd: 0.01 }] }), { status: 200 });
+        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "person-email", method: "POST", title: "Work email", provider: "hunter", price_usd: 0.01 }), { status: 200 });
         return new Response(JSON.stringify({ result: { email: "person@example.com", full_name: "A Person" } }), { status: 200 });
       },
     });
@@ -498,9 +522,9 @@ test("TregGateway sends the company enrichment contract and unwraps provider out
       fetchImpl: async (url, init) => {
         if (url.includes("/catalog/search")) {
           searchCalls += 1;
-          return new Response(JSON.stringify({ results: searchCalls === 1 ? [] : [{ id: "treg.companies.enrich", title: "Company enrichment", provider: "treg", category: "company", price_usd: 0.01 }] }), { status: 200 });
+          return new Response(JSON.stringify({ results: searchCalls === 1 ? [] : [{ id: "treg.companies.enrich", method: "POST", title: "Company enrichment", provider: "treg", category: "company", price_usd: 0.01 }] }), { status: 200 });
         }
-        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ endpoint: { id: "treg.companies.enrich", name: "Company enrichment", provider: "treg", cost: { usd: 0.01 }, input: { body: { domain: {}, name: {} } } } }), { status: 200 });
+        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ endpoint: { id: "treg.companies.enrich", method: "POST", name: "Company enrichment", provider: "treg", cost: { usd: 0.01 }, input: { body: { domain: {}, name: {} } } } }), { status: 200 });
         requestBody = JSON.parse(String(init.body)) as Record<string, unknown>;
         return new Response(JSON.stringify({ result: { output: { name: "Acme", domain: "acme.test", industry: "software", employees: "1-10" }, raw: { secret: "not returned" } } }), { status: 200 });
       },
@@ -579,7 +603,7 @@ test("TregGateway maps company query to exactly one Treg identity and preflights
       fetchImpl: async (url, init) => {
         if (url.includes("/catalog/endpoints/")) {
           metadataCalls += 1;
-          return new Response(JSON.stringify({ id: "treg.companies.search", title: "Company search", provider: "treg", price_usd: 0, price_unit: "call" }), { status: 200 });
+          return new Response(JSON.stringify({ id: "treg.companies.search", method: "POST", title: "Company search", provider: "treg", price_usd: 0, price_unit: "call" }), { status: 200 });
         }
         providerCalls += 1;
         requestBody = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -612,7 +636,7 @@ test("Treg company search excludes provider rows that do not match an exact requ
       recordReceipt: async () => {},
       fetchImpl: async (url) => {
         if (url.includes("/catalog/endpoints/")) {
-          return new Response(JSON.stringify({ id: "treg.companies.search", title: "Company search", provider: "treg", price_usd: 0, price_unit: "call" }), { status: 200 });
+          return new Response(JSON.stringify({ id: "treg.companies.search", method: "POST", title: "Company search", provider: "treg", price_usd: 0, price_unit: "call" }), { status: 200 });
         }
         return new Response(JSON.stringify({ result: { companies: [
           { name: "HubSpot", domain: "https://www.hubspot.com/company/about" },
@@ -644,7 +668,7 @@ test("Treg company search combines identity inputs into one q field and blocks a
       spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
       recordReceipt: async () => {},
       fetchImpl: async (url, init) => {
-        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "treg.companies.search", title: "Company search", provider: "treg", price_usd: metadataPriceUsd, price_unit: "result" }), { status: 200 });
+        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "treg.companies.search", method: "POST", title: "Company search", provider: "treg", price_usd: metadataPriceUsd, price_unit: "result" }), { status: 200 });
         providerCalls += 1;
         requestBody = JSON.parse(String(init.body)) as Record<string, unknown>;
         return new Response(JSON.stringify({ result: { companies: [] } }), { status: 200, headers: { "X-Treg-Call-Id": "call_company_2", "X-Treg-Cost-Micro": "0" } });
@@ -684,7 +708,7 @@ test("Treg company search accepts current variable per-success catalog pricing u
       fetchImpl: async (url, init) => {
         if (url.includes("/catalog/endpoints/")) {
           return new Response(JSON.stringify({ endpoint: {
-            id: "treg.companies.search", provider: "treg", method: "POST", title: "Routed company search",
+            id: "treg.companies.search", method: "POST", provider: "treg", title: "Routed company search",
             cost: { type: "per_success", value: 0, usd: 0, currency: "USD", per: 1, unit: "call", varies: true },
           } }), { status: 200 });
         }
@@ -722,7 +746,7 @@ test("Treg company search rejects country-only input and unknown prices before p
       fetchImpl: async (url) => {
         if (url.includes("/catalog/endpoints/")) {
           metadataCalls += 1;
-          return new Response(JSON.stringify({ id: "treg.companies.search", title: "Company search", provider: "treg", price_usd: metadataPriceUsd }), { status: 200 });
+          return new Response(JSON.stringify({ id: "treg.companies.search", method: "POST", title: "Company search", provider: "treg", price_usd: metadataPriceUsd }), { status: 200 });
         }
         providerCalls += 1;
         return new Response(JSON.stringify({ result: { companies: [] } }), { status: 200 });
@@ -757,9 +781,9 @@ test("TregGateway falls back to the work-email capability search when a person q
       fetchImpl: async (url, init) => {
         if (url.includes("/catalog/search")) {
           searchCalls += 1;
-          return new Response(JSON.stringify({ results: searchCalls === 1 ? [] : [{ id: "treg.people.email.find", title: "Find a work email", provider: "treg", category: "enrichment_person", price_usd: 0.01, input_fields: ["full_name", "domain"] }] }), { status: 200 });
+          return new Response(JSON.stringify({ results: searchCalls === 1 ? [] : [{ id: "treg.people.email.find", method: "POST", title: "Find a work email", provider: "treg", category: "enrichment_person", price_usd: 0.01, input_fields: ["full_name", "domain"] }] }), { status: 200 });
         }
-        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "treg.people.email.find", title: "Find a work email", provider: "treg", category: "enrichment_person", price_usd: 0.01, input_fields: ["full_name", "domain"] }), { status: 200 });
+        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "treg.people.email.find", method: "POST", title: "Find a work email", provider: "treg", category: "enrichment_person", price_usd: 0.01, input_fields: ["full_name", "domain"] }), { status: 200 });
         requestBody = JSON.parse(String(init.body)) as Record<string, unknown>;
         return new Response(JSON.stringify({ result: { email: "person@example.com", full_name: "A Person" } }), { status: 200 });
       },
@@ -786,7 +810,7 @@ test("TregGateway records mission evidence after a successful paid call", async 
         spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
         recordReceipt: async () => {},
         recordMissionEvidence: async ({ missionId, resultHash }) => { evidenceInput = { missionId, resultHash }; return true; },
-        fetchImpl: async () => { calls += 1; return new Response(JSON.stringify(calls === 1 ? { id: "endpoint-1", price_usd: 0.05 } : { id: "call-1", cost_usd: 0.05, result: { verified: true } }), { status: 200 }); },
+        fetchImpl: async () => { calls += 1; return new Response(JSON.stringify(calls === 1 ? { id: "endpoint-1", method: "POST", price_usd: 0.05 } : { id: "call-1", cost_usd: 0.05, result: { verified: true } }), { status: 200 }); },
       });
       const result = await gateway.call({ userId: 1, endpointId: "endpoint-1", missionId: "mis_123", estimateUsd: 0.05 });
       assert.equal(result.receipt.missionEvidenceRecorded, true);
@@ -799,7 +823,7 @@ test("TregGateway fails closed when the endpoint has no price or explicit estima
     const previous = { enabled: config.tregEnabled, token: config.tregToken };
     config.tregEnabled = true;
     config.tregToken = "test-token";
-    const fetchImpl = async () => new Response(JSON.stringify({ id: "endpoint-1", provider: "test" }), { status: 200 });
+    const fetchImpl = async () => new Response(JSON.stringify({ id: "endpoint-1", method: "POST", provider: "test" }), { status: 200 });
     try {
       const gateway = new TregGateway({ spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }), recordReceipt: async () => {}, fetchImpl });
       await assert.rejects(gateway.call({ userId: 1, endpointId: "endpoint-1" }), /price is unavailable/i);
@@ -817,7 +841,7 @@ test("TregGateway does not send a body to a strict-query catalog endpoint", asyn
       recordReceipt: async () => {},
       fetchImpl: async () => {
         requests += 1;
-        return new Response(JSON.stringify({ id: "endpoint-1", price_usd: 0.01, strict_query: true }), { status: 200 });
+        return new Response(JSON.stringify({ id: "endpoint-1", method: "POST", price_usd: 0.01, strict_query: true }), { status: 200 });
       },
     });
     await assert.rejects(gateway.call({ userId: 1, endpointId: "endpoint-1", body: { q: "bad" } }), /strict-query catalog endpoint requires declared query parameters/i);
@@ -860,7 +884,7 @@ test("TregGateway does not settle a successful provider call twice when settleme
     settle: async () => { settleCalls += 1; throw new Error("ledger unavailable"); },
   } as unknown as TregSpendGuard;
   const fetchImpl = async (_url: string, _init: RequestInit) => {
-    if (settleCalls === 0) return new Response(JSON.stringify({ id: "endpoint-1", price_usd: 0.05 }), { status: 200 });
+    if (settleCalls === 0) return new Response(JSON.stringify({ id: "endpoint-1", method: "POST", price_usd: 0.05 }), { status: 200 });
     return new Response(JSON.stringify({ id: "call-1", cost_usd: 0.05, result: { ok: true } }), { status: 200 });
   };
   try {

@@ -25,6 +25,18 @@ export interface SdkRunProgress {
   evidence?: SdkRunEvidence[];
 }
 
+export type SdkProgressActivity = {
+  toolSlug: string;
+  status: "started" | "completed" | "failed" | "approval_required" | "cancelled";
+  message: string;
+  actionLabel?: string;
+  toolkitSlug?: string;
+  toolkitName?: string;
+  summary?: string;
+  callId?: string;
+  durationMs?: number;
+};
+
 const MAX_TITLE_CHARS = 240;
 const MAX_DETAIL_CHARS = 500;
 const MAX_PROVIDER_CHARS = 80;
@@ -98,6 +110,13 @@ function isResearchActivity(toolSlug: string | undefined): boolean {
 }
 
 const GENERIC_ACTIVITY_COPY = /^(?:i['’]?m|i am)?\s*(?:taking care of (?:that|it)|working(?: through your request| on it)?|processing (?:your request|that|it)|handling (?:that|it)|running(?: now)?|one moment)[\s.!…]*$/i;
+const GENERIC_PROGRESS_COPY = /^(?:preparing your request|researching the request|executing the next action|working(?: now| on it| through your request)?|running(?: now)?|chusky is (?:organizing|keeping the work visible|preparing)(?: the right context)?(?: before it acts)?|i['’]?m\s+(?:understanding(?: your request)?|lining up (?:the )?best way(?: to help)?|taking care of (?:that|it)))[\s.!…]*$/i;
+
+function meaningfulProgressText(value: string | undefined): string | undefined {
+  const text = value?.trim();
+  const comparable = text?.replace(/^[^\p{L}\p{N}]+/u, "").trim();
+  return text && comparable && !GENERIC_ACTIVITY_COPY.test(comparable) && !GENERIC_PROGRESS_COPY.test(comparable) ? text : undefined;
+}
 
 function titleCaseToken(value: string): string {
   return value
@@ -147,8 +166,9 @@ function activityEvidence(activity: { callId?: unknown; activityId?: unknown; ac
 }
 
 export function progressFromSdkStatus(text: string, previous?: SdkRunProgress): SdkRunProgress {
-  const status = cleanText(text, MAX_DETAIL_CHARS) ?? "Chusky is keeping the work visible while it continues.";
-  const lower = status.toLowerCase();
+  const rawStatus = cleanText(text, MAX_DETAIL_CHARS) ?? "";
+  const status = meaningfulProgressText(rawStatus);
+  const lower = rawStatus.toLowerCase();
   const phase: SdkRunProgressPhase = lower.includes("approval") || lower.includes("review")
     ? "waiting"
     : lower.includes("finaliz") || lower.includes("pulling everything")
@@ -160,8 +180,8 @@ export function progressFromSdkStatus(text: string, previous?: SdkRunProgress): 
           : previous?.phase ?? "planning";
   return normalizeSdkRunProgress({
     phase,
-    title: phase === "planning" ? "Preparing your request" : phase === "researching" ? "Researching the request" : phase === "waiting" ? "Waiting for your approval" : "Executing the next action",
-    detail: status,
+    title: phase === "waiting" ? "Waiting for your approval" : "Working…",
+    ...(status ? { detail: status } : {}),
     ...(previous?.provider ? { provider: previous.provider } : {}),
     ...(previous?.evidence ? { evidence: previous.evidence } : {}),
   })!;
@@ -194,7 +214,7 @@ export function progressFromSdkToolActivity(activity: {
         ? "This step needs attention; the run will report what was confirmed."
         : activity.status === "cancelled"
           ? "This step was cancelled; completed work remains available."
-          : message && message.toLowerCase() !== title.toLowerCase() ? message : "Running now.";
+          : message && message.toLowerCase() !== title.toLowerCase() && !GENERIC_ACTIVITY_COPY.test(message) && !GENERIC_PROGRESS_COPY.test(message) ? message : undefined;
   return normalizeSdkRunProgress({
     phase,
     title,
@@ -202,6 +222,38 @@ export function progressFromSdkToolActivity(activity: {
     ...(provider ? { provider } : previous?.provider ? { provider: previous.provider } : {}),
     ...(activity.status === "approval_required" ? { requiresApproval: true } : {}),
     ...(activityEvidence(activity) ? { evidence: [...(previous?.evidence ?? []).slice(-7), ...activityEvidence(activity)!] } : previous?.evidence ? { evidence: previous.evidence } : {}),
+  })!;
+}
+
+/**
+ * Publish a bounded, truthful checkpoint after a small group of tool calls.
+ * This is deterministic: it describes lifecycle facts and the active action,
+ * without asking the model to narrate its own internals.
+ */
+export function progressFromSdkToolCheckpoint(
+  completed: SdkProgressActivity[],
+  active?: SdkProgressActivity,
+  previous?: SdkRunProgress,
+): SdkRunProgress {
+  const recent = completed.slice(-4);
+  const done = recent.map((item) => activityTitle(item, "Completed step")).filter(Boolean);
+  const next = active ? activityTitle(active, "the next verified action") : undefined;
+  const provider = active ? providerFor(active) : providerFor(recent.at(-1) ?? {});
+  const title = provider ? `${provider} · Progress update` : "Progress update";
+  const detail = done.length
+    ? `Done: ${done.join("; ")}.${next ? ` Next: ${next}.` : ""}`
+    : next
+      ? `Next: ${next}.`
+      : undefined;
+  const phase: SdkRunProgressPhase = active
+    ? isResearchActivity(active.toolSlug) ? "researching" : "acting"
+    : previous?.phase === "researching" ? "researching" : "acting";
+  return normalizeSdkRunProgress({
+    phase,
+    title,
+    ...(detail ? { detail } : {}),
+    ...(provider ? { provider } : previous?.provider ? { provider: previous.provider } : {}),
+    ...(previous?.evidence ? { evidence: previous.evidence } : {}),
   })!;
 }
 
@@ -237,7 +289,7 @@ export function progressFromSdkSubagentActivity(activity: {
 }
 
 export function initialSdkRunProgress(): SdkRunProgress {
-  return { phase: "planning", title: "Preparing your request", detail: "Chusky is organizing the right context before it acts." };
+  return { phase: "planning", title: "Working…" };
 }
 
 export function terminalSdkRunProgress(status: "completed" | "failed" | "cancelled", options: { artifacts?: Array<{ id: string; name: string }>; error?: string; previous?: SdkRunProgress } = {}): SdkRunProgress {

@@ -130,7 +130,7 @@ test("Treg exposes bounded intelligence tools without exposing a provider catalo
   validateNativeToolArguments("CHUCK_TREG_COMPANY_JOBS_SEARCH", { domain: "example.com", limit: 5, maxSpendUsd: 0.05 });
   assert.match(chuckTools.find((tool) => tool.function.name === "CHUCK_TREG_RESOLVE")?.function.description ?? "", /Muna.*GET, HEAD, or OPTIONS.*at most once/);
   assert.throws(() => validateNativeToolArguments("CHUCK_TREG_SEARCH", { q: "x" }), /at least 2/i);
-  assert.deepEqual(chuckTools.find((tool) => tool.function.name === "CHUCK_TREG_CALL")?.function.parameters.properties.method.enum, ["GET", "POST", "PUT", "PATCH", "DELETE"]);
+  assert.deepEqual(chuckTools.find((tool) => tool.function.name === "CHUCK_TREG_CALL")?.function.parameters.properties.method.enum, ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]);
   validateNativeToolArguments("CHUCK_TREG_USAGE", { dayKey: "2026-09-27", limit: 10 });
   validateNativeToolArguments("CHUCK_TREG_PLATFORMS", { slug: "people-email" });
   validateNativeToolArguments("CHUCK_TREG_MY_TOOLS", {});

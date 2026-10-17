@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeSdkRunProgress, progressFromSdkStatus, progressFromSdkToolActivity, terminalSdkRunProgress } from "../src/sdkRunProgress.js";
+import { normalizeSdkRunProgress, progressFromSdkStatus, progressFromSdkToolActivity, progressFromSdkToolCheckpoint, terminalSdkRunProgress } from "../src/sdkRunProgress.js";
 
 test("SDK run progress is bounded and strips unsafe evidence links", () => {
   const progress = normalizeSdkRunProgress({
@@ -33,6 +33,8 @@ test("SDK run progress is bounded and strips unsafe evidence links", () => {
 test("SDK progress derives human phases from statuses and tool activity", () => {
   const planning = progressFromSdkStatus("🧭 I’m understanding your request…");
   assert.equal(planning.phase, "planning");
+  assert.equal(planning.title, "Working…");
+  assert.equal(planning.detail, undefined);
 
   const research = progressFromSdkToolActivity({
     toolSlug: "CHUCK_SEARCH_SKILLS",
@@ -75,8 +77,27 @@ test("SDK progress replaces generic model filler with a provider-qualified tool 
   });
 
   assert.equal(progress.title, "Google Maps · Search Businesses");
-  assert.equal(progress.detail, "Running now.");
+  assert.equal(progress.detail, undefined);
   assert.equal(progress.provider, "google_maps");
+});
+
+test("SDK progress publishes a bounded done-and-next checkpoint after four tool calls", () => {
+  const checkpoint = progressFromSdkToolCheckpoint([
+    { toolSlug: "CHUCK_TREG_BALANCE", status: "completed", message: "Done", toolkitName: "Treg", summary: "Balance checked" },
+    { toolSlug: "CHUCK_TREG_SEARCH", status: "completed", message: "Done", toolkitName: "Treg", summary: "Capabilities found" },
+    { toolSlug: "CHUCK_TREG_COMPANY_SEARCH", status: "completed", message: "Done", toolkitName: "Treg", summary: "Companies found" },
+    { toolSlug: "CHUCK_TREG_PEOPLE_SEARCH", status: "completed", message: "Done", toolkitName: "Treg", summary: "People found" },
+  ], {
+    toolSlug: "CHUCK_TREG_ENRICH_PERSON",
+    status: "started",
+    message: "Running now",
+    toolkitName: "Treg",
+  });
+
+  assert.equal(checkpoint.title, "Treg · Progress update");
+  assert.match(checkpoint.detail ?? "", /Done:/);
+  assert.match(checkpoint.detail ?? "", /Next: Treg · Enrich Person\./);
+  assert.equal(checkpoint.phase, "acting");
 });
 
 test("completed SDK progress exposes generated artifacts as safe evidence", () => {

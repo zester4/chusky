@@ -15,6 +15,11 @@ test("Treg engine selects a focused reusable playbook without choosing providers
     ["Find recent job postings and hiring signals for these companies", "hiring_signals"],
     ["Compare technology adoption and the companies' tech stacks", "technology_research"],
     ["Build a market map of competitors and peer companies", "market_map"],
+    ["Bulk enrich these 200 qualified companies asynchronously", "bulk_enrichment"],
+    ["Research SEO keywords, backlinks, and AI search visibility", "seo_research"],
+    ["Find recent public social mentions and creator engagement", "social_intelligence"],
+    ["Research competitor ads and ad library creatives", "ads_intelligence"],
+    ["Pause the campaign and reduce the ad budget", "ads_operations"],
     ["Find a structured dataset for a specific external-data question", "general_research"],
   ] as const;
 
@@ -47,7 +52,8 @@ test("Treg plans preserve the requested aggregate cap and describe runtime prece
 test("Treg plan exposes every reusable playbook in the native schema", () => {
   for (const playbook of [
     "auto", "account_research", "people_search", "lead_enrichment", "lead_generation", "buying_signals",
-    "hiring_signals", "technology_research", "market_map", "general_research",
+    "hiring_signals", "technology_research", "market_map", "bulk_enrichment", "seo_research",
+    "social_intelligence", "ads_intelligence", "ads_operations", "general_research",
   ]) {
     assert.doesNotThrow(() => validateNativeToolArguments("CHUCK_TREG_PLAN", { task: "Research target companies", playbook }));
   }
@@ -74,4 +80,10 @@ test("signal playbook treats buying clues as evidence, not confirmed intent", ()
   const guardrails = (plan.guardrails as string[]).join(" ");
   assert.match(validation, /not proof of purchase intent/);
   assert.match(guardrails, /Do not contact a prospect/);
+});
+
+test("Treg ad operations explicitly require exact owner approval and read-back", () => {
+  const plan = buildTregPlan({ task: "Pause the campaign and lower the ad spend", playbook: "ads_operations" });
+  assert.match((plan.guardrails as string[]).join(" "), /exact owner approval/i);
+  assert.match((plan.workflow as string[]).join(" "), /read the campaign back/i);
 });
