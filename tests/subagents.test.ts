@@ -864,14 +864,10 @@ test("executes peer handoff between domain workers via CHUCK_HANDOFF_SUBAGENT", 
   assert.equal(peerHandoff.delegationDepth, 1);
   assert.equal(peerHandoff.status, "max_tool_calls_exceeded");
   assert.equal(peerHandoff.delegation?.allowedTools.includes("CHUCK_HANDOFF_SUBAGENT"), false);
-  assert.deepEqual(peerHandoff.delegation?.allowedTools.slice().sort(), [
-    "CHUCK_LIST_SKILL_FILES",
-    "CHUCK_READ_SKILL_FILE",
-    "CHUCK_REQUEST_ADDITIONAL_TOOLS",
-    "CHUCK_SCRATCHPAD_READ",
-    "CHUCK_SCRATCHPAD_WRITE",
-    "CHUCK_SEARCH_SKILLS",
-  ]);
+  const expectedPeerTools = WORKER_CAPABILITIES.lucas.allowedTools
+    .filter((tool) => WORKER_CAPABILITIES.leo.allowedTools.includes(tool) && tool !== "CHUCK_HANDOFF_SUBAGENT")
+    .sort();
+  assert.deepEqual(peerHandoff.delegation?.allowedTools.slice().sort(), expectedPeerTools);
   const rootHandoff = handoffs.find((handoff) => handoff.id === peerHandoff.rootHandoffId);
   assert.ok(rootHandoff);
   assert.equal(rootHandoff.delegation?.sharedToolCallsUsed, 1);

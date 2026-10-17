@@ -787,6 +787,9 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // The workflow/task layers provide the outer retry boundary; a single model
   // turn should never be allowed to spin indefinitely.
   openRouterMaxAttempts: boundedInt("OPENROUTER_MAX_ATTEMPTS", 2, 1, 5),
+  // Trigger model requests have a tighter end-to-end budget because a slow
+  // model callback is retried by the durable workflow boundary.
+  triggerModelRequestBudgetMs: boundedInt("TRIGGER_MODEL_REQUEST_BUDGET_MS", 30_000, 5_000, 120_000),
   // Dedicated low-cost model used to turn evicted private conversation history
   // into durable continuity. The deterministic store summary remains the
   // fallback when this provider is disabled or unavailable.

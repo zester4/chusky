@@ -1169,7 +1169,13 @@ test("turn-wide Jev none keeps irrelevant connected-app schemas out of a convers
   setJevClientForTests(new JevClient({ apiKey: "test-jev-key", fetchImpl: (async (_url, init) => {
     const body = JSON.parse(String(init?.body ?? "{}"));
     jevRequests.push(body);
-    return new Response(JSON.stringify({ model: body.model, answers: { action_required: { type: "noul", noul: 0.02 } } }), { status: 200 });
+    const answers: Record<string, unknown> = {};
+    for (const [key, question] of Object.entries<any>(body.questions ?? {})) {
+      answers[key] = question.type === "choice"
+        ? { type: "choice", choice: "__none__", confidence: 0.98, probabilities: Object.fromEntries(Object.keys(question.criteria).map((id) => [id, id === "__none__" ? 0.98 : 0.02 / Math.max(1, Object.keys(question.criteria).length - 1)])) }
+        : { type: "noul", noul: 0.02 };
+    }
+    return new Response(JSON.stringify({ model: body.model, answers }), { status: 200 });
   }) as typeof fetch }));
   globalThis.fetch = (async (input, init) => {
     if (String(input).includes("/chat/completions")) {
@@ -1184,7 +1190,7 @@ test("turn-wide Jev none keeps irrelevant connected-app schemas out of a convers
     assert.equal(result.text, "The proposal sounds reasonable.");
     assert.deepEqual(result.toolsUsed, []);
     assert.equal(jevRequests.length, 1, "the turn-wide none check should be the only Jev request");
-    assert.deepEqual(Object.keys(jevRequests[0].questions), ["action_required"]);
+    assert.ok(Object.keys(jevRequests[0].questions).includes("action_required"), "the batched Jev request must include the turn-wide action check");
     assert.equal(connectedAccountLookups, 0, "no-app turns must skip connected-account lookup");
     const visibleTools = modelRequests[0]?.tools?.map((tool: any) => tool.function.name).sort() ?? [];
     assert.deepEqual(visibleTools, ["CHUCK_FIND_TOOLS", "COMPOSIO_SEARCH_TOOLS"], "generic native and connected-app discovery remain available as recovery paths");
@@ -2781,6 +2787,34 @@ test("agent retries transient OpenRouter responses with a bounded retry", async 
     assert.equal(result.text, "retried");
     assert.equal(chatAttempts, 2);
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test("trigger model request budget prevents sequential model timeouts from stretching a turn", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalTimeout = config.openRouterTimeoutMs;
+  const originalAttempts = config.openRouterMaxAttempts;
+  let chatAttempts = 0;
+  config.openRouterTimeoutMs = 1_000;
+  config.openRouterMaxAttempts = 2;
+  globalThis.fetch = (async (_input, init) => {
+    chatAttempts++;
+    const signal = init?.signal as AbortSignal;
+    return await new Promise<Response>((_resolve, reject) => {
+      if (signal.aborted) reject(signal.reason);
+      else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      () => orChat("test/model", [{ role: "user", content: "hello" }], [], undefined, undefined, undefined, { maxTotalElapsedMs: 20 }),
+      (error: unknown) => error instanceof OpenRouterTimeoutError && error.modelId === "test/model" && error.attempts === 1,
+    );
+    assert.equal(chatAttempts, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    config.openRouterTimeoutMs = originalTimeout;
+    config.openRouterMaxAttempts = originalAttempts;
+  }
 });
 
 test("OpenRouter reports a typed timeout after its bounded model attempts", async () => {

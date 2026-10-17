@@ -602,6 +602,8 @@ export interface OrChatOptions {
   sessionId?: string;
   /** Ask OpenRouter to route across the selected model set by recent latency. */
   latencyOptimized?: boolean;
+  /** Total elapsed-time budget shared across all HTTP attempts for this turn. */
+  maxTotalElapsedMs?: number;
   /** Safe trigger correlation for timing logs; contains no prompt or user content. */
   triggerEventId?: string;
   /** Agent loop round for trigger timing logs. */
@@ -666,16 +668,26 @@ export async function orChat(
 
   let lastError: unknown;
   let timedOut = false;
+  let budgetExhausted = false;
   let attemptsMade = 0;
   const requestStartedAt = Date.now();
+  const maxTotalElapsedMs = routing.maxTotalElapsedMs
+    ? Math.max(1, Math.min(routing.maxTotalElapsedMs, 120_000))
+    : undefined;
+  const deadlineAt = maxTotalElapsedMs ? requestStartedAt + maxTotalElapsedMs : undefined;
   const trace = routing.triggerEventId
     ? { triggerEventId: routing.triggerEventId, round: routing.triggerRound }
     : undefined;
   let streamedOutputExposed = false;
   for (let attempt = 0; attempt < config.openRouterMaxAttempts; attempt++) {
     if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
+    const remainingMs = deadlineAt ? deadlineAt - Date.now() : Number.POSITIVE_INFINITY;
+    if (remainingMs <= 0) {
+      budgetExhausted = true;
+      break;
+    }
     try {
-      const attemptTimeoutMs = openRouterAttemptTimeoutMs(attempt);
+      const attemptTimeoutMs = Math.max(1, Math.min(openRouterAttemptTimeoutMs(attempt), remainingMs));
       attemptsMade += 1;
       if (trace) logger.info({ ...trace, model: model.slice(0, 160), attempt: attemptsMade, timeoutMs: attemptTimeoutMs }, "Trigger model request attempt started");
       const attemptSignal = requestSignal(signal, attemptTimeoutMs);
@@ -713,19 +725,26 @@ export async function orChat(
     }
     if (attempt + 1 < config.openRouterMaxAttempts) {
       const retryDelayMs = 400 * 2 ** attempt + Math.random() * 250;
+      const retryRemainingMs = deadlineAt ? deadlineAt - Date.now() : Number.POSITIVE_INFINITY;
+      if (retryRemainingMs <= retryDelayMs) {
+        budgetExhausted = true;
+        break;
+      }
       logger.debug({ model, attempt: attempt + 1, timeoutMs: openRouterAttemptTimeoutMs(attempt + 1) }, "Retrying OpenRouter request after a transient failure");
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
   }
   const elapsedMs = Date.now() - requestStartedAt;
-  if (timedOut && lastError instanceof Error && lastError.name === "TimeoutError") {
+  const exhaustedBudget = budgetExhausted || Boolean(deadlineAt && elapsedMs >= maxTotalElapsedMs!);
+  if ((timedOut && lastError instanceof Error && lastError.name === "TimeoutError") || exhaustedBudget) {
     logger.warn({
       model: model.slice(0, 160),
       attempts: attemptsMade,
       elapsedMs,
+      maxTotalElapsedMs,
       ...(trace ?? {}),
       failureClass: "OpenRouterTimeoutError",
-    }, "OpenRouter model request exhausted its bounded attempt timeouts");
+    }, "OpenRouter model request exhausted its bounded time budget");
     throw new OpenRouterTimeoutError(model, attemptsMade, elapsedMs);
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -2956,21 +2975,15 @@ async function executeAgent(
   let nativeToolRoutePromise: Promise<Awaited<ReturnType<typeof routeNativeToolsForTurn>>>;
 
   // The normal private text path uses one explicit Jev request for all
-  // independent routing judgments. Exact Composio action selection can still
-  // follow after its toolkit catalogue is known; that dependent phase reuses
-  // the stage-1 result and never repeats the turn plan.
+  // independent routing judgments. Connected-account metadata is demand-loaded
+  // only after the action gate says a capability is needed, so ordinary
+  // conversation does not read the account store just to decide it is ordinary.
   if (batchRoutingEligible) {
     try {
-      const [batchAccounts, skills] = await Promise.all([
-        listConnectedAccounts(userId).catch((error) => {
-          logger.debug({ err: error, userId }, "Connected-account metadata unavailable for batched routing");
-          return [] as ConnectedComposioAccount[];
-        }),
-        listSkillSummaries().catch((error) => {
+      const skills = await listSkillSummaries().catch((error) => {
           logger.debug({ err: error }, "Skill catalogue unavailable for batched routing");
           return [] as Array<{ name: string; description: string }>;
-        }),
-      ]);
+        });
       const nativeNames = new Set(availableTools.map((tool) => toolName(tool)));
       const plan = await computeTurnRoutingPlan({
         query: routingQuery,
@@ -2978,11 +2991,11 @@ async function executeAgent(
         skills,
         nativeCandidates: nativeToolManifest.filter((tool) => nativeNames.has(tool.slug)),
         availableNativeTools: availableTools,
-        connectedAccounts: batchAccounts,
+        connectedAccounts: [],
         forceCapability: forceCapabilityRouting,
         includeSkills: !options?.ephemeral || ownerPrivateRun,
         includeNative: true,
-        includeComposio: true,
+        includeComposio: false,
         includeTreg: true,
         includeMonid: true,
         preserveNativeTools: Boolean(options?.toolAllow?.length && !options?.taskId && !options?.missionId),
@@ -2991,25 +3004,31 @@ async function executeAgent(
       });
       turnActionDecision = plan.action;
       actionRoutingLikely = !plan.action.noActionNeeded;
-      accountsPromise = Promise.resolve(batchAccounts);
+      accountsPromise = actionRoutingLikely && !sharedScope
+        ? listConnectedAccounts(userId).catch((error) => {
+          logger.debug({ err: error, userId }, "Connected-account metadata unavailable after batched action gate");
+          return undefined;
+        })
+        : Promise.resolve(undefined);
       skillRoutePromise = Promise.resolve(actionRoutingLikely ? plan.skillRoute : undefined);
       tregRoutePromise = Promise.resolve(actionRoutingLikely ? plan.tregRoute : undefined);
-      const stage1 = actionRoutingLikely ? plan.composioStage1 : undefined;
-      composioRoutePromise = stage1 || !jevEnabled("composio")
+      composioRoutePromise = accountsPromise.then((accounts) => actionRoutingLikely && accounts && jevEnabled("composio")
         ? routeComposioForTurn(routingQuery, {
-          accounts: batchAccounts,
+          accounts,
           listActions: listComposioToolkitActions,
           listToolkits: listComposioToolkitCatalogue,
           signal,
           deadline: routingDeadline,
           recentContext: routingRecentContext,
           sessionId: durableRunId,
-          ...(stage1 ? { stage1 } : {}),
         }).catch((error) => {
           logger.debug({ err: error, userId }, "Batched Composio action routing unavailable for this run");
-          return stage1;
+          return undefined;
         })
-        : Promise.resolve(undefined);
+        : undefined).catch((error) => {
+          logger.debug({ err: error, userId }, "Batched Composio account lookup unavailable for this run");
+          return undefined;
+        });
       const nativeRoutingQuery = options?.missionToolHints?.length
         ? `${routingQuery}\nPlanner preload hints: ${options.missionToolHints.join(", ")}`
         : routingQuery;
@@ -3503,6 +3522,7 @@ async function executeAgent(
         } : channelContext?.triggerEventId ? {
           fallbackModels: config.openRouterFallbackModels,
           latencyOptimized: true,
+          maxTotalElapsedMs: config.triggerModelRequestBudgetMs,
           triggerEventId: channelContext.triggerEventId,
           triggerRound: round,
         } : (structuredArtifactRequest || malformedToolCallPending ? { maxTokens: config.openRouterArtifactMaxTokens } : undefined);
@@ -3527,6 +3547,7 @@ async function executeAgent(
         } : channelContext?.triggerEventId ? {
           fallbackModels: config.openRouterFallbackModels,
           latencyOptimized: true,
+          maxTotalElapsedMs: config.triggerModelRequestBudgetMs,
           triggerEventId: channelContext.triggerEventId,
           triggerRound: round,
         } : (structuredArtifactRequest || malformedToolCallPending ? { maxTokens: config.openRouterArtifactMaxTokens } : undefined);

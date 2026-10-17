@@ -145,7 +145,24 @@ export async function executeDelegation(
   // A durable continuation reuses the already-validated handoff contract.
   // Its persisted manifest-wide tool list is not a new routing hint; treating
   // it as one can falsely classify a resumed worker as a mixed objective.
-  validateDelegationTarget(workerName, contractInput.objective, options?.resume ? [] : contractInput.allowedTools ?? []);
+  // An explicit peer handoff is a capability-preserving control action. Its
+  // parent objective describes the handoff itself and can legitimately name
+  // both the source and target domains; validating that prose as the parent's
+  // work would reject the handoff before the child objective is checked. The
+  // target worker is validated again when the child delegation is created.
+  const explicitToolName = contractInput.context?.toolCall && typeof contractInput.context.toolCall === "object"
+    ? String((contractInput.context.toolCall as Record<string, unknown>).name ?? "")
+    : "";
+  if (explicitToolName !== "CHUCK_HANDOFF_SUBAGENT") {
+    // When a specific action is already selected, use that action—not the
+    // target manifest's full capability bundle—as the semantic hint. The
+    // latter can contain artifact or Daytona tools shared by several roles
+    // and falsely turns a single-worker action into a mixed objective.
+    const routingTools = explicitToolName
+      ? [explicitToolName]
+      : (options?.resume ? [] : contractInput.allowedTools ?? []);
+    validateDelegationTarget(workerName, contractInput.objective, routingTools);
+  }
 
   const duration = (contractInput.duration && contractInput.duration in WORKER_DURATION_SECONDS ? contractInput.duration : "30m") as WorkerDuration;
   const budgetSeconds = Math.max(WORKER_DURATION_SECONDS["5m"], Math.min(WORKER_DURATION_SECONDS["1w"], contractInput.budgetSeconds ?? WORKER_DURATION_SECONDS[duration]));

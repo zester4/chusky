@@ -1607,6 +1607,7 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `MAX_BROWSER_TOOL_CALLS` | — | `24` | Max browser tool calls per run before Chusky stops the browser loop and reports the verified state |
 | `OPENROUTER_TIMEOUT_MS` | — | `45000` | First-attempt OpenRouter timeout in milliseconds; transient retries expand up to 120s |
 | `OPENROUTER_MAX_ATTEMPTS` | — | `2` | Maximum OpenRouter attempts for a model turn (hard-bounded to 1-5) |
+| `TRIGGER_MODEL_REQUEST_BUDGET_MS` | — | `30000` | Total elapsed-time budget across OpenRouter attempts for each trigger model turn (bounded to 5-120 seconds) |
 | `OPENROUTER_ARTIFACT_MAX_TOKENS` | — | `12000` | Output budget for structured PDF/document/artifact tool calls |
 | `RATE_LIMIT` | — | `10` | Messages per window |
 | `RATE_WINDOW_SECONDS` | — | `60` | Rate window |
