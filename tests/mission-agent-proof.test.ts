@@ -103,6 +103,32 @@ test("real agent dispatch advances a three-step mission through durable handoffs
   assert.equal(queue.published.length, 3);
 });
 
+test("real agent dispatch preserves the owning mission step for a durable timer", async () => {
+  const userId = 981004;
+  const queue = new MissionFakeQStash();
+  const created = await createMission(userId, {
+    title: "Agent timer ownership",
+    objective: "Persist one checkpoint and wait for the same mission step",
+    definitionOfDone: "The timer request is accepted for the active step",
+    steps: [{ id: "wait", title: "Wait", objective: "Persist the checkpoint and wait" }],
+  });
+  await startMission(userId, created.id);
+  await reconcileMissionExecution(userId, created.id, queue.enqueue);
+  const task = (await listTasks(userId)).find((candidate) => candidate.missionId === created.id && candidate.status === "queued");
+  assert.ok(task);
+
+  const result = await scriptedAgent(task, queue, () => completion(null, {
+    id: "wait-1",
+    name: "CHUCK_TASK_WAIT",
+    args: { delaySeconds: 60, checkpoint: "stage-1-complete", nextAction: "Verify stage 1 after wake" },
+  }));
+
+  assert.equal(result.taskWait?.checkpoint, "stage-1-complete");
+  assert.equal(result.taskWait?.nextAction, "Verify stage 1 after wake");
+  assert.ok(typeof result.taskWait?.runAt === "number" && result.taskWait.runAt > Date.now());
+  assert.deepEqual(result.toolOutcomes, [{ callId: "wait-1", toolSlug: "CHUCK_TASK_WAIT", status: "succeeded", dispatched: true }]);
+});
+
 test("a prose-only real agent is not promoted to mission completion", async () => {
   const userId = 981002;
   const queue = new MissionFakeQStash();
