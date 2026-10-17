@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { durableSdkRunHash, DURABLE_SESSION_DOMAINS, NeonDurableState, type DurableMissionRecord } from "../src/neonDurableState.js";
-import { DURABLE_SESSION_FORMAT, DurableSessionDocumentsIncompleteError, joinSessionDomains, mergeDurableSessionDomain, splitSessionDomains } from "../src/sessionDomains.js";
+import { DURABLE_SESSION_FORMAT, DurableSessionDocumentsIncompleteError, joinSessionDomains, mergeDurableSessionDomain, splitSessionDomains, splitSessionDomainsForSave } from "../src/sessionDomains.js";
 import type { UserSession } from "../src/store.js";
 
 class FakeClient {
@@ -185,6 +185,13 @@ test("durable session snapshots never leak into the Redis core payload", () => {
   const value = { ...session(), durableDomainSnapshots: { profile: { totalMessages: 1 } } } as UserSession & { durableDomainSnapshots: Record<string, unknown> };
   const { core } = splitSessionDomains(value);
   assert.equal("durableDomainSnapshots" in core, false);
+});
+
+test("durable saves never synthesize an unloaded SDK domain", () => {
+  const partial = { ...session(), durableDomainSnapshots: { profile: { totalMessages: 1 } } } as UserSession & { durableDomainSnapshots: Record<string, unknown> };
+  assert.equal(splitSessionDomainsForSave(partial, true, false).domains.has("sdk"), false);
+  const loaded = { ...partial, durableDomainSnapshots: { ...partial.durableDomainSnapshots, sdk: { sdkThreads: [] } } };
+  assert.equal(splitSessionDomainsForSave(loaded, true, false).domains.has("sdk"), true);
 });
 
 test("Neon durable session-domain failures roll back and release the connection", async () => {

@@ -1,5 +1,9 @@
 # Polite power language
 
+Use approved facts and current deal context. Examples are language patterns,
+not permission to claim a customer result, market benchmark, discount, deadline,
+or legal position that has not been verified.
+
 Tone: **peer, not petitioner; partner, not predator.**
 
 ## Core moves
@@ -41,3 +45,6 @@ a spontaneous discount is how margin dies.
 - Summarize *their* constraints accurately before your counter
 - No ALL CAPS pressure, no guilt
 - End with a concrete path: call, revised proposal, or decision date
+
+Keep the distinction between a draft, an approved offer, and a sent message;
+the language pattern never authorizes the external action.

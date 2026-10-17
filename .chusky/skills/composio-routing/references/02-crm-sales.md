@@ -1,5 +1,10 @@
 # CRM & sales
 
+Use the Jev-provided CRM route when present. Bind the action to the intended
+connected account, resolve the exact schema, search before create/update, and
+read back the record or stage after a write. Never treat a toolkit name or
+worker suggestion as proof of connection or authorization.
+
 | Prefer | Typical use |
 |--------|-------------|
 | `HUBSPOT_` | CRM, deals, contacts, sequences |

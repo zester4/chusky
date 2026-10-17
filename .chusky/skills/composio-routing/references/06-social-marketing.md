@@ -1,5 +1,10 @@
 # Social & marketing
 
+Use Jev's route and the exact connected publishing account. Separate asset
+preparation, scheduling, and publication; public posting remains approval- and
+policy-gated. Verify the returned post or schedule ID and live visibility after
+publication instead of claiming success from the action response alone.
+
 | Prefer | Typical use |
 |--------|-------------|
 | `X_` / `TWITTER_` | Posts, engagement |

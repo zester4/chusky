@@ -65,9 +65,10 @@ test("verified triggers receive executor framing while ordinary conversations do
   assert.equal(triggerAutonomyInstructions(undefined), undefined);
   const instructions = triggerAutonomyInstructions("evt_trigger_1");
   assert.match(instructions ?? "", /TRIGGER HANDLING/);
-  assert.match(instructions ?? "", /An enabled trigger assigns you the matching event/i);
-  assert.match(instructions ?? "", /answer a clear ordinary email question.*send the reply/i);
+  assert.match(instructions ?? "", /Inspect the source event and relevant record/i);
+  assert.match(instructions ?? "", /answer an ordinary email in its original thread/i);
   assert.match(instructions ?? "", /existing approval boundary/i);
+  assert.match(instructions ?? "", /Identify the source and relevant person or place when available/i);
   assert.match(instructions ?? "", /provider receipt or read the changed record/i);
   assert.doesNotMatch(instructions ?? "", /return exactly NO_ACTION/i);
 });
@@ -256,6 +257,7 @@ test("mission provider allowlists receive the routed direct action schema", asyn
     const result = await runAgent(userId, "Read the owner's Gmail inbox", [], "test/model", undefined, undefined, undefined, undefined, undefined, {
       ephemeral: true,
       toolAllow: ["GMAIL_FETCH_EMAILS"],
+      meetingId: "mtg_mission_direct_schema",
       taskId: "task_mission_direct_schema",
       missionId: "mis_mission_direct_schema",
       missionStepId: "step-gmail",
@@ -1167,7 +1169,13 @@ test("turn-wide Jev none keeps irrelevant connected-app schemas out of a convers
   setJevClientForTests(new JevClient({ apiKey: "test-jev-key", fetchImpl: (async (_url, init) => {
     const body = JSON.parse(String(init?.body ?? "{}"));
     jevRequests.push(body);
-    return new Response(JSON.stringify({ model: body.model, answers: { action_required: { type: "noul", noul: 0.02 } } }), { status: 200 });
+    const answers: Record<string, unknown> = {};
+    for (const [key, question] of Object.entries<any>(body.questions ?? {})) {
+      answers[key] = question.type === "choice"
+        ? { type: "choice", choice: "__none__", confidence: 0.98, probabilities: Object.fromEntries(Object.keys(question.criteria).map((id) => [id, id === "__none__" ? 0.98 : 0.02 / Math.max(1, Object.keys(question.criteria).length - 1)])) }
+        : { type: "noul", noul: 0.02 };
+    }
+    return new Response(JSON.stringify({ model: body.model, answers }), { status: 200 });
   }) as typeof fetch }));
   globalThis.fetch = (async (input, init) => {
     if (String(input).includes("/chat/completions")) {
@@ -1182,7 +1190,7 @@ test("turn-wide Jev none keeps irrelevant connected-app schemas out of a convers
     assert.equal(result.text, "The proposal sounds reasonable.");
     assert.deepEqual(result.toolsUsed, []);
     assert.equal(jevRequests.length, 1, "the turn-wide none check should be the only Jev request");
-    assert.deepEqual(Object.keys(jevRequests[0].questions), ["action_required"]);
+    assert.ok(Object.keys(jevRequests[0].questions).includes("action_required"), "the batched Jev request must include the turn-wide action check");
     assert.equal(connectedAccountLookups, 0, "no-app turns must skip connected-account lookup");
     const visibleTools = modelRequests[0]?.tools?.map((tool: any) => tool.function.name).sort() ?? [];
     assert.deepEqual(visibleTools, ["CHUCK_FIND_TOOLS", "COMPOSIO_SEARCH_TOOLS"], "generic native and connected-app discovery remain available as recovery paths");

@@ -1,5 +1,9 @@
 # Close and confirm
 
+Close only the decision that is actually supported by the conversation and
+source system. Keep proposed, verbally agreed, approved, signed, and provider-
+confirmed states separate.
+
 ## Closing styles (pick fit)
 
 | Style | When |
@@ -34,3 +38,7 @@ A clean no beats a toxic yes. If below reservation:
 - Scope deliverable without heroics
 - Relationship intact for renewal/expansion
 - Written alignment, not fog
+
+For an external write, verify the returned document/order/CRM ID or provider
+read-back before reporting completion. If paperwork, legal review, payment, or
+authority remains open, report the exact open loop.

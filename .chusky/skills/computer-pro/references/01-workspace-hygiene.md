@@ -2,6 +2,10 @@
 
 The private computer must stay clean, navigable, and recoverable.
 
+Use the Jev-selected workspace and process scope. This reference does not grant
+filesystem, network, repository, or deployment authority; record the exact
+path/process and the evidence that makes each checkpoint trustworthy.
+
 ## Mindset
 
 - A messy workspace creates errors and wasted time.
@@ -33,6 +37,7 @@ The private computer must stay clean, navigable, and recoverable.
 - Would a fresh session understand what this directory is for?
 - Is there a short note of status if the work is incomplete?
 - Are running servers, PTYs, previews, and leases intentionally retained or safely released?
+- Is the next action explicit enough for another worker or resumed turn to continue safely?
 
 ## Anti-Patterns
 

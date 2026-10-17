@@ -1,5 +1,10 @@
 # Lifecycle: Lead → Customer → Relationship
 
+Use one routed objective and keep each lifecycle transition evidence-backed.
+Research, communication, meeting, commercial, and customer-success actions have
+different owners and approval boundaries; do not collapse them into one tool
+call or claim a stage change without a source-of-truth read-back.
+
 Run the full commercial loop, not a one-shot enrich.
 
 ## Stages

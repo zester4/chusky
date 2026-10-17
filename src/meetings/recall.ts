@@ -50,6 +50,10 @@ export interface RecallCreateBotRequest {
       send_to: "everyone";
       message: string;
     };
+    on_participant_join: {
+      exclude_host: boolean;
+      message: string;
+    };
   };
 }
 
@@ -210,6 +214,7 @@ export function buildRecallCreateBotRequest(input: {
   const continuityDisclosure = interactionMode === "addressed"
     ? ""
     : " I keep a short private summary for continuity in the owner’s Meetings history; it is not a searchable transcript.";
+  const disclosureMessage = `Hi everyone, I’m here to help. Meeting audio is processed live so I can participate; no audio or video recording is retained.${continuityDisclosure}${transcriptDisclosure}${screenShareContextEnabled ? " Shared-screen frames may be analyzed to answer questions; they are not saved to meeting history." : ""} ${participantDisclosure}`;
   const request: RecallCreateBotRequest = {
     meeting_url: meeting.url,
     bot_name: botName,
@@ -241,7 +246,14 @@ export function buildRecallCreateBotRequest(input: {
       chat: {
         on_bot_join: {
           send_to: "everyone",
-          message: `Hi everyone, I’m here to help. Meeting audio is processed live so I can participate; no audio or video recording is retained.${continuityDisclosure}${transcriptDisclosure}${screenShareContextEnabled ? " Shared-screen frames may be analyzed to answer questions; they are not saved to meeting history." : ""} ${participantDisclosure}`,
+          message: disclosureMessage,
+        },
+        // Recall sends this to participants who join after the bot, so the
+        // disclosure is not lost when the meeting roster changes. The host
+        // already received on_bot_join and should not get a duplicate.
+        on_participant_join: {
+          exclude_host: true,
+          message: disclosureMessage,
         },
       },
     } : {}),

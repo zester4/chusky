@@ -1,5 +1,9 @@
 # Launch day
 
+The war room coordinates verified state; it does not widen authority. Use the
+current decision owner, deployment/channel receipts, and source-of-truth health
+signals rather than relying on a worker's narration.
+
 ## War-room rules
 
 - Single decision owner
@@ -16,3 +20,7 @@
 5. Monitor metrics and support
 
 If no-go: communicate hold clearly; do not half-launch.
+
+If a publish or enablement result is ambiguous, stop the sequence and reconcile
+the live state before retrying. Never create duplicate announcements or rollouts
+because a provider call timed out.

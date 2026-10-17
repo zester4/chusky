@@ -1,5 +1,10 @@
 # Billing & finance
 
+Use Jev's exact billing route and inspect live source objects before drafting
+or changing anything. Payment, refund, invoice, subscription, and account
+changes remain approval-gated by policy; confirm the provider receipt and final
+state rather than trusting a tool success response.
+
 | Prefer | Typical use |
 |--------|-------------|
 | `STRIPE_` | Subscriptions, invoices, customers, payment links |

@@ -2,6 +2,10 @@
 
 Disciplined Computer Use for GUI applications and local files on the private computer. Website automation belongs to browser-pro and the owner-scoped E2B browser.
 
+Use the routed computer capability only for private desktop/local work. A
+desktop browser does not turn website work into a computer task; route websites,
+credentials, cookies, forms, CAPTCHA, and 2FA to browser-pro/E2B.
+
 ## Mindset
 
 - The desktop is a tool of last resort when APIs, direct file tools, or app tooling are unavailable.
@@ -35,6 +39,7 @@ Disciplined Computer Use for GUI applications and local files on the private com
 - If the page state is unclear, re-observe before more actions.
 - If a desktop app reaches a human-only gate, pause with the app ready for the owner. If a website reaches CAPTCHA, bot detection, or 2FA, stop computer actions and switch to the private E2B browser handoff.
 - If the flow is fragile and high-stakes, prefer a careful documented approach over aggressive automation.
+- If a mutation has an uncertain result, inspect the current app state before retrying; never duplicate a submission because a GUI call timed out.
 
 ## Mind-Blowing Standard
 

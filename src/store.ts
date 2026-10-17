@@ -11,7 +11,7 @@ import { withDistributedLease } from "./distributedLease.js";
 import { createNeonDurableState, durableSdkRunHash, DURABLE_SESSION_DOMAINS, type DurableConversationMessage, type DurableMissionEvent, type DurableMissionRecord, type DurableObjectMetadata, type DurableSessionDocument, type DurableSessionDomain, type DurableStateStatus, type DurableSdkTableChanges, type DurableSdkTableState, type NeonDurableState } from "./neonDurableState.js";
 import { archiveRecallTranscriptSegment, deleteRecallTranscriptArchive, getArchivedRecallTranscriptSegment, listArchivedRecallTranscriptSegments, recallTranscriptMeetingHash, updateRecallTranscriptArchiveExpiry as updateArchivedRecallExpiry, type RecallTranscriptArchiveDependencies } from "./recallTranscriptArchive.js";
 import { backfillMissionSnapshotToNeon } from "./missionBackfill.js";
-import { HOT_CONVERSATION_MESSAGES, joinSessionDomains, mergeDurableSessionDomain, sessionUsesNeonDomains, splitSessionDomains } from "./sessionDomains.js";
+import { HOT_CONVERSATION_MESSAGES, joinSessionDomains, mergeDurableSessionDomain, sessionUsesNeonDomains, splitSessionDomains, splitSessionDomainsForSave } from "./sessionDomains.js";
 import { repairIncompleteDurableSession } from "./durableSessionBackfill.js";
 import { normalizeVoiceCallProfile, type VoiceCallProfile } from "./calls/voiceProfile.js";
 import { createVoiceCallEvent, normalizeVoiceCallEvents, type VoiceCallEvent, type VoiceCallEventInput } from "./calls/voiceEvents.js";
@@ -2492,8 +2492,10 @@ class RedisBackend implements Backend {
           if (Array.isArray(conversation?.history) && conversation.history.length) metadata.durableDomainHashes = { ...metadata.durableDomainHashes, conversation: "legacy-history-needs-compaction" };
         }
         if (this.durableState && userId !== 0 && !(session as UserSession & DurableSessionMetadata).durableDomainSnapshots) {
+          const { domains } = splitSessionDomains(session);
+          if (!includeSdkTables) domains.delete("sdk");
           (session as UserSession & DurableSessionMetadata).durableDomainSnapshots = Object.fromEntries(
-            [...splitSessionDomains(session).domains].map(([domain, payload]) => [domain, structuredClone(payload)]),
+            [...domains].map(([domain, payload]) => [domain, structuredClone(payload)]),
           ) as DurableSessionMetadata["durableDomainSnapshots"];
         }
         if (includeSdkTables) session = await this.attachSdkTables(userId, session);
@@ -2546,8 +2548,10 @@ class RedisBackend implements Backend {
     }
     const session = fresh();
     if (this.durableState && userId !== 0) {
+      const { domains } = splitSessionDomains(session);
+      if (!includeSdkTables) domains.delete("sdk");
       (session as UserSession & DurableSessionMetadata).durableDomainSnapshots = Object.fromEntries(
-        [...splitSessionDomains(session).domains].map(([domain, payload]) => [domain, structuredClone(payload)]),
+        [...domains].map(([domain, payload]) => [domain, structuredClone(payload)]),
       ) as DurableSessionMetadata["durableDomainSnapshots"];
     }
     const attached = includeSdkTables ? await this.attachSdkTables(userId, session) : session;
@@ -2588,14 +2592,17 @@ class RedisBackend implements Backend {
       });
       if (pendingMessages.length) await this.durableState.appendConversationMessages(userId, pendingMessages);
       const metadata = withMessageIds as UserSession & DurableSessionMetadata;
-      const sdkTablesLoaded = !this.durableSdkTablesEnabled || metadata.durableSdkTablesLoaded === true;
-      let { core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled || this.durableSdkTablesEnabled, this.durableSdkTablesEnabled);
-      if (!sdkTablesLoaded) domains.delete("sdk");
+      // Ordinary session reads intentionally omit the SDK domain. Never
+      // synthesize an empty SDK payload during a save: without the caller's
+      // loaded baseline it cannot be safely merged with a newer durable SDK
+      // document.
+      const sdkDomainLoaded = Object.hasOwn(metadata.durableDomainSnapshots ?? {}, "sdk");
+      let { core, domains, sdkRuns } = splitSessionDomainsForSave(withMessageIds, this.durableSdkRunsEnabled || this.durableSdkTablesEnabled, this.durableSdkTablesEnabled);
       let oldHashes = metadata.durableDomainHashes ?? {};
       let oldSnapshots = metadata.durableDomainSnapshots;
       const changedDomains = new Map([...domains].filter(([domain, payload]) => oldHashes[domain] !== durableDomainHash(payload)));
       const expectedVersions = new Map([...changedDomains.keys()].map((domain) => [domain, metadata.durableDomainVersions?.[domain]] as const));
-      let sdkTableChanges = this.durableSdkTablesEnabled ? durableSdkTableChanges(userId, withMessageIds, metadata.durableSdkTablesSnapshot) : undefined;
+      let sdkTableChanges = this.durableSdkTablesEnabled && sdkDomainLoaded ? durableSdkTableChanges(userId, withMessageIds, metadata.durableSdkTablesSnapshot) : undefined;
       (core as UserSession & DurableSessionMetadata).durableConversationHeadId = withMessageIds.history.at(-1)?.id;
       // Neon commits all domains before Redis points at them. If this fails,
       // the old Redis session remains canonical and can be retried safely.
@@ -2648,14 +2655,13 @@ class RedisBackend implements Backend {
           // Ordinary turns intentionally omit the SDK domain until an SDK
           // operation asks for it. Reconciliation must preserve that partial
           // load instead of treating the omitted domain as corruption.
-          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads, this.durableSdkTablesEnabled && sdkTablesLoaded), sdkState, {
+          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads, this.durableSdkTablesEnabled && sdkDomainLoaded), sdkState, {
             durableDomainVersions: { ...metadata.durableDomainVersions, ...latestVersions },
             durableDomainHashes: oldHashes,
             durableDomainSnapshots: oldSnapshots,
           });
-          ({ core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled || this.durableSdkTablesEnabled, this.durableSdkTablesEnabled));
-          if (!sdkTablesLoaded) domains.delete("sdk");
-          sdkTableChanges = this.durableSdkTablesEnabled ? durableSdkTableChanges(userId, withMessageIds, metadata.durableSdkTablesSnapshot) : undefined;
+          ({ core, domains, sdkRuns } = splitSessionDomainsForSave(withMessageIds, this.durableSdkRunsEnabled || this.durableSdkTablesEnabled, this.durableSdkTablesEnabled));
+          sdkTableChanges = this.durableSdkTablesEnabled && sdkDomainLoaded ? durableSdkTableChanges(userId, withMessageIds, metadata.durableSdkTablesSnapshot) : undefined;
         }
       }
       let writeAttempts = 0;
@@ -2680,10 +2686,9 @@ class RedisBackend implements Backend {
             domains.set(domain, merged);
           }
           const sdkState = { sdkThreads: withMessageIds.sdkThreads, sdkIdempotency: withMessageIds.sdkIdempotency, sdkAudit: withMessageIds.sdkAudit };
-          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads, this.durableSdkTablesEnabled && sdkTablesLoaded), sdkState);
-          ({ core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled || this.durableSdkTablesEnabled, this.durableSdkTablesEnabled));
-          if (!sdkTablesLoaded) domains.delete("sdk");
-          sdkTableChanges = this.durableSdkTablesEnabled ? durableSdkTableChanges(userId, withMessageIds, metadata.durableSdkTablesSnapshot) : undefined;
+          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads, this.durableSdkTablesEnabled && sdkDomainLoaded), sdkState);
+          ({ core, domains, sdkRuns } = splitSessionDomainsForSave(withMessageIds, this.durableSdkRunsEnabled || this.durableSdkTablesEnabled, this.durableSdkTablesEnabled));
+          sdkTableChanges = this.durableSdkTablesEnabled && sdkDomainLoaded ? durableSdkTableChanges(userId, withMessageIds, metadata.durableSdkTablesSnapshot) : undefined;
           writeExpectedVersions = new Map([...changedDomains.keys()].map((domain) => [domain, latest.get(domain)?.version] as const));
         }
       }
@@ -2695,7 +2700,7 @@ class RedisBackend implements Backend {
       const nextHashes = { ...oldHashes, ...Object.fromEntries([...changedDomains].map(([domain, payload]) => [domain, durableDomainHash(payload)])) };
       const nextSnapshots = { ...oldSnapshots, ...Object.fromEntries([...changedDomains].map(([domain, payload]) => [domain, structuredClone(payload)])) };
       const nextHeadId = withMessageIds.history.at(-1)?.id;
-      const nextSdkTablesSnapshot = this.durableSdkTablesEnabled && sdkTablesLoaded ? durableSdkTablesSnapshot(withMessageIds) : metadata.durableSdkTablesSnapshot;
+      const nextSdkTablesSnapshot = this.durableSdkTablesEnabled && sdkDomainLoaded ? durableSdkTablesSnapshot(withMessageIds) : metadata.durableSdkTablesSnapshot;
       Object.assign(core as UserSession & DurableSessionMetadata, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableDomainSnapshots: nextSnapshots, durableSdkTablesSnapshot: nextSdkTablesSnapshot, durableConversationHeadId: nextHeadId });
       Object.assign(s as UserSession & DurableSessionMetadata, withMessageIds, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableDomainSnapshots: nextSnapshots, durableSdkTablesSnapshot: nextSdkTablesSnapshot, durableConversationHeadId: nextHeadId });
       await this.writeSessionDomainCache(userId, domains, nextVersions, changedDomains.keys());
@@ -6284,7 +6289,7 @@ export async function appendSdkRunHistory(uid: number, threadId: string, runId: 
     await mutateSession(uid, (session) => {
       const accountSourceIds = new Set(session.history.map((message) => message.sourceId).filter((value): value is string => typeof value === "string"));
       appendSessionHistory(session, tagged.filter((message) => !accountSourceIds.has(message.sourceId!)));
-    });
+    }, { includeSdkTables: true });
   }
   return true;
 }
@@ -6537,6 +6542,8 @@ export async function releaseMonidSpendLock(userId: number, dayKey: string, toke
 type SessionMutationOptions = {
   sdkThreadId?: string;
   allSdkRuns?: boolean;
+  /** Load the durable SDK domain without materializing its run rows. */
+  includeSdkTables?: boolean;
   /** Return immediately when another worker owns the session lease. */
   skipIfBusy?: boolean;
 };
@@ -6553,7 +6560,7 @@ export async function mutateSession<T>(uid: number, mutator: (session: UserSessi
       renew: async () => backend.renewKeyLock(key, token, 60),
       release: async () => backend.releaseKeyLock(key, token),
     }, async () => {
-      const session = options.allSdkRuns ? await getSessionWithSdkRuns(uid) : options.sdkThreadId ? await getSessionWithSdkRuns(uid, options.sdkThreadId) : await getSession(uid);
+      const session = options.allSdkRuns ? await getSessionWithSdkRuns(uid) : options.sdkThreadId ? await getSessionWithSdkRuns(uid, options.sdkThreadId) : options.includeSdkTables ? await getSessionWithSdkTables(uid) : await getSession(uid);
       const result = await mutator(session);
       await saveSession(uid, session);
       return result;

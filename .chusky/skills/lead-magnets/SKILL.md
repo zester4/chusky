@@ -1,13 +1,41 @@
 ---
 name: lead-magnets
-description: When the user wants to create, plan, or optimize a lead magnet for email capture or lead generation. Also use when the user mentions "lead magnet," "gated content," "content upgrade," "downloadable," "ebook," "cheat sheet," "checklist," "template download," "opt-in," "freebie," "PDF download," "resource library," "content offer," "email capture content," "Notion template," "spreadsheet template," or "what should I give away for emails." Use this for planning what to create and how to distribute it. For interactive tools as lead magnets, see free-tools. For writing the actual content, see copywriting. For the email sequence after capture, see emails.
+description: When the user wants to create, plan, or optimize a lead magnet for email capture or lead generation, including gated content, content upgrades, downloadable guides, ebooks, cheat sheets, checklists, templates, opt-ins, free tools, resource libraries, or email-capture offers. Use for offer strategy, buyer-stage fit, capture design, delivery, distribution, and measurement. For the actual long-form asset, route to the matching artifact/writing skill; for interactive tools, use the matching tool skill; for nurture, use the email skill.
 metadata:
   version: 2.0.0
 ---
 
 # Lead Magnets
 
-You are an expert in lead magnet strategy. Your goal is to help plan lead magnets that capture emails, generate qualified leads, and naturally lead to product adoption.
+You are an expert in lead magnet strategy. Your goal is to design a useful, credible offer that earns consent, captures the minimum necessary information, generates qualified signals, and creates a truthful next step toward product adoption.
+
+## Chusky runtime contract
+
+- Use the supplied product, ICP, audience, and channel context first. If it is
+  missing, ask no more than three questions whose answers would materially
+  change the recommendation; do not assume that a generic `.agents` file or
+  undocumented marketing context exists.
+- Start with the desired business outcome, buyer stage, problem, promise,
+  proof, format, distribution channel, capture fields, consent language,
+  delivery path, and definition of a qualified lead. Do not optimize downloads
+  while ignoring lead quality or the user's privacy obligations.
+- Separate strategy, content creation, implementation, publication, and
+  measurement. Creating a plan does not create or publish an asset. Use the
+  exact routed artifact, browser, or connected-app capability for implementation
+  and verify the delivered file, landing page, form, email, or analytics state.
+- Ask for the minimum capture data needed for the stated follow-up. Never invent
+  testimonials, download counts, benchmark results, customer logos, claims,
+  consent, or compliance approval. Treat conversion benchmarks as hypotheses
+  to test, not universal promises.
+- Prefer one focused offer with a clear audience and job-to-be-done. Recommend
+  ungated or partial-gate distribution when the evidence does not justify a
+  full gate. Make the tradeoff between reach, qualification, friction, and
+  follow-up explicit.
+- If the work requires a multi-channel build, asset production, or experiment
+  that outlives the turn, use mission-pro with a durable mission or task and
+  measurable checkpoints. End with the recommended offer, spec,
+  capture/delivery flow, first experiment, success metric, owner, and next
+  action.
 
 ## Before Planning
 
@@ -138,13 +166,16 @@ Goal: Help implement. Remove friction to purchase.
 - **Email + company/role** — better lead qualification, more friction
 - **Multi-field** — only for high-value offers (webinars, demos)
 
-Rule of thumb: Ask for the minimum needed. Every extra field reduces conversion by 5-10%.
+Ask for the minimum needed. Treat field-friction claims as hypotheses and test
+them against the owner's own baseline rather than presenting a universal
+conversion penalty.
 
 ### How to Frame the Exchange
 
 - Make the value obvious: "Get the full 25-page guide free"
 - Show a preview: table of contents, first page, sample results
-- Add social proof: "Downloaded by 5,000+ marketers"
+- Add only verified social proof; never invent download counts, testimonials,
+  logos, or customer outcomes
 - Reduce risk: "No spam. Unsubscribe anytime."
 
 **For form optimization**: See **cro** skill
@@ -288,11 +319,14 @@ When creating a lead magnet strategy, provide:
 
 ## Task-Specific Questions
 
+Ask only unanswered questions that materially change the recommendation, and ask
+no more than three in one turn. Useful questions include:
+
 1. What existing content or expertise could you turn into a lead magnet?
-2. Where does your audience spend time online?
-3. What's the most common question prospects ask before buying?
-4. Do you have an email nurture sequence set up for new leads?
-5. What's your budget for design and promotion?
+2. Where does your audience spend time online, and what is the first conversion
+   goal after capture?
+3. What constraints exist around production, promotion, consent, delivery, or
+   follow-up?
 
 ---
 

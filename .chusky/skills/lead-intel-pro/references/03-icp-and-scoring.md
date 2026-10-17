@@ -1,5 +1,9 @@
 # ICP and Scoring
 
+Use a transparent, owner-approved scoring policy. Scores summarize cited
+evidence and assumptions; they are not provider truth, permission to contact,
+or a substitute for a source-of-truth record.
+
 ## Build or load ICP
 
 Prefer owner memory. If absent, capture a compact ICP once:
@@ -70,3 +74,6 @@ Note the trigger explicitly — it powers personalization later.
 ```
 
 Respect Treg budgets: enrich A-priority first when spend is tight.
+
+If a factor is unknown, leave it unknown or mark it as a bounded hypothesis;
+never award points merely to complete the table.

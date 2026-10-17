@@ -46,7 +46,7 @@ import { ensureXchatActivitySubscriptions, type XchatSetupStatus } from "./chann
 import { XAdapter, type XSetupStatus } from "./channels/x.js";
 import { TelegramAdapter } from "./channels/telegram.js";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "./telegramWebhook.js";
-import { enqueueAutonomyApprovalResume, enqueueTaskWorkflow, parseWorkflowFailureRequestPayload, triggerWorkflowVersionForPayload, TRIGGER_AGENT_WORKFLOW_TIMEOUT, TRIGGER_WORKFLOW_VERSION, triggerAgentWorkflowRunId, triggerAgentWorkflowUrl, triggerWorkflowUrl, workflowClient, workflowFailureUrl } from "./triggerWorkflow.js";
+import { enqueueAutonomyApprovalResume, enqueueTaskWorkflow, parseWorkflowFailureRequestPayload, triggerWorkflowVersionForPayload, TRIGGER_AGENT_WORKFLOW_TIMEOUT, TRIGGER_WORKFLOW_VERSION, triggerAgentWorkflowRunId, triggerAgentWorkflowUrl, triggerWorkflowUrl, workflowClient, workflowFailureUrl, workflowServeOptions } from "./triggerWorkflow.js";
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
 import type { TinyFishResearchRunRecord } from "./store.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
@@ -624,7 +624,7 @@ async function main(): Promise<void> {
       app.post("/workflows/sendblue-event", serveWorkflow(async (workflow) => {
         const payload = workflow.requestPayload as { eventId: string };
         await processSendblueWorkflow(workflow, payload.eventId, sendblueEventDependencies);
-      }, { url: resolveWorkflowEndpoint(config.sendblueWorkflowUrl, config.webhookUrl, "/workflows/sendblue-event", "Sendblue workflows") }));
+      }, workflowServeOptions(resolveWorkflowEndpoint(config.sendblueWorkflowUrl, config.webhookUrl, "/workflows/sendblue-event", "Sendblue workflows"))));
     }
     channelGateway.startRecovery();
     if (config.apiKey || config.betterAuthEnabled) {
@@ -2506,7 +2506,7 @@ async function main(): Promise<void> {
         entityId: runRecordId, dedupeKey: `tinyfish-research:${runRecordId}:reconcile-delayed`, occurredAt: Date.now(),
         importance: 0.65, novelty: 0.8, confidence: 1, privacyScope: "private", status: "new", metadata: { reportId: runRecordId },
       }));
-    }, { url: resolveWorkflowEndpoint("", config.webhookUrl, "/workflows/tinyfish-research", "TinyFish Research workflows") }));
+    }, workflowServeOptions(resolveWorkflowEndpoint("", config.webhookUrl, "/workflows/tinyfish-research", "TinyFish Research workflows"))));
 
     app.post("/workflows/video", serveWorkflow(async (workflow) => {
       const payload = workflow.requestPayload as { userId: number; prompt: string; model?: string; destination?: "telegram" | "daytona" | "both"; workspacePath?: string; jobId?: string; duration?: number; aspectRatio?: string; resolution?: string; size?: string; generateAudio?: boolean; frameMode?: "reference" | "first_frame" | "last_frame"; inputReferences?: Array<{ type: "image_url"; image_url: { url: string } }> };
@@ -2585,7 +2585,7 @@ async function main(): Promise<void> {
         if (payload.jobId) await updateVideoJob(payload.userId, payload.jobId, { status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
         throw error;
       }
-    }, { url: resolveWorkflowEndpoint(config.videoWorkflowUrl, config.webhookUrl, "/workflows/video", "Video workflows") }));
+    }, workflowServeOptions(resolveWorkflowEndpoint(config.videoWorkflowUrl, config.webhookUrl, "/workflows/video", "Video workflows"))));
 
     app.post("/workflows/reminder", serveWorkflow(async (workflow) => {
       let payload;
@@ -2623,7 +2623,7 @@ async function main(): Promise<void> {
         sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options),
         sendChannelMessage: (target, text, idempotencyKey) => channelGateway.send({ accountId: `account_${payload.userId}`, userId: payload.userId, target, text, idempotencyKey, kind: "notification" }),
       }));
-    }, { url: resolveWorkflowEndpoint(config.reminderWorkflowUrl, config.webhookUrl, "/workflows/reminder", "Reminder workflows") }));
+    }, workflowServeOptions(resolveWorkflowEndpoint(config.reminderWorkflowUrl, config.webhookUrl, "/workflows/reminder", "Reminder workflows"))));
 
     // QStash failure callbacks are authenticated separately from Workflow
     // requests. Persist the useful owner-facing state, while keeping the raw
@@ -3021,7 +3021,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
         sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options),
         sendChannelMessage: (target, text, idempotencyKey) => channelGateway.send({ accountId: `account_${payload.userId}`, userId: payload.userId, target, text, idempotencyKey, kind: "notification" }),
       }));
-    }, { url: resolveWorkflowEndpoint(config.jobWorkflowUrl, config.webhookUrl, "/workflows/job", "Job workflows") }));
+    }, workflowServeOptions(resolveWorkflowEndpoint(config.jobWorkflowUrl, config.webhookUrl, "/workflows/job", "Job workflows"))));
 
     app.post("/workflows/task", serveWorkflow(async (workflow) => {
       let payload;
@@ -3059,7 +3059,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           await workflow.sleep(`retry-claim-${attempt}`, Math.max(1, Math.ceil((wakeAt - now) / 1000)));
           continue;
         }
-        if (run.status !== "queued" || !run.runAt || run.runAt <= Date.now()) break;
+        if (run.status !== "queued" || !run.runAt) break;
         // Keep the continuation inside the durable workflow while the delay is
         // short. Re-publishing a mission task immediately was a hot-loop bug:
         // provider and approval waits were never actually allowed to sleep.
@@ -3068,8 +3068,12 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           break;
         }
         await workflow.sleep(`retry-delay-${attempt}`, Math.max(1, Math.ceil((run.runAt - Date.now()) / 1000)));
+        // On replay the named sleep is already complete. Advance to a new
+        // execution step; never evaluate the old wake time and register the
+        // same sleep step again.
+        continue;
       }
-    }, { url: resolveWorkflowEndpoint("", config.webhookUrl, "/workflows/task", "Task workflows") }));
+    }, workflowServeOptions(resolveWorkflowEndpoint("", config.webhookUrl, "/workflows/task", "Task workflows"))));
 
     // A worker may stop at a capability boundary. This workflow is the durable
     // continuation: it waits for Chusky's verified, role-scoped decision, then
@@ -3217,7 +3221,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           send: (message) => channelGateway.send(message),
         });
       });
-    }, { url: subagentWorkflowUrl() }));
+    }, workflowServeOptions(subagentWorkflowUrl())));
 
     // The agent call is deliberately a signed, ordinary QStash callback. A
     // Workflow `run` step is for short durable mutations; holding it open for
@@ -3375,7 +3379,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             result = outcome.result;
           }
         }
-        const closeout = ensureTriggerCloseout({ triggerSlug: event.triggerSlug, summary: event.summary, text: redactMeetingLinks(result.text), toolsUsed: result.toolsUsed, toolsSucceeded: result.toolsSucceeded });
+        const closeout = ensureTriggerCloseout({ text: redactMeetingLinks(result.text), toolsUsed: result.toolsUsed });
         const actionPlan = parseTriggerSuggestedActions(closeout.text);
         const safeResult = redactMeetingLinks(actionPlan.text);
         const finalTriggerStatus = modelTimedOut || closeout.reportMissing ? "failed" : "completed";
@@ -3412,7 +3416,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             eventId: event.eventId,
             triggerSlug: event.triggerSlug,
             summary: event.summary,
-            result: `Approval needed before this trigger can continue. Review the requested action: ${error.toolSlug}. Approval ID: ${error.approvalId}`,
+            result: "This event needs your approval before the requested action can continue.",
             status: "requires_approval",
             approvalId: error.approvalId,
           }));
@@ -3422,7 +3426,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           if (!chatId) {
             await saveEventStep("mark-trigger-approval-undeliverable", { notificationStatus: "unavailable" });
           }
-          if (chatId && approvalExists) await workflow.run("request-trigger-approval", async () => bot.api.sendMessage(chatId, `⚠️ <b>Approval needed</b>\n\nI need your approval to run <code>${error.toolSlug}</code>.\nApproval ID: <code>${error.approvalId}</code>`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Approve", `appr:approve:${error.approvalId}`).text("🛑 Deny", `appr:deny:${error.approvalId}`) }));
+          if (chatId && approvalExists) await workflow.run("request-trigger-approval", async () => bot.api.sendMessage(chatId, "⚠️ <b>Approval needed</b>\n\nThis event needs your approval before the requested action can continue. Approving runs the exact saved action; denying leaves it undone.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Approve", `appr:approve:${error.approvalId}`).text("🛑 Deny", `appr:deny:${error.approvalId}`) }));
           const decision = await workflow.waitForEvent<{ approved: boolean }>("trigger-approval", workflowEventId("trigger-approval", error.approvalId), { timeout: "24h" });
           if (decision.timeout || !decision.eventData?.approved) {
             const denialResult = "The requested triggered action was denied or expired.";
@@ -3460,7 +3464,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
               // second external-action sequence.
               return executeTriggerAgentForEvent(event, error.approvalId);
             });
-          const resumedCloseout = ensureTriggerCloseout({ triggerSlug: event.triggerSlug, summary: event.summary, text: redactMeetingLinks(resumed.text), toolsUsed: resumed.toolsUsed, toolsSucceeded: resumed.toolsSucceeded });
+          const resumedCloseout = ensureTriggerCloseout({ text: redactMeetingLinks(resumed.text), toolsUsed: resumed.toolsUsed });
           const resumedActionPlan = parseTriggerSuggestedActions(resumedCloseout.text);
           const safeResumed = redactMeetingLinks(resumedActionPlan.text);
           const resumedFinalStatus = resumedModelTimedOut || resumedCloseout.reportMissing ? "failed" : "completed";
@@ -3491,7 +3495,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
         // step and let the signed exhaustion callback persist terminal state.
         throw error;
       }
-    }, { url: triggerWorkflowUrl() });
+    }, workflowServeOptions(triggerWorkflowUrl()));
     app.post("/workflows/trigger-event", triggerEventWorkflow);
 
     app.get("/", (c) => c.json({ ok: true, agent: "Chusky", mode: "webhook", ts: Date.now() }));
@@ -3722,7 +3726,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           // Do not serialize provider/model error text into workflow logs.
           throw new Error("Recall meeting chat processing failed");
         }
-      }, { url: resolveWorkflowEndpoint("", config.webhookUrl, "/workflows/recall-chat", "Recall chat workflows") }));
+      }, workflowServeOptions(resolveWorkflowEndpoint("", config.webhookUrl, "/workflows/recall-chat", "Recall chat workflows"))));
     }
 
     if (config.recallMeetingsEnabled && config.qstashToken && isDurableStore() && /^https:\/\//i.test(config.webhookUrl.trim())) {
@@ -3821,9 +3825,17 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             ])];
             if (!tools.length) return {};
             const followUpDecision = await decideFollowUp({
-              summary: `${outcome.summary} ${outcome.actionItems.length} structured action items; ${contacts.length} captured participant cards.`,
+              summary: outcome.summary,
               preferredChannel: contacts.some((contact) => contact.email && contact.contactPreference !== "phone") ? "email" : undefined,
               hasAgreedNextStep: outcome.actionItems.length > 0 || contacts.some((contact) => Boolean(contact.nextStep)),
+              outcome: {
+                title: outcome.title,
+                summary: outcome.summary,
+                decisions: outcome.decisions,
+                actionItems: outcome.actionItems,
+                openQuestions: outcome.openQuestions,
+                ...(outcome.escalation ? { escalation: { required: outcome.escalation.required, severity: outcome.escalation.severity, reason: outcome.escalation.reason } } : {}),
+              },
             });
             const followUpGuidance = followUpDecision.source === "jev"
               ? `\n\nTyped follow-up proposal (not authority): relevant=${followUpDecision.relevant}; channel=${followUpDecision.channel}; timing=${followUpDecision.timing}; message=${followUpDecision.messageType}. Use it only to prioritize the explicit structured outcome; do not contact anyone or create commitments outside the granted tools and agreed facts.`
@@ -3887,7 +3899,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           // Do not checkpoint the summary or meeting data in QStash state.
           return { status: result };
         });
-      }, { url: recallOutcomeWorkflowUrl }));
+      }, workflowServeOptions(recallOutcomeWorkflowUrl)));
     }
 
     // Recall status webhooks are signed by Svix. Verify the exact raw body

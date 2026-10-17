@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { delegationStartedStatus, executeDelegation, resumeApprovedDelegation, setSubagentExecutorDependenciesForTests } from "../src/subagents/executor.js";
 import { setSubagentWorkflowTriggerForTests } from "../src/subagents/workflow.js";
 import { nativeTool, setPhoneCallLauncherForTests } from "../src/nativeTools.js";
-import { ATTENTION_PULSE_TOOLS, WORKER_CAPABILITIES, classifyDelegationObjective, isComposioToolAllowedForWorker, normalizeDelegationToolScopes, planDelegationObjective, validateDelegationTarget } from "../src/subagents/capabilities.js";
+import { ATTENTION_PULSE_TOOLS, WORKER_CAPABILITIES, classifyDelegationObjective, isComposioToolAllowedForWorker, normalizeDelegationToolScopes, objectiveRequiresNoraResearch, planDelegationObjective, validateDelegationTarget } from "../src/subagents/capabilities.js";
 import { chuckTools } from "../src/agentTools.js";
 import { initStore, getSession, listHandoffRecords, listTasks, createMission, claimApproval, claimHandoffBudget } from "../src/store.js";
 import { config } from "../src/config.js";
@@ -33,6 +33,30 @@ test("validates capability registry manifests for all worker capabilities", () =
     assert.ok(cap.systemPrompt.length > 20);
     assert.ok(cap.reflectionChecklist.length > 0);
   }
+});
+
+test("gives every specialist a verified tool guard, complete native schemas, and a shared execution contract", () => {
+  const catalog = new Set(chuckTools.map((tool) => tool.function.name));
+  const workers = ["lucas", "maya", "leo", "sofia", "dexter", "elena", "nora", "ivy", "quinn", "aria", "kai", "muna"] as const;
+  for (const worker of workers) {
+    const manifest = WORKER_CAPABILITIES[worker];
+    assert.ok(manifest.allowedTools.includes("CHUCK_TOOL_PREFLIGHT"), `${worker} needs tool preflight`);
+    assert.ok(manifest.allowedTools.includes("CHUCK_REQUEST_ADDITIONAL_TOOLS"), `${worker} needs capability requests`);
+    assert.match(manifest.systemPrompt, /Shared Specialist Contract/);
+    assert.match(manifest.systemPrompt, /exact native and Composio actions exposed/);
+    assert.match(manifest.systemPrompt, /CHUCK_REQUEST_ADDITIONAL_TOOLS/);
+    for (const tool of manifest.allowedTools) {
+      assert.equal(catalog.has(tool), true, `${worker} references missing native schema ${tool}`);
+    }
+    for (const slug of manifest.starterComposioTools) {
+      assert.equal(isComposioToolAllowedForWorker(worker, slug), true, `${worker} starter ${slug} is outside its Composio policy`);
+    }
+    for (const slug of ["COMPOSIO_EXECUTE_TOOL", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_REMOTE_BASH_TOOL", "COMPOSIO_REMOTE_WORKBENCH"]) {
+      assert.equal(isComposioToolAllowedForWorker(worker, slug), false, `${worker} must not receive ${slug}`);
+    }
+  }
+  assert.deepEqual(WORKER_CAPABILITIES.ivy.starterComposioTools, ["GMAIL_FETCH_EMAILS", "SLACK_SEARCH_MESSAGES"]);
+  assert.deepEqual(WORKER_CAPABILITIES.kai.starterComposioTools, ["GOOGLESHEETS_VALUES_GET", "GOOGLESHEETS_SEARCH_SPREADSHEETS", "GOOGLEDRIVE_FIND_FILE"]);
 });
 
 test("attention pulse grant is catalogued and permitted by Elena's manifest", () => {
@@ -197,9 +221,10 @@ test("keeps business workers inside their intended connected-app families", () =
 
 test("gives Nora only scoped Composio research-provider families", () => {
   const nora = WORKER_CAPABILITIES.nora;
-  for (const tool of ["CHUCK_ARTIFACT", "CHUCK_CREATE_PDF", "CHUCK_CREATE_DOCUMENT", "CHUCK_REQUEST_ADDITIONAL_TOOLS"]) {
+  for (const tool of ["CHUCK_TINYFISH_SEARCH", "CHUCK_TINYFISH_FETCH", "CHUCK_ARTIFACT", "CHUCK_CREATE_PDF", "CHUCK_CREATE_DOCUMENT", "CHUCK_REQUEST_ADDITIONAL_TOOLS"]) {
     assert.ok(nora.allowedTools.includes(tool), `${tool} should be available to Nora`);
   }
+  assert.deepEqual(nora.starterComposioTools, ["COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT"]);
   for (const tool of ["TAVILY_SEARCH", "EXA_SEARCH", "FIRECRAWL_SCRAPE"]) {
     assert.equal(isComposioToolAllowedForWorker("nora", tool), true, `${tool} should be allowed for Nora when Chusky verifies it`);
   }
@@ -213,8 +238,15 @@ test("gives Nora only scoped Composio research-provider families", () => {
   for (const tool of ["GITHUB_CREATE_PULL_REQUEST"]) {
     assert.equal(isComposioToolAllowedForWorker("nora", tool), false, `${tool} must not be available to Nora`);
   }
-  assert.match(nora.systemPrompt, /exact Composio actions explicitly delegated/);
+  assert.match(nora.systemPrompt, /exact actions exposed/);
   assert.match(nora.systemPrompt, /Never guess a tool slug/);
+  assert.doesNotMatch(nora.systemPrompt, /Use COMPOSIO_SEARCH_TOOLS/);
+});
+
+test("detects Nora research objectives without treating ordinary handoffs as research", () => {
+  assert.equal(objectiveRequiresNoraResearch("Research current competitor pricing with cited sources"), true);
+  assert.equal(objectiveRequiresNoraResearch("Investigate the latest API documentation"), true);
+  assert.equal(objectiveRequiresNoraResearch("Summarize the handoff from the supervisor"), false);
 });
 
 test("normalizes generic web search aliases into the canonical Composio scope", () => {
@@ -832,14 +864,10 @@ test("executes peer handoff between domain workers via CHUCK_HANDOFF_SUBAGENT", 
   assert.equal(peerHandoff.delegationDepth, 1);
   assert.equal(peerHandoff.status, "max_tool_calls_exceeded");
   assert.equal(peerHandoff.delegation?.allowedTools.includes("CHUCK_HANDOFF_SUBAGENT"), false);
-  assert.deepEqual(peerHandoff.delegation?.allowedTools.slice().sort(), [
-    "CHUCK_LIST_SKILL_FILES",
-    "CHUCK_READ_SKILL_FILE",
-    "CHUCK_REQUEST_ADDITIONAL_TOOLS",
-    "CHUCK_SCRATCHPAD_READ",
-    "CHUCK_SCRATCHPAD_WRITE",
-    "CHUCK_SEARCH_SKILLS",
-  ]);
+  const expectedPeerTools = WORKER_CAPABILITIES.lucas.allowedTools
+    .filter((tool) => WORKER_CAPABILITIES.leo.allowedTools.includes(tool) && tool !== "CHUCK_HANDOFF_SUBAGENT")
+    .sort();
+  assert.deepEqual(peerHandoff.delegation?.allowedTools.slice().sort(), expectedPeerTools);
   const rootHandoff = handoffs.find((handoff) => handoff.id === peerHandoff.rootHandoffId);
   assert.ok(rootHandoff);
   assert.equal(rootHandoff.delegation?.sharedToolCallsUsed, 1);

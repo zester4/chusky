@@ -1,5 +1,10 @@
 # Real-world mission playbooks
 
+Adapt these examples to the exact routed tools and connected systems exposed by
+the runtime. Each playbook separates research, communication, writes, waits,
+and verification; never collapse them into a claimed outcome because a worker
+returned successfully.
+
 These map production-style agent work onto Chusky missions. Adapt steps to the owner’s tools and approvals.
 
 ## 1. Customer support resolution
@@ -92,3 +97,7 @@ Same shapes: trip planning (research → shortlist → wait on confirm → book 
 - Name the **system of record** (CRM, inbox, sheet, repo)
 - Put **approval** only on irreversible steps
 - Prefer **one mission per outcome**, not one mission per message
+
+When the outcome includes follow-up after a meeting, call, approval, or provider
+event, keep that follow-up in the same mission when it is part of the stated
+definition of done and record the source evidence.

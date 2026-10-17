@@ -953,24 +953,36 @@ async function persistSdkRunSnapshot(
       approvalId: preserveCancellation ? undefined : run.approvalId,
       durableVersion: storedDirect.durableVersion,
     };
+    let directRunSaved = false;
     try {
-      if (await saveSdkRun(userId, threadId, nextRun)) {
-        Object.assign(run, nextRun, { durableVersion: (storedDirect.durableVersion ?? 0) + 1 });
-        if (run.status === "completed" || run.status === "failed") {
-          const settledHistory = historyAppend.length ? historyAppend : run.status === "completed" ? [
-            { role: "user" as const, content: `${run.input || "Attached file(s)"}${run.attachments?.length ? `\n[Attachments: ${run.attachments.map((file) => file.name).join(", ")}]` : ""}`, createdAt: run.createdAt },
-            { role: "assistant" as const, content: run.output ?? "", createdAt: run.updatedAt },
-          ] : failedSdkRunHistory(run);
-          await appendSdkRunHistory(userId, threadId, run.id, settledHistory);
-          if (run.status === "completed" && storedDirect.status !== "completed" && costIncrement) {
-            await mutateSession(userId, (session) => { session.totalCost = (session.totalCost ?? 0) + costIncrement; });
-          }
-        }
-        await persistSdkCompanyRun(run);
-        return;
-      }
+      directRunSaved = await saveSdkRun(userId, threadId, nextRun);
     } catch (error) {
       logger.warn({ userId, threadId, runId: run.id, err: error }, "Direct SDK run write conflicted; falling back to session reconciliation");
+    }
+    if (directRunSaved) {
+      Object.assign(run, nextRun, { durableVersion: (storedDirect.durableVersion ?? 0) + 1 });
+      if (run.status === "completed" || run.status === "failed") {
+        const settledHistory = historyAppend.length ? historyAppend : run.status === "completed" ? [
+          { role: "user" as const, content: `${run.input || "Attached file(s)"}${run.attachments?.length ? `\n[Attachments: ${run.attachments.map((file) => file.name).join(", ")}]` : ""}`, createdAt: run.createdAt },
+          { role: "assistant" as const, content: run.output ?? "", createdAt: run.updatedAt },
+        ] : failedSdkRunHistory(run);
+        try {
+          await appendSdkRunHistory(userId, threadId, run.id, settledHistory);
+        } catch (error) {
+          // The run row is canonical. A projection failure must not turn a
+          // successful SDK run into a false execution failure or re-run it.
+          logger.warn({ userId, threadId, runId: run.id, err: error }, "SDK run persisted but account history projection failed");
+        }
+        if (run.status === "completed" && storedDirect.status !== "completed" && costIncrement) {
+          try {
+            await mutateSession(userId, (session) => { session.totalCost = (session.totalCost ?? 0) + costIncrement; });
+          } catch (error) {
+            logger.warn({ userId, threadId, runId: run.id, err: error }, "SDK run persisted but cost projection failed");
+          }
+        }
+      }
+      await persistSdkCompanyRun(run);
+      return;
     }
   }
   // Progress and approval snapshots are hot writes. Keep them on the bounded

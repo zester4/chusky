@@ -8,9 +8,11 @@ import { JevClient, JevUnavailableError, NONE_OPTION, createRoutingDeadline, ran
 import { explicitlyNamedSkills, routeSkillsForTurn } from "../src/decisions/skillRouter.js";
 import { clearComposioActionCache, composioDecisionContext, computeJevComposioDecision, routeComposioForTurn, toComposioAction, toComposioToolkitInfo, type ComposioAction, type ComposioToolkitInfo } from "../src/decisions/composioRouter.js";
 import { computeTregTurnRoute, createTregEndpointJudge } from "../src/decisions/tregRouter.js";
+import { computeTurnRoutingPlan } from "../src/decisions/turnRouter.js";
+import { augmentNativeToolRoute, nativeToolManifest } from "../src/decisions/nativeToolRouter.js";
 import { rankHits } from "../src/treg/gateway.js";
 import { clearSkillCatalogCache } from "../src/skills/catalog.js";
-import { resetJevRoutingStats, jevRoutingStats } from "../src/decisions/telemetry.js";
+import { recordRouteOutcome, resetJevRoutingStats, jevRoutingStats } from "../src/decisions/telemetry.js";
 import type { TregEndpointHit } from "../src/treg/types.js";
 
 const mutableConfig = config as unknown as Record<string, unknown>;
@@ -108,6 +110,163 @@ test("Jev coalesces independent same-turn routes and fans answers and cost back 
   assert.deepEqual(results.map((result) => Object.keys(result.answers)), [["native"], ["app"], ["skill"]]);
   assert.ok(Math.abs(results.reduce((sum, result) => sum + (result.costUsd ?? 0), 0) - 0.000004) < 1e-12, "allocated costs sum to provider cost");
   assert.equal(results[2].answers.skill?.type, "choice");
+});
+
+test("turn routing plan batches independent capability questions into one Jev request", async () => {
+  const captured: Captured[] = [];
+  const restore = withConfig({
+    jevMode: "enforce",
+    jevProvider: "openrouter",
+    openRouterApiKey: "test-key",
+    jevSurfaces: new Set(["skills", "composio", "treg", "monid", "native"]),
+    jevNativeToolRouting: true,
+    nativeToolLoading: "bundle",
+    tregEnabled: true,
+    monidEnabled: true,
+  });
+  try {
+    const client = new JevClient({ apiKey: "k", fetchImpl: fakeJev(captured) });
+    const testManifest = [...nativeToolManifest.slice(0, 8), ...nativeToolManifest.filter((descriptor) => descriptor.bundle === "monid")];
+    const availableTools = testManifest.map((descriptor) => ({ type: "function", function: { name: descriptor.slug, description: descriptor.description, parameters: { type: "object", properties: {} } } }));
+    const plan = await computeTurnRoutingPlan({
+      query: "Send an email and check live company information",
+      recentContext: "The owner asked for a concise update.",
+      skills: [
+        { name: "email-workflow", description: "Prepare and send email messages through connected providers." },
+        { name: "company-research", description: "Research companies and collect current firmographic evidence." },
+        { name: "unrelated-cooking", description: "Recipes and meal planning." },
+      ],
+      nativeCandidates: testManifest,
+      availableNativeTools: availableTools,
+      connectedAccounts: [{ toolkit: "gmail", status: "ACTIVE" }, { toolkit: "slack", status: "ACTIVE" }],
+      includeSkills: true,
+      includeNative: true,
+      includeComposio: true,
+      includeTreg: true,
+      includeMonid: true,
+      sessionId: "turn-plan-test",
+      client,
+    });
+    assert.equal(captured.length, 1, "all independent routing surfaces share one provider request");
+    const questionKeys = Object.keys(captured[0].body.questions);
+    assert.ok(questionKeys.includes("action_required"));
+    assert.ok(questionKeys.some((key) => key.startsWith("skill_")));
+    assert.ok(questionKeys.some((key) => key.startsWith("native_")));
+    assert.ok(questionKeys.includes("composio_needs_app"));
+    assert.ok(questionKeys.some((key) => key.startsWith("composio_toolkit_")));
+    assert.ok(questionKeys.includes("treg_live_data"));
+    assert.ok(questionKeys.includes("monid_needed"));
+    assert.ok(questionKeys.some((key) => key.startsWith("monid_tool_")));
+    assert.equal(plan.action.noActionNeeded, false);
+    assert.ok(plan.skillRoute);
+    assert.ok(plan.composioStage1);
+    assert.ok(plan.tregRoute);
+    assert.equal(plan.externalDataBackend?.selected, "treg");
+    assert.equal(plan.monidRoute, undefined, "the shared backend arbiter must not select MonID alongside Treg");
+    assert.ok(!plan.tregRoute || !plan.monidRoute?.selected.length, "overlapping live-data gateways are mutually exclusive");
+    const augmented = augmentNativeToolRoute(availableTools, plan.nativeToolRoute!, []);
+    assert.ok(augmented.selected.length > 0);
+  } finally {
+    restore();
+  }
+});
+
+test("expanded routing vocabulary ranks natural-language skill matches before Jev", async () => {
+  const captured: Captured[] = [];
+  const restore = withConfig({
+    jevMode: "enforce",
+    jevProvider: "openrouter",
+    openRouterApiKey: "test-key",
+    jevSurfaces: new Set(["skills"]),
+    jevTurnPlanMaxCandidates: 1,
+  });
+  try {
+    const client = new JevClient({ apiKey: "k", fetchImpl: fakeJev(captured) });
+    await computeTurnRoutingPlan({
+      query: "Please check my threads",
+      forceCapability: true,
+      skills: [
+        { name: "calendar-workflow", description: "Manage calendar meetings and events." },
+        { name: "mail-reader", description: "Read email from connected providers." },
+      ],
+      includeSkills: true,
+      client,
+      sessionId: "alias-routing-test",
+    });
+    const skillQuestions = Object.values(captured[0]?.body.questions ?? {}).filter((question: any) => question.type === "noul" && question.instructions?.candidate);
+    assert.equal(skillQuestions.length, 1, "the configured pre-filter should send only its top skill candidate");
+    assert.equal((skillQuestions[0] as any).instructions.candidate.id, "mail-reader", "thread language should match the email skill before Jev evaluates it");
+  } finally {
+    restore();
+  }
+});
+
+test("explicit MonID requests win the shared external-data backend arbitration", async () => {
+  const captured: Captured[] = [];
+  const restore = withConfig({
+    jevMode: "enforce",
+    jevProvider: "openrouter",
+    openRouterApiKey: "test-key",
+    jevSurfaces: new Set(["monid"]),
+    monidEnabled: true,
+    tregEnabled: false,
+  });
+  try {
+    const client = new JevClient({ apiKey: "k", fetchImpl: fakeJev(captured) });
+    const plan = await computeTurnRoutingPlan({
+      query: "Use MonID to find local customer reviews",
+      forceCapability: true,
+      includeMonid: true,
+      nativeCandidates: nativeToolManifest.filter((descriptor) => descriptor.bundle === "monid"),
+      client,
+      sessionId: "monid-backend-test",
+    });
+    assert.equal(captured.length, 1);
+    assert.equal(plan.externalDataBackend?.selected, "monid");
+    assert.equal(plan.externalDataBackend?.fallbackReason, undefined);
+    assert.ok(plan.monidRoute?.selected.length, "an explicit MonID request should expose a relevant MonID capability");
+  } finally {
+    restore();
+  }
+});
+
+test("batched Composio routing reuses stage one before exact action discovery", async () => {
+  clearComposioActionCache();
+  const captured: Captured[] = [];
+  const restore = withConfig({
+    jevMode: "enforce",
+    jevProvider: "openrouter",
+    openRouterApiKey: "test-key",
+    jevSurfaces: new Set(["composio"]),
+    jevMaxOptionsPerQuestion: 100,
+  });
+  try {
+    const client = new JevClient({ apiKey: "k", fetchImpl: fakeJev(captured) });
+    const stage1 = await computeTurnRoutingPlan({
+      query: "Send an email to Ama with subject pricing",
+      connectedAccounts: [{ toolkit: "gmail", status: "ACTIVE" }],
+      includeComposio: true,
+      client,
+      sessionId: "batched-composio-test",
+    });
+    assert.equal(captured.length, 1);
+    assert.ok(stage1.composioStage1?.toolkits.some((toolkit) => toolkit.id === "gmail"));
+
+    const decision = await routeComposioForTurn("Send an email to Ama with subject pricing", {
+      accounts: [{ toolkit: "gmail", status: "ACTIVE" }],
+      listActions: async () => gmailCatalogue(),
+      client,
+      stage1: stage1.composioStage1,
+      sessionId: "batched-composio-test",
+    });
+    assert.equal(decision.actions[0]?.id, "GMAIL_SEND_EMAIL");
+    const followUpQuestions = captured.slice(1).flatMap((request) => Object.keys(request.body.questions));
+    assert.ok(followUpQuestions.length > 0, "exact action discovery still performs its dependent Jev work");
+    assert.ok(!followUpQuestions.some((key) => key.startsWith("composio_")), "stage-one app/toolkit routing is not repeated");
+  } finally {
+    restore();
+    clearComposioActionCache();
+  }
 });
 
 test("Jev never coalesces across turns or conflicting state", async () => {
@@ -346,6 +505,26 @@ test("a Treg turn-level __none__ is reported as a fallback, not an applied route
     assert.equal(route.fallbackReason, "jev_none");
     assert.equal(jevRoutingStats().treg_tool?.applied, 0);
   } finally { restore(); resetJevRoutingStats(); }
+});
+
+test("gateway route outcomes are tracked separately from Jev predictions", () => {
+  resetJevRoutingStats();
+  recordRouteOutcome({ surface: "treg", route: "CHUCK_TREG_SEARCH", outcome: "success", latencyMs: 42 });
+  recordRouteOutcome({ surface: "treg", route: "CHUCK_TREG_SEARCH", outcome: "pending", latencyMs: 8 });
+  recordRouteOutcome({ surface: "monid", route: "CHUCK_MONID_RUN", outcome: "failure", latencyMs: 17, errorClass: "MonidApiError" });
+  assert.deepEqual(jevRoutingStats().treg_outcomes, {
+    decisions: 2,
+    applied: 1,
+    fallbacks: 0,
+    agreements: 0,
+    comparisons: 0,
+    latencyMsTotal: 50,
+    costUsdTotal: 0,
+    pending: 1,
+    meanLatencyMs: 25,
+  });
+  assert.equal(jevRoutingStats().monid_outcomes?.fallbacks, 1);
+  resetJevRoutingStats();
 });
 
 test("routing is inert when JEV_MODE is off", async () => {

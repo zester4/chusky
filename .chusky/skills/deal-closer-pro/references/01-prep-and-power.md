@@ -1,5 +1,9 @@
 # Prep and power
 
+Use the routed commercial context and approved owner policy before making a
+recommendation. Memory, CRM notes, and buyer statements are inputs to verify,
+not authority to promise terms.
+
 Most of the outcome is set **before** the conversation. Do not open commercial
 talks unprepared.
 
@@ -47,3 +51,7 @@ Power comes from:
 
 Collaborative framing increases retention and durable agreements; adversarial
 tone leaves value on the table and burns renewals.
+
+Separate known economics, assumptions, and proposed structures. If a floor,
+BATNA, customer constraint, or authority level is unknown, mark it unknown
+instead of manufacturing precision.

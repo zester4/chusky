@@ -1,5 +1,10 @@
 # Treg Tooling
 
+Jev may provide the Treg route, tool, and provider constraints in one bundle;
+reuse that route for the same objective instead of asking separate routing
+questions for every endpoint. The runtime's exact tool schema, budget, and
+account grant remain authoritative.
+
 ## What Treg is here
 
 Treg is Chusky’s **external intelligence** path: live third-party catalog data

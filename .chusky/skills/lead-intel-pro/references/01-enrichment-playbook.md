@@ -1,5 +1,9 @@
 # Enrichment Playbook
 
+Use Jev's single routed intelligence plan for the current objective and reuse
+its provider route for the same step. Treg/provider output is evidence with
+provenance, not authority to contact, create CRM records, or infer intent.
+
 ## Mindset
 
 Enrichment is **retrieval of provider data**, not creative writing. You pull
@@ -97,3 +101,6 @@ If email is missing, do not invent one. Offer LinkedIn or “no email in provide
 ```
 
 Never pad with guessed titles or fabricated contacts to look complete.
+
+Keep returned, verified, invalid, and unknown fields distinct; preserve the
+provider/endpoint and retrieval time for every material claim.

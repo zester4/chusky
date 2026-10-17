@@ -1,5 +1,9 @@
 # Tools and stack map
 
+Jev routing is a bounded preload for the current step, not a reason to call
+separate routing searches on every wake. Reuse a verified route until the
+objective, scope, provider, or required capability materially changes.
+
 ## How to think about tools
 
 ```text
@@ -61,3 +65,7 @@ Supervisor starts/replans/verifies missions. Workers execute scoped steps.
 5. Verify definition of done
 
 Never register a missing path.
+
+For external tools, pair the execution receipt with a provider read-back or
+bounded evidence item. Tool availability, a specialist narrative, or a queued
+task is not completion proof.

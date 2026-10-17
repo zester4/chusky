@@ -1,5 +1,9 @@
 # Save and retrieve playbook
 
+Use Jev's bounded memory route once for the current objective and reuse the
+brief while scope and purpose are unchanged. The runtime grant and canonical
+store remain authoritative; this playbook never expands access.
+
 ## Save decision
 
 Save when all are true:
@@ -37,3 +41,8 @@ On retrieval:
 4. Detect contradictions and supersession.
 5. Use only facts relevant to the objective.
 6. Cite or explain uncertainty when it matters.
+
+If retrieval, vector indexing, or cache projection fails, continue only with
+context already supplied or a safe live source. Do not widen the lookup or claim
+that a save/update completed until the canonical store confirms it. Redis and
+vector results are projections; they are not proof of durable persistence.

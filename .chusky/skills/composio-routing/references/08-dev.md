@@ -1,5 +1,10 @@
 # Dev & project ops
 
+Consume Jev's repository or operations route first and bind it to the intended
+project/account. Separate inspection, patching, review, and release. Production
+deploys, remote pushes, permission changes, and destructive operations remain
+approval-gated and require an independent provider/deployment read-back.
+
 | Prefer | Typical use |
 |--------|-------------|
 | `GITHUB_` | Repos, PRs, issues |

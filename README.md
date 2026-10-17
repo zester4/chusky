@@ -357,6 +357,12 @@ MONID_ENABLED=true
 MONID_API_KEY=...
 ```
 
+On eligible private turns, Jev receives bounded capability cards and chooses
+one primary external-data backend when Treg and Monid overlap. Treg remains the
+default live-intelligence path; an explicit Monid request or a Treg coverage
+gap selects Monid. Chusky does not expose both overlapping gateways for the
+same route, and this choice never grants spend or authorization.
+
 For separate company billing, `MONID_ORG_TOKENS_JSON` maps trusted Chusky
 organization IDs to server-only Monid API keys. Chusky never exposes these
 credentials to model tools or browser code. Default spend controls are $5 per
@@ -1683,9 +1689,9 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `MONID_MISSION_BUDGET_USD` | — | `1` | Per-mission Monid spend cap |
 | `MONID_PER_CALL_SOFT_CAP_USD` | — | `0.25` | Maximum estimated cost reserved for one Monid run |
 | `MONID_RATE_LIMIT_PER_MINUTE` | — | `20` | Per-owner Monid call-attempt limit per minute |
-| `JEV_MODE` | — | `off` | Jev decision routing for skills, Composio toolkits/actions, Treg, and optional native-tool exposure: `off`, `shadow` (log only), or `enforce` (apply with deterministic fallback). See `.agents/skills/chusky/references/jev.md` |
+| `JEV_MODE` | — | `off` | Jev decision routing for skills, Composio toolkits/actions, Treg, Monid, and optional native-tool exposure: `off`, `shadow` (log only), or `enforce` (apply with deterministic fallback). See `.agents/skills/chusky/references/jev.md` |
 | `JEV_PROVIDER` | — | `openrouter` | `openrouter` reuses `OPENROUTER_API_KEY`; `typesafe` needs `JEV_API_KEY` |
-| `JEV_SURFACES` | — | `skills,composio,treg,autonomy,browser` | Jev surfaces: skills, Composio, Treg, bounded autonomy, inspected browser next-step proposals, and opt-in `native` tool exposure |
+| `JEV_SURFACES` | — | `skills,composio,treg,monid,autonomy,browser` | Jev surfaces: skills, Composio, Treg, Monid, bounded autonomy, inspected browser next-step proposals, and opt-in `native` tool exposure |
 | `JEV_NATIVE_TOOL_ROUTING` | — | `false` | With `native` enabled, select a compact native-tool schema set in enforce mode; false preserves the existing full native catalog |
 | `NATIVE_TOOL_LOADING` | — | `full` | `full` preserves all native schemas; `bundle` sends core/matched bundles and enables progressive `CHUCK_FIND_TOOLS` discovery |
 | `JEV_NATIVE_TOOL_MAX_CANDIDATES` | — | `16` | Maximum compact native candidates considered by Jev (4-32) |
@@ -1694,6 +1700,8 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `JEV_COMPOSIO_ROUTE_UNCONNECTED` | — | `true` | Route across Composio's full toolkit catalogue so requests can target apps that are not connected yet (connect-first hint, never executable until connected) |
 | `JEV_COMPOSIO_CATALOG_LIMIT` | — | `500` | Most-used Composio toolkits considered for routing (cached 6h) |
 | `JEV_TURN_BUDGET_MS` | — | `3000` | One shared per-turn deadline for all routing before the first model call; slower routes fall back to keywords |
+| `JEV_TURN_BATCH_ROUTING` | — | `true` | In enforce mode, evaluate independent action, skill, native-tool, Composio, Treg, and enabled Monid routing questions in one Jev request; dependent catalogue lookups still follow the selected capability |
+| `JEV_TURN_PLAN_MAX_CANDIDATES` | — | `48` | Maximum compact candidates per routing surface included in the batched turn plan (8-120) |
 
 ---
 

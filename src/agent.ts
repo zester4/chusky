@@ -53,15 +53,16 @@ import { posthog } from "./posthog.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
 import { assertComposioImageUploadField, buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, findPendingSavedImagePostRetry, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, selectRetrievedImageForAction, type MediaAttachmentSelection } from "./mediaBridge.js";
 import { hasValidImageEnvelope, sniffImageMime } from "./channels/imageMedia.js";
-import { ROUTED_SKILL_REFERENCES, readSkillFile, routedSkillContext, skillContextForBinding } from "./skills/catalog.js";
+import { ROUTED_SKILL_REFERENCES, listSkillSummaries, readSkillFile, routedSkillContext, skillContextForBinding } from "./skills/catalog.js";
 import { routeSkillsForTurn } from "./decisions/skillRouter.js";
 import { composioDecisionContext, routeComposioForTurn, toComposioAction, toComposioToolkitInfo, type ComposioAction, type ComposioToolkitInfo } from "./decisions/composioRouter.js";
 import { recordTurnMode } from "./decisions/telemetry.js";
 import { decideTurnAction } from "./decisions/actionGate.js";
 import type { MissionRoutingCache } from "./decisions/missionRoutingCache.js";
 import { routeTregForTurn, tregTurnContext } from "./decisions/tregRouter.js";
-import { createRoutingDeadline } from "./decisions/jev.js";
-import { routeNativeToolsForTurn } from "./decisions/nativeToolRouter.js";
+import { createRoutingDeadline, jevEnabled } from "./decisions/jev.js";
+import { augmentNativeToolRoute, nativeToolManifest, routeNativeToolsForTurn } from "./decisions/nativeToolRouter.js";
+import { computeTurnRoutingPlan } from "./decisions/turnRouter.js";
 import { claimUpgradeNotice, formatAgentReleaseContext, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
 import { abortable, safeToolAudit, throwIfAborted } from "./cancellation.js";
 import { reconcileComposioTriggerSubscription, type ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
@@ -2628,6 +2629,9 @@ async function executeAgent(
     if (sharedScope && isSharedChannelToolDenied(name)) return false;
     return (!allow || allow.has(name) || ownerPrivateRun && voiceCapabilityNames.has(composioActionSlug(name))) && voiceModelAllowed(name) && !deny.has(name);
   });
+  const meetingPreloadedTools: any[] = options?.meetingId
+    ? availableTools.filter((tool) => discoveredMeetingTools.some((candidate) => toolName(candidate) === toolName(tool)))
+    : [];
   // A ToolRouter session may expose only gateway/meta tools when its catalogue
   // is large. The exact purpose-bounded voice schemas are already resolved
   // above, so keep every resolved capability action in the model payload. The
@@ -2652,31 +2656,34 @@ async function executeAgent(
   // the already-granted exact slugs, never a model-selected or broad catalog
   // of actions. The normal dispatch path still enforces account scope,
   // argument validation, approval, and provider receipts.
-  if (sessionObj && allow?.size && typeof composio?.tools?.getRawComposioToolBySlug === "function") {
+  if (sessionObj && allow?.size) {
     const present = new Set(availableTools.map((tool) => toolName(tool)));
-    for (const slug of allow) {
-      if (!/^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(slug) || slug.startsWith("CHUCK_") || slug.startsWith("COMPOSIO_") || slug.startsWith("MCP_") || present.has(slug) || deny.has(slug)) continue;
-      try {
-        const raw = await abortable(composio.tools.getRawComposioToolBySlug.call(composio.tools, slug), signal);
-        const rawRecord = raw && typeof raw === "object" ? raw as Record<string, any> : undefined;
-        const rawFunction = rawRecord?.function && typeof rawRecord.function === "object" ? rawRecord.function as Record<string, any> : undefined;
-        const returnedSlug = String(rawRecord?.slug ?? rawRecord?.toolSlug ?? rawRecord?.tool_slug ?? rawFunction?.name ?? "").trim().toUpperCase();
-        const parameters = rawRecord?.inputParameters ?? rawRecord?.input_parameters ?? rawFunction?.parameters;
-        if (returnedSlug !== slug || !parameters || typeof parameters !== "object" || Array.isArray(parameters)) continue;
-        const exactTool = {
-          type: "function",
-          function: {
-            name: slug,
-            description: String(rawRecord?.description ?? rawRecord?.name ?? rawFunction?.description ?? slug).slice(0, 1_000),
-            parameters,
-          },
-        };
-        registerComposioToolMetadata(exactTool);
-        availableTools.push(addAccountSelector(exactTool));
-        present.add(slug);
-      } catch (error) {
-        logger.debug({ err: error, tool: slug }, "Could not resolve an explicitly granted Composio action schema");
-      }
+    const loaded: string[] = [];
+    const unavailable: string[] = [];
+    const requestedSlugs = [...allow].map(composioActionSlug).filter((requestedSlug) =>
+      /^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(requestedSlug)
+      && !requestedSlug.startsWith("CHUCK_")
+      && !requestedSlug.startsWith("COMPOSIO_")
+      && !requestedSlug.startsWith("MCP_")
+      && !present.has(requestedSlug)
+      && !deny.has(requestedSlug),
+    );
+    const exactTools = await resolveExactComposioModelTools(sessionObj, requestedSlugs, signal);
+    for (const requestedSlug of requestedSlugs) {
+      const resolved = exactTools.get(requestedSlug);
+      if (!resolved) { unavailable.push(requestedSlug); continue; }
+      const exactTool = resolved.tool;
+      registerComposioToolMetadata(exactTool);
+      const modelTool = meetingComposioAccountAliases
+        ? hideMeetingAccountSelector(addAccountSelector(exactTool))
+        : addAccountSelector(exactTool);
+      availableTools.push(modelTool);
+      if (options?.meetingId) meetingPreloadedTools.push(modelTool);
+      present.add(requestedSlug);
+      loaded.push(requestedSlug);
+    }
+    if (options?.meetingId && (loaded.length || unavailable.length)) {
+      logger.info({ meetingId: options.meetingId, requested: loaded.length + unavailable.length, loaded, unavailable }, "Meeting Composio actions prepared");
     }
   }
   const composioToolPresentations = collectComposioToolPresentations(fullComposioTools);
@@ -2932,7 +2939,7 @@ async function executeAgent(
   // Resolve one turn-wide intent before launching independent skill, Treg,
   // Composio, and native routers. A native-tool `none` is not a global `none`:
   // an email request may need Composio even when no CHUCK_* tool is relevant.
-  // Durable/trigger/shared/media/approved work bypasses this optimization.
+  // Durable/trigger/shared/media/approved work bypass this optimization.
   const hasNonTextContent = Array.isArray(userMessage) && userMessage.some((part) => part.type !== "text");
   const forceCapabilityRouting = Boolean(
     (voiceTurn && !voiceFastLane && !voiceToolFreeTurn) || (sharedScope && !options?.speculativeMeetingTurn) || (options?.ephemeral && !options?.speculativeMeetingTurn) || hasNonTextContent || mediaRequest
@@ -2940,85 +2947,173 @@ async function executeAgent(
     || options?.taskId || options?.missionId || options?.missionStepId || (options?.meetingId && !options?.speculativeMeetingTurn) || options?.meetingAppAccess
     || options?.toolAllow?.length || options?.missionRoutingCache || channelContext?.triggerEventId
   );
-  const turnActionDecision = voiceFastLane || voiceToolFreeTurn
-    ? { noActionNeeded: true as const, reason: voiceFastLane ? "voice_fast_lane" as const : "voice_tool_free" as const, actionProbability: 0 }
-    : toolsDisabled && !forceCapabilityRouting
-    ? { noActionNeeded: true, reason: "routing_disabled" as const }
-    : await decideTurnAction(routingQuery, {
-      recentContext: routingRecentContext,
-      forceCapability: forceCapabilityRouting,
-      signal,
-      deadline: routingDeadline,
-      sessionId: durableRunId,
-    });
-  const actionRoutingLikely = !turnActionDecision.noActionNeeded;
-  // Media uses a tiny local skill preflight below. Do not run the broad skill
-  // router or inject the full creative manual before the generation turn.
+  const batchRoutingEligible = config.jevMode === "enforce"
+    && config.jevTurnBatchRouting
+    && !voiceTurn
+    && !mediaRequest
+    && !sharedScope
+    && !toolsDisabled
+    && !hasNonTextContent
+    && !pendingApproval
+    && !pendingContinuation
+    && !approvedApprovalId
+    && !options?.ephemeral
+    && !options?.meetingId
+    && !options?.toolAllow?.length
+    && !channelContext?.triggerEventId
+    && !persistedMissionRouting
+    && !reusableMissionRouting
+    && !options?.taskId
+    && !options?.missionId
+    && !options?.missionStepId;
+  let turnActionDecision: { noActionNeeded: boolean; reason: string; actionProbability?: number };
+  let actionRoutingLikely: boolean;
+  let skillRoutePromise: Promise<Awaited<ReturnType<typeof routeSkillsForTurn>> | undefined>;
+  let tregRoutePromise: Promise<Awaited<ReturnType<typeof routeTregForTurn>> | undefined>;
+  let accountsPromise: Promise<ConnectedComposioAccount[] | undefined>;
+  let composioRoutePromise: Promise<Awaited<ReturnType<typeof routeComposioForTurn>> | undefined>;
+  let nativeToolRoutePromise: Promise<Awaited<ReturnType<typeof routeNativeToolsForTurn>>>;
+
+  // The normal private text path uses one explicit Jev request for all
+  // independent routing judgments. Connected-account metadata is demand-loaded
+  // only after the action gate says a capability is needed, so ordinary
+  // conversation does not read the account store just to decide it is ordinary.
+  if (batchRoutingEligible) {
+    try {
+      const skills = await listSkillSummaries().catch((error) => {
+          logger.debug({ err: error }, "Skill catalogue unavailable for batched routing");
+          return [] as Array<{ name: string; description: string }>;
+        });
+      const nativeNames = new Set(availableTools.map((tool) => toolName(tool)));
+      const plan = await computeTurnRoutingPlan({
+        query: routingQuery,
+        recentContext: routingRecentContext,
+        skills,
+        nativeCandidates: nativeToolManifest.filter((tool) => nativeNames.has(tool.slug)),
+        availableNativeTools: availableTools,
+        connectedAccounts: [],
+        forceCapability: forceCapabilityRouting,
+        includeSkills: !options?.ephemeral || ownerPrivateRun,
+        includeNative: true,
+        includeComposio: false,
+        includeTreg: true,
+        includeMonid: true,
+        preserveNativeTools: Boolean(options?.toolAllow?.length && !options?.taskId && !options?.missionId),
+        signal: routingDeadline.signal,
+        sessionId: durableRunId,
+      });
+      turnActionDecision = plan.action;
+      actionRoutingLikely = !plan.action.noActionNeeded;
+      accountsPromise = actionRoutingLikely && !sharedScope
+        ? listConnectedAccounts(userId).catch((error) => {
+          logger.debug({ err: error, userId }, "Connected-account metadata unavailable after batched action gate");
+          return undefined;
+        })
+        : Promise.resolve(undefined);
+      skillRoutePromise = Promise.resolve(actionRoutingLikely ? plan.skillRoute : undefined);
+      tregRoutePromise = Promise.resolve(actionRoutingLikely ? plan.tregRoute : undefined);
+      composioRoutePromise = accountsPromise.then((accounts) => actionRoutingLikely && accounts && jevEnabled("composio")
+        ? routeComposioForTurn(routingQuery, {
+          accounts,
+          listActions: listComposioToolkitActions,
+          listToolkits: listComposioToolkitCatalogue,
+          signal,
+          deadline: routingDeadline,
+          recentContext: routingRecentContext,
+          sessionId: durableRunId,
+        }).catch((error) => {
+          logger.debug({ err: error, userId }, "Batched Composio action routing unavailable for this run");
+          return undefined;
+        })
+        : undefined).catch((error) => {
+          logger.debug({ err: error, userId }, "Batched Composio account lookup unavailable for this run");
+          return undefined;
+        });
+      const nativeRoutingQuery = options?.missionToolHints?.length
+        ? `${routingQuery}\nPlanner preload hints: ${options.missionToolHints.join(", ")}`
+        : routingQuery;
+      const applyBatchedMonidRoute = (route: Awaited<ReturnType<typeof routeNativeToolsForTurn>>) => plan.monidRoute?.selected.length
+        ? augmentNativeToolRoute(availableTools, route, plan.monidRoute.selected)
+        : route;
+      nativeToolRoutePromise = actionRoutingLikely && plan.nativeToolRoute
+        ? Promise.resolve(applyBatchedMonidRoute(plan.nativeToolRoute))
+        : actionRoutingLikely
+        ? routeNativeToolsForTurn(availableTools, nativeRoutingQuery, { signal, deadline: routingDeadline, recentContext: routingRecentContext, sessionId: durableRunId, preserveAll: Boolean(options?.toolAllow?.length && !options?.taskId && !options?.missionId) }).then(applyBatchedMonidRoute)
+        : Promise.resolve({
+          tools: availableTools.filter((tool) => toolName(tool) === "CHUCK_FIND_TOOLS" || toolName(tool) === "COMPOSIO_SEARCH_TOOLS"),
+          source: "fallback" as const,
+          candidateCount: availableTools.filter((tool) => toolName(tool).startsWith("CHUCK_")).length,
+          selected: [],
+          noNativeTool: true,
+          noNativeToolConfidence: 1 - (plan.action.actionProbability ?? 0),
+          fallbackReason: plan.action.reason,
+        });
+    } catch (error) {
+      logger.warn({ err: error }, "Batched Jev turn routing unavailable; using independent route fallbacks");
+      // The fallback below is deliberately the pre-batch behavior. A partial
+      // plan is never applied because its surfaces must agree on one state.
+      turnActionDecision = voiceFastLane || voiceToolFreeTurn
+        ? { noActionNeeded: true, reason: voiceFastLane ? "voice_fast_lane" : "voice_tool_free", actionProbability: 0 }
+        : await decideTurnAction(routingQuery, { recentContext: routingRecentContext, forceCapability: forceCapabilityRouting, signal, deadline: routingDeadline, sessionId: durableRunId });
+      actionRoutingLikely = !turnActionDecision.noActionNeeded;
+      const skillsRoutable = actionRoutingLikely && !mediaRequest && (!options?.ephemeral || ownerPrivateRun) && !voiceTurn;
+      skillRoutePromise = skillsRoutable
+        ? routeSkillsForTurn(routingQuery, { signal, deadline: routingDeadline, recentContext: routingRecentContext, sessionId: durableRunId }).catch((routeError) => { logger.warn({ err: routeError }, "Skill routing unavailable; continuing with keyword routing"); return undefined; })
+        : Promise.resolve(undefined);
+      tregRoutePromise = actionRoutingLikely && !sharedScope && !voiceTurn && !toolsDisabled
+        ? routeTregForTurn(routingQuery, { signal, deadline: routingDeadline, sessionId: durableRunId }).catch(() => undefined)
+        : Promise.resolve(undefined);
+      accountsPromise = actionRoutingLikely && !sharedScope
+        ? listConnectedAccounts(userId).catch((accountError) => { logger.debug({ err: accountError, userId }, "Connected-account metadata unavailable for this run"); return undefined; })
+        : Promise.resolve(undefined);
+      composioRoutePromise = accountsPromise.then((accounts) => actionRoutingLikely && accounts
+        ? routeComposioForTurn(routingQuery, { accounts, listActions: listComposioToolkitActions, listToolkits: listComposioToolkitCatalogue, signal, deadline: routingDeadline, recentContext: routingRecentContext, sessionId: durableRunId })
+        : undefined).catch((routeError) => { logger.debug({ err: routeError, userId }, "Composio routing unavailable for this run"); return undefined; });
+      const nativeRoutingQuery = options?.missionToolHints?.length ? `${routingQuery}\nPlanner preload hints: ${options.missionToolHints.join(", ")}` : routingQuery;
+      nativeToolRoutePromise = actionRoutingLikely
+        ? routeNativeToolsForTurn(availableTools, nativeRoutingQuery, { signal, deadline: routingDeadline, recentContext: routingRecentContext, sessionId: durableRunId, preserveAll: Boolean(options?.toolAllow?.length && !options?.taskId && !options?.missionId) })
+        : Promise.resolve({ tools: availableTools.filter((tool) => toolName(tool) === "CHUCK_FIND_TOOLS" || toolName(tool) === "COMPOSIO_SEARCH_TOOLS"), source: "fallback" as const, candidateCount: availableTools.filter((tool) => toolName(tool).startsWith("CHUCK_")).length, selected: [], noNativeTool: true, noNativeToolConfidence: 1 - (turnActionDecision.actionProbability ?? 0), fallbackReason: turnActionDecision.reason });
+    }
+  } else {
+    turnActionDecision = voiceFastLane || voiceToolFreeTurn
+      ? { noActionNeeded: true, reason: voiceFastLane ? "voice_fast_lane" : "voice_tool_free", actionProbability: 0 }
+      : toolsDisabled && !forceCapabilityRouting
+      ? { noActionNeeded: true, reason: "routing_disabled" }
+      : await decideTurnAction(routingQuery, { recentContext: routingRecentContext, forceCapability: forceCapabilityRouting, signal, deadline: routingDeadline, sessionId: durableRunId });
+    actionRoutingLikely = !turnActionDecision.noActionNeeded;
+    const skillsRoutable = actionRoutingLikely && !mediaRequest && (!options?.ephemeral || ownerPrivateRun) && !voiceTurn;
+    skillRoutePromise = persistedMissionRouting || reusableMissionRouting
+      ? Promise.resolve(reusableMissionRouting?.skillRoute)
+      : skillsRoutable
+      ? routeSkillsForTurn(routingQuery, { signal, deadline: routingDeadline, recentContext: routingRecentContext, sessionId: durableRunId }).catch((error) => { logger.warn({ err: error }, "Skill routing unavailable; continuing with keyword routing"); return undefined; })
+      : Promise.resolve(undefined);
+    tregRoutePromise = persistedMissionRouting || reusableMissionRouting
+      ? Promise.resolve(reusableMissionRouting?.tregRoute)
+      : actionRoutingLikely && !sharedScope && !voiceTurn && !toolsDisabled
+      ? routeTregForTurn(routingQuery, { signal, deadline: routingDeadline, sessionId: durableRunId }).catch(() => undefined)
+      : Promise.resolve(undefined);
+    accountsPromise = persistedMissionRouting
+      ? Promise.resolve(persistedMissionRouting.connectedAccounts as ConnectedComposioAccount[])
+      : reusableMissionRouting
+      ? Promise.resolve(reusableMissionRouting.routedAccounts)
+      : !actionRoutingLikely || sharedScope
+      ? Promise.resolve(undefined)
+      : listConnectedAccounts(userId).catch((error) => { logger.debug({ err: error, userId }, "Connected-account metadata unavailable for this run"); return undefined; });
+    composioRoutePromise = persistedMissionRouting || reusableMissionRouting
+      ? Promise.resolve(reusableMissionRouting?.composioDecision)
+      : accountsPromise.then((accounts) => actionRoutingLikely && accounts
+      ? routeComposioForTurn(routingQuery, { accounts, listActions: listComposioToolkitActions, listToolkits: listComposioToolkitCatalogue, signal, deadline: routingDeadline, recentContext: routingRecentContext, sessionId: durableRunId })
+      : undefined).catch((error) => { logger.debug({ err: error, userId }, "Composio routing unavailable for this run"); return undefined; });
+    // Start native routing at the same time as the other Jev surfaces. It used
+    // to start only after these calls completed, reusing their already-expired
+    // deadline and turning a healthy native route into a timeout fallback.
+    const nativeRoutingQuery = options?.missionToolHints?.length ? `${routingQuery}\nPlanner preload hints: ${options.missionToolHints.join(", ")}` : routingQuery;
+    nativeToolRoutePromise = actionRoutingLikely
+      ? routeNativeToolsForTurn(availableTools, nativeRoutingQuery, { signal, deadline: routingDeadline, recentContext: routingRecentContext, sessionId: durableRunId, preserveAll: Boolean(options?.toolAllow?.length && !options?.taskId && !options?.missionId) })
+      : Promise.resolve({ tools: availableTools.filter((tool) => toolName(tool) === "CHUCK_FIND_TOOLS" || toolName(tool) === "COMPOSIO_SEARCH_TOOLS"), source: "fallback" as const, candidateCount: availableTools.filter((tool) => toolName(tool).startsWith("CHUCK_")).length, selected: [], noNativeTool: true, noNativeToolConfidence: 1 - (turnActionDecision.actionProbability ?? 0), fallbackReason: turnActionDecision.reason });
+  }
+
   const skillsRoutable = actionRoutingLikely && !mediaRequest && (!options?.ephemeral || ownerPrivateRun) && !voiceTurn;
-  const skillRoutePromise = persistedMissionRouting || reusableMissionRouting
-    ? Promise.resolve(reusableMissionRouting?.skillRoute)
-    : skillsRoutable
-    ? routeSkillsForTurn(routingQuery, { signal, deadline: routingDeadline, recentContext: routingRecentContext, sessionId: durableRunId }).catch((error) => {
-      logger.warn({ err: error }, "Skill routing unavailable; continuing with keyword routing");
-      return undefined;
-    })
-    : Promise.resolve(undefined);
-  const tregRoutePromise = persistedMissionRouting || reusableMissionRouting
-    ? Promise.resolve(reusableMissionRouting?.tregRoute)
-    : actionRoutingLikely && !sharedScope && !voiceTurn && !toolsDisabled
-    ? routeTregForTurn(routingQuery, { signal, deadline: routingDeadline, sessionId: durableRunId }).catch(() => undefined)
-    : Promise.resolve(undefined);
-  // Connected-account metadata is private context. Never expose a user's
-  // account aliases or tool access to a shared channel conversation.
-  const accountsPromise: Promise<ConnectedComposioAccount[] | undefined> = persistedMissionRouting
-    ? Promise.resolve(persistedMissionRouting.connectedAccounts as ConnectedComposioAccount[])
-    : reusableMissionRouting
-    ? Promise.resolve(reusableMissionRouting.routedAccounts)
-    : !actionRoutingLikely || sharedScope
-    ? Promise.resolve(undefined)
-    : listConnectedAccounts(userId).catch((error) => {
-      logger.debug({ err: error, userId }, "Connected-account metadata unavailable for this run");
-      return undefined;
-    });
-  const composioRoutePromise = persistedMissionRouting || reusableMissionRouting
-    ? Promise.resolve(reusableMissionRouting?.composioDecision)
-    : accountsPromise.then((accounts) => actionRoutingLikely && accounts
-    ? routeComposioForTurn(routingQuery, {
-      accounts,
-      listActions: listComposioToolkitActions,
-      listToolkits: listComposioToolkitCatalogue,
-      signal,
-      deadline: routingDeadline,
-      recentContext: routingRecentContext,
-      sessionId: durableRunId,
-    })
-    : undefined).catch((error) => {
-    logger.debug({ err: error, userId }, "Composio routing unavailable for this run");
-    return undefined;
-  });
-  // Start native routing at the same time as the other Jev surfaces. It used
-  // to start only after these calls completed, reusing their already-expired
-  // deadline and turning a healthy native route into a timeout fallback.
-  const nativeRoutingQuery = options?.missionToolHints?.length
-    ? `${routingQuery}\nPlanner preload hints: ${options.missionToolHints.join(", ")}`
-    : routingQuery;
-  const nativeToolRoutePromise = actionRoutingLikely
-    ? routeNativeToolsForTurn(availableTools, nativeRoutingQuery, {
-      signal,
-      deadline: routingDeadline,
-      recentContext: routingRecentContext,
-      sessionId: durableRunId,
-      preserveAll: Boolean(options?.toolAllow?.length && !options?.taskId && !options?.missionId),
-    })
-    : Promise.resolve({
-      tools: availableTools.filter((tool) => toolName(tool) === "CHUCK_FIND_TOOLS" || toolName(tool) === "COMPOSIO_SEARCH_TOOLS"),
-      source: "fallback" as const,
-      candidateCount: availableTools.filter((tool) => toolName(tool).startsWith("CHUCK_")).length,
-      selected: [],
-      noNativeTool: true,
-      noNativeToolConfidence: 1 - (turnActionDecision.actionProbability ?? 0),
-      fallbackReason: turnActionDecision.reason,
-    });
   const [skillRoute, tregRoute, routedAccounts, composioDecision, nativeToolRoute] = await Promise.all([
     skillRoutePromise,
     tregRoutePromise,
@@ -3056,8 +3151,49 @@ async function executeAgent(
           const slug = toolName(tool);
           if (!slug || (allow && !allow.has(slug)) || present.has(slug) || deny.has(slug) || COMPOSIO_GATEWAY_TOOLS.has(slug) || slug.startsWith("CHUCK_") || slug.startsWith("MCP_")) continue;
           registerComposioToolMetadata(tool);
-          availableTools.push(addAccountSelector(tool));
+          const modelTool = meetingComposioAccountAliases
+            ? hideMeetingAccountSelector(addAccountSelector(tool))
+            : addAccountSelector(tool);
+          availableTools.push(modelTool);
           present.add(slug);
+        }
+      }
+      // A Jev action can be confidently routed while the SDK's direct-tool
+      // response still omits its full schema. In meetings that omission used
+      // to leave the model with a route description but no callable action.
+      // Recover only exact, connected candidates already selected by Jev; a
+      // shared meeting must still carry the exact room grant.
+      if (options?.meetingId && sessionObj) {
+        const routedLoaded: string[] = [];
+        const routedUnavailable: string[] = [];
+        const present = new Set(availableTools.map((tool) => toolName(tool)));
+        const candidates = composioDecision.actions
+          .filter((action) => action.connected !== false)
+          .filter((action) => Number(action.probability ?? 0) >= config.jevInjectActionMinProbability || Number(action.verified ?? 0) >= 0.75)
+          .slice(0, 4);
+        for (const action of candidates) {
+          const slug = composioActionSlug(String(action.id ?? ""));
+          if (!/^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(slug)
+            || slug.startsWith("CHUCK_")
+            || slug.startsWith("COMPOSIO_")
+            || slug.startsWith("MCP_")
+            || (sharedScope && (!allow || !allow.has(slug)))
+            || present.has(slug)
+            || deny.has(slug)) continue;
+          const resolved = await resolveExactComposioModelTool(sessionObj, slug, signal);
+          if (!resolved) { routedUnavailable.push(slug); continue; }
+          const exactTool = resolved.tool;
+          registerComposioToolMetadata(exactTool);
+          const modelTool = meetingComposioAccountAliases
+            ? hideMeetingAccountSelector(addAccountSelector(exactTool))
+            : addAccountSelector(exactTool);
+          availableTools.push(modelTool);
+          meetingPreloadedTools.push(modelTool);
+          present.add(slug);
+          routedLoaded.push(slug);
+        }
+        if (routedLoaded.length || routedUnavailable.length) {
+          logger.info({ meetingId: options.meetingId, loaded: routedLoaded, unavailable: routedUnavailable }, "Meeting routed Composio actions reconciled");
         }
       }
     }
@@ -3301,10 +3437,10 @@ async function executeAgent(
       (voiceFastLane || voiceToolFreeTurn)
         ? []
         : noToolTurn
-          ? [...availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS" || revealedNativeTools.has(toolSchemaName(tool))), ...preloadedVoiceCapabilityTools]
+          ? [...availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS" || revealedNativeTools.has(toolSchemaName(tool))), ...meetingPreloadedTools, ...preloadedVoiceCapabilityTools]
           : missionHintPreload
-            ? [...missionRoutedNativeTools, ...preloadedMissionTools, ...missionDiscoveryTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools]
-            : [...nativeToolRoute.tools, ...preloadedMissionTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools]
+            ? [...missionRoutedNativeTools, ...preloadedMissionTools, ...missionDiscoveryTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools]
+            : [...nativeToolRoute.tools, ...preloadedMissionTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools]
     )
       .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index);
     const approvalResumeTool = forcedApproval
@@ -3344,7 +3480,7 @@ async function executeAgent(
       counts.schemaChars += JSON.stringify(tool).length;
       return counts;
     }, { native: 0, composio: 0, mcp: 0, other: 0, schemaChars: 0 });
-    logger.info({ round, finalModelToolCount: modelAvailableTools.length, ...toolCounts }, "Model tool payload prepared");
+    logger.info({ round, ...(options?.meetingId ? { meetingId: options.meetingId } : {}), finalModelToolCount: modelAvailableTools.length, ...toolCounts }, "Model tool payload prepared");
     const compactedContext = inTurnContextSummary
       ? { messages: compactModelMessages(messages, undefined, undefined, `[ScaleDown in-turn context summary]\n${inTurnContextSummary}`), summary: inTurnContextSummary }
       : await compactModelMessagesWithSummary(messages);
@@ -4735,6 +4871,117 @@ function normalizeComposioSearchResults(result: unknown): unknown[] {
     }
   }
   return [];
+}
+
+type ExactComposioToolResolution = {
+  tool: any;
+  source: "session" | "batch" | "slug" | "search";
+};
+
+function composioSchemaCandidates(result: unknown): unknown[] {
+  const candidates = normalizeComposioSearchResults(result);
+  if (candidates.length) return candidates;
+  if (!result || typeof result !== "object" || Array.isArray(result)) return [];
+  const record = result as Record<string, unknown>;
+  return [record, record.tool, record.toolSchema, record.tool_schema, record.data].filter(Boolean);
+}
+
+/**
+ * Convert one provider record into a canonical model function only when the
+ * returned action is exactly the requested slug and has a complete schema.
+ * A route or search result is never allowed to substitute a similarly named
+ * action, and a description without input parameters is not callable.
+ */
+function exactComposioModelTool(value: unknown, expectedSlug: string): any | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, any>;
+  if (record.hasFullSchema === false) return undefined;
+  const functionRecord = record.function && typeof record.function === "object" ? record.function as Record<string, any> : undefined;
+  const returnedName = String(record.slug ?? record.toolSlug ?? record.tool_slug ?? functionRecord?.name ?? record.name ?? "").trim();
+  const slug = composioActionSlug(expectedSlug);
+  if (!returnedName || composioActionSlug(returnedName) !== slug) return undefined;
+  const parameters = functionRecord?.parameters
+    ?? record.inputParameters
+    ?? record.input_parameters
+    ?? record.inputSchema
+    ?? record.input_schema;
+  if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) return undefined;
+  return {
+    type: "function",
+    function: {
+      name: slug,
+      description: String(functionRecord?.description ?? record.description ?? record.name ?? slug).slice(0, 1_000),
+      parameters,
+    },
+  };
+}
+
+/**
+ * Resolve one exact connected-app action through the SDK's compatible schema
+ * surfaces. Composio SDK versions have exposed the same capability through
+ * different methods; keeping these fallbacks exact avoids broad discovery and
+ * makes meetings reliable when the session catalogue is gateway-only.
+ */
+async function resolveExactComposioModelTool(
+  sessionObj: any,
+  expectedSlug: string,
+  signal?: AbortSignal,
+): Promise<ExactComposioToolResolution | undefined> {
+  return (await resolveExactComposioModelTools(sessionObj, [expectedSlug], signal)).get(composioActionSlug(expectedSlug));
+}
+
+async function resolveExactComposioModelTools(
+  sessionObj: any,
+  expectedSlugs: readonly string[],
+  signal?: AbortSignal,
+): Promise<Map<string, ExactComposioToolResolution>> {
+  const slugs = [...new Set(expectedSlugs.map(composioActionSlug).filter((slug) => /^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(slug)))];
+  const resolved = new Map<string, ExactComposioToolResolution>();
+  const addCandidates = (result: unknown, source: ExactComposioToolResolution["source"]) => {
+    for (const candidate of composioSchemaCandidates(result)) {
+      const name = String((candidate as any)?.slug ?? (candidate as any)?.toolSlug ?? (candidate as any)?.tool_slug ?? (candidate as any)?.function?.name ?? "");
+      const slug = composioActionSlug(name);
+      if (!slugs.includes(slug) || resolved.has(slug)) continue;
+      const tool = exactComposioModelTool(candidate, slug);
+      if (tool) resolved.set(slug, { tool, source });
+    }
+  };
+  if (!slugs.length) return resolved;
+
+  const getRawTools = composio?.tools?.getRawComposioTools;
+  if (typeof getRawTools === "function") {
+    try {
+      addCandidates(await abortable(getRawTools.call(composio.tools, { tools: slugs, important: false }), signal), "batch");
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      logger.debug({ err: error, count: slugs.length }, "Exact Composio batch schema lookup unavailable");
+    }
+  }
+
+  const missing = slugs.filter((slug) => !resolved.has(slug));
+  const getRawBySlug = composio?.tools?.getRawComposioToolBySlug;
+  if (missing.length && typeof getRawBySlug === "function") {
+    await Promise.all(missing.map(async (slug) => {
+      try {
+        addCandidates(await abortable(getRawBySlug.call(composio.tools, slug), signal), "slug");
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        logger.debug({ err: error, tool: slug }, "Exact Composio slug schema lookup unavailable");
+      }
+    }));
+  }
+
+  const stillMissing = slugs.filter((slug) => !resolved.has(slug));
+  if (stillMissing.length && typeof sessionObj?.search === "function") {
+    try {
+      const query = `Find the exact connected-app actions ${stillMissing.join(", ")} and return complete input schemas.`.slice(0, 1_900);
+      addCandidates(await abortable(sessionObj.search({ query }), signal), "search");
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      logger.debug({ err: error, count: stillMissing.length }, "Exact Composio search schema lookup unavailable");
+    }
+  }
+  return resolved;
 }
 
 function isGoogleCalendarToolName(value: string): boolean {

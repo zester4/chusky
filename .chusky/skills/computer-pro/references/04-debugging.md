@@ -2,6 +2,11 @@
 
 Systematic debugging when code or desktop-application flows fail on the private computer. Website/browser failures belong to the E2B browser skill.
 
+The Jev route selects the execution boundary; it does not select the root
+cause. Keep the failing objective, environment, and workspace scope fixed while
+testing a hypothesis, and do not broaden credentials or permissions to make a
+diagnostic pass.
+
 ## Mindset
 
 - Errors are information.
@@ -18,6 +23,10 @@ Systematic debugging when code or desktop-application flows fail on the private 
 6. Re-run the original failing path, including the same computer-tool boundary, to confirm resolution.
 7. Re-read the resulting file, artifact, preview, or provider state as independent evidence.
 8. Note any follow-up cleanup needed.
+
+Record whether each check proves only process health, artifact correctness, or
+the real external/business outcome. When provider state is involved, verify it
+independently after the local fix.
 
 ## Useful Techniques
 

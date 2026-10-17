@@ -1,5 +1,9 @@
 # Buyer tactics and calm counters
 
+Classify the statement as observed, reported, or inferred before responding.
+Do not invent competitor quotes, budget limits, urgency, authority, or objective
+criteria to make a counter sound stronger.
+
 Recognize the move; respond without heat.
 
 | Tactic | What it sounds like | Response |
@@ -32,3 +36,7 @@ Same skill, inverted:
 - Ask for structure, not only price
 - Trade volume, term, referenceability for better rates
 - Stay polite; still use if/then
+
+Any external follow-up, quote revision, or CRM update is a separate authorized
+action. A persuasive draft is not a sent message and a buyer's enthusiasm is
+not a signed agreement.

@@ -5,7 +5,9 @@ description: >
   partners, and B2B commercial talks. Use when pricing is pushed, discounts are
   requested, contracts are redlined, procurement squeezes, renewals are at risk,
   or the owner needs a calm closer who protects margin and relationship. Not for
-  aggressive hardball or legal advice.
+  aggressive hardball or legal advice. Use with meeting-pro or voice-call-pro
+  for live conversations and with workspace-pro/composio-routing for verified
+  CRM, email, calendar, or document actions.
 ---
 
 # Deal Closer Pro
@@ -48,6 +50,28 @@ and never free concessions.
 
 Load **meeting-pro** / **voice-call-pro** when live; **cold-email** only for
 first-touch outreach, not for active deal negotiation.
+
+## Runtime contract
+
+- Start from the actual commercial objective, stage, decision-maker, approved
+  offer, pricing floor, scope boundary, deadline, and walk-away condition. Use a
+  narrow memory brief or current source-system read; do not invent a floor,
+  competitor offer, case study, legal position, or approval.
+- Separate four phases: prepare, recommend, communicate, and commit. Drafting a
+  counteroffer is not sending it; a verbal agreement is not a recorded contract;
+  a CRM note is not proof that the buyer accepted the terms.
+- Every concession must be an explicit if/then trade tied to value, volume,
+  timing, scope, payment, access, term, or another variable. Do not give away
+  margin to remove temporary discomfort.
+- Use exact connected-app schemas for CRM/email/calendar updates. Keep external
+  sends, price changes, contract commitments, and irreversible term changes
+  inside the current approval policy, then verify the provider receipt.
+- After a live call or meeting, capture only attributable outcomes: agreed,
+  proposed, rejected, open, owner, due date, and follow-up. If the next step
+  spans multiple systems or waits on the buyer, use mission-pro instead of a
+  prose promise.
+- When evidence is incomplete, state the missing fact and give the owner a
+  decision-ready recommendation rather than manufacturing certainty.
 
 ## Authority
 

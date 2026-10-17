@@ -114,6 +114,8 @@ test("Recall bot subscribes to chat and live roster events without enabling reta
     events: ["participant_events.chat_message", "participant_events.join", "participant_events.leave", "participant_events.update", "participant_events.speech_on", "participant_events.speech_off", "transcript.data"],
   }]);
   assert.equal(request.chat?.on_bot_join.send_to, "everyone");
+  assert.equal(request.chat?.on_participant_join.exclude_host, true);
+  assert.equal(request.chat?.on_participant_join.message, request.chat?.on_bot_join.message);
   assert.match(request.chat?.on_bot_join.message ?? "", /^Hi everyone, I’m here to help\./i);
   assert.match(request.chat?.on_bot_join.message ?? "", /I’ll join in when I can help/i);
   assert.match(request.chat?.on_bot_join.message ?? "", /processed live/i);

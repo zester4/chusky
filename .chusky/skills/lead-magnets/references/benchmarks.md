@@ -2,6 +2,15 @@
 
 Reference data for planning and evaluating lead magnet performance.
 
+## Benchmark safety
+
+The ranges below are directional hypotheses, not universal industry facts or
+promises. Before using a number in a recommendation, attach its source, date,
+sample, audience, traffic quality, and definition of conversion when available.
+If that provenance is missing, label the figure as an unverified planning
+assumption and recommend measuring a baseline rather than presenting it as a
+benchmark.
+
 ---
 
 ## Conversion Rate Benchmarks
@@ -127,3 +136,7 @@ Reference data for planning and evaluating lead magnet performance.
 | Full ROI assessment | 6-12 months |
 
 **Note**: These benchmarks are general guidelines. Your actual results depend on audience, niche, traffic volume, and offer quality. Start measuring from day one and build your own benchmarks.
+
+Do not invent testimonials, logos, subscriber counts, open rates, or revenue
+impact to make a magnet appear validated. Report observed results separately
+from targets and hypotheses.

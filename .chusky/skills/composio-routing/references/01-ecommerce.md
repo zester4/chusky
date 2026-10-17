@@ -1,5 +1,10 @@
 # E-commerce & retail
 
+Consume Jev's exact route first, then confirm the connected account and action
+schema before any mutation. Verify inventory, cart, order, or payment state
+from the provider; a successful tool call is not proof that the business state
+changed. Use browser-pro only when the needed operation is genuinely UI-only.
+
 | Prefer | Typical use |
 |--------|-------------|
 | `SHOPIFY_` | Orders, products, customers, inventory |

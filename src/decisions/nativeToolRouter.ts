@@ -37,6 +37,10 @@ export type NativeToolDescriptor = {
   bundle: NativeToolBundle;
   risk: NativeToolRisk;
   alwaysAvailable: boolean;
+  /** Compact capability terms used for pre-Jev candidate recall. */
+  capabilities?: string[];
+  /** Human/task aliases that may not appear in the stable tool slug. */
+  aliases?: string[];
 };
 
 export type NativeToolRoute = {
@@ -55,7 +59,7 @@ export type NativeToolRoute = {
   };
 };
 
-export type NativeToolSearchResult = Pick<NativeToolDescriptor, "slug" | "description" | "bundle" | "risk">;
+export type NativeToolSearchResult = Pick<NativeToolDescriptor, "slug" | "description" | "bundle" | "risk" | "capabilities" | "aliases">;
 
 const CORE_TOOLS = new Set([
   "CHUCK_FIND_TOOLS",
@@ -148,7 +152,14 @@ function descriptorFor(tool: ToolSchema): NativeToolDescriptor | undefined {
   if (!slug.startsWith("CHUCK_") || slug === "CHUCK_MEDIA_BRIDGE") return undefined;
   const description = compactDescription(tool);
   const bundle = inferBundle(slug, description);
-  return { slug, description, bundle, risk: inferRisk(slug), alwaysAvailable: CORE_TOOLS.has(slug) };
+  const slugTerms = words(slug.replace(/^CHUCK_/, "").replace(/_/g, " "));
+  const capabilities = [...new Set([...BUNDLE_TERMS[bundle], ...slugTerms])].slice(0, 32);
+  const aliases = [
+    ...(bundle === "workspace" ? ["connected app", "integration", "saas"] : []),
+    ...(bundle === "intelligence" || bundle === "monid" ? ["live data", "external data", "research"] : []),
+    ...(bundle === "autonomy" ? ["durable work", "background task"] : []),
+  ];
+  return { slug, description, bundle, risk: inferRisk(slug), alwaysAvailable: CORE_TOOLS.has(slug), capabilities, aliases };
 }
 
 /**
@@ -158,6 +169,13 @@ function descriptorFor(tool: ToolSchema): NativeToolDescriptor | undefined {
 export const nativeToolManifest: NativeToolDescriptor[] = modelFacingChuckTools
   .map(descriptorFor)
   .filter((item): item is NativeToolDescriptor => Boolean(item));
+
+/** A bounded capability card for Jev; full tool schemas stay in the runtime. */
+export function nativeToolCapabilityCard(tool: NativeToolDescriptor): string {
+  const capabilities = tool.capabilities?.length ? `; capabilities: ${tool.capabilities.slice(0, 18).join(", ")}` : "";
+  const aliases = tool.aliases?.length ? `; aliases: ${tool.aliases.join(", ")}` : "";
+  return `${tool.slug} (${tool.bundle}, ${tool.risk}${tool.alwaysAvailable ? ", always available" : ""}) — ${tool.description}${capabilities}${aliases}`.slice(0, 900);
+}
 
 const descriptorBySlug = new Map(nativeToolManifest.map((item) => [item.slug, item]));
 
@@ -255,7 +273,7 @@ export function searchNativeToolManifest(query: string, bundle?: NativeToolBundl
     .filter((entry) => family || !queryText || entry.score > 0)
     .sort((a, b) => b.score - a.score || a.item.slug.localeCompare(b.item.slug))
     .slice(0, bounded)
-    .map(({ item }) => ({ slug: item.slug, description: item.description, bundle: item.bundle, risk: item.risk }));
+    .map(({ item }) => ({ slug: item.slug, description: item.description, bundle: item.bundle, risk: item.risk, capabilities: item.capabilities, aliases: item.aliases }));
   return entries;
 }
 
@@ -303,6 +321,85 @@ function modelToolsForSelection(tools: ToolSchema[], selected: Set<string>): Too
     const slug = toolName(tool);
     return !descriptorBySlug.has(slug) || selected.has(slug);
   });
+}
+
+/**
+ * Apply a multi-label Jev result that was already obtained in a turn-wide
+ * batch. This keeps the model-facing catalog reduction and lifecycle closure
+ * identical to the standalone native router without making another request.
+ */
+export function nativeToolRouteFromJevScores(tools: ToolSchema[], input: {
+  scores: Record<string, number>;
+  candidateCount?: number;
+  query: string;
+  recentContext?: string;
+  preserveAll?: boolean;
+  latencyMs?: number;
+  costUsd?: number;
+}): NativeToolRoute {
+  const baseline = baselineRoute(tools);
+  const ranked = Object.entries(input.scores)
+    .filter(([id, value]) => descriptorBySlug.has(id) && Number.isFinite(value))
+    .map(([id, probability]) => ({ id, probability: Math.max(0, Math.min(1, probability)) }))
+    .sort((a, b) => b.probability - a.probability || a.id.localeCompare(b.id));
+  const telemetry = {
+    latencyMs: input.latencyMs ?? 0,
+    costUsd: input.costUsd ?? 0,
+    ranked,
+  };
+  const best = ranked[0];
+  if (!best || best.probability < config.jevNativeToolMinProbability) {
+    const fallbackReason = "jev_no_native_tool_needed";
+    const fallback = config.nativeToolLoading === "bundle" && !input.preserveAll
+      ? bundleFallbackRoute(tools, input.query, fallbackReason)
+      : baseline;
+    return {
+      ...fallback,
+      candidateCount: input.candidateCount ?? ranked.length,
+      noNativeTool: true,
+      noNativeToolConfidence: 1 - (best?.probability ?? 0),
+      telemetry,
+    };
+  }
+
+  const selected = ranked
+    .filter((item) => item.probability >= config.jevNativeToolMinProbability)
+    .slice(0, Math.min(12, config.jevNativeToolMaxCandidates))
+    .map((item) => item.id);
+  if (!selected.length) {
+    const fallbackReason = "jev_no_selected_native_tool";
+    return {
+      ...(config.nativeToolLoading === "bundle" && !input.preserveAll ? bundleFallbackRoute(tools, input.query, fallbackReason) : baseline),
+      candidateCount: input.candidateCount ?? ranked.length,
+      fallbackReason,
+      telemetry,
+    };
+  }
+
+  const selectedSet = new Set(selected);
+  for (const item of nativeToolManifest) if (item.alwaysAvailable) selectedSet.add(item.slug);
+  retainLifecycleToolFamilies(tools, selectedSet, input.query, input.recentContext);
+  return {
+    tools: modelToolsForSelection(tools, selectedSet),
+    source: "jev",
+    candidateCount: input.candidateCount ?? ranked.length,
+    selected: [...selectedSet],
+    telemetry,
+  };
+}
+
+/** Add a separately routed native family without reopening a Jev request. */
+export function augmentNativeToolRoute(tools: ToolSchema[], route: NativeToolRoute, slugs: string[]): NativeToolRoute {
+  const additions = new Set(slugs.filter((slug) => descriptorBySlug.has(slug)));
+  if (!additions.size) return route;
+  const existing = new Set(route.tools.map(toolName));
+  return {
+    ...route,
+    tools: [...route.tools, ...tools.filter((tool) => additions.has(toolName(tool)) && !existing.has(toolName(tool)))],
+    selected: [...new Set([...route.selected, ...additions])],
+    noNativeTool: false,
+    noNativeToolConfidence: undefined,
+  };
 }
 
 function nativeToolCount(tools: ToolSchema[]): number {
