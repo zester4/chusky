@@ -71,6 +71,20 @@ test("durable migration runner refuses to execute an applied migration whose che
   }
 });
 
+test("durable migration runner accepts legacy Windows line-ending checksums", async () => {
+  const sql = "SELECT 'stable';\n";
+  const directory = await migrationDirectory({ "0001_first.sql": sql });
+  const database = new MigrationDatabase();
+  database.applied.set("0001_first.sql", createHash("sha256").update(sql.replace(/\n/g, "\r\n")).digest("hex"));
+  try {
+    const result = await applyDurableStateMigrations(database as never, directory);
+    assert.deepEqual(result, { applied: [], skipped: ["0001_first.sql"] });
+    assert.deepEqual(database.executed, []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("durable migration runner does not record a migration that fails", async () => {
   const directory = await migrationDirectory({ "0001_broken.sql": "SELECT 'broken';" });
   const database = new MigrationDatabase();

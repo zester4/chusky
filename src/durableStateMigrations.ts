@@ -6,6 +6,17 @@ import type { Pool } from "pg";
 const MIGRATION_LOCK_ID = "74231881421077";
 const MIGRATION_NAME = /^\d{4}_[a-z0-9_-]+\.sql$/i;
 
+function migrationChecksums(sql: string): { canonical: string; accepted: Set<string> } {
+  // Migration files are committed with LF, but older production ledgers were
+  // created from Windows worktrees with CRLF. Treat line-ending changes as
+  // byte-format differences, not schema edits; every other content change
+  // must still fail closed.
+  const canonicalSql = sql.replace(/\r\n?/g, "\n");
+  const canonical = createHash("sha256").update(canonicalSql, "utf8").digest("hex");
+  const accepted = new Set([canonical, createHash("sha256").update(`${canonicalSql.replace(/\n/g, "\r\n")}`, "utf8").digest("hex")]);
+  return { canonical, accepted };
+}
+
 /**
  * Apply numbered schema migrations once, in order. A session advisory lock
  * serializes deploys/operators; checksums prevent silently editing history.
@@ -41,10 +52,10 @@ export async function applyDurableStateMigrations(
     const skipped: string[] = [];
     for (const name of files) {
       const sql = await readFile(path.join(migrationsDirectory, name), "utf8");
-      const sha256 = createHash("sha256").update(sql, "utf8").digest("hex");
+      const { canonical: sha256, accepted } = migrationChecksums(sql);
       const recordedHash = appliedHashes.get(name);
       if (recordedHash !== undefined) {
-        if (recordedHash !== sha256) throw new Error(`Previously applied migration checksum changed: ${name}; add a new migration instead.`);
+        if (!accepted.has(recordedHash)) throw new Error(`Previously applied migration checksum changed: ${name}; add a new migration instead.`);
         skipped.push(name);
         continue;
       }
