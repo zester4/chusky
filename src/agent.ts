@@ -239,7 +239,7 @@ const VOICE_COMPOSIO_BUNDLES: Record<string, readonly string[]> = {
   ],
   billing: [
     "STRIPE_SEARCH_CUSTOMERS", "STRIPE_LIST_INVOICES", "STRIPE_SEARCH_INVOICES", "STRIPE_RETRIEVE_CHARGE",
-    "STRIPE_CREATE_INVOICE", "STRIPE_SEND_INVOICE", "STRIPE_GET_INVOICES_INVOICE",
+    "STRIPE_CREATE_INVOICE", "STRIPE_SEND_INVOICE", "STRIPE_CREATE_PAYMENT", "STRIPE_GET_INVOICES_INVOICE",
     "STRIPE_GET_PAYMENT_RECORD", "STRIPE_POST_PAYMENT_RECORDS_REPORT_PAYMENT", "STRIPE_CREATE_REFUND",
     "STRIPE_PAY_INVOICE", "STRIPE_LIST_REFUNDS",
   ],
@@ -2615,7 +2615,12 @@ async function executeAgent(
   // this run remain available, while the model can discover any other action
   // through COMPOSIO_SEARCH_TOOLS and execute it through the session.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const fullComposioTools: any[] = sessionObj && !boundedVoicePreparation
+  const voiceCapabilitySlugsForFallback = voiceTurn && ownerPrivateRun && !voiceFastLane
+    ? voiceComposioToolSlugs(`${voiceRoutingText}\n${options?.voiceRoutingHint ?? ""}`)
+    : [];
+  const composioExactLookupAvailable = typeof composio?.tools?.getRawComposioTools === "function"
+    || typeof composio?.tools?.getRawComposioToolBySlug === "function";
+  const fullComposioTools: any[] = sessionObj && (!boundedVoicePreparation || (voiceCapabilitySlugsForFallback.length > 0 && !composioExactLookupAvailable))
     ? voicePreparationKey
       ? await cachedVoiceToolSchemas(voicePreparationKey, () => sessionObj.tools())
       : await sessionObj.tools()
@@ -2629,9 +2634,7 @@ async function executeAgent(
       : await discoverVoiceCalendarTools(sessionObj, fullComposioTools, signal)
     : [];
   if (voiceCalendarRequest) logger.info({ count: voiceCalendarTools.length }, "Voice calendar tools preloaded");
-  const voiceCapabilitySlugs = voiceTurn && ownerPrivateRun
-    ? voiceComposioToolSlugs(`${voiceRoutingText}\n${options?.voiceRoutingHint ?? ""}`)
-    : [];
+  const voiceCapabilitySlugs = voiceCapabilitySlugsForFallback;
   const voiceCalendarNames = new Set(voiceCalendarTools.map((tool) => composioActionSlug(toolName(tool))));
   const voiceCapabilityTools = voiceCapabilitySlugs.length
     ? voicePreparationKey
@@ -2668,11 +2671,27 @@ async function executeAgent(
     : { tools: [], failures: [] };
   const mcpTools = mcpDiscovery.tools;
   if (onStatus) for (const failure of mcpDiscovery.failures) await onStatus(`⚠️ A connected MCP server (${failure.serverId}) could not provide tools: ${failure.message}`);
-  const availableTools = [...composioTools, ...mcpTools].filter((tool) => {
+  let availableTools = [...composioTools, ...mcpTools].filter((tool) => {
     const name = toolName(tool);
     if (sharedScope && isSharedChannelToolDenied(name)) return false;
     return (!allow || allow.has(name) || ownerPrivateRun && voiceCapabilityNames.has(composioActionSlug(name))) && voiceModelAllowed(name) && !deny.has(name);
   });
+  // A bounded voice preload may resolve an exact action through Composio's
+  // catalogue without that action appearing in session.tools(). Treat that
+  // exact, purpose-routed schema as part of the trusted available surface so
+  // the model can call it and the execution path can validate it. Never add a
+  // broad catalogue here: voiceCapabilityTools contains only the slugs chosen
+  // by the purpose router above.
+  if (voiceTurn && ownerPrivateRun && voiceCapabilityTools.length) {
+    const present = new Set(availableTools.map((tool) => toolName(tool)));
+    for (const tool of voiceCapabilityTools) {
+      const name = toolName(tool);
+      if (name && !present.has(name) && voiceCapabilityNames.has(composioActionSlug(name)) && !deny.has(name)) {
+        availableTools.push(tool);
+        present.add(name);
+      }
+    }
+  }
   const meetingPreloadedTools: any[] = options?.meetingId
     ? availableTools.filter((tool) => discoveredMeetingTools.some((candidate) => toolName(candidate) === toolName(tool)))
     : [];
@@ -2683,7 +2702,16 @@ async function executeAgent(
   // search returned no rows, the voice model received zero tools even though
   // Composio routing had selected the correct application/action.
   const preloadedVoiceCapabilityTools = voiceTurn && ownerPrivateRun
-    ? availableTools.filter((tool) => voiceCapabilityNames.has(composioActionSlug(toolName(tool))))
+    ? [...availableTools, ...fullComposioTools, ...voiceCapabilityTools]
+      .filter((tool, index, all) => all.findIndex((candidate) => toolName(candidate) === toolName(tool)) === index)
+      .filter((tool) => voiceCapabilityNames.has(composioActionSlug(toolName(tool))))
+    : [];
+  // Private meeting turns may use the owner's explicitly discovered MCP
+  // servers. Keep those schemas in the model payload; they are already
+  // owner-scoped discovery results, and the dispatch gate still applies the
+  // MCP action's risk policy before execution.
+  const preloadedVoiceMcpTools = voiceTurn && ownerPrivateRun && options?.meetingId
+    ? mcpTools
     : [];
   if (voiceTurn && ownerPrivateRun && voiceCapabilitySlugs.length) {
     logger.info({
@@ -3070,7 +3098,7 @@ async function executeAgent(
       });
       turnActionDecision = plan.action;
       actionRoutingLikely = !plan.action.noActionNeeded;
-      accountsPromise = actionRoutingLikely && !sharedScope
+      accountsPromise = actionRoutingLikely && !sharedScope && likelyNeedsActionRouting(routingQuery)
         ? prefetchedAccounts !== undefined
           ? Promise.resolve(prefetchedAccounts)
           : (voicePreparationKey ? cachedVoiceConnectedAccounts(voicePreparationKey, () => listConnectedAccounts(userId)) : listConnectedAccounts(userId)).catch((error) => {
@@ -3135,7 +3163,7 @@ async function executeAgent(
       tregRoutePromise = actionRoutingLikely && !sharedScope && !voiceTurn && !toolsDisabled
         ? routeTregForTurn(routingQuery, { signal, deadline: routingDeadline, sessionId: durableRunId }).catch(() => undefined)
         : Promise.resolve(undefined);
-      accountsPromise = actionRoutingLikely && !sharedScope
+      accountsPromise = actionRoutingLikely && !sharedScope && likelyNeedsActionRouting(routingQuery)
         ? (voicePreparationKey ? cachedVoiceConnectedAccounts(voicePreparationKey, () => listConnectedAccounts(userId)) : listConnectedAccounts(userId)).catch((accountError) => { logger.debug({ err: accountError, userId }, "Connected-account metadata unavailable for this run"); return undefined; })
         : Promise.resolve(undefined);
       composioRoutePromise = accountsPromise.then((accounts) => actionRoutingLikely && accounts
@@ -3528,7 +3556,7 @@ async function executeAgent(
           ? [...availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS" || revealedNativeTools.has(toolSchemaName(tool))), ...meetingPreloadedTools, ...preloadedVoiceCapabilityTools]
           : missionHintPreload
             ? [...missionRoutedNativeTools, ...preloadedMissionTools, ...missionDiscoveryTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools]
-            : [...nativeToolRoute.tools, ...preloadedMissionTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools]
+            : [...nativeToolRoute.tools, ...preloadedMissionTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools, ...preloadedVoiceMcpTools]
     )
       .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index);
     // A routed turn may intentionally expose only meta-tools or a small

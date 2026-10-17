@@ -141,7 +141,7 @@ export function voiceProfileInstructions(profile: VoiceCallProfile | undefined, 
   const safe = profile ?? normalizeVoiceCallProfile(undefined);
   const identity = safe.organization ? `${safe.identity}, speaking on behalf of ${safe.organization}` : safe.identity;
   const callContext = direction === "outbound"
-    ? `Owner-authorized outbound call objective: ${purpose}. This is private working context. Use only approved call context, bounded relevant memory, and purpose-approved connected tools; never use unrelated chat messages, files, or images.`
+    ? `Owner-authorized outbound call objective: ${purpose}. This is private working context. Use relevant private context and connected tools only within the approved call scope; use approved call context, bounded relevant memory, and purpose-approved connected tools only within that scope, and never use unrelated chat messages, files, or images.`
     : "This is an authorized inbound call. Use public information first, then identify the caller, and disclose sensitive company or account details only after the configured verification tier is satisfied. Do not consult unrelated owner chat, files, or images.";
   const facts = safe.facts.length ? `LEAD AND CALL CONTEXT — approved facts only: ${safe.facts.join("; ")}.` : "LEAD AND CALL CONTEXT — no additional approved facts were supplied.";
   const guardrails = safe.guardrails.length ? `Owner communication preferences: ${safe.guardrails.join("; ")}.` : "";
