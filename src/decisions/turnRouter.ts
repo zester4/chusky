@@ -343,8 +343,8 @@ function buildMonidRoute(result: JevResult, candidates: Candidate[], query: stri
   };
 }
 
-function recordPlanSurface(surface: "skills" | "composio_toolkit" | "treg_tool" | "monid_tool" | "external_data_backend" | "native_tool" | "turn_action", result: JevResult, model: string, applied = true, jev?: Array<{ id: string; p: number }>, extra: Record<string, unknown> = {}): void {
-  const costShare = result.costUsd === undefined ? undefined : result.costUsd / 5;
+function recordPlanSurface(surface: "skills" | "composio_toolkit" | "treg_tool" | "monid_tool" | "external_data_backend" | "native_tool" | "turn_action", result: JevResult, model: string, costDivisor: number, applied = true, jev?: Array<{ id: string; p: number }>, extra: Record<string, unknown> = {}): void {
+  const costShare = result.costUsd === undefined ? undefined : result.costUsd / Math.max(1, costDivisor);
   recordDecision({ surface, mode: "enforce", applied, ...(jev ? { jev } : {}), latencyMs: result.latencyMs, ...(costShare === undefined ? {} : { costUsd: costShare }), model, ...(extra as any) });
 }
 
@@ -424,11 +424,12 @@ export async function computeTurnRoutingPlan(input: TurnRoutingPlanInput): Promi
     : actionProbability <= NO_ACTION_MAX_PROBABILITY
       ? { noActionNeeded: true, reason: "jev_no_action_needed", actionProbability }
       : { noActionNeeded: false, reason: actionProbability >= 0.5 ? "jev_action_needed" : "jev_uncertain", actionProbability };
-  recordPlanSurface("turn_action", result, client.modelId, true, [{ id: action.noActionNeeded ? "__none__" : "__capability_needed__", p: action.noActionNeeded ? 1 - actionProbability : actionProbability }], { noTool: action.noActionNeeded });
-  if (action.noActionNeeded) return { action, result };
+  if (action.noActionNeeded) {
+    recordPlanSurface("turn_action", result, client.modelId, 1, true, [{ id: "__none__", p: 1 - actionProbability }], { noTool: true });
+    return { action, result };
+  }
 
   const skillRoute = input.includeSkills && jevEnabled("skills") ? buildSkillRoute(query, skills, result, skillCandidates) : undefined;
-  if (skillRoute) recordPlanSurface("skills", result, client.modelId, true, (skillRoute.ranked ?? []).map((item) => ({ id: item.id, p: item.probability })), { routeSource: "jev" });
   const nativeToolRoute = input.includeNative && input.availableNativeTools && config.jevNativeToolRouting && jevEnabled("native")
     ? nativeToolRouteFromJevScores(input.availableNativeTools, {
       scores: Object.fromEntries(nativeCandidateList.map((candidate, index) => [candidate.id, answerNoul(result, `native_${index}`)])),
@@ -440,21 +441,33 @@ export async function computeTurnRoutingPlan(input: TurnRoutingPlanInput): Promi
       costUsd: result.costUsd,
     })
     : undefined;
-  if (nativeToolRoute) recordPlanSurface("native_tool", result, client.modelId, nativeToolRoute.source === "jev", nativeToolRoute.telemetry?.ranked?.map((item) => ({ id: item.id, p: item.probability })), { routeSource: nativeToolRoute.source, noNativeTool: nativeToolRoute.noNativeTool });
   const composioStage1 = input.includeComposio && jevEnabled("composio") ? buildComposioStage1(query, accounts, result, toolkitCandidates) : undefined;
-  if (composioStage1) recordPlanSurface("composio_toolkit", result, client.modelId, true, composioStage1.toolkits.map((item) => ({ id: item.id, p: item.probability })), { routeSource: "jev" });
   const externalDataBackend = buildExternalDataBackend(result, query);
-  if (externalDataBackend) {
-    const ranked = Object.entries(answerChoice(result, "external_data_backend")?.probabilities ?? {}).map(([id, p]) => ({ id, p }));
-    recordPlanSurface("external_data_backend", result, client.modelId, Boolean(externalDataBackend.selected && externalDataBackend.selected !== "none"), ranked, { selectedRoute: externalDataBackend.selected, ...(externalDataBackend.fallbackReason ? { fallbackReason: externalDataBackend.fallbackReason } : {}) });
-  }
   const selectedBackend = externalDataBackend?.selected;
   const tregRoute = input.includeTreg && config.tregEnabled && jevEnabled("treg") && (!externalDataBackend || selectedBackend === "treg") ? buildTregRoute(result) : undefined;
-  if (tregRoute) recordPlanSurface("treg_tool", result, client.modelId, Boolean(tregRoute.tool), tregRoute.tool ? [{ id: tregRoute.tool, p: tregRoute.probability }] : undefined);
   const monidRoute = input.includeMonid && config.monidEnabled && jevEnabled("monid") && (!externalDataBackend || selectedBackend === "monid") ? buildMonidRoute(result, monidCandidateList, query) : undefined;
+  const planSurfaces = [
+    "turn_action",
+    skillRoute ? "skills" : undefined,
+    nativeToolRoute ? "native_tool" : undefined,
+    composioStage1 ? "composio_toolkit" : undefined,
+    externalDataBackend ? "external_data_backend" : undefined,
+    tregRoute ? "treg_tool" : undefined,
+    monidRoute ? "monid_tool" : undefined,
+  ].filter(Boolean).length;
+  const costDivisor = Math.max(1, planSurfaces);
+  recordPlanSurface("turn_action", result, client.modelId, costDivisor, true, [{ id: action.noActionNeeded ? "__none__" : "__capability_needed__", p: action.noActionNeeded ? 1 - actionProbability : actionProbability }], { noTool: action.noActionNeeded });
+  if (skillRoute) recordPlanSurface("skills", result, client.modelId, costDivisor, true, (skillRoute.ranked ?? []).map((item) => ({ id: item.id, p: item.probability })), { routeSource: "jev" });
+  if (nativeToolRoute) recordPlanSurface("native_tool", result, client.modelId, costDivisor, nativeToolRoute.source === "jev", nativeToolRoute.telemetry?.ranked?.map((item) => ({ id: item.id, p: item.probability })), { routeSource: nativeToolRoute.source, noNativeTool: nativeToolRoute.noNativeTool });
+  if (composioStage1) recordPlanSurface("composio_toolkit", result, client.modelId, costDivisor, true, composioStage1.toolkits.map((item) => ({ id: item.id, p: item.probability })), { routeSource: "jev" });
+  if (externalDataBackend) {
+    const ranked = Object.entries(answerChoice(result, "external_data_backend")?.probabilities ?? {}).map(([id, p]) => ({ id, p }));
+    recordPlanSurface("external_data_backend", result, client.modelId, costDivisor, Boolean(externalDataBackend.selected && externalDataBackend.selected !== "none"), ranked, { selectedRoute: externalDataBackend.selected, ...(externalDataBackend.fallbackReason ? { fallbackReason: externalDataBackend.fallbackReason } : {}) });
+  }
+  if (tregRoute) recordPlanSurface("treg_tool", result, client.modelId, costDivisor, Boolean(tregRoute.tool), tregRoute.tool ? [{ id: tregRoute.tool, p: tregRoute.probability }] : undefined);
   if (monidRoute) {
     const ranked = monidCandidateList.map((candidate, index) => ({ id: candidate.id, p: answerNoul(result, `monid_tool_${index}`) }));
-    recordPlanSurface("monid_tool", result, client.modelId, Boolean(monidRoute.selected.length), ranked, { needed: monidRoute.needed, ...(monidRoute.fallbackReason ? { fallbackReason: monidRoute.fallbackReason } : {}) });
+    recordPlanSurface("monid_tool", result, client.modelId, costDivisor, Boolean(monidRoute.selected.length), ranked, { needed: monidRoute.needed, ...(monidRoute.fallbackReason ? { fallbackReason: monidRoute.fallbackReason } : {}) });
   }
   return { action, skillRoute, nativeToolRoute, composioDecision: composioStage1, composioStage1, tregRoute, monidRoute, externalDataBackend, result };
 }

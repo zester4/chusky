@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { clearSkillCatalogCache, listSkillFiles, readSkillFile, relevantSkillContext, routedSkillContext, routedSkillNames, searchSkills, skillContextForBinding } from "../src/skills/catalog.js";
+import { clearSkillCatalogCache, listSkillFiles, readSkillFile, relevantSkillContext, routedSkillContext, routedSkillNames, searchSkills, skillContextForBinding, ROUTED_SKILL_REFERENCES } from "../src/skills/catalog.js";
 import { WORKER_CAPABILITIES } from "../src/subagents/capabilities.js";
 import { WORKER_SKILL_BINDINGS } from "../src/subagents/skillBindings.js";
 import { getSkillCoverage } from "../src/subagents/skillCoverage.js";
@@ -32,6 +32,21 @@ test("routes structured external data tasks to Monid guidance without requiring 
     assert.ok(routedSkillNames(query).includes("monid"), `expected Monid guidance for ${query}`);
   }
   assert.ok(!routedSkillNames("Search the web for today's headlines").includes("monid"));
+});
+
+test("routes explicit and structured live-data requests to Treg guidance", () => {
+  assert.ok(routedSkillNames("Use Treg to find verified work emails for these target companies").includes("treg"));
+  assert.ok(routedSkillNames("Find current hiring signals for this company").includes("treg"));
+});
+
+test("loads the Treg and Monid reference bundles after skill routing", async () => {
+  const context = await skillContextForBinding({
+    primary: ["treg", "monid"],
+    supporting: [],
+    requiredReferences: ROUTED_SKILL_REFERENCES,
+  }, "live structured research", path.resolve(".chusky/skills"));
+  assert.match(context, /Reference: references\/runtime-contract\.md/);
+  assert.match(context, /Reference: references\/engine-playbooks\.md/);
 });
 
 test("routes negotiation and pricing requests to deal-closer-pro", () => {

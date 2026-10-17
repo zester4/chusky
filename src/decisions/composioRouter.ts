@@ -15,7 +15,7 @@
 import { config } from "../config.js";
 import { composioDomainCatalog, resolveComposioRoute, toolkitKey, type ComposioDomain, type ComposioRoute } from "../composioRouting.js";
 import { logger } from "../logger.js";
-import { NONE_OPTION, awaitRoute, jevClient, jevEnabled, jevText, rankOptions, verifyCandidates, type JevChoiceAnswer, type JevClient, type JevNoulAnswer, type JevQuestion, type RankedOption, type RoutingDeadline } from "./jev.js";
+import { NONE_OPTION, awaitRoute, jevClient, jevEnabled, jevText, rankAndVerifyOptions, rankOptions, type JevChoiceAnswer, type JevClient, type JevNoulAnswer, type JevQuestion, type RankedOption, type RoutingDeadline } from "./jev.js";
 import { recordDecision } from "./telemetry.js";
 
 export type ComposioAction = {
@@ -274,34 +274,25 @@ export async function computeJevComposioDecision(objective: string, input: {
   const actions = catalogues.flat();
   if (!actions.length) { decision.telemetry = { latencyMs, costUsd, calls }; return decision; }
   const bySlug = new Map(actions.map((action) => [action.slug, action]));
-  const ranking = await rankOptions(client, {
+  const ranking = await rankAndVerifyOptions(client, {
     state,
     instructions: "Choose the single first app action that most directly advances `request`, based on each action's name and description. Prefer a necessary, specific read or write over a broad or indirect action. Choose __none__ if none is a meaningful step. This only routes the action; runtime schema, account, approval, and result checks still govern execution.",
     options: actions.map((action) => ({ id: action.slug, description: `${action.name}: ${action.description}` })),
     noneDescription: "None of these actions fits the request.",
+    verificationQuestion: () => "Would calling `candidate` materially help complete the requested outcome, either as a necessary read or a required action step?",
+    verificationCriteria: { true: "The described action directly supports a required or strongly useful step toward the requested outcome.", false: "The action is unrelated, redundant, unsafe to infer, or only superficially similar to the request." },
     signal: input.signal,
     sessionId: input.sessionId,
   });
   latencyMs += ranking.latencyMs; costUsd += ranking.costUsd; calls += ranking.calls;
   const candidates = ranking.ranked.filter((item) => item.probability >= 0.01).slice(0, 6);
-  const verification = candidates.length
-    ? await verifyCandidates(client, {
-      state,
-      candidates: candidates.map((item) => ({ id: item.id, description: `${bySlug.get(item.id)?.name ?? item.id}: ${bySlug.get(item.id)?.description ?? ""}` })),
-      question: () => "Would calling `candidate` materially help complete the requested outcome, either as a necessary read or a required action step?",
-      criteria: { true: "The described action directly supports a required or strongly useful step toward the requested outcome.", false: "The action is unrelated, redundant, unsafe to infer, or only superficially similar to the request." },
-      signal: input.signal,
-      sessionId: input.sessionId,
-    })
-    : { scores: {} as Record<string, number>, latencyMs: 0, costUsd: 0 };
-  latencyMs += verification.latencyMs; costUsd += verification.costUsd; calls += candidates.length ? 1 : 0;
 
   decision.actions = candidates
-    .filter((item, index) => index === 0 ? (verification.scores[item.id] ?? 0) >= config.jevActionVerifyThreshold || item.probability >= config.jevInjectActionMinProbability : (verification.scores[item.id] ?? 0) >= config.jevActionVerifyThreshold)
+    .filter((item, index) => index === 0 ? (ranking.scores[item.id] ?? 0) >= config.jevActionVerifyThreshold || item.probability >= config.jevInjectActionMinProbability : (ranking.scores[item.id] ?? 0) >= config.jevActionVerifyThreshold)
     .slice(0, 4)
     .map((item) => {
       const toolkit = bySlug.get(item.id)?.toolkit ?? "";
-      return { ...item, verified: verification.scores[item.id], toolkit, description: bySlug.get(item.id)?.description ?? "", connected: connectedSet.has(toolkitKey(toolkit)) };
+      return { ...item, verified: ranking.scores[item.id], toolkit, description: bySlug.get(item.id)?.description ?? "", connected: connectedSet.has(toolkitKey(toolkit)) };
     });
   // Only connected toolkits can execute, so only they become direct tools.
   decision.directTools = decision.actions
@@ -350,34 +341,26 @@ export async function completeJevComposioActions(objective: string, input: {
   const actions = catalogues.flat();
   if (!actions.length) return stage1;
   const bySlug = new Map(actions.map((action) => [action.slug, action]));
-  const ranking = await rankOptions(client, {
+  const ranking = await rankAndVerifyOptions(client, {
     state,
     instructions: "Choose the single first app action that most directly advances `request`, based on each action's name and description. Prefer a necessary, specific read or write over a broad or indirect action. Choose __none__ if none is a meaningful step. This only routes the action; runtime schema, account, approval, and result checks still govern execution.",
     options: actions.map((action) => ({ id: action.slug, description: `${action.name}: ${action.description}` })),
     noneDescription: "None of these actions fits the request.",
+    verificationQuestion: () => "Would calling `candidate` materially help complete the requested outcome, either as a necessary read or a required action step?",
+    verificationCriteria: { true: "The described action directly supports a required or strongly useful step toward the requested outcome.", false: "The action is unrelated, redundant, unsafe to infer, or only superficially similar to the request." },
     signal: input.signal,
     sessionId: input.sessionId,
   });
   const candidates = ranking.ranked.filter((item) => item.probability >= 0.01).slice(0, 6);
-  const verification = candidates.length
-    ? await verifyCandidates(client, {
-      state,
-      candidates: candidates.map((item) => ({ id: item.id, description: `${bySlug.get(item.id)?.name ?? item.id}: ${bySlug.get(item.id)?.description ?? ""}` })),
-      question: () => "Would calling `candidate` materially help complete the requested outcome, either as a necessary read or a required action step?",
-      criteria: { true: "The described action directly supports a required or strongly useful step toward the requested outcome.", false: "The action is unrelated, redundant, unsafe to infer, or only superficially similar to the request." },
-      signal: input.signal,
-      sessionId: input.sessionId,
-    })
-    : { scores: {} as Record<string, number>, latencyMs: 0, costUsd: 0 };
   const decision: ComposioDecision = {
     ...stage1,
     toolkits: stage1.toolkits,
     actions: candidates
-      .filter((item, index) => index === 0 ? (verification.scores[item.id] ?? 0) >= config.jevActionVerifyThreshold || item.probability >= config.jevInjectActionMinProbability : (verification.scores[item.id] ?? 0) >= config.jevActionVerifyThreshold)
+      .filter((item, index) => index === 0 ? (ranking.scores[item.id] ?? 0) >= config.jevActionVerifyThreshold || item.probability >= config.jevInjectActionMinProbability : (ranking.scores[item.id] ?? 0) >= config.jevActionVerifyThreshold)
       .slice(0, 4)
       .map((item) => {
         const action = bySlug.get(item.id);
-        return { ...item, verified: verification.scores[item.id], toolkit: action?.toolkit ?? "", description: action?.description ?? "", connected: connectedSet.has(toolkitKey(action?.toolkit ?? "")) };
+        return { ...item, verified: ranking.scores[item.id], toolkit: action?.toolkit ?? "", description: action?.description ?? "", connected: connectedSet.has(toolkitKey(action?.toolkit ?? "")) };
       }),
     directTools: [],
   };
@@ -391,9 +374,9 @@ export async function completeJevComposioActions(objective: string, input: {
   if (!decision.actions.length && ranking.confidence < config.jevMinConfidence) decision.fallbackReason = "low_confidence_actions";
   const base = stage1.telemetry ?? { latencyMs: 0, costUsd: 0, calls: 1 };
   decision.telemetry = {
-    latencyMs: base.latencyMs + ranking.latencyMs + verification.latencyMs,
-    costUsd: base.costUsd + ranking.costUsd + verification.costUsd,
-    calls: base.calls + ranking.calls + (candidates.length ? 1 : 0),
+    latencyMs: base.latencyMs + ranking.latencyMs,
+    costUsd: base.costUsd + ranking.costUsd,
+    calls: base.calls + ranking.calls,
   };
   return decision;
 }

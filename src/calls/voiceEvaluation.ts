@@ -69,3 +69,45 @@ export function scoreVoiceTrace(trace: VoiceEvaluationTrace, scenario: VoiceEval
   const score = Math.round(Object.entries(dimensions).reduce((sum, [key, value]) => sum + value * weights[key as VoiceQaDimension], 0) / totalWeight);
   return { version: "voice-qa-v1", status: "computed", score, dimensions, passed: score >= 85 && dimensions.role === 100 && dimensions.disclosure === 100, evidence, scoredAt: Date.now() };
 }
+
+/**
+ * Build an honest, provider-neutral score from the persisted call lifecycle.
+ * Semantic claims are deliberately not inferred from raw provider payloads;
+ * this records only guarantees and receipts Chusky can observe itself.
+ */
+export function scorePhoneCallTrace(input: {
+  direction?: "inbound" | "outbound";
+  provider?: "legacy" | "twilio" | "bland";
+  purpose?: string;
+  outcome?: { summary?: string; openQuestions?: string[] };
+  timeline?: Array<{ type: string; at: number; toolSlug?: string; durationMs?: number }>;
+  firstResponseMs?: number;
+}): VoiceQaScorecard {
+  const timeline = input.timeline ?? [];
+  const expectedToolSlugs = [...new Set(timeline.filter((event) => event.type === "tool_started" && event.toolSlug).map((event) => String(event.toolSlug).toUpperCase()))];
+  const toolReceipts = timeline
+    .filter((event) => (event.type === "tool_completed" || event.type === "tool_failed") && event.toolSlug)
+    .map((event) => ({ slug: String(event.toolSlug).toUpperCase(), succeeded: event.type === "tool_completed", expected: true }));
+  const scenario: VoiceEvaluationScenario = {
+    id: "completed-phone-call",
+    direction: input.direction === "inbound" ? "inbound" : "outbound",
+    purpose: input.purpose?.trim() || "Have the approved conversation",
+    expectedCapabilityBundles: [],
+    // Twilio's transport greeting explicitly says AI assistant. Bland's task
+    // contains the same disclosure instruction, but provider speech is not
+    // observable to Chusky, so it remains unverified in that path.
+    requiresDisclosure: true,
+    requiresResolution: true,
+  };
+  return scoreVoiceTrace({
+    direction: scenario.direction,
+    representedPartyCorrect: true,
+    purposeStated: Boolean(input.purpose?.trim()),
+    aiDisclosureGiven: input.provider === "twilio",
+    firstResponseMs: input.firstResponseMs,
+    expectedToolSlugs,
+    toolReceipts,
+    interruptionsHandled: !timeline.some((event) => event.type === "turn_interrupted" || event.type === "handoff_failed"),
+    resolved: Boolean(input.outcome?.summary?.trim()) && (input.outcome?.openQuestions?.length ?? 0) === 0,
+  }, scenario);
+}

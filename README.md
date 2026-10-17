@@ -1463,6 +1463,28 @@ or confidential business context. Bland call creation attaches the provisioned t
 status callbacks use a separate signed, per-call opaque URL. Health reports
 Bland as misconfigured until all five settings are valid.
 
+Bland inbound numbers are supported as provider-managed inbound conversations.
+Set `BLAND_INBOUND_ENABLED=true`, map each Bland number to the business's
+Chusky account/workspace anchor with
+`BLAND_INBOUND_ROUTES=+15550000001=123456789`, and configure the optional
+`BLAND_INBOUND_ALLOWED_CALLERS` verification list. This route value is not a
+caller allowlist: callers are public by default. On the current Railway
+deployment, set `BLAND_INBOUND_WEBHOOK_URL` to
+`https://chusky.up.railway.app/bland/inbound/webhook`, then run
+`npm run setup:bland-inbound -- +15550000001` once for that Bland number. The
+setup updates Bland's inbound-number configuration with the signed Chusky
+callback, live call events, and the existing Consult Chusky tool. Chusky
+registers the inbound call from the signed provider event before resolving
+live consultation requests, stores the call as an account-scoped inbound
+record, and persists its transcript, outcome, QA result, and durable follow-up
+tasks. Calls from numbers outside the optional verification list remain
+public/unverified: they may ask public company questions, but Chusky will not
+expose private history, connected-app data, or state-changing tools until the
+caller is verified. The health check reports `blandInbound` separately when
+its route, webhook, tool, or secret configuration is incomplete. Organization-
+and team-level routing plus a dedicated safe public-action policy remain the
+next business voice expansion.
+
 Sendblue `content` is plain text, not rendered Markdown. Chusky converts common Markdown at the provider boundary: emphasis markers are removed, bullets become `•`, headings become uppercase, and links become `label: URL`. Typing indicators are sent through `POST /api/send-typing-indicator` before linked one-to-one agent work and stopped after delivery. Verified one-to-one inbound messages are marked read through `POST /api/mark-read`; this is best-effort and never blocks the reply. Generated images and supported audio/video artifacts are stored in R2 and sent using short-lived HTTPS URLs when R2 is configured. A linked user can reply to an iMessage and send `/react love`, `/react like`, `/react dislike`, `/react laugh`, `/react emphasize`, or `/react question` to send a tapback to the replied message. Reactions are private-chat only. Sendblue status callbacks are sent to `/sendblue/status` and update the durable outbox receipt. The Sendblue dashboard's “Typing Indicators” webhook section is only needed if Chusky later needs to receive user-typing events.
 
 ### Channel support and operating model
@@ -1627,6 +1649,14 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `DURABLE_SDK_AUDIT_RETENTION_DAYS` | Neon | `90` | Retain SDK audit rows for this many days |
 | `DURABLE_SDK_RUN_RETENTION_DAYS` | Neon | `30` | Retain terminal SDK run rows for this many days |
 | `BETTER_AUTH_DATABASE` | — | `./data/better-auth.sqlite` | Local-development Better Auth SQLite fallback only |
+| `BLAND_INBOUND_ENABLED` | Bland AI | `false` | Enable inbound Bland numbers |
+| `BLAND_INBOUND_WEBHOOK_URL` | Bland AI | `WEBHOOK_URL` + `/bland/inbound/webhook` | Clean HTTPS callback root used by `setup:bland-inbound` |
+| `BLAND_INBOUND_ROUTES` | Bland AI | — | Comma-separated `E.164=accountTelegramUserId` inbound number routes |
+| `BLAND_INBOUND_ALLOWED_CALLERS` | Bland AI | — | Optional comma-separated E.164 callers treated as verified |
+| `BLAND_INBOUND_CALL_PROFILE` | Bland AI | `personal` | `personal` or `business` inbound safety profile |
+| `BLAND_INBOUND_PURPOSE` | Bland AI | `Handle an inbound caller request` | Bounded internal purpose used by Chusky's consultation runtime |
+| `BLAND_INBOUND_FIRST_SENTENCE` | Bland AI | — | Optional provider-managed opening sentence |
+| `BLAND_INBOUND_PROMPT` | Bland AI | built-in safe prompt | Optional provider-managed inbound prompt override |
 | `PORT` | — | `8080` | HTTP port |
 | `LOG_LEVEL` | — | `info` | trace/debug/info/warn/error |
 | `SLACK_ENABLED` | — | `false` | Enable the verified Slack adapter |
@@ -1692,8 +1722,8 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `JEV_MODE` | — | `off` | Jev decision routing for skills, Composio toolkits/actions, Treg, Monid, and optional native-tool exposure: `off`, `shadow` (log only), or `enforce` (apply with deterministic fallback). See `.agents/skills/chusky/references/jev.md` |
 | `JEV_PROVIDER` | — | `openrouter` | `openrouter` reuses `OPENROUTER_API_KEY`; `typesafe` needs `JEV_API_KEY` |
 | `JEV_SURFACES` | — | `skills,composio,treg,monid,autonomy,browser` | Jev surfaces: skills, Composio, Treg, Monid, bounded autonomy, inspected browser next-step proposals, and opt-in `native` tool exposure |
-| `JEV_NATIVE_TOOL_ROUTING` | — | `false` | With `native` enabled, select a compact native-tool schema set in enforce mode; false preserves the existing full native catalog |
-| `NATIVE_TOOL_LOADING` | — | `full` | `full` preserves all native schemas; `bundle` sends core/matched bundles and enables progressive `CHUCK_FIND_TOOLS` discovery |
+| `JEV_NATIVE_TOOL_ROUTING` | — | `false` | With `native` enabled, select a compact native-tool schema set in enforce mode; false leaves native selection to deterministic bundle loading |
+| `NATIVE_TOOL_LOADING` | — | `bundle` | `bundle` sends core/matched bundles and enables progressive `CHUCK_FIND_TOOLS` discovery; set `full` only as an explicit compatibility rollback |
 | `JEV_NATIVE_TOOL_MAX_CANDIDATES` | — | `16` | Maximum compact native candidates considered by Jev (4-32) |
 | `JEV_NATIVE_TOOL_MIN_CONFIDENCE` | — | `0.6` | Minimum Jev confidence required before native schemas are reduced |
 | `JEV_NATIVE_TOOL_MIN_PROBABILITY` | — | `0.12` | Minimum per-tool probability for a selected native schema |

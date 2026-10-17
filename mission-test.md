@@ -102,3 +102,18 @@ Use this prompt with the agent responsible for the live staging test:
 > call count, QStash delivery evidence, and any errors. Do not call the test a
 > pass if the process merely reaches the timeout while the mission is still
 > running.
+
+## Smoke-test guardrails
+
+The smoke harness now derives a safe default deadline from the requested waits:
+the sum of all waits plus two minutes of QStash/network headroom, with a
+minimum of three minutes. If `LIVE_MISSION_TIMEOUT_MS` is set below that
+deadline, the harness fails before creating a mission instead of producing a
+misleading `running` result. A persisted `failed` mission is also terminal for
+the poller, so delivery or worker failures are reported immediately.
+
+For three 60-second stages, use at least:
+
+```text
+LIVE_MISSION_TIMEOUT_MS=300000
+```

@@ -488,6 +488,108 @@ export async function verifyCandidates(client: JevClient, input: {
   return { scores, latencyMs: result.latencyMs, costUsd: result.costUsd ?? 0 };
 }
 
+/**
+ * Rank a bounded catalogue and independently verify every candidate in the
+ * same Jev request. This is the low-call path for exact action routing: the
+ * rank answer chooses an ordered shortlist while the Noul answers preserve
+ * the independent "does this materially apply?" safety check. Large or
+ * token-heavy catalogues fall back to the existing sharded rank plus verify
+ * flow so a single request never exceeds the configured Jev budget.
+ */
+export async function rankAndVerifyOptions(client: JevClient, input: {
+  state: JevState;
+  instructions: string;
+  options: RankOption[];
+  noneDescription: string;
+  verificationQuestion: (candidate: RankOption) => string;
+  verificationCriteria?: { true: string; false: string };
+  signal?: AbortSignal;
+  maxPerQuestion?: number;
+  sessionId?: string;
+}): Promise<RankResult & { scores: Record<string, number> }> {
+  const unique = new Map<string, RankOption>();
+  for (const option of input.options) if (option.id && option.id !== NONE_OPTION && !unique.has(option.id)) unique.set(option.id, option);
+  const options = [...unique.values()];
+  if (!options.length) return { ranked: [], none: 1, confidence: 1, calls: 0, latencyMs: 0, costUsd: 0, scores: {} };
+
+  const maxPerQuestion = Math.max(4, Math.min(input.maxPerQuestion ?? config.jevMaxOptionsPerQuestion, 254));
+  const rank = choiceQuestion(input.instructions, options.slice(0, maxPerQuestion), input.noneDescription);
+  const verification: Record<string, JevQuestion> = {};
+  const ids: string[] = [];
+  options.slice(0, maxPerQuestion).forEach((candidate, index) => {
+    const key = `verify_${index}`;
+    ids.push(candidate.id);
+    verification[key] = {
+      type: "noul",
+      instructions: {
+        candidate: { id: candidate.id, description: jevText(candidate.description, 600) },
+        question: input.verificationQuestion(candidate),
+        decision_rules: "Assess this candidate independently using only the supplied state and candidate description. Answer true only when it materially applies to the requested outcome; incidental keyword overlap or broad capability is insufficient. This assessment does not establish availability, authorization, or successful execution.",
+      },
+      ...(input.verificationCriteria ? { criteria: input.verificationCriteria } : {}),
+    };
+  });
+  const questions = { rank, ...verification };
+  const budget = config.jevMaxRequestTokens - estimateTokens(input.state) - 200;
+  // A catalogue larger than the bounded set must retain rankOptions' shard
+  // tournament. Likewise, do not duplicate a long catalogue into a request
+  // that would be rejected before Jev can answer it.
+  if (options.length > maxPerQuestion || estimateTokens(questions) > budget) {
+    const ranking = await rankOptions(client, {
+      state: input.state,
+      instructions: input.instructions,
+      options,
+      noneDescription: input.noneDescription,
+      signal: input.signal,
+      maxPerQuestion,
+      sessionId: input.sessionId,
+    });
+    const byId = new Map(options.map((option) => [option.id, option]));
+    const candidates = ranking.ranked
+      .filter((item) => item.probability >= 0.01)
+      .slice(0, 6)
+      .map((item) => ({ ...item, description: byId.get(item.id)?.description ?? item.id }));
+    const checked = candidates.length
+      ? await verifyCandidates(client, {
+        state: input.state,
+        candidates,
+        question: input.verificationQuestion,
+        criteria: input.verificationCriteria,
+        signal: input.signal,
+        sessionId: input.sessionId,
+      })
+      : { scores: {}, latencyMs: 0, costUsd: 0 };
+    return {
+      ...ranking,
+      scores: checked.scores,
+      calls: ranking.calls + (candidates.length ? 1 : 0),
+      latencyMs: ranking.latencyMs + checked.latencyMs,
+      costUsd: ranking.costUsd + checked.costUsd,
+    };
+  }
+
+  const result = await client.evaluate(input.state, questions, { signal: input.signal, sessionId: input.sessionId });
+  const answer = result.answers.rank as JevChoiceAnswer;
+  const scores: Record<string, number> = {};
+  ids.forEach((id, index) => {
+    const checked = result.answers[`verify_${index}`];
+    if (checked?.type === "noul") scores[id] = checked.noul;
+  });
+  const ranked = Object.entries(answer.probabilities)
+    .filter(([id]) => id !== NONE_OPTION)
+    .map(([id, probability]) => ({ id, probability }))
+    .sort((a, b) => b.probability - a.probability);
+  return {
+    ranked,
+    none: answer.probabilities[NONE_OPTION] ?? (answer.choice === NONE_OPTION ? answer.confidence : 0),
+    confidence: answer.confidence,
+    calls: 1,
+    latencyMs: result.latencyMs,
+    costUsd: result.costUsd ?? 0,
+    scores,
+  };
+}
+
 let sharedClient: JevClient | undefined;
 
 export function jevEnabled(surface?: "skills" | "composio" | "treg" | "monid" | "autonomy" | "browser" | "native" | "memory"): boolean {

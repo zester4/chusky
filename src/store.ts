@@ -513,6 +513,10 @@ export interface PhoneCallRecord {
   timeline?: VoiceCallEvent[];
   /** Deterministic post-call QA result; never contains raw audio or transcript. */
   qa?: VoiceQaScorecard;
+  /** Durable tasks created from the structured call outcome. */
+  followUpTaskIds?: string[];
+  followUpStatus?: "pending" | "scheduled" | "failed";
+  followUpErrorCode?: string;
   outcomeStatus?: "pending" | "completed" | "failed";
   outcomeErrorCode?: string;
   callLengthSeconds?: number;
@@ -6410,6 +6414,9 @@ export async function getSession(uid: number, includeSdkTables = false, options?
       ...(item.outcome && typeof item.outcome === "object" && !Array.isArray(item.outcome) ? { outcome: normalizePhoneCallOutcome(item.outcome) } : {}),
       ...(Array.isArray(item.timeline) ? { timeline: normalizeVoiceCallEvents(item.timeline) } : {}),
       ...(item.qa && typeof item.qa === "object" && !Array.isArray(item.qa) ? { qa: normalizeVoiceQaScorecard(item.qa) } : {}),
+      ...(Array.isArray(item.followUpTaskIds) ? { followUpTaskIds: item.followUpTaskIds.filter((id): id is string => typeof id === "string" && /^task_[A-Za-z0-9_-]{1,160}$/.test(id)).slice(0, 10) } : {}),
+      ...(item.followUpStatus === "pending" || item.followUpStatus === "scheduled" || item.followUpStatus === "failed" ? { followUpStatus: item.followUpStatus } : {}),
+      ...(typeof item.followUpErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(item.followUpErrorCode) ? { followUpErrorCode: item.followUpErrorCode } : {}),
       ...(item.outcomeStatus === "pending" || item.outcomeStatus === "completed" || item.outcomeStatus === "failed" ? { outcomeStatus: item.outcomeStatus } : {}),
       ...(typeof item.outcomeErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(item.outcomeErrorCode) ? { outcomeErrorCode: item.outcomeErrorCode } : {}),
       ...(typeof item.callLengthSeconds === "number" && Number.isFinite(item.callLengthSeconds) && item.callLengthSeconds >= 0 ? { callLengthSeconds: Math.min(item.callLengthSeconds, 86_400) } : {}),
@@ -7108,6 +7115,8 @@ function publishPhoneCallNotification(call: PhoneCallRecord): void {
 export async function addPhoneCall(uid: number, record: PhoneCallRecord): Promise<PhoneCallRecord> {
   const initial = record.timeline?.length ? record : { ...record, timeline: [createVoiceCallEvent({ type: "call_started", summary: `${record.direction === "inbound" ? "Inbound" : "Outbound"} call created.` })] };
   const added = await mutateSession(uid, (session) => {
+    const existing = (session.phoneCalls ?? []).find((call) => call.id === initial.id && call.userId === uid);
+    if (existing) return existing;
     session.phoneCalls = [initial, ...(session.phoneCalls ?? [])].slice(0, 50);
     return initial;
   });
@@ -7115,7 +7124,7 @@ export async function addPhoneCall(uid: number, record: PhoneCallRecord): Promis
   return added;
 }
 
-type PhoneCallPatch = Partial<Pick<PhoneCallRecord, "status" | "runtimeState" | "bridgeSessionId" | "lastCommittedTurnId" | "continuity" | "providerCallId" | "error" | "summary" | "callLengthSeconds" | "postCallProcessedAt" | "outcome" | "outcomeStatus" | "outcomeErrorCode" | "timeline" | "qa">>;
+type PhoneCallPatch = Partial<Pick<PhoneCallRecord, "status" | "runtimeState" | "bridgeSessionId" | "lastCommittedTurnId" | "continuity" | "providerCallId" | "phoneNumber" | "error" | "summary" | "callLengthSeconds" | "postCallProcessedAt" | "outcome" | "outcomeStatus" | "outcomeErrorCode" | "timeline" | "qa" | "followUpTaskIds" | "followUpStatus" | "followUpErrorCode">>;
 
 function nextPhoneCallStatus(current: PhoneCallRecord["status"], next: PhoneCallRecord["status"], provider?: PhoneCallRecord["provider"]): PhoneCallRecord["status"] {
   if (provider !== "bland") return next;

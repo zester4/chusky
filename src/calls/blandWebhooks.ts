@@ -10,6 +10,9 @@ import {
   type Message,
 } from "../store.js";
 import { isValidBlandToolSecret, readBlandCallToken, verifyBlandWebhookSignature } from "./blandSecurity.js";
+import { normalizeBlandInboundNumber, registerBlandInboundCall, type BlandInboundRoute } from "./blandInbound.js";
+import { schedulePhoneCallFollowUps } from "./followUp.js";
+import { scorePhoneCallTrace } from "./voiceEvaluation.js";
 
 const MAX_WEBHOOK_BYTES = 2 * 1024 * 1024;
 const MAX_TOOL_BYTES = 16 * 1024;
@@ -41,8 +44,8 @@ function providerCallId(body: Record<string, unknown>): string | undefined {
 }
 
 function isPostCall(body: Record<string, unknown>): boolean {
-  return typeof body.completed === "boolean"
-    || typeof body.queue_status === "string"
+  return body.completed === true
+    || String(body.queue_status ?? "").toLowerCase() === "complete"
     || Array.isArray(body.transcripts)
     || typeof body.concatenated_transcript === "string";
 }
@@ -122,27 +125,58 @@ function safeError(body: Record<string, unknown>): string | undefined {
   return body.error_message.replace(/[\u0000-\u001F]/g, " ").trim().slice(0, 500);
 }
 
-function blandOutcome(body: Record<string, unknown>): { title: string; summary: string; decisions: string[]; actionItems: []; openQuestions: string[] } | undefined {
+function boundedOutcomeText(value: unknown, maximum: number): string | undefined {
+  return typeof value === "string" && value.trim()
+    ? value.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, maximum)
+    : undefined;
+}
+
+function blandOutcome(body: Record<string, unknown>): { title: string; summary: string; decisions: string[]; actionItems: Array<{ task: string; owner: string; dueDate?: string }>; openQuestions: string[] } | undefined {
   const summary = typeof body.summary === "string" ? body.summary.replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 2_000) : "";
-  return summary ? { title: "Bland call outcome", summary, decisions: [], actionItems: [], openQuestions: [] } : undefined;
+  if (!summary) return undefined;
+  const list = (value: unknown, maximum: number): string[] => Array.isArray(value)
+    ? value.flatMap((entry) => { const item = boundedOutcomeText(entry, maximum); return item ? [item] : []; }).slice(0, 10)
+    : [];
+  const rawItems = Array.isArray(body.action_items) ? body.action_items : Array.isArray(body.actionItems) ? body.actionItems : [];
+  const actionItems = rawItems.slice(0, 10).flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const item = entry as Record<string, unknown>;
+    const task = boundedOutcomeText(item.task, 500);
+    const owner = boundedOutcomeText(item.owner, 120);
+    if (!task || !owner) return [];
+    const dueDate = boundedOutcomeText(item.dueDate ?? item.due_date, 80);
+    return [{ task, owner, ...(dueDate ? { dueDate } : {}) }];
+  });
+  return { title: boundedOutcomeText(body.outcome_title ?? body.title, 180) ?? "Bland call outcome", summary, decisions: list(body.decisions, 700), actionItems, openQuestions: list(body.open_questions ?? body.openQuestions, 700) };
 }
 
 export async function processBlandWebhook(input: {
   rawBody: string;
   signature: string;
   callbackToken?: string;
+  inboundRoute?: BlandInboundRoute;
   secret: string;
 }): Promise<BlandWebhookResult> {
   if (!verifyBlandWebhookSignature(input.rawBody, input.signature, input.secret)) return fail(401, "invalid Bland webhook signature");
   const body = parseObject(input.rawBody, MAX_WEBHOOK_BYTES);
   if (!body) return fail(Buffer.byteLength(input.rawBody, "utf8") > MAX_WEBHOOK_BYTES ? 413 : 400, "invalid Bland webhook payload");
-  const identity = callbackIdentity(body, input.callbackToken, input.secret);
+  let identity = callbackIdentity(body, input.callbackToken, input.secret);
   const callId = providerCallId(body);
   const postCall = isPostCall(body);
   if (input.callbackToken && !identity) return fail(401, "invalid Bland callback token");
-  if (!identity || !callId || (!input.callbackToken && !postCall)) return fail(400, "invalid Bland callback identity or event");
+  if (input.callbackToken && input.inboundRoute) return fail(400, "Bland callback cannot use both call and inbound route identities");
+  if (input.inboundRoute && body.inbound === false) return fail(400, "Bland payload is not an inbound call");
+  if (input.inboundRoute && postCall && body.inbound !== true) return fail(400, "Bland post-call payload is missing inbound direction");
 
-  const call = await getPhoneCall(identity.userId, identity.callId);
+  let call: Awaited<ReturnType<typeof getPhoneCall>>;
+  if (!identity && input.inboundRoute && callId) {
+    const inbound = await registerBlandInboundCall({ route: input.inboundRoute, providerCallId: callId, from: body.from });
+    identity = { userId: inbound.userId, callId: inbound.id };
+    call = inbound;
+  }
+  if (!identity || !callId || (!input.callbackToken && !input.inboundRoute && !postCall)) return fail(400, "invalid Bland callback identity or event");
+
+  call ??= await getPhoneCall(identity.userId, identity.callId);
   if (!call || call.provider !== "bland") return fail(404, "unknown Bland call");
   if (call.providerCallId && call.providerCallId !== callId) return fail(409, "Bland call ID mismatch");
 
@@ -156,18 +190,30 @@ export async function processBlandWebhook(input: {
   try {
     if (postCall) {
       const callLength = Number(body.call_length);
+      const outcome = blandOutcome(body);
       const patch = {
         providerCallId: callId,
         ...(blandCallStatus(body, true) ? { status: blandCallStatus(body, true)! } : {}),
+        ...(normalizeBlandInboundNumber(body.from) ? { phoneNumber: normalizeBlandInboundNumber(body.from)! } : {}),
         ...(safeError(body) ? { error: safeError(body)! } : {}),
         ...(typeof body.summary === "string" ? { summary: body.summary.replace(/[\u0000-\u001F]/g, " ").trim().slice(0, 2000) } : {}),
-        ...(blandOutcome(body) ? { outcome: blandOutcome(body), outcomeStatus: "completed" as const } : {}),
+        ...(outcome ? { outcome, outcomeStatus: "completed" as const, followUpStatus: outcome.actionItems.length ? "pending" as const : "scheduled" as const, qa: scorePhoneCallTrace({ direction: call.direction, provider: call.provider, purpose: call.purpose, outcome, timeline: call.timeline }) } : {}),
         ...(Number.isFinite(callLength) && callLength >= 0 ? { callLengthSeconds: Math.min(callLength, 86_400) } : {}),
       };
       const result = await finalizeBlandPhoneCall(identity.userId, identity.callId, patch, blandTranscriptMessages(body, identity.callId));
       if (result === "not_found") {
         await releaseDeliveryLease(deliveryKey, leaseToken).catch(() => false);
         return fail(404, "unknown Bland call");
+      }
+      const saved = await getPhoneCall(identity.userId, identity.callId);
+      if (saved?.outcome && saved.followUpStatus !== "scheduled") {
+        try {
+          const followUp = await schedulePhoneCallFollowUps(saved, saved.outcome);
+          await updatePhoneCall(identity.userId, identity.callId, { followUpTaskIds: followUp.taskIds, followUpStatus: "scheduled", followUpErrorCode: undefined });
+        } catch (error) {
+          await updatePhoneCall(identity.userId, identity.callId, { followUpStatus: "failed", followUpErrorCode: "follow_up_scheduling_failed" }).catch(() => undefined);
+          throw error;
+        }
       }
       if (!(await completeDeliveryLease(deliveryKey, leaseToken, DELIVERY_TTL_SECONDS))) return fail(503, "Bland callback lease expired before completion");
       return { status: 200, body: { ok: true, duplicate: result === "already_processed" } };

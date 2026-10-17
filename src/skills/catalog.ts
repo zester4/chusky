@@ -103,6 +103,7 @@ const ROUTED_SKILLS: Array<{ name: string; triggers: string[] }> = [
   { name: "lead-intel-pro", triggers: ["lead signals", "buyer intent signals", "monitor leads", "signal monitoring", "find prospects", "lead research", "qualify leads", "lead campaign", "lead generation", "build a lead list", "prospecting campaign", "100 leads", "enrich leads", "target accounts", "company research"] },
   { name: "memory-pro", triggers: ["memory", "remember this", "save this", "what do you remember", "recall", "forget this", "memory brief", "personal context"] },
   { name: "mission-pro", triggers: ["mission", "durable mission", "multi-step mission", "continue after this chat", "wait and continue", "sleep and wake", "durable work", "keep working"] },
+  { name: "treg", triggers: ["treg", "live external data", "provider catalog", "company enrichment", "people enrichment", "find prospects", "verified work email", "hiring signals", "buying signals", "seo data", "backlink data", "ad library", "social data", "market data"] },
   { name: "marketing-ideas", triggers: ["marketing ideas", "campaign ideas", "growth ideas"] },
   { name: "marketing-psychology", triggers: ["marketing psychology", "persuasion", "positioning"] },
   { name: "customer-research", triggers: ["customer research", "icp", "user interviews"] },
@@ -269,6 +270,8 @@ export const ROUTED_SKILL_REFERENCES: Record<string, string[]> = {
   "fullstack-guardian": ["references/design-template.md"],
   "ui-ux-pro-max": ["references/pro-rules.md", "references/quick-reference.md"],
   "browser-pro": ["references/retailer-playbook.md", "references/tool-contract.md", "references/recovery-matrix.md"],
+  "treg": ["references/runtime-contract.md", "references/provider-selection.md", "references/research-workflows.md"],
+  "monid": ["references/engine-playbooks.md", "references/lead-sourcing.md", "references/local-prospects.md", "references/research-briefs.md"],
 };
 
 /** Installed trusted skills, using their frontmatter names. */

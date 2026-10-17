@@ -47,6 +47,20 @@ test("Bland refuses to dial without a callback-signing secret", async () => {
   }), /BLAND_WEBHOOK_SECRET/);
 });
 
+test("Bland refuses outbound dialing during the configured quiet hours", async () => {
+  await initStore({ memoryOnly: true });
+  await assert.rejects(() => startBlandCallForUser(811, {
+    phoneNumber: "+15550001",
+    purpose: "Confirm the appointment",
+    profile: { controls: { timezone: "UTC", start: "00:00", end: "23:59" } },
+  }, {
+    enabled: true, apiKey: "bland-key", webhookUrl: "https://chusky.example/bland/webhook",
+    webhookSecret: "a-secure-test-secret-that-is-long-enough", consultToolId: "TL-1234567890",
+    consultToolSecret: "a-second-secure-test-secret-long-enough", voice: "maya",
+    fetchImpl: async () => { throw new Error("must not reach provider"); },
+  }), /quiet hours/i);
+});
+
 test("Bland readiness requires distinct signing/tool secrets and a provisioned v1 tool ID", () => {
   const ready = {
     enabled: true, apiKey: "key", webhookUrl: "https://chusky.example/bland/webhook",

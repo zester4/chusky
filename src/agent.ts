@@ -81,6 +81,7 @@ import { boundMissionContext, compactModelMessages, compactModelMessagesWithSumm
 import { ATTENTION_PULSE_IDENTITY, CAPABILITY_ROUTING_KERNEL, compactActionCustomization, compactConversationalCustomization, compactMissionCustomization, composeSystemPrompt } from "./prompt.js";
 import { contextPrompt } from "./contextGraph.js";
 import { withLatencyBudget } from "./voiceLatency.js";
+import { cachedVoiceConnectedAccounts, cachedVoiceToolSchemas } from "./calls/voicePreparation.js";
 import { AUTONOMY_OPERATING_KERNEL, needsAutonomyCloseoutNudge } from "./autonomy/operatingLoop.js";
 import { createComposioOutcomeReadAdapter } from "./reliability/composioReadAdapter.js";
 import { browserRunHasProgress, browserRunProgressMarker } from "./lib/e2b/runProgress.js";
@@ -2533,11 +2534,14 @@ async function executeAgent(
 
   const durableRunId = options?.runId ?? channelContext?.runId ?? `run_${randomUUID()}`;
   const voiceTurn = options?.voiceTurn === true;
+  const voicePreparationKey = voiceTurn ? `${userId}:${options?.voiceSessionId ?? durableRunId}` : undefined;
   const voiceRoutingText = userRequestText(userMessage);
   const sharedScope = channelContext?.scope === "shared";
   const ownerPrivateRun = options?.ownerPrivateRun === true && !sharedScope;
+  // The trusted outbound purpose selects the capability preload, but it must
+  // not make ordinary greetings pay for action routing on every turn.
   const voiceFastLane = voiceTurn && ownerPrivateRun && !approvedApprovalId && !options?.meetingId && !options?.toolAllow?.length
-    && voiceFastLaneEligible(`${voiceRoutingText}\n${options?.voiceRoutingHint ?? ""}`);
+    && voiceFastLaneEligible(voiceRoutingText);
   const sharedMeetingRoomAccess = sharedScope && options?.sharedMeetingRoomAccess === true && Boolean(options?.meetingId);
   const existingRun = options?.ephemeral || voiceTurn ? undefined : await getAgentRun(userId, durableRunId);
   let durableRunRecord = existingRun;
@@ -2598,7 +2602,11 @@ async function executeAgent(
   // this run remain available, while the model can discover any other action
   // through COMPOSIO_SEARCH_TOOLS and execute it through the session.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const fullComposioTools: any[] = sessionObj ? await sessionObj.tools() : [];
+  const fullComposioTools: any[] = sessionObj
+    ? voicePreparationKey
+      ? await cachedVoiceToolSchemas(voicePreparationKey, () => sessionObj.tools())
+      : await sessionObj.tools()
+    : [];
   fullComposioTools.forEach((tool: unknown) => registerComposioToolMetadata(tool));
   const voiceCalendarRequest = voiceTurn && ownerPrivateRun
     && /\b(?:calendar|calendars|schedule|scheduling|appointment|appointments|availability|available|book|booking|reschedule)\b/i.test(`${voiceRoutingText}\n${options?.voiceRoutingHint ?? ""}`);
@@ -2968,7 +2976,7 @@ async function executeAgent(
   );
   const batchRoutingEligible = config.jevMode === "enforce"
     && config.jevTurnBatchRouting
-    && !voiceTurn
+    && (!voiceTurn || (ownerPrivateRun && !voiceToolFreeTurn && !options?.ephemeral))
     && !mediaRequest
     && !sharedScope
     && !toolsDisabled
@@ -2976,7 +2984,7 @@ async function executeAgent(
     && !pendingApproval
     && !pendingContinuation
     && !approvedApprovalId
-    && !options?.ephemeral
+    && (!options?.ephemeral || (voiceTurn && ownerPrivateRun))
     && !options?.meetingId
     && !options?.toolAllow?.length
     && !channelContext?.triggerEventId
@@ -2994,15 +3002,27 @@ async function executeAgent(
   let nativeToolRoutePromise: Promise<Awaited<ReturnType<typeof routeNativeToolsForTurn>>>;
 
   // The normal private text path uses one explicit Jev request for all
-  // independent routing judgments. Connected-account metadata is demand-loaded
-  // only after the action gate says a capability is needed, so ordinary
-  // conversation does not read the account store just to decide it is ordinary.
+  // independent routing judgments. In the batch path, connected-account
+  // metadata is prefetched in parallel so Composio's stage-one decision can
+  // share that same Jev request; the result is discarded for ordinary turns.
   if (batchRoutingEligible) {
     try {
-      const skills = await listSkillSummaries().catch((error) => {
+      // Prefetch the connected-account snapshot alongside the skill catalogue.
+      // The batch planner needs it to include Composio's stage-one decision in
+      // the same Jev request. This lookup is hidden behind the existing Jev
+      // round-trip and is reused below, so it does not add a sequential hop.
+      const [skills, prefetchedAccounts] = await Promise.all([
+        listSkillSummaries().catch((error) => {
           logger.debug({ err: error }, "Skill catalogue unavailable for batched routing");
           return [] as Array<{ name: string; description: string }>;
-        });
+        }),
+        jevEnabled("composio") && likelyNeedsActionRouting(routingQuery)
+          ? (voicePreparationKey ? cachedVoiceConnectedAccounts(voicePreparationKey, () => listConnectedAccounts(userId)) : listConnectedAccounts(userId)).catch((error) => {
+            logger.debug({ err: error, userId }, "Connected-account metadata unavailable for batched routing");
+            return undefined;
+          })
+          : Promise.resolve(undefined),
+      ]);
       const nativeNames = new Set(availableTools.map((tool) => toolName(tool)));
       const plan = await computeTurnRoutingPlan({
         query: routingQuery,
@@ -3010,13 +3030,13 @@ async function executeAgent(
         skills,
         nativeCandidates: nativeToolManifest.filter((tool) => nativeNames.has(tool.slug)),
         availableNativeTools: availableTools,
-        connectedAccounts: [],
+        connectedAccounts: prefetchedAccounts ?? [],
         forceCapability: forceCapabilityRouting,
-        includeSkills: !options?.ephemeral || ownerPrivateRun,
+        includeSkills: !voiceTurn && (!options?.ephemeral || ownerPrivateRun),
         includeNative: true,
-        includeComposio: false,
-        includeTreg: true,
-        includeMonid: true,
+        includeComposio: prefetchedAccounts !== undefined,
+        includeTreg: !voiceTurn,
+        includeMonid: !voiceTurn,
         preserveNativeTools: Boolean(options?.toolAllow?.length && !options?.taskId && !options?.missionId),
         signal: routingDeadline.signal,
         sessionId: durableRunId,
@@ -3024,10 +3044,12 @@ async function executeAgent(
       turnActionDecision = plan.action;
       actionRoutingLikely = !plan.action.noActionNeeded;
       accountsPromise = actionRoutingLikely && !sharedScope
-        ? listConnectedAccounts(userId).catch((error) => {
-          logger.debug({ err: error, userId }, "Connected-account metadata unavailable after batched action gate");
-          return undefined;
-        })
+        ? prefetchedAccounts !== undefined
+          ? Promise.resolve(prefetchedAccounts)
+          : (voicePreparationKey ? cachedVoiceConnectedAccounts(voicePreparationKey, () => listConnectedAccounts(userId)) : listConnectedAccounts(userId)).catch((error) => {
+            logger.debug({ err: error, userId }, "Connected-account metadata unavailable after batched action gate");
+            return undefined;
+          })
         : Promise.resolve(undefined);
       skillRoutePromise = Promise.resolve(actionRoutingLikely ? plan.skillRoute : undefined);
       tregRoutePromise = Promise.resolve(actionRoutingLikely ? plan.tregRoute : undefined);
@@ -3040,6 +3062,7 @@ async function executeAgent(
           deadline: routingDeadline,
           recentContext: routingRecentContext,
           sessionId: durableRunId,
+          stage1: plan.composioStage1,
         }).catch((error) => {
           logger.debug({ err: error, userId }, "Batched Composio action routing unavailable for this run");
           return undefined;
@@ -3083,7 +3106,7 @@ async function executeAgent(
         ? routeTregForTurn(routingQuery, { signal, deadline: routingDeadline, sessionId: durableRunId }).catch(() => undefined)
         : Promise.resolve(undefined);
       accountsPromise = actionRoutingLikely && !sharedScope
-        ? listConnectedAccounts(userId).catch((accountError) => { logger.debug({ err: accountError, userId }, "Connected-account metadata unavailable for this run"); return undefined; })
+        ? (voicePreparationKey ? cachedVoiceConnectedAccounts(voicePreparationKey, () => listConnectedAccounts(userId)) : listConnectedAccounts(userId)).catch((accountError) => { logger.debug({ err: accountError, userId }, "Connected-account metadata unavailable for this run"); return undefined; })
         : Promise.resolve(undefined);
       composioRoutePromise = accountsPromise.then((accounts) => actionRoutingLikely && accounts
         ? routeComposioForTurn(routingQuery, { accounts, listActions: listComposioToolkitActions, listToolkits: listComposioToolkitCatalogue, signal, deadline: routingDeadline, recentContext: routingRecentContext, sessionId: durableRunId })
@@ -3117,7 +3140,7 @@ async function executeAgent(
       ? Promise.resolve(reusableMissionRouting.routedAccounts)
       : !actionRoutingLikely || sharedScope
       ? Promise.resolve(undefined)
-      : listConnectedAccounts(userId).catch((error) => { logger.debug({ err: error, userId }, "Connected-account metadata unavailable for this run"); return undefined; });
+      : (voicePreparationKey ? cachedVoiceConnectedAccounts(voicePreparationKey, () => listConnectedAccounts(userId)) : listConnectedAccounts(userId)).catch((error) => { logger.debug({ err: error, userId }, "Connected-account metadata unavailable for this run"); return undefined; });
     composioRoutePromise = persistedMissionRouting || reusableMissionRouting
       ? Promise.resolve(reusableMissionRouting?.composioDecision)
       : accountsPromise.then((accounts) => actionRoutingLikely && accounts

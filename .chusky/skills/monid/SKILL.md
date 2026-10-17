@@ -1,7 +1,7 @@
 ---
 name: monid
-description: Discover and run external APIs from Monid's catalog through Chusky's governed Monid tools.
-version: 0.1.7-chusky.1
+description: Use Monid's governed structured-API catalog when a live data capability is explicitly requested or fills a concrete gap not covered by Treg, connected apps, native tools, or owner MCPs. Discover, inspect, approve, run, poll, and validate bounded provider research with source and spend evidence.
+version: 1.0.0-chusky.2
 ---
 
 # Monid external API catalog

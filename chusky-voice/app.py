@@ -252,6 +252,7 @@ class RecallMeetingAgentError(RuntimeError):
 class VoiceTurnResult:
     text: str
     cost: float
+    first_audio_ms: int | None = None
 
 
 class TwilioVoiceCall:
@@ -298,6 +299,7 @@ class TwilioVoiceCall:
         self.greeting_sent = False
         self.eager_end_times: dict[int, float] = {}
         self.response_started_at = 0.0
+        self.first_response_ms: int | None = None
         self.eager_response_started_at = 0.0
         self.tts_socket: Any | None = None
         self.tts_lock = asyncio.Lock()
@@ -307,6 +309,7 @@ class TwilioVoiceCall:
         self.elevenlabs_runtime_fallback = False
         self.tts_first_audio_recorded = False
         self.turn_first_audio_event: asyncio.Event | None = None
+        self.turn_first_audio_at: float | None = None
         self.tool_progress_task: asyncio.Task[None] | None = None
         self.stt_resample_state: object | None = None
         self.tts_resample_state: object | None = None
@@ -765,6 +768,7 @@ class TwilioVoiceCall:
             audio_started_at = time.monotonic()
             first_audio_origin = self.eager_response_started_at or self.response_started_at
             first_audio_ms = max(0, int((audio_started_at - first_audio_origin) * 1000)) if first_audio_origin else 0
+            self.turn_first_audio_at = audio_started_at
             self.metrics.tts_first_audio_ms_total += first_audio_ms
             self.metrics.tts_first_audio_count += 1
             if self.eager_response_started_at:
@@ -885,6 +889,7 @@ class TwilioVoiceCall:
         the agent's substantive answer.
         """
         self.turn_first_audio_event = asyncio.Event()
+        self.turn_first_audio_at = None
         stream_task = asyncio.create_task(
             self._consume_agent_stream(transcript, speculative=speculative),
             name=f"twilio-agent-stream-{self.call_id}",
@@ -992,7 +997,8 @@ class TwilioVoiceCall:
                 await asyncio.wait_for(self.tts_done_event.wait(), timeout=45.0)
             self.metrics.agent_turn_ms_total += int((time.monotonic() - started) * 1000)
             self.metrics.agent_turns += 1
-            return VoiceTurnResult(text=normalize_voice_text(full_text)[:5000], cost=cost)
+            first_audio_ms = max(0, round((self.turn_first_audio_at - started) * 1000)) if self.turn_first_audio_at else None
+            return VoiceTurnResult(text=normalize_voice_text(full_text)[:5000], cost=cost, first_audio_ms=first_audio_ms)
         except asyncio.CancelledError:
             await self._cancel_tool_progress()
             raise
@@ -1054,6 +1060,7 @@ class TwilioVoiceCall:
         payload = {
             "callId": self.call_id, "userId": self.user_id, "transcript": transcript,
             "text": result.text, "cost": result.cost, "turnId": f"{turn_index}", "sessionId": self.bridge_session_id,
+            **({"firstResponseMs": result.first_audio_ms} if result.first_audio_ms is not None else {}),
         }
         last_error: Exception | None = None
         for attempt in range(3):
@@ -1110,6 +1117,8 @@ class TwilioVoiceCall:
                 await self._speak_slow_turn_fallback()
                 return
             await self._commit_turn(transcript, result, turn_index)
+            if result.first_audio_ms is not None and self.first_response_ms is None:
+                self.first_response_ms = result.first_audio_ms
             self.outcome_turns.append({"transcript": transcript[:900], "response": result.text[:900]})
         except Exception:
             # The caller may already have heard the completed streamed answer.
@@ -1127,6 +1136,8 @@ class TwilioVoiceCall:
                     result = await self._request_agent(transcript)
                     if result.text:
                         await self._commit_turn(transcript, result, turn_index)
+                        if result.first_audio_ms is not None and self.first_response_ms is None:
+                            self.first_response_ms = result.first_audio_ms
                         self.outcome_turns.append({"transcript": transcript[:900], "response": result.text[:900]})
                         await self._speak(result.text)
                     elif not self.interrupted:
@@ -1147,7 +1158,7 @@ class TwilioVoiceCall:
         self.outcome_committed = True
         marker = "/commit-outcome"
         base = self.settings.chusky_turn_url[:-len("/turn")] if self.settings.chusky_turn_url.endswith("/turn") else self.settings.chusky_turn_url.rstrip("/")
-        payload = {"callId": self.call_id, "userId": self.user_id, "turns": list(self.outcome_turns)}
+        payload = {"callId": self.call_id, "userId": self.user_id, "turns": list(self.outcome_turns), **({"firstResponseMs": self.first_response_ms} if self.first_response_ms is not None else {})}
         last_error: Exception | None = None
         for attempt in range(3):
             try:

@@ -67,6 +67,7 @@ import { twilioVoicemailTwiML } from "./calls/twilio.js";
 import { answerBlandQuestion } from "./calls/blandBrain.js";
 import { processBlandConsult, processBlandWebhook } from "./calls/blandWebhooks.js";
 import { isBlandVoiceConfigured } from "./calls/bland.js";
+import { isBlandInboundConfigured, parseBlandInboundAllowedCallers, parseBlandInboundRoutes, resolveBlandInboundRoute } from "./calls/blandInbound.js";
 import { listBlandCuratedVoices } from "./calls/blandVoices.js";
 import { FLUX_TTS_VOICES } from "./voiceSettings.js";
 import { nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow, syncDefaultProactiveWatchesForConnectedAccounts } from "./nativeTools.js";
@@ -109,6 +110,8 @@ import { diagnoseMission } from "./reliability/missionDoctor.js";
 import { classifyTriggerWebhookSessionFailure } from "./triggerWebhookErrors.js";
 import { reconcileAllUserSchedules } from "./scheduler.js";
 import { buildPhoneCallOutcomePrompt, fallbackPhoneCallOutcome, parsePhoneCallOutcome } from "./calls/outcome.js";
+import { schedulePhoneCallFollowUps } from "./calls/followUp.js";
+import { scorePhoneCallTrace } from "./calls/voiceEvaluation.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -989,6 +992,43 @@ async function main(): Promise<void> {
     app.post("/bland/webhook", blandWebhook);
     app.post("/bland/webhook/:callbackToken", blandWebhook);
 
+    // Bland inbound numbers are provider-managed conversations. The signed
+    // callback registers the provider call against the configured number and
+    // owner before the live Consult Chusky tool can access private context.
+    const blandInboundWebhook = async (c: Context) => {
+      if (!config.blandVoiceEnabled || !config.blandInboundEnabled || config.blandWebhookSecret.trim().length < 32) return c.text("Not found", 404);
+      const contentLength = Number(c.req.header("content-length") ?? 0);
+      if (contentLength > 2 * 1024 * 1024) return c.json({ ok: false, error: "payload too large" }, 413);
+      let routes: ReturnType<typeof parseBlandInboundRoutes>;
+      try {
+        routes = parseBlandInboundRoutes(config.blandInboundRoutes, {
+          callProfile: config.blandInboundCallProfile === "business" ? "business" : "personal",
+          purpose: config.blandInboundPurpose,
+          allowedCallers: parseBlandInboundAllowedCallers(config.blandInboundAllowedCallers),
+        });
+      } catch {
+        return c.json({ ok: false, error: "Bland inbound routing is misconfigured" }, 503);
+      }
+      try {
+        const rawBody = await c.req.text();
+        const pathNumber = c.req.param("phoneNumber");
+        const route = resolveBlandInboundRoute(rawBody, routes, pathNumber);
+        if (!route) return c.json({ ok: false, error: "unknown Bland inbound number" }, 404);
+        const result = await processBlandWebhook({
+          rawBody,
+          signature: c.req.header("X-Webhook-Signature") ?? "",
+          inboundRoute: route,
+          secret: config.blandWebhookSecret,
+        });
+        return new Response(JSON.stringify(result.body), { status: result.status, headers: { "Content-Type": "application/json" } });
+      } catch (error) {
+        logger.warn({ err: error }, "Bland inbound callback processing failed; allowing provider retry");
+        return c.json({ ok: false, error: "Bland inbound callback could not be processed" }, 503);
+      }
+    };
+    app.post("/bland/inbound/webhook", blandInboundWebhook);
+    app.post("/bland/inbound/webhook/:phoneNumber", blandInboundWebhook);
+
     app.post("/bland/tool", async (c) => {
       if (!config.blandVoiceEnabled || config.blandConsultToolSecret.trim().length < 32) return c.text("Not found", 404);
       const contentLength = Number(c.req.header("content-length") ?? 0);
@@ -1118,7 +1158,7 @@ async function main(): Promise<void> {
     // tools or treated as authorization.
     app.post("/internal/twilio/commit-outcome", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.twilioMediaBridgeSecret)) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; turns?: unknown };
+      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; turns?: unknown; firstResponseMs?: number };
       const callId = String(body.callId ?? "").trim();
       const userId = Number(body.userId);
       if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !Array.isArray(body.turns) || body.turns.length > 12) return c.json({ ok: false, error: "invalid Twilio voice outcome" }, 400);
@@ -1135,13 +1175,18 @@ async function main(): Promise<void> {
       // the bridge can submit the bounded turns, but the call is still an
       // owner-scoped Twilio record and should be processed exactly once.
       if (!call || call.provider !== "twilio" || !["bridging", "active", "ended", "failed"].includes(call.status)) return c.json({ ok: false, error: "unknown or ineligible call" }, 404);
-      if (call.outcomeStatus === "completed") return c.json({ ok: true, duplicate: true });
       const key = `voice-outcome:${callId}`;
       const leaseToken = randomUUID();
       const lease = await claimDeliveryLease(key, leaseToken, 10 * 60_000);
       if (lease === "completed") return c.json({ ok: true, duplicate: true });
       if (lease === "busy") return c.json({ ok: false, error: "voice outcome is in progress", retryable: true }, 409);
       try {
+        if (call.outcomeStatus === "completed" && call.outcome) {
+          const followUp = await schedulePhoneCallFollowUps(call, call.outcome);
+          await updatePhoneCall(userId, callId, { followUpTaskIds: followUp.taskIds, followUpStatus: "scheduled", followUpErrorCode: undefined });
+          if (!(await completeDeliveryLease(key, leaseToken, 90 * 24 * 60 * 60))) throw new Error("voice outcome lease expired");
+          return c.json({ ok: true, duplicate: true, followUpsScheduled: followUp.scheduled });
+        }
         await updatePhoneCall(userId, callId, { outcomeStatus: "pending", outcomeErrorCode: undefined });
         const session = await getSession(userId);
         const result = await withCliLock(userId, c.req.raw.signal, () => runAgent(
@@ -1165,12 +1210,40 @@ async function main(): Promise<void> {
           logger.warn({ errorName: error instanceof Error ? error.name : "UnknownError", callId, userId }, "Voice outcome model returned invalid structured output; saving review fallback");
           outcome = fallbackPhoneCallOutcome();
         }
-        await updatePhoneCall(userId, callId, { outcome, outcomeStatus: "completed", postCallProcessedAt: Date.now() });
+        const qa = scorePhoneCallTrace({
+          direction: call.direction,
+          provider: call.provider,
+          purpose: call.purpose,
+          outcome,
+          timeline: call.timeline,
+          firstResponseMs: typeof body.firstResponseMs === "number" && Number.isFinite(body.firstResponseMs) ? Math.max(0, Math.min(120_000, Math.floor(body.firstResponseMs))) : undefined,
+        });
+        await updatePhoneCall(userId, callId, {
+          outcome,
+          outcomeStatus: "completed",
+          postCallProcessedAt: Date.now(),
+          qa,
+          followUpStatus: outcome.actionItems.length ? "pending" : "scheduled",
+          followUpErrorCode: undefined,
+        });
+        const saved = await getPhoneCall(userId, callId);
+        if (saved?.outcome && saved.followUpStatus !== "scheduled") {
+          try {
+            const followUp = await schedulePhoneCallFollowUps(saved, saved.outcome);
+            await updatePhoneCall(userId, callId, { followUpTaskIds: followUp.taskIds, followUpStatus: "scheduled", followUpErrorCode: undefined });
+          } catch (error) {
+            await updatePhoneCall(userId, callId, { followUpStatus: "failed", followUpErrorCode: "follow_up_scheduling_failed" }).catch(() => undefined);
+            throw error;
+          }
+        }
         if (result.cost) await addUsage(userId, result.cost);
         if (!(await completeDeliveryLease(key, leaseToken, 90 * 24 * 60 * 60))) throw new Error("voice outcome lease expired");
         return c.json({ ok: true });
       } catch (error) {
-        await updatePhoneCall(userId, callId, { outcomeStatus: "failed", outcomeErrorCode: "outcome_generation_failed" }).catch(() => undefined);
+        const latest = await getPhoneCall(userId, callId);
+        await updatePhoneCall(userId, callId, latest?.outcome
+          ? { followUpStatus: "failed", followUpErrorCode: "follow_up_scheduling_failed" }
+          : { outcomeStatus: "failed", outcomeErrorCode: "outcome_generation_failed" }).catch(() => undefined);
         await releaseDeliveryLease(key, leaseToken).catch(() => false);
         logger.warn({ err: error, callId, userId }, "Voice call outcome commit failed");
         return c.json({ ok: false, error: "voice outcome commit failed", retryable: true }, 502);
@@ -3516,9 +3589,9 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
         const xchatCheck = !config.xchatEnabled ? "disabled" : xchatSetup?.status === "ready" ? "configured" : "misconfigured";
         const composioTriggersCheck = !composioTriggerSetup ? "disabled" : composioTriggerSetup.status === "ready" ? "configured" : "misconfigured";
         const durableState = await durableStateStatus();
-    const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", neonDurableState: !config.durableStateEnabled ? "disabled" : durableState.reachable && durableState.schemaReady ? "ok" : "failed", qstash: config.qstashToken ? "configured" : "disabled", composioTriggers: composioTriggersCheck, sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", twilio: config.twilioVoiceEnabled ? (config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", bland: config.blandVoiceEnabled ? (isBlandVoiceConfigured() ? "configured" : "misconfigured") : "disabled", recallMeetings: config.recallMeetingsEnabled ? (recallConfigurationReady() ? "configured" : "misconfigured") : "disabled", recallChat: recallChatConfigurationStatus(), mcp: config.mcpEnabled ? (mcpClient.configurationErrors().length ? "misconfigured" : "configured") : "disabled", treg: config.tregEnabled ? (config.tregToken || Object.keys(config.tregOrganizationTokens).length ? "configured" : "misconfigured") : "disabled", e2b: config.e2bEnabled ? (config.e2bApiKey && config.e2bBrowserTemplate ? "configured" : "misconfigured") : "disabled", webBotAuth: webBotAuthConfigurationStatus(), webBotAuthSigning: config.webBotAuthSignRequests ? (webBotAuthSigningEnabled() ? "configured" : "misconfigured") : "disabled", twilioSms: config.twilioSmsEnabled ? (config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid) ? "configured" : "misconfigured") : "disabled", twilioInbound: config.twilioInboundEnabled ? (config.twilioVoiceEnabled && (config.twilioInboundOwnerUserId || config.twilioInboundRoutes) && config.twilioInboundAllowedCallers && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", x: xCheck, xchat: xchatCheck } as const;
+    const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", neonDurableState: !config.durableStateEnabled ? "disabled" : durableState.reachable && durableState.schemaReady ? "ok" : "failed", qstash: config.qstashToken ? "configured" : "disabled", composioTriggers: composioTriggersCheck, sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", twilio: config.twilioVoiceEnabled ? (config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilioInbound: config.twilioInboundEnabled ? (config.twilioVoiceEnabled && (config.twilioInboundOwnerUserId || config.twilioInboundRoutes) && config.twilioInboundAllowedCallers && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", bland: config.blandVoiceEnabled ? (isBlandVoiceConfigured() ? "configured" : "misconfigured") : "disabled", blandInbound: config.blandInboundEnabled ? (config.blandVoiceEnabled && isBlandInboundConfigured({ enabled: config.blandInboundEnabled, apiKey: config.blandApiKey, inboundWebhookUrl: config.blandInboundWebhookUrl, routes: config.blandInboundRoutes, allowedCallers: config.blandInboundAllowedCallers, webhookSecret: config.blandWebhookSecret, consultToolId: config.blandConsultToolId, consultToolSecret: config.blandConsultToolSecret }) ? "configured" : "misconfigured") : "disabled", recallMeetings: config.recallMeetingsEnabled ? (recallConfigurationReady() ? "configured" : "misconfigured") : "disabled", recallChat: recallChatConfigurationStatus(), mcp: config.mcpEnabled ? (mcpClient.configurationErrors().length ? "misconfigured" : "configured") : "disabled", treg: config.tregEnabled ? (config.tregToken || Object.keys(config.tregOrganizationTokens).length ? "configured" : "misconfigured") : "disabled", e2b: config.e2bEnabled ? (config.e2bApiKey && config.e2bBrowserTemplate ? "configured" : "misconfigured") : "disabled", webBotAuth: webBotAuthConfigurationStatus(), webBotAuthSigning: config.webBotAuthSignRequests ? (webBotAuthSigningEnabled() ? "configured" : "misconfigured") : "disabled", twilioSms: config.twilioSmsEnabled ? (config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid) ? "configured" : "misconfigured") : "disabled", x: xCheck, xchat: xchatCheck } as const;
         const recallChatIssue = recallChatConfigurationIssue();
-        const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.neonDurableState !== "failed" && checks.composioTriggers !== "misconfigured" && checks.sendblue !== "misconfigured" && checks.twilio !== "misconfigured" && checks.bland !== "misconfigured" && checks.recallMeetings !== "misconfigured" && checks.recallChat !== "misconfigured" && checks.mcp !== "misconfigured" && checks.treg !== "misconfigured" && checks.e2b !== "misconfigured" && checks.webBotAuth !== "misconfigured" && checks.webBotAuthSigning !== "misconfigured" && checks.twilioSms !== "misconfigured" && checks.twilioInbound !== "misconfigured" && checks.x !== "misconfigured" && checks.xchat !== "misconfigured";
+        const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.neonDurableState !== "failed" && checks.composioTriggers !== "misconfigured" && checks.sendblue !== "misconfigured" && checks.twilio !== "misconfigured" && checks.twilioInbound !== "misconfigured" && checks.bland !== "misconfigured" && checks.blandInbound !== "misconfigured" && checks.recallMeetings !== "misconfigured" && checks.recallChat !== "misconfigured" && checks.mcp !== "misconfigured" && checks.treg !== "misconfigured" && checks.e2b !== "misconfigured" && checks.webBotAuth !== "misconfigured" && checks.webBotAuthSigning !== "misconfigured" && checks.twilioSms !== "misconfigured" && checks.x !== "misconfigured" && checks.xchat !== "misconfigured";
         return c.json({ ok, status: ok ? "operational" : "degraded", bot: me.username, agent: "Chusky", persistence: redis ? "redis" : "memory", checks, durableState: { enabled: durableState.enabled, reachable: durableState.reachable, schemaReady: durableState.schemaReady }, configurationIssues: { recallChat: recallChatIssue, webBotAuth: webBotAuthConfigurationIssue() }, x: config.xEnabled ? xSetup : undefined, xchat: config.xchatEnabled ? { ...xchatSetup, cryptoStatus: xchatAdapter?.cryptoStatus ?? "uninitialized" } : undefined, composioTriggers: composioTriggerSetup, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, x: config.xEnabled, xchat: config.xchatEnabled }, monitoring: monitoringSnapshot() }, ok ? 200 : 503);
       } catch (e) {
         recordFailure("provider_failure", e, { provider: "telegram", check: "health" });

@@ -22,6 +22,24 @@ const activeWorkerControllers = new Map<string, AbortController>();
 let workerChat = orChat;
 let scopedToolsForWorker = getScopedComposioTools;
 
+/**
+ * Nora may receive a verified provider action instead of the legacy generic
+ * Composio search actions. Keep this preflight aligned with the manifest's
+ * provider-family policy so a valid Tavily, Exa, or Firecrawl grant is not
+ * incorrectly turned into a durable capability wait.
+ */
+function isNoraResearchCapabilitySlug(value: unknown): boolean {
+  const slug = String(value ?? "").trim().toUpperCase();
+  if ([
+    "COMPOSIO_SEARCH_WEB",
+    "COMPOSIO_SEARCH_FETCH_URL_CONTENT",
+    "CHUCK_TINYFISH_SEARCH",
+    "CHUCK_TINYFISH_FETCH",
+    "CHUCK_TINYFISH_RESEARCH",
+  ].includes(slug)) return true;
+  return /^(?:TAVILY|EXA|FIRECRAWL)_(?:SEARCH|FETCH|EXTRACT|CRAWL|RESEARCH|SCRAPE|MAP|FIND|GET|OPEN|CONTENT)(?:_|$)/.test(slug);
+}
+
 /** Replace external inference/provider boundaries in deterministic unit tests. */
 export function setSubagentExecutorDependenciesForTests(overrides?: {
   chat?: typeof orChat;
@@ -344,13 +362,7 @@ export async function executeDelegation(
     const workerTools = [...nativeWorkerTools, ...scopedComposio.tools];
     const noraResearchCapabilityMissing = workerName === "nora"
       && objectiveRequiresNoraResearch(contract.objective)
-      && !workerTools.some((tool: any) => [
-        "COMPOSIO_SEARCH_WEB",
-        "COMPOSIO_SEARCH_FETCH_URL_CONTENT",
-        "CHUCK_TINYFISH_SEARCH",
-        "CHUCK_TINYFISH_FETCH",
-        "CHUCK_TINYFISH_RESEARCH",
-      ].includes(String(tool?.function?.name ?? tool?.name ?? "")));
+      && !workerTools.some((tool: any) => isNoraResearchCapabilitySlug(tool?.function?.name ?? tool?.name));
     if (actionPayload) {
       // ── Explicit Tool Call Execution (Direct Action Payload) ────────────────
       if (!allowedToolNames.has(actionPayload.name)) {
@@ -491,7 +503,7 @@ export async function executeDelegation(
       status = "requires_tool_request";
       toolRequest = {
         intent: "A verified public-web research action for Nora",
-        reason: "This research objective reached Nora without COMPOSIO_SEARCH_WEB, COMPOSIO_SEARCH_FETCH_URL_CONTENT, or a configured native web-research fallback.",
+        reason: "This research objective reached Nora without a verified public-web research action from the scoped Composio provider families or the configured native fallback.",
         preferredToolkit: "web research",
       };
       outputSummary = `${manifest.displayName} is waiting for a verified public-web research capability before starting. No unsupported tool was attempted.`;

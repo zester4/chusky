@@ -23,6 +23,8 @@ test("updated skill entrypoints keep every referenced playbook resolvable", asyn
     "meeting-pro",
     "memory-pro",
     "mission-pro",
+    "treg",
+    "monid",
   ];
 
   for (const skill of skills) {

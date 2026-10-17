@@ -296,12 +296,13 @@ export const config = {
   memoryClassificationEnabled: optional("MEMORY_CLASSIFICATION_ENABLED", "false") === "true",
   meetingDisclosureGateEnabled: optional("MEETING_DISCLOSURE_GATE", "false") === "true",
   meetingDisclosureGateMode: oneOf("MEETING_DISCLOSURE_GATE_MODE", "shadow", ["shadow", "enforce"] as const),
-  // Native-tool schema reduction is separately opt-in. When false, Jev does
-  // not change the existing model-facing native catalog.
+  // Jev-native ranking remains separately opt-in. Progressive bundle loading
+  // below is independent of Jev and keeps ordinary model requests small.
   jevNativeToolRouting: optional("JEV_NATIVE_TOOL_ROUTING", "false") === "true",
-  // `full` preserves the legacy all-native-schema surface. `bundle` exposes
-  // core tools plus keyword/Jev-matched bundles and progressive discovery.
-  nativeToolLoading: oneOf("NATIVE_TOOL_LOADING", "full", ["full", "bundle"] as const),
+  // `bundle` is the production default: core tools plus keyword/Jev-matched
+  // bundles and progressive discovery. `full` is an explicit compatibility
+  // switch for operators that need the legacy all-native-schema surface.
+  nativeToolLoading: oneOf("NATIVE_TOOL_LOADING", "bundle", ["full", "bundle"] as const),
   // Compact conversational turns are opt-out so operators can immediately
   // restore the full capability surface during rollout.
   conversationalFastPath: oneOf("CONVERSATIONAL_FAST_PATH", "on", ["on", "off"] as const) === "on",
@@ -404,6 +405,12 @@ export const config = {
   blandApiKey: optional("BLAND_API_KEY", ""),
   blandWebhookSecret: optional("BLAND_WEBHOOK_SECRET", ""),
   blandWebhookUrl: optional("BLAND_WEBHOOK_URL", ""),
+  blandInboundEnabled: optional("BLAND_INBOUND_ENABLED", "false") === "true",
+  blandInboundWebhookUrl: optional("BLAND_INBOUND_WEBHOOK_URL", `${optional("WEBHOOK_URL", "").replace(/\/+$/, "")}/bland/inbound/webhook`),
+  blandInboundRoutes: optional("BLAND_INBOUND_ROUTES", ""),
+  blandInboundAllowedCallers: optional("BLAND_INBOUND_ALLOWED_CALLERS", ""),
+  blandInboundCallProfile: optional("BLAND_INBOUND_CALL_PROFILE", "personal"),
+  blandInboundPurpose: optional("BLAND_INBOUND_PURPOSE", "Handle an inbound caller request"),
   blandConsultToolId: optional("BLAND_CONSULT_TOOL_ID", ""),
   blandConsultToolSecret: optional("BLAND_CONSULT_TOOL_SECRET", ""),
   blandVoice: optional("BLAND_VOICE", "maya"),

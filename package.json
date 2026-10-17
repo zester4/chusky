@@ -33,6 +33,7 @@
     "durable-memory:migrate": "tsx src/migrate-durable-memory.ts",
     "doctor": "tsx src/cli.ts doctor",
     "setup:bland-tool": "tsx scripts/setup-bland-consult-tool.ts",
+    "setup:bland-inbound": "tsx scripts/setup-bland-inbound.ts",
     "treg:check": "tsx scripts/treg-credential-check.ts",
     "treg:live-smoke": "tsx scripts/treg-live-smoke.ts",
     "jev:live-smoke": "tsx scripts/jev-live-smoke.ts",

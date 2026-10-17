@@ -2,7 +2,7 @@ import { config } from "../config.js";
 import { addPhoneCall, getSession, updatePhoneCall, type PhoneCallRecord } from "../store.js";
 import { createBlandCallToken, isValidBlandToolSecret } from "./blandSecurity.js";
 import { resolveVoiceContinuity, voiceContinuityInstructions } from "./continuity.js";
-import { normalizeVoiceCallProfile, voiceProfileInstructions, type CallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
+import { normalizeVoiceCallProfile, voiceCallDialBlockReason, voiceProfileInstructions, type CallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -65,6 +65,8 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
   const purpose = text(input.purpose, "purpose", 2000);
   const profile = normalizeVoiceCallProfile(input.profile);
   const callProfile = input.callProfile === "business" ? "business" : "personal";
+  const dialBlockReason = voiceCallDialBlockReason(profile);
+  if (dialBlockReason) throw new Error(dialBlockReason);
   const continuity = await resolveVoiceContinuity(userId, input.continuityFromCallId);
   const call: PhoneCallRecord = { id: `blc_${crypto.randomUUID()}`, userId, provider: "bland", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, ...(continuity ? { continuity } : {}), status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
   await addPhoneCall(userId, call);

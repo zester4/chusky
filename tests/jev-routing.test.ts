@@ -254,14 +254,16 @@ test("batched Composio routing reuses stage one before exact action discovery", 
 
     const decision = await routeComposioForTurn("Send an email to Ama with subject pricing", {
       accounts: [{ toolkit: "gmail", status: "ACTIVE" }],
-      listActions: async () => gmailCatalogue(),
+      listActions: async () => gmailCatalogue().filter((action) => ["GMAIL_SEND_EMAIL", "GMAIL_FETCH_EMAILS"].includes(action.slug)),
       client,
       stage1: stage1.composioStage1,
       sessionId: "batched-composio-test",
     });
     assert.equal(decision.actions[0]?.id, "GMAIL_SEND_EMAIL");
     const followUpQuestions = captured.slice(1).flatMap((request) => Object.keys(request.body.questions));
-    assert.ok(followUpQuestions.length > 0, "exact action discovery still performs its dependent Jev work");
+    assert.equal(captured.length, 2, "bounded exact-action routing combines ranking and independent verification in one dependent request");
+    assert.ok(followUpQuestions.includes("rank"), "dependent routing must rank exact actions");
+    assert.ok(followUpQuestions.some((key) => key.startsWith("verify_")), "dependent routing must independently verify exact actions");
     assert.ok(!followUpQuestions.some((key) => key.startsWith("composio_")), "stage-one app/toolkit routing is not repeated");
   } finally {
     restore();

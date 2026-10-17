@@ -92,13 +92,18 @@ mode it may select an inspected low-risk candidate. Low confidence, unavailable
 Jev, or any high-impact candidate falls back to deterministic guidance and the
 existing approval policy.
 
-Native-tool routing is separately opt-in with `JEV_NATIVE_TOOL_ROUTING=true`
-and `native` added to `JEV_SURFACES`. In `shadow`, the full native catalog is
-still sent to the main model and Jev only records a comparison. In `enforce`,
-only a bounded set of native schemas is exposed after Jev returns a valid,
+Native-tool Jev ranking is separately opt-in with
+`JEV_NATIVE_TOOL_ROUTING=true` and `native` added to `JEV_SURFACES`. The
+model-facing native catalog itself uses progressive `bundle` loading by
+default: core tools, a deterministic keyword-matched family, and
+`CHUCK_FIND_TOOLS` for bounded discovery. In `shadow`, Jev only records a
+comparison; in `enforce`, it may further narrow the bundle to a bounded,
 high-confidence selection. Non-native tools remain available, and timeouts,
-low confidence, no-match requests, or disabled routing fall back to the full
-catalog. Turning Jev off therefore preserves the pre-routing behavior exactly.
+low confidence, no-match requests, or disabled Jev routing fall back to the
+safe bundle rather than reopening the full catalog. Set
+`NATIVE_TOOL_LOADING=full` only as an explicit compatibility rollback.
+Turning Jev off therefore preserves deterministic execution while retaining
+the smaller progressive native surface.
 
 Jev is additive. A Jev answer, including a confident `__none__`, never
 removes keyword skill routes or the keyword Composio domain route. A Treg

@@ -249,6 +249,34 @@ test("detects Nora research objectives without treating ordinary handoffs as res
   assert.equal(objectiveRequiresNoraResearch("Summarize the handoff from the supervisor"), false);
 });
 
+test("lets Nora run when Chusky grants a verified provider research action", async () => {
+  const userId = 991021;
+  const previousApiKey = config.openRouterApiKey;
+  config.openRouterApiKey = "test-openrouter-key";
+  setSubagentExecutorDependenciesForTests({
+    getScopedComposioTools: async () => ({
+      tools: [{ type: "function", function: { name: "TAVILY_SEARCH", parameters: { type: "object", properties: {} } } }],
+      missing: [],
+      execute: async () => ({ results: [{ title: "Verified source" }] }),
+    }),
+    chat: async () => ({
+      choices: [{ message: { role: "assistant", content: "I found cited competitor pricing evidence." }, finish_reason: "stop" }],
+    } as any),
+  });
+  try {
+    const result = await executeDelegation(userId, {
+      worker: "nora",
+      objective: "Research current competitor pricing with cited sources",
+      allowedComposioTools: ["TAVILY_SEARCH"],
+    });
+    assert.equal(result.status, "success");
+    assert.equal(result.toolRequest, undefined);
+  } finally {
+    config.openRouterApiKey = previousApiKey;
+    setSubagentExecutorDependenciesForTests();
+  }
+});
+
 test("normalizes generic web search aliases into the canonical Composio scope", () => {
   assert.deepEqual(
     normalizeDelegationToolScopes({

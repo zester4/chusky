@@ -63,6 +63,10 @@ const timeoutMs = Number(process.env.LIVE_MISSION_TIMEOUT_MS ?? String(defaultTi
 if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 30_000 || timeoutMs > 3_600_000) {
   throw new Error("LIVE_MISSION_TIMEOUT_MS must be a whole number from 30000 to 3600000.");
 }
+const minimumTimeoutMs = delays.reduce((total, delay) => total + delay, 0) * 1000 + 120_000;
+if (timeoutMs < minimumTimeoutMs) {
+  throw new Error(`LIVE_MISSION_TIMEOUT_MS must be at least ${minimumTimeoutMs}ms for ${delays.join(",")} second waits plus QStash/network headroom.`);
+}
 
 async function main(): Promise<void> {
 console.error("[live-smoke] loading durable store and workflow modules");
@@ -254,7 +258,7 @@ try {
 
   const deadline = Date.now() + timeoutMs;
   let finalMission = await getMission(userId, mission.id);
-  while (finalMission && !["completed", "blocked", "cancelled"].includes(finalMission.status) && Date.now() < deadline) {
+  while (finalMission && !["completed", "blocked", "failed", "cancelled"].includes(finalMission.status) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
     finalMission = await getMission(userId, mission.id);
   }
