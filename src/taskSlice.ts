@@ -2,7 +2,7 @@ import { extendMissionDurationIfEligible } from "./store.js";
 import { config } from "./config.js";
 import { appendSdkRunHistoryToSession, getMeetingRepresentativeProfile } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
-import { getTelegramChatId, getSession, getSessionWithSdkRuns, saveSession, addUsage, canSpend, getApproval, getTask, getMission, isTaskCancellationRequested, recordMissionSlice, waitMission, resumeMissionFromTimer, checkpointMission, completeTask, updateTask, updateMission, acquireMissionLease, renewMissionLease, releaseMissionLease, acquireMissionStepLease, renewMissionStepLease, releaseMissionStepLease, missionBudgetPreflight, getRecallMeeting, getMeetingContact } from "./store.js";
+import { getTelegramChatId, getSession, getSessionWithSdkRuns, saveSession, addUsage, canSpend, getApproval, getTask, getMission, isTaskCancellationRequested, recordMissionSlice, waitMission, resumeMissionFromTimer, checkpointMission, completeTask, updateTask, updateMission, acquireMissionLease, renewMissionLease, releaseMissionLease, acquireMissionStepLease, renewMissionStepLease, releaseMissionStepLease, missionBudgetPreflight, MISSION_ZERO_COST_BUDGET_ERROR, getRecallMeeting, getMeetingContact } from "./store.js";
 import { runAgent as defaultRunAgent, ApprovalRequiredError } from "./agent.js";
 import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
@@ -189,6 +189,10 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
     const missionRemainingTools = mission ? mission.budget.maxToolCalls - mission.toolCalls : undefined;
     const missionRemainingCost = mission ? mission.budget.maxCost - mission.cost : undefined;
     if (mission) mission = await extendMissionDurationIfEligible(task.userId, mission.id) ?? mission;
+    if (mission && mission.budget.maxCost <= 0) {
+      const blocked = await updateMission(task.userId, mission.id, { status: "blocked", error: MISSION_ZERO_COST_BUDGET_ERROR, nextAction: "Resume with a positive model-execution budget; external provider actions can remain disabled." });
+      return { status: "blocked" as const, message: blocked?.error ?? MISSION_ZERO_COST_BUDGET_ERROR, checkpoint: blocked?.checkpoint, nextAction: blocked?.nextAction };
+    }
     if (mission && ((missionRemainingSteps ?? 1) <= 0 || (missionRemainingTools ?? 1) <= 0 || (missionRemainingCost ?? 1) <= 0)) {
       const blocked = await updateMission(task.userId, mission.id, { status: "blocked", error: "Mission budget is exhausted before the next slice.", nextAction: "Increase the mission budget or revise the objective before resuming." });
       return { status: "blocked" as const, message: blocked?.error ?? "Mission budget exhausted", checkpoint: blocked?.checkpoint, nextAction: blocked?.nextAction };

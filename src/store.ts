@@ -1028,6 +1028,13 @@ export interface MissionBudget {
   maxCost: number;
 }
 
+/**
+ * A mission worker always needs a model-execution budget, even when the
+ * mission is forbidden from using external provider actions. A zero provider
+ * action allowance is a separate policy concern from the model budget.
+ */
+export const MISSION_ZERO_COST_BUDGET_ERROR = "Mission maxCost must be greater than zero for model-backed execution; disable external provider actions separately.";
+
 export interface MissionWorkSchedule {
   timezone: string;
   windowStart: string;
@@ -1151,6 +1158,10 @@ export interface MissionRecord {
   webNotificationReadVersion?: number;
   /** Set atomically with a new terminal transition so crash recovery can find it without replaying old missions. */
   webNotificationEligibleAt?: number;
+  /** Durable projection receipt; prevents terminal mission updates from rereading the chat session. */
+  webNotificationEventId?: string;
+  webNotificationThreadId?: string;
+  webNotificationRunId?: string;
   createdAt: number;
   updatedAt: number;
   startedAt?: number;
@@ -2057,7 +2068,7 @@ interface Backend {
   claimTaskEnqueue(userId: number, id: string, token: string, claimMs: number): Promise<TaskRecord | undefined>;
   renewTaskLease(userId: number, id: string, leaseToken: string, leaseMs: number): Promise<TaskRecord | undefined>;
   getMissions(userId: number): Promise<MissionRecord[]>;
-  getMissionsPage(userId: number, limit: number): Promise<MissionRecord[]>;
+  getMissionsPage(userId: number, limit: number, statuses?: MissionStatus[]): Promise<MissionRecord[]>;
   getMission(userId: number, id: string): Promise<MissionRecord | undefined>;
   saveMissions(userId: number, missions: MissionRecord[]): Promise<void>;
   createMissionIfAbsent(userId: number, mission: MissionRecord): Promise<MissionRecord>;
@@ -2510,6 +2521,8 @@ class RedisBackend implements Backend {
   private outboxProviderKey = (provider: ChannelProvider, providerMessageId: string) => `chuck:outbox:provider:${provider}:${createHash("sha256").update(providerMessageId).digest("hex")}`;
   /** Status-specific indexes keep idle recovery from scanning delivered audit records. */
   private outboxPendingIndexKey = (status: typeof RECOVERABLE_OUTBOX_STATUSES[number]) => `chuck:outbox:pending:${status}`;
+  /** Owner-scoped history index keeps dashboard reads bounded and private. */
+  private outboxOwnerIndexKey = (userId: number) => `chuck:outbox:owner:${userId}`;
   private outboxPendingIndexReadyKey = "chuck:outbox:pending:index-v1";
   private outboxPendingIndexMigrationLockKey = "chuck:outbox:pending:index-v1:lock";
   private channelConversationKey = (id: string) => `chuck:channel:conversation:${createHash("sha256").update(id).digest("hex")}`;
@@ -4088,13 +4101,14 @@ class RedisBackend implements Backend {
     }
     return this.readRedisMissions(userId);
   }
-  async getMissionsPage(userId: number, limit: number): Promise<MissionRecord[]> {
+  async getMissionsPage(userId: number, limit: number, statuses?: MissionStatus[]): Promise<MissionRecord[]> {
     const boundedLimit = Math.max(1, Math.min(200, Math.floor(limit)));
     if (await this.missionOwnerUsesNeon(userId)) {
-      const page = await this.durableState!.listMissions(userId, boundedLimit);
+      const page = await this.durableState!.listMissions(userId, boundedLimit, undefined, statuses);
       return page.map((record) => this.missionFromDurable(record));
     }
-    return (await this.readRedisMissions(userId)).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, boundedLimit);
+    const wanted = statuses?.length ? new Set(statuses) : undefined;
+    return (await this.readRedisMissions(userId)).filter((mission) => !wanted || wanted.has(mission.status)).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, boundedLimit);
   }
   private async readRedisMissions(userId: number): Promise<MissionRecord[]> {
     const raw = await this.r.get(this.missionk(userId));
@@ -4619,6 +4633,7 @@ class RedisBackend implements Backend {
       const result = await this.r.multi()
         .set(this.outboxKey(record.id), JSON.stringify(record), "EX", 30 * 24 * 60 * 60)
         .set(idempotencyKey, record.id, "EX", 30 * 24 * 60 * 60)
+        .zadd(this.outboxOwnerIndexKey(record.userId), record.createdAt, record.id)
         .zadd(this.outboxPendingIndexKey("queued"), record.createdAt, record.id)
         .exec();
       if (result) return record;
@@ -4660,6 +4675,7 @@ class RedisBackend implements Backend {
     if (!current) return undefined;
     const next = { ...current, ...patch, id: current.id, idempotencyKey: current.idempotencyKey, updatedAt: Date.now() };
     const transaction = this.r.multi().set(this.outboxKey(id), JSON.stringify(next), "EX", 30 * 24 * 60 * 60);
+    transaction.zadd(this.outboxOwnerIndexKey(next.userId), next.createdAt, id);
     for (const status of RECOVERABLE_OUTBOX_STATUSES) transaction.zrem(this.outboxPendingIndexKey(status), id);
     if (isRecoverableOutboxStatus(next.status)) transaction.zadd(this.outboxPendingIndexKey(next.status), next.createdAt, id);
     if (next.providerMessageId) transaction.set(this.outboxProviderKey(next.provider, next.providerMessageId), id, "EX", 30 * 24 * 60 * 60);
@@ -4737,7 +4753,41 @@ class RedisBackend implements Backend {
     return records.sort((a, b) => a.createdAt - b.createdAt).slice(0, limit);
   }
 
+  /**
+   * Read one owner's recent delivery history without scanning the global
+   * outbox keyspace. The index is maintained atomically on create/update;
+   * expired records are removed lazily while reading. Status filtering is
+   * deliberately done after the bounded MGET because one owner may have a
+   * mixture of queued, delivered, failed, and ambiguous records.
+   */
+  private async listOwnerOutbox(statuses: OutboxRecord["status"][] | undefined, limit: number, userId: number): Promise<OutboxRecord[]> {
+    const wanted = statuses?.length ? new Set(statuses) : undefined;
+    const records: OutboxRecord[] = [];
+    const staleIds: string[] = [];
+    const pageSize = Math.min(100, Math.max(25, limit));
+    const maxIndexedRecords = Math.max(pageSize, Math.min(1000, limit * 10));
+    let offset = 0;
+    while (records.length < limit && offset < maxIndexedRecords) {
+      const ids = await this.r.zrevrange(this.outboxOwnerIndexKey(userId), offset, Math.min(maxIndexedRecords, offset + pageSize) - 1);
+      if (!ids.length) break;
+      const values = await this.r.mget(...ids.map((id) => this.outboxKey(id)));
+      for (const [index, raw] of values.entries()) {
+        const id = ids[index];
+        if (!raw) { if (id) staleIds.push(id); continue; }
+        try {
+          const record = JSON.parse(raw) as OutboxRecord;
+          if (record.userId === userId && (!wanted || wanted.has(record.status))) records.push(record);
+        } catch { if (id) staleIds.push(id); }
+      }
+      offset += ids.length;
+      if (ids.length < pageSize) break;
+    }
+    if (staleIds.length) await this.r.zrem(this.outboxOwnerIndexKey(userId), ...staleIds);
+    return records.sort((a, b) => b.createdAt - a.createdAt).slice(0, limit);
+  }
+
   async listOutbox(statuses?: OutboxRecord["status"][], limit = 100, userId?: number): Promise<OutboxRecord[]> {
+    if (userId !== undefined) return this.listOwnerOutbox(statuses, limit, userId);
     if (statuses?.length && statuses.every(isRecoverableOutboxStatus)) {
       return this.listRecoverableOutbox([...new Set(statuses)], limit, userId);
     }
@@ -5494,7 +5544,10 @@ class MemoryBackend implements Backend {
     tasks[index] = next; this.tasks.set(userId, tasks); return next;
   }
   async getMissions(userId: number) { return this.missions.get(userId) ?? []; }
-  async getMissionsPage(userId: number, limit: number) { return [...(this.missions.get(userId) ?? [])].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, Math.max(1, Math.min(200, Math.floor(limit)))); }
+  async getMissionsPage(userId: number, limit: number, statuses?: MissionStatus[]) {
+    const wanted = statuses?.length ? new Set(statuses) : undefined;
+    return [...(this.missions.get(userId) ?? [])].filter((mission) => !wanted || wanted.has(mission.status)).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, Math.max(1, Math.min(200, Math.floor(limit))));
+  }
   async getMission(userId: number, id: string) { return (this.missions.get(userId) ?? []).find((mission) => mission.id === id); }
   async saveMissions(userId: number, missions: MissionRecord[]) { this.missions.set(userId, missions); }
   async createMissionIfAbsent(userId: number, mission: MissionRecord) {
@@ -7295,20 +7348,62 @@ export async function ensureReminderWebProjection(input: {
   return projection;
 }
 
+type MissionWebProjection = { threadId: string; runId: string; eventId: string; created: boolean };
+const missionProjectionInFlight = new Map<string, Promise<MissionWebProjection>>();
+
+function missionWebProjectionIdentity(mission: MissionRecord): { threadId: string; runId: string; eventId: string } {
+  const terminalEvent = (Array.isArray(mission.events) ? [...mission.events] : []).reverse().find((event) => event.type === mission.status);
+  const eventId = terminalEvent?.id ?? `mission:${mission.id}:${mission.status}:${mission.completedAt ?? mission.createdAt}`;
+  const threadId = "thr_mission_updates";
+  const runId = `run_mission_${createHash("sha256").update(eventId).digest("hex").slice(0, 32)}`;
+  return { threadId, runId, eventId };
+}
+
 /**
  * Materialize one terminal mission update as an owner-private dashboard chat
  * run. The durable mission is the replay source; the terminal event ID makes
- * projection retries idempotent across worker and API restarts.
+ * projection retries idempotent across worker and API restarts. Calls for the
+ * same owner/event share one promise so a dashboard refresh cannot start a
+ * second session read or contend for the session mutation lease.
  */
-export async function ensureMissionWebProjection(mission: MissionRecord): Promise<{ threadId: string; runId: string; eventId: string; created: boolean }> {
+export function ensureMissionWebProjection(mission: MissionRecord): Promise<MissionWebProjection> {
+  const identity = missionWebProjectionIdentity(mission);
+  const key = `${mission.userId}:${identity.eventId}`;
+  const inFlight = missionProjectionInFlight.get(key);
+  if (inFlight) return inFlight;
+
+  const promise = ensureMissionWebProjectionWithRetry(mission, identity).finally(() => {
+    if (missionProjectionInFlight.get(key) === promise) missionProjectionInFlight.delete(key);
+  });
+  missionProjectionInFlight.set(key, promise);
+  return promise;
+}
+
+async function ensureMissionWebProjectionWithRetry(mission: MissionRecord, identity: { threadId: string; runId: string; eventId: string }): Promise<MissionWebProjection> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await ensureMissionWebProjectionOnce(mission, identity);
+    } catch (error) {
+      // Only errors classified at the storage/session boundary are safe to
+      // retry. Unknown errors must fail closed instead of turning a bug or
+      // malformed record into repeated session traffic.
+      const retryable = error instanceof MissionWebProjectionError ? error.retryable : false;
+      if (!retryable || attempt === 2) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, 150 * (2 ** attempt)));
+    }
+  }
+  throw new MissionWebProjectionError("write_session", "Mission notification projection retry budget exhausted.", true);
+}
+
+async function ensureMissionWebProjectionOnce(mission: MissionRecord, identity: { threadId: string; runId: string; eventId: string }): Promise<MissionWebProjection> {
   if (!Number.isSafeInteger(mission.userId) || mission.userId <= 0 || !/^mis_[A-Za-z0-9_-]{1,120}$/.test(mission.id)
     || !["completed", "failed", "cancelled"].includes(mission.status)) {
     throw new MissionWebProjectionError("validate", "A valid owner-scoped terminal mission is required for its web notification.", false);
   }
-  const terminalEvent = [...mission.events].reverse().find((event) => event.type === mission.status);
-  const eventId = terminalEvent?.id ?? `mission:${mission.id}:${mission.status}:${mission.completedAt ?? mission.createdAt}`;
-  const threadId = "thr_mission_updates";
-  const runId = `run_mission_${createHash("sha256").update(eventId).digest("hex").slice(0, 32)}`;
+  const { threadId, runId, eventId } = identity;
+  if (mission.webNotificationEventId === eventId && mission.webNotificationThreadId === threadId && mission.webNotificationRunId === runId) {
+    return { threadId, runId, eventId, created: false };
+  }
   let existingSession: UserSession;
   try {
     existingSession = await getSessionWithSdkRuns(mission.userId, threadId);
@@ -7358,6 +7453,18 @@ export async function ensureMissionWebProjection(mission: MissionRecord): Promis
     throw wrapMissionProjectionError("write_session", error);
   }
   if (!projection) throw new MissionWebProjectionError("write_session", "Mission notification could not be saved to the owner session.", true);
+  if (mission.webNotificationEventId !== eventId || mission.webNotificationThreadId !== projection.threadId || mission.webNotificationRunId !== projection.runId) {
+    try {
+      await updateMission(mission.userId, mission.id, (current) => current.webNotificationEventId === eventId && current.webNotificationThreadId === projection!.threadId && current.webNotificationRunId === projection!.runId
+        ? undefined
+        : { webNotificationEventId: eventId, webNotificationThreadId: projection!.threadId, webNotificationRunId: projection!.runId });
+    } catch (error) {
+      // The session projection is already idempotent and durable. A marker
+      // write failure must not make a successful user notification look like
+      // a failed mission; the next terminal update can repair the marker.
+      logger.warn({ errorType: error instanceof Error ? error.name : "UnknownError", missionId: mission.id }, "Mission web projection receipt could not be persisted");
+    }
+  }
   if (projection.created) publishWebNotification({ userId: mission.userId, eventId, kind: "mission", missionId: mission.id, threadId: projection.threadId, runId: projection.runId });
   return projection;
 }
@@ -8915,6 +9022,10 @@ function validateMissionStepGraph(steps: Array<{ id: string; dependsOn: string[]
 }
 
 export async function createMission(userId: number, input: MissionCreateInput): Promise<MissionRecord> {
+  for (const [label, budget] of [["budget", input.budget], ["budget ceiling", input.budgetCeiling]] as const) {
+    const maxCost = budget?.maxCost;
+    if (maxCost !== undefined && (!Number.isFinite(maxCost) || maxCost <= 0)) throw new Error(`${label}: ${MISSION_ZERO_COST_BUDGET_ERROR}`);
+  }
   if (input.budget?.durationMode !== undefined && !["active", "wall_clock"].includes(input.budget.durationMode)) throw new Error("Mission durationMode must be active or wall_clock.");
   for (const [field, maximum] of [["maxLifetimeSeconds", 2592000], ["automaticExtensionSeconds", 3600], ["maxAutomaticExtensions", 10]] as const) {
     const value = input.budget?.[field];
@@ -9440,7 +9551,7 @@ export async function listMissions(userId: number, statuses?: MissionStatus[]): 
 }
 
 export async function listMissionsPage(userId: number, limit = 100, statuses?: MissionStatus[]): Promise<MissionRecord[]> {
-  return (await backend.getMissionsPage(userId, Math.max(1, Math.min(200, limit)))).map(normalizeMission)
+  return (await backend.getMissionsPage(userId, Math.max(1, Math.min(200, limit)), statuses)).map(normalizeMission)
     .filter((mission) => !statuses?.length || statuses.includes(mission.status))
     .sort((a, b) => b.updatedAt - a.updatedAt);
 }
@@ -9562,6 +9673,7 @@ export async function resumeMission(userId: number, id: string, maxDurationSecon
       if (value !== undefined && limit !== undefined && value > limit) throw new Error(`Requested mission ${field} exceeds the owner's saved ceiling.`);
       if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) throw new Error(`Requested mission ${field} is invalid.`);
     }
+    if (requestedBudget.maxCost !== undefined && requestedBudget.maxCost <= 0) throw new Error(MISSION_ZERO_COST_BUDGET_ERROR);
     const budget = { ...mission.budget, ...requestedBudget };
     const events = budget.maxDurationSeconds !== mission.budget.maxDurationSeconds
       ? [...mission.events, missionEvent("checkpointed", `Owner-authorized duration budget changed from ${mission.budget.maxDurationSeconds} to ${budget.maxDurationSeconds} seconds; original start and usage retained.`)] : mission.events;
@@ -9632,7 +9744,7 @@ export async function updateMissionControl(userId: number, id: string, input: { 
     if (requested.maxSteps !== undefined && requested.maxSteps < 1) throw new Error("Requested mission maxSteps must be at least 1.");
     if (requested.maxSlices !== undefined && requested.maxSlices < 1) throw new Error("Requested mission maxSlices must be at least 1.");
     if (requested.maxToolCalls !== undefined && requested.maxToolCalls < 1) throw new Error("Requested mission maxToolCalls must be at least 1.");
-    if (requested.maxCost !== undefined && requested.maxCost < 0) throw new Error("Requested mission maxCost cannot be negative.");
+    if (requested.maxCost !== undefined && requested.maxCost <= 0) throw new Error(MISSION_ZERO_COST_BUDGET_ERROR);
     if (input.workSchedule) validateMissionWorkSchedule(input.workSchedule);
     const budget = { ...mission.budget, ...requested };
     const scheduleChanged = JSON.stringify(mission.workSchedule ?? null) !== JSON.stringify(input.workSchedule ?? mission.workSchedule ?? null);
@@ -10361,6 +10473,18 @@ export async function listReminders(uid: number): Promise<ReminderRecord[]> {
 
 export async function listReminderSummaries(uid: number): Promise<ReminderSummary[]> {
   return (await backend.getReminderSummaries(uid)).filter((r) => r.status === "scheduled" || r.status === "waiting" || r.status === "paused").sort((a, b) => a.runAt - b.runAt);
+}
+
+/**
+ * Bounded reminder projection for Attention Pulse. Failed reminders are
+ * terminal for delivery, but remain actionable operational signals until the
+ * owner has been told about the failure. Keep this separate from the active
+ * dashboard listing so terminal history does not re-enter ordinary queues.
+ */
+export async function listReminderPulseSummaries(uid: number): Promise<ReminderSummary[]> {
+  return (await backend.getReminderSummaries(uid))
+    .filter((r) => r.status === "scheduled" || r.status === "waiting" || r.status === "paused" || r.status === "failed")
+    .sort((a, b) => a.runAt - b.runAt);
 }
 
 /** Owner-scoped reminder history for diagnostics; normal user listings stay active-only. */

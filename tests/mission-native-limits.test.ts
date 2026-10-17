@@ -2,7 +2,7 @@ import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import { nativeTool } from "../src/nativeTools.js";
 import { validateNativeToolArguments } from "../src/agentTools.js";
-import { createMission, getMission, initStore, startMission, updateMission } from "../src/store.js";
+import { createMission, getMission, initStore, startMission, updateMission, updateMissionControl } from "../src/store.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
 
@@ -73,6 +73,44 @@ test("mission start accepts its published objective and step text limits", async
   assert.equal(returned.id, existing.id);
   assert.equal(returned.objective, existing.objective);
   assert.throws(() => validateNativeToolArguments("CHUCK_MISSION_START", { ...args, objective: "O".repeat(8001) }), /objective.*8000/);
+});
+
+test("mission start rejects a zero model budget before creating or queueing work", async () => {
+  const args = {
+    title: "Zero budget mission",
+    objective: "Run an internal checkpoint test.",
+    definitionOfDone: "The checkpoint test completes.",
+    maxCost: 0,
+  };
+
+  assert.throws(
+    () => validateNativeToolArguments("CHUCK_MISSION_START", args),
+    /maxCost must be greater than zero.*external provider actions/i,
+  );
+  await assert.rejects(
+    createMission(951103, { ...args, budget: { maxCost: 0 } }),
+    /budget: Mission maxCost must be greater than zero.*external provider actions/i,
+  );
+});
+
+test("mission resume and control reject zero model budgets", async () => {
+  const userId = 951107;
+  const mission = await createMission(userId, {
+    title: "Positive budget mission",
+    objective: "Exercise budget controls.",
+    definitionOfDone: "The mission remains bounded.",
+    budget: { maxCost: 1 },
+  });
+  await startMission(userId, mission.id);
+
+  assert.throws(
+    () => validateNativeToolArguments("CHUCK_MISSION_RESUME", { id: mission.id, budget: { maxCost: 0 } }),
+    /maxCost must be greater than zero/i,
+  );
+  await assert.rejects(
+    updateMissionControl(userId, mission.id, { budget: { maxCost: 0 } }),
+    /maxCost must be greater than zero/i,
+  );
 });
 
 test("mission step tool fences are published and strip supervisor-owned tools from model plans", async () => {

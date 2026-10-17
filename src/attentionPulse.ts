@@ -3,7 +3,7 @@ import {
   listOpenTaskSummaries,
   listAttentionRecords,
   listApprovals,
-  listReminderSummaries,
+  listReminderPulseSummaries,
   listCalendarMeetingPreparations,
   listJobOccurrences,
   listJobSummaries,
@@ -585,7 +585,7 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now(), 
     listApprovals(userId, 100),
     listJobSummaries(userId),
     listJobOccurrences(userId, undefined, 100),
-    listReminderSummaries(userId),
+    listReminderPulseSummaries(userId),
     readAttentionChecklist(userId),
   ]);
   const actionableLoops = (loops as OpenLoopRecord[])

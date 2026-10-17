@@ -9,7 +9,7 @@ import { browserFileDownloadResponse, persistSdkCompanyRun, registerSdkApi, sdkR
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
-import { addJob, addPhoneCall, addRecallMeeting, attachMeetingToRoom, authenticateCliToken, completeMissionStep, createApproval, createAttentionRecord, createCliDevice, createMission, createTask, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getAttentionRecord, getMission, getOutbox, getSession, getTask, initStore, listAttentionRecords, listTasks, recordTrustedMissionEvidence, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, startMission, updateMission, updateOutbox, upsertMeetingContact, upsertMemory, waitMission } from "../src/store.js";
+import { addJob, addPhoneCall, addRecallMeeting, attachMeetingToRoom, authenticateCliToken, completeMissionStep, createApproval, createAttentionRecord, createCliDevice, createMission, createTask, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, ensureMissionWebProjection, getAttentionRecord, getMission, getOutbox, getSession, getTask, initStore, listAttentionRecords, listTasks, recordTrustedMissionEvidence, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, setMissionUpdateNotifier, startMission, updateMission, updateOutbox, upsertMeetingContact, upsertMemory, waitMission } from "../src/store.js";
 import { redeemLinkCode } from "../src/channels/identity.js";
 import { appendTraceEvent, queueCompensation, saveOutcomeVerification } from "../src/reliability/persistence.js";
 import { resetTriggerCatalogueForTests } from "../src/triggerCatalog.js";
@@ -191,18 +191,22 @@ test("account overview exposes durable mission approvals without an active chat 
   assert.equal(visible.missionId, "mis_feed_owner");
 });
 
-test("terminal missions create one owner-scoped chat update and an unread badge that can be acknowledged", async () => {
+test("terminal mission notifications are projected once without making overview reads mutate sessions", async () => {
   const externalUserId = "mission-notification-owner";
   const ownerId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalUserId}`).digest("hex").slice(0, 12), 16);
   const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalUserId };
   const api = app();
+  // The mission notifier is the write path. Disable it here so this test can
+  // prove that an overview read does not become a second write path.
+  setMissionUpdateNotifier(undefined);
   const mission = await createMission(ownerId, {
     title: "Prepare a verified prospect brief",
     objective: "Research and qualify prospects.",
     definitionOfDone: "The cited brief is ready for review.",
     steps: [{ id: "research", title: "Research", objective: "Find and qualify prospects." }],
   });
-  await updateMission(ownerId, mission.id, (current) => ({ status: "completed", completedAt: Date.now(), result: "Three cited prospects are ready for review.", events: [...current.events, { id: "misevt_mission_notice_completed", type: "completed", message: "Mission completed.", at: Date.now() }] }));
+  const completed = await updateMission(ownerId, mission.id, (current) => ({ status: "completed", completedAt: Date.now(), result: "Three cited prospects are ready for review.", events: [...current.events, { id: "misevt_mission_notice_completed", type: "completed", message: "Mission completed.", at: Date.now() }] }));
+  assert.ok(completed);
 
   const overviewResponse = await api.fetch(new Request("http://local/v1/account/overview", { headers }));
   assert.equal(overviewResponse.status, 200);
@@ -211,10 +215,11 @@ test("terminal missions create one owner-scoped chat update and an unread badge 
   assert.ok(notice);
   assert.equal(notice.status, "completed");
   assert.equal(notice.unread, true);
-  assert.equal(notice.threadId, "thr_mission_updates");
-  assert.ok(notice.runId);
+  assert.equal(notice.threadId, undefined);
+  assert.equal(notice.runId, undefined);
   assert.match(notice.summary, /Three cited prospects/);
 
+  await Promise.all([ensureMissionWebProjection(completed), ensureMissionWebProjection(completed)]);
   const runsResponse = await api.fetch(new Request("http://local/v1/threads/thr_mission_updates/runs?limit=50", { headers }));
   assert.equal(runsResponse.status, 200);
   const runs = (await runsResponse.json() as { data: Array<{ id: string; output?: string; metadata?: Record<string, unknown> }> }).data;

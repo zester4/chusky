@@ -954,13 +954,16 @@ export class NeonDurableState {
     return result.rows[0] ? toDurableMission(result.rows[0]) : undefined;
   }
 
-  async listMissions(userId: number, limit = 100, afterMissionId?: string): Promise<DurableMissionRecord[]> {
+  async listMissions(userId: number, limit = 100, afterMissionId?: string, statuses?: readonly string[]): Promise<DurableMissionRecord[]> {
     assertUserId(userId);
     const boundedLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(500, limit)) : 100;
     if (afterMissionId !== undefined && !/^mis_[A-Za-z0-9_-]{1,160}$/.test(afterMissionId)) throw new Error("Durable mission pagination cursor is invalid.");
+    const requestedStatuses = [...new Set((statuses ?? []).filter((status): status is string => typeof status === "string" && /^(?:queued|running|waiting|paused|blocked|completed|failed|cancelled)$/.test(status)))];
+    const statusClause = requestedStatuses.length ? " AND status = ANY($4::text[])" : "";
+    const orderClause = requestedStatuses.length && afterMissionId === undefined ? "updated_at DESC, mission_id" : "mission_id";
     const result = await this.measuredQuery<MissionRow>(this.database,
-      "SELECT owner_user_id, mission_id, status, idempotency_key, payload, version, created_at, updated_at FROM chusky_mission WHERE owner_user_id = $1 AND ($2::text IS NULL OR mission_id > $2) ORDER BY mission_id LIMIT $3",
-      [userId, afterMissionId ?? null, boundedLimit]);
+      `SELECT owner_user_id, mission_id, status, idempotency_key, payload, version, created_at, updated_at FROM chusky_mission WHERE owner_user_id = $1 AND ($2::text IS NULL OR mission_id > $2)${statusClause} ORDER BY ${orderClause} LIMIT $3`,
+      requestedStatuses.length ? [userId, afterMissionId ?? null, boundedLimit, requestedStatuses] : [userId, afterMissionId ?? null, boundedLimit]);
     return result.rows.map(toDurableMission);
   }
 

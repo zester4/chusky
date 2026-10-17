@@ -1881,23 +1881,20 @@ export function registerSdkApi(app: Hono): void {
     const [channels, devices, reminders, jobs, workspace, deliveries, memoryProjectionResult, triggerEvents, approvals, attentionCandidates, terminalMissions] = await Promise.all([
       listChannelIdentities(owner.userId),
       listCliDevices(owner.userId),
-      listReminders(owner.userId),
-      listJobs(owner.userId),
+      listReminderSummaries(owner.userId),
+      listJobSummaries(owner.userId),
       getDaytonaWorkspace(owner.userId),
-      listOutbox(undefined, 500, owner.userId),
+      // The owner-scoped Redis index keeps this read bounded. The overview
+      // only needs recent delivery cards; the full delivery history has its
+      // own paginated endpoint.
+      listOutbox(undefined, 50, owner.userId),
       memoryProjection,
       listTriggerEvents(owner.userId, 50),
-      listApprovals(owner.userId, 100),
+      listApprovals(owner.userId, 50),
       listAttentionRecords(owner.userId, "attention_candidate", { limit: 50 }),
-      listMissionsPage(owner.userId, 100, ["completed", "failed", "cancelled"]).then((items) => items.filter((item) => Number.isSafeInteger(item.webNotificationEligibleAt)).slice(0, 50)),
+      listMissionsPage(owner.userId, 50, ["completed", "failed", "cancelled"]).then((items) => items.filter((item) => Number.isSafeInteger(item.webNotificationEligibleAt)).slice(0, 50)),
     ]);
-    // Mission state is authoritative and durable. Reconcile terminal records
-    // into the chat projection on account refresh so a process crash between
-    // mission closeout and best-effort live fan-out cannot lose the notice.
-    const missionProjections = await Promise.allSettled(terminalMissions.map((mission) => ensureMissionWebProjection(mission)));
-    const missionNotifications = terminalMissions.map((mission, index) => {
-      const projection = missionProjections[index];
-      if (projection?.status === "rejected") logger.warn({ ...missionProjectionFailureDetails(projection.reason), missionId: mission.id }, "Mission notification projection unavailable");
+    const missionNotifications = terminalMissions.map((mission) => {
       return {
         id: mission.id,
         title: mission.title,
@@ -1905,7 +1902,7 @@ export function registerSdkApi(app: Hono): void {
         summary: (mission.result || mission.error || mission.nextAction || "Review the saved mission state and evidence.").slice(0, 500),
         updatedAt: new Date(mission.completedAt ?? mission.updatedAt).toISOString(),
         unread: (mission.webNotificationReadVersion ?? -1) < mission.version,
-        ...(projection?.status === "fulfilled" ? { threadId: projection.value.threadId, runId: projection.value.runId } : {}),
+        ...(mission.webNotificationThreadId && mission.webNotificationRunId ? { threadId: mission.webNotificationThreadId, runId: mission.webNotificationRunId } : {}),
       };
     });
     const visibleApprovals = await visibleApprovalsForDashboard(owner.userId, approvals);

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { executeTaskSlice, type TaskSliceContext } from "../src/taskSlice.js";
 import { executeDurableTask } from "../src/taskRunner.js";
 import { nativeTool } from "../src/nativeTools.js";
-import { acquireUserLock, claimApproval, createApproval, createMission, getMission, getTask, initStore, listTasks, recordTrustedMissionEvidence, releaseUserLock, resumeMissionFromProviderEvent, startMission, waitMission } from "../src/store.js";
+import { acquireUserLock, claimApproval, createApproval, createMission, getMission, getTask, initStore, listTasks, recordTrustedMissionEvidence, releaseUserLock, resumeMissionFromProviderEvent, startMission, updateMission, waitMission } from "../src/store.js";
 import { reconcileMissionExecution, replanMissionAndSchedule, resumeMissionAndSchedule } from "../src/missionScheduler.js";
 import { resumeMissionTaskAfterApproval } from "../src/missionApproval.js";
 import { ApprovalRequiredError } from "../src/agent.js";
@@ -44,6 +44,28 @@ async function fixture(userId: number, queue: MissionFakeQStash) {
   const task = (await listTasks(userId)).find((candidate) => candidate.missionId === mission.id)!;
   return { mission, task };
 }
+
+test("legacy zero-cost missions block before the worker invokes the model", async () => {
+  const userId = 982000;
+  const queue = new MissionFakeQStash();
+  const mission = await createMission(userId, {
+    title: "Legacy zero-cost mission",
+    objective: "Exercise the worker defense-in-depth guard.",
+    definitionOfDone: "The invalid mission is blocked before inference.",
+    budget: { maxCost: 1 },
+  });
+  await updateMission(userId, mission.id, { budget: { ...mission.budget, maxCost: 0 } });
+  await startMission(userId, mission.id);
+  await reconcileMissionExecution(userId, mission.id, queue.enqueue);
+  const task = (await listTasks(userId)).find((candidate) => candidate.missionId === mission.id);
+  assert.ok(task);
+  let modelCalls = 0;
+  const run = await executeDurableTask({ userId, taskId: task.id }, { workerId: "zero-cost-defense-worker", execute: (claimed, signal) => executeTaskSlice(claimed, signal, context(queue, async () => { modelCalls++; return { text: "must not run", toolsUsed: [], toolsSucceeded: [] }; })) });
+  assert.equal(modelCalls, 0);
+  assert.equal(run.task?.status, "blocked");
+  assert.match(run.task?.nextAction ?? "", /positive model-execution budget/i);
+  assert.equal((await getMission(userId, mission.id))?.status, "blocked");
+});
 
 test("full production slice executes a scripted model through real native dispatch and settlement", async () => {
   const userId = 982001;
