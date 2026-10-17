@@ -1,9 +1,32 @@
 import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import { nativeTool } from "../src/nativeTools.js";
-import { claimTask, claimTaskEnqueue, createTask, getTask, initStore, isTaskCancellationRequested, renewTaskLease, updateTask } from "../src/store.js";
+import { claimTask, claimTaskEnqueue, createTask, getTask, initStore, isTaskCancellationRequested, listDueTasks, listOpenTaskSummaries, listOpenTasks, listTasksForMission, listTasksSince, renewTaskLease, updateTask } from "../src/store.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
+
+test("bounded task projections exclude historical payload scans", async () => {
+  const userId = 830099;
+  const missionTask = await createTask(userId, { id: "task_projection_mission", title: "Mission task", objective: "Run one bounded step", missionId: "mis_projection", missionStepId: "step-1" });
+  const ordinaryTask = await createTask(userId, { id: "task_projection_ordinary", title: "Ordinary task", objective: "Run one bounded task" });
+  await updateTask(userId, ordinaryTask.id, { status: "completed", result: "Historical result" });
+
+  const changed = await listTasksSince(userId, missionTask.createdAt - 1, 10);
+  assert.deepEqual(new Set(changed.map((task) => task.id)), new Set([missionTask.id, ordinaryTask.id]));
+  assert.deepEqual((await listOpenTasks(userId)).map((task) => task.id), [missionTask.id]);
+  assert.deepEqual((await listTasksForMission(userId, "mis_projection")).map((task) => task.id), [missionTask.id]);
+});
+
+test("task summaries and due reads stay compact and bounded", async () => {
+  const userId = 830098;
+  const due = await createTask(userId, { id: "task_due_projection", title: "Wake", objective: "Resume from checkpoint", runAt: Date.now() - 1 });
+  await updateTask(userId, due.id, { checkpoint: "checkpoint", nextAction: "continue", events: [{ type: "checkpoint", at: Date.now(), summary: "large event is not part of the summary" }] as never });
+  const summaries = await listOpenTaskSummaries(userId, 1);
+  assert.equal(summaries.length, 1);
+  assert.equal(summaries[0]?.id, due.id);
+  assert.equal("events" in (summaries[0] ?? {}), false);
+  assert.deepEqual((await listDueTasks(userId, Date.now(), 10)).map((task) => task.id), [due.id]);
+});
 
 test("expired enqueue claims can be recovered after a publisher crash", async () => {
   const userId = 830000;

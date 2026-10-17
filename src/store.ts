@@ -38,6 +38,11 @@ import type { ShoppingRun, ShoppingSite } from "./shopping/types.js";
 import type { CompanyAgentProfile, CompanyPolicy } from "./companyPlatform.js";
 import type { RecallChatCommand } from "./meetings/recall.js";
 import type { MeetingCapabilities } from "./meetings/capabilities.js";
+
+export interface SessionReadOptions {
+  /** Read only the durable domains needed by this operation. */
+  domains?: readonly DurableSessionDomain[];
+}
 import { defaultMeetingRepresentativeProfile, normalizeMeetingRepresentativeProfile, type MeetingRepresentativeProfile } from "./meetings/representative.js";
 import { normalizeMeetingMission, type MeetingMission } from "./meetings/mission.js";
 import { isBlandVoiceId, isFluxTtsVoice, normalizeLiveVoicePreferences, type FluxTtsVoiceId, type LiveVoicePreferences, type LiveVoiceProvider } from "./voiceSettings.js";
@@ -316,6 +321,21 @@ export interface UserSession {
   /** Department operating spaces and typed handoff packets for company workflows. */
   departmentSpaces?: DepartmentSpaceRecord[];
   workPackets?: WorkPacketRecord[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Small owner-scoped projection used by dashboards and channel identity code. */
+export interface SessionProfileProjection {
+  model: string;
+  totalMessages: number;
+  totalCost: number;
+  telegramChatId?: number;
+  voiceReplies?: boolean;
+  voicePreferences?: LiveVoicePreferences;
+  scratchpad: Record<string, ScratchpadEntry>;
+  triggerIds: string[];
+  triggerInstructions: Record<string, string>;
   createdAt: number;
   updatedAt: number;
 }
@@ -1255,6 +1275,55 @@ export interface TaskRecord {
   webSessionReconciliation?: WebSessionReconciliationTask;
 }
 
+/**
+ * The bounded projection used by dashboards and autonomy planning.  It is
+ * deliberately not a TaskRecord: checkpoint events, attachments, routing
+ * hints, and provider payloads stay out of hot queue reads.
+ */
+export interface TaskSummary {
+  id: string;
+  userId: number;
+  title: string;
+  objective: string;
+  status: TaskStatus;
+  checkpoint?: string;
+  nextAction?: string;
+  error?: string;
+  attempt: number;
+  maxAttempts: number;
+  runAt?: number;
+  updatedAt: number;
+  createdAt: number;
+  version: number;
+  lease?: TaskLease;
+  missionId?: string;
+  missionStepId?: string;
+  taskKind?: TaskRecord["taskKind"];
+}
+
+function taskSummary(task: TaskRecord): TaskSummary {
+  return {
+    id: task.id,
+    userId: task.userId,
+    title: task.title,
+    objective: task.objective,
+    status: task.status,
+    ...(task.checkpoint ? { checkpoint: task.checkpoint.slice(0, 4_000) } : {}),
+    ...(task.nextAction ? { nextAction: task.nextAction.slice(0, 2_000) } : {}),
+    ...(task.error ? { error: task.error.slice(0, 2_000) } : {}),
+    attempt: task.attempt,
+    maxAttempts: task.maxAttempts,
+    ...(task.runAt !== undefined ? { runAt: task.runAt } : {}),
+    updatedAt: task.updatedAt,
+    createdAt: task.createdAt,
+    version: task.version,
+    ...(task.lease ? { lease: { ...task.lease } } : {}),
+    ...(task.missionId ? { missionId: task.missionId } : {}),
+    ...(task.missionStepId ? { missionStepId: task.missionStepId } : {}),
+    ...(task.taskKind ? { taskKind: task.taskKind } : {}),
+  };
+}
+
 export type ComposerStageStatus = "pending" | "running" | "completed" | "blocked" | "failed" | "cancelled";
 export interface ComposerStage {
   id: string;
@@ -1306,6 +1375,33 @@ export interface ReminderRecord {
   webNotificationAt?: number;
   webReadAt?: number;
   createdAt: number;
+}
+
+export interface ReminderSummary {
+  id: string;
+  userId: number;
+  text: string;
+  runAt: number;
+  status: ReminderRecord["status"];
+  mode?: AutonomyMode;
+  nextAction?: string;
+  deliveryError?: string;
+  webThreadId?: string;
+  webRunId?: string;
+  webNotificationAt?: number;
+  webReadAt?: number;
+  createdAt: number;
+}
+
+function reminderSummary(reminder: ReminderRecord): ReminderSummary {
+  return {
+    id: reminder.id, userId: reminder.userId, text: reminder.text.slice(0, 1_000), runAt: reminder.runAt, status: reminder.status,
+    ...(reminder.mode ? { mode: reminder.mode } : {}), ...(reminder.nextAction ? { nextAction: reminder.nextAction.slice(0, 1_000) } : {}),
+    ...(reminder.deliveryError ? { deliveryError: reminder.deliveryError.slice(0, 500) } : {}),
+    ...(reminder.webThreadId ? { webThreadId: reminder.webThreadId } : {}), ...(reminder.webRunId ? { webRunId: reminder.webRunId } : {}),
+    ...(reminder.webNotificationAt ? { webNotificationAt: reminder.webNotificationAt } : {}), ...(reminder.webReadAt ? { webReadAt: reminder.webReadAt } : {}),
+    createdAt: reminder.createdAt,
+  };
 }
 
 export interface ExternalActionReceipt {
@@ -1390,6 +1486,29 @@ export interface JobRecord {
   /** Last bounded QStash schedule-recovery error; cleared after a verified repair. */
   scheduleError?: string;
   createdAt: number;
+}
+
+export interface JobSummary {
+  id: string;
+  userId: number;
+  text: string;
+  cron: string;
+  scheduleId: string;
+  status: JobRecord["status"];
+  kind?: JobRecord["kind"];
+  nextAction?: string;
+  deliveryError?: string;
+  scheduleError?: string;
+  createdAt: number;
+}
+
+function jobSummary(job: JobRecord): JobSummary {
+  return {
+    id: job.id, userId: job.userId, text: job.text.slice(0, 1_000), cron: job.cron, scheduleId: job.scheduleId, status: job.status,
+    ...(job.kind ? { kind: job.kind } : {}), ...(job.nextAction ? { nextAction: job.nextAction.slice(0, 1_000) } : {}),
+    ...(job.deliveryError ? { deliveryError: job.deliveryError.slice(0, 500) } : {}), ...(job.scheduleError ? { scheduleError: job.scheduleError.slice(0, 500) } : {}),
+    createdAt: job.createdAt,
+  };
 }
 
 export interface ScratchpadEntry {
@@ -1806,7 +1925,9 @@ export interface ChannelInboundEventRecord {
 interface Backend {
   close(): Promise<void>;
   flushStorageMetrics?(): Promise<void>;
-  getSession(userId: number, includeSdkTables?: boolean): Promise<UserSession>;
+  getSession(userId: number, includeSdkTables?: boolean, options?: SessionReadOptions): Promise<UserSession>;
+  getSessionProfile(userId: number): Promise<SessionProfileProjection>;
+  getSessionWebhooks(userId: number): Promise<UserSession["sdkWebhooks"]>;
   saveSession(userId: number, s: UserSession): Promise<void>;
   readConversationBefore(userId: number, before: { createdAt: number; id: string }, limit: number): Promise<DurableConversationMessage[] | undefined>;
   getSdkRun(userId: number, threadId: string, runId: string): Promise<SdkRunRecord | undefined>;
@@ -1917,6 +2038,11 @@ interface Backend {
   listTaskOwnerIds(limit?: number): Promise<number[]>;
   listJobOwnerIds(limit?: number): Promise<number[]>;
   getTasks(userId: number): Promise<TaskRecord[]>;
+  getTasksSince(userId: number, afterMs: number, limit: number): Promise<TaskRecord[]>;
+  getOpenTasks(userId: number, limit: number): Promise<TaskRecord[]>;
+  getOpenTaskSummaries(userId: number, limit: number): Promise<TaskSummary[]>;
+  getDueTasks(userId: number, nowMs: number, limit: number): Promise<TaskRecord[]>;
+  getTasksForMission(userId: number, missionId: string, limit: number): Promise<TaskRecord[]>;
   getTask(userId: number, id: string): Promise<TaskRecord | undefined>;
   /** Small, per-task cancellation signal for active workers. */
   isTaskCancellationRequested(userId: number, id: string): Promise<boolean>;
@@ -1927,6 +2053,7 @@ interface Backend {
   claimTaskEnqueue(userId: number, id: string, token: string, claimMs: number): Promise<TaskRecord | undefined>;
   renewTaskLease(userId: number, id: string, leaseToken: string, leaseMs: number): Promise<TaskRecord | undefined>;
   getMissions(userId: number): Promise<MissionRecord[]>;
+  getMissionsPage(userId: number, limit: number): Promise<MissionRecord[]>;
   getMission(userId: number, id: string): Promise<MissionRecord | undefined>;
   saveMissions(userId: number, missions: MissionRecord[]): Promise<void>;
   createMissionIfAbsent(userId: number, mission: MissionRecord): Promise<MissionRecord>;
@@ -1937,10 +2064,12 @@ interface Backend {
   appendMissionEvents(userId: number, missionId: string, events: MissionEventRecord[]): Promise<void>;
   listMissionEvents(userId: number, missionId: string, limit: number): Promise<MissionEventRecord[]>;
   getReminders(userId: number): Promise<ReminderRecord[]>;
+  getReminderSummaries(userId: number): Promise<ReminderSummary[]>;
   saveReminders(userId: number, reminders: ReminderRecord[]): Promise<void>;
   addReminder(userId: number, reminder: ReminderRecord, maxActive: number): Promise<void>;
   transitionReminderStatus(userId: number, id: string, expectedStatuses: ReminderRecord["status"][], patch: Partial<ReminderRecord>): Promise<ReminderRecord | undefined>;
   getJobs(userId: number): Promise<JobRecord[]>;
+  getJobSummaries(userId: number): Promise<JobSummary[]>;
   saveJobs(userId: number, jobs: JobRecord[]): Promise<void>;
   addJob(userId: number, job: JobRecord, maxActive: number): Promise<void>;
   getAttentionRecords(userId: number, collection: AttentionCollection): Promise<AttentionRecord[]>;
@@ -2166,6 +2295,8 @@ function boundedAgentRun(record: AgentRunRecord): AgentRunRecord {
 // ── Redis ─────────────────────────────────────────────────────────────────────
 class RedisBackend implements Backend {
   private readonly durableStorageMetrics = { redisSessionCommands: 0, redisSessionBytesRead: 0, redisSessionBytesWritten: 0, redisDomainCacheHits: 0, redisDomainCacheMisses: 0, redisSessionCoreBytes: 0, redisDomainCacheBytes: 0 };
+  /** Coalesce concurrent reads from dashboard/CLI fan-out without serving stale sessions. */
+  private readonly sessionReadsInFlight = new Map<string, Promise<UserSession>>();
   private retentionLastRunAt = 0;
   constructor(private r: Redis, private readonly durableState?: NeonDurableState, private readonly durableSdkRunsEnabled = false, private readonly durableSdkTablesEnabled = false, private readonly durableStateMissionsEnabled = false, private readonly redisCommandMetrics = new RedisCommandMetrics(), private readonly redisMetricsPublisher?: RedisMetricsPublisher) {}
 
@@ -2218,6 +2349,7 @@ class RedisBackend implements Backend {
         const totals30d = await this.redisMetricsPublisher.totals(30);
         if (totals1d) Object.assign(persisted, flattenStorageMetricTotals(totals1d, "1d"));
         if (totals30d) Object.assign(persisted, flattenStorageMetricTotals(totals30d, "30d"));
+        if (this.durableState) Object.assign(persisted, await this.durableState.redisRouteMetricTotals(Date.now() - 24 * 60 * 60_000, 1));
         persisted["redis.persisted.available"] = 1;
       } catch {
         persisted["redis.persisted.available"] = 0;
@@ -2313,7 +2445,15 @@ class RedisBackend implements Backend {
   private taskk = (id: number) => `chuck:tasks:${id}`;
   private taskKey = (userId: number, id: string) => `chuck:task:${userId}:${id}`;
   private taskIndexKey = (userId: number) => `chuck:tasks:${userId}:index`;
-  private taskMigrationKey = (userId: number) => `chuck:tasks:${userId}:v2`;
+  /** Indexes only non-terminal tasks so workers do not reread old payloads. */
+  private openTaskIndexKey = (userId: number) => `chuck:tasks:${userId}:open`;
+  /** Queue-only index for tasks that are eligible to wake at or before now. */
+  private dueTaskIndexKey = (userId: number) => `chuck:tasks:${userId}:due`;
+  /** Compact metadata projection; full task payloads are never needed for queue counts. */
+  private taskSummaryKey = (userId: number, id: string) => `chuck:task-summary:${userId}:${id}`;
+  /** Mission-local task index; the hash keeps user-controlled IDs out of keys. */
+  private taskMissionIndexKey = (userId: number, missionId: string) => `chuck:tasks:${userId}:mission:${createHash("sha256").update(missionId).digest("hex").slice(0, 32)}`;
+  private taskMigrationKey = (userId: number) => `chuck:tasks:${userId}:v5`;
   private taskCancellationKey = (userId: number, id: string) => `chuck:task:cancel:${userId}:${id}`;
   private migratedTaskOwners = new Set<number>();
   private missionk = (id: number) => `chuck:missions:${id}`;
@@ -2322,7 +2462,9 @@ class RedisBackend implements Backend {
   private missionRecoveryOwnerCursorKey = "chuck:missions:recovery:owner-cursor";
   private missionRecoveryMissionCursorKey = (userId: number) => `chuck:missions:recovery:mission-cursor:${userId}`;
   private reminderk = (id: number) => `chuck:reminders:${id}`;
+  private reminderSummaryKey = (id: number) => `chuck:reminder-summaries:${id}`;
   private jobk = (id: number) => `chuck:jobs:${id}`;
+  private jobSummaryKey = (id: number) => `chuck:job-summaries:${id}`;
   private attentionKey = (id: number, collection: AttentionCollection) => `chuck:attention:${collection}:${id}`;
   private pk = (hash: string) => `chuck:cli:pairing:${hash}`;
   private tk = (hash: string) => `chuck:cli:device:${hash}`;
@@ -2451,7 +2593,98 @@ class RedisBackend implements Backend {
     });
   }
 
-  async getSession(userId: number, includeSdkTables = false): Promise<UserSession> {
+  async getSession(userId: number, includeSdkTables = false, options?: SessionReadOptions): Promise<UserSession> {
+    const requestedDomains = options?.domains?.length ? [...new Set(options.domains)].sort() : undefined;
+    const key = `${userId}:${includeSdkTables ? "sdk" : "core"}:${requestedDomains?.join(",") ?? "all"}`;
+    const existing = this.sessionReadsInFlight.get(key);
+    if (existing) return structuredClone(await existing);
+    const pending = this.loadSession(userId, includeSdkTables, requestedDomains);
+    this.sessionReadsInFlight.set(key, pending);
+    try {
+      return structuredClone(await pending);
+    } finally {
+      if (this.sessionReadsInFlight.get(key) === pending) this.sessionReadsInFlight.delete(key);
+    }
+  }
+
+  async getSessionProfile(userId: number): Promise<SessionProfileProjection> {
+    const fromValue = (value: unknown): SessionProfileProjection | undefined => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+      const item = value as Record<string, unknown>;
+      if (typeof item.model !== "string" || !Number.isSafeInteger(item.totalMessages) || typeof item.totalCost !== "number") return undefined;
+      const scratchpad = item.scratchpad && typeof item.scratchpad === "object" && !Array.isArray(item.scratchpad) ? item.scratchpad as Record<string, ScratchpadEntry> : {};
+      const triggerIds = Array.isArray(item.triggerIds) ? item.triggerIds.filter((id): id is string => typeof id === "string").slice(-100) : [];
+      const owned = new Set(triggerIds);
+      const triggerInstructions = item.triggerInstructions && typeof item.triggerInstructions === "object" && !Array.isArray(item.triggerInstructions)
+        ? Object.fromEntries(Object.entries(item.triggerInstructions).filter(([id, instruction]) => owned.has(id) && typeof instruction === "string").slice(-100).map(([id, instruction]) => [id, String(instruction).slice(0, 2_000)]))
+        : {};
+      return {
+        model: item.model,
+        totalMessages: Math.max(0, Number(item.totalMessages)),
+        totalCost: Number.isFinite(item.totalCost) && item.totalCost >= 0 ? item.totalCost : 0,
+        ...(Number.isSafeInteger(item.telegramChatId) ? { telegramChatId: Number(item.telegramChatId) } : {}),
+        ...(typeof item.voiceReplies === "boolean" ? { voiceReplies: item.voiceReplies } : {}),
+        ...(item.voicePreferences && typeof item.voicePreferences === "object" && !Array.isArray(item.voicePreferences) ? { voicePreferences: item.voicePreferences as LiveVoicePreferences } : {}),
+        scratchpad,
+        triggerIds,
+        triggerInstructions,
+        createdAt: Number.isSafeInteger(item.createdAt) ? Number(item.createdAt) : Date.now(),
+        updatedAt: Number.isSafeInteger(item.updatedAt) ? Number(item.updatedAt) : Date.now(),
+      };
+    };
+
+    if (this.durableState && userId !== 0) {
+      const cached = await this.r.get(this.sessionDomainKey(userId, "profile"));
+      const parsed = parseSessionDomainCache(cached, "profile");
+      const projection = fromValue(parsed?.payload);
+      if (projection) return projection;
+      const document = await this.durableState.readSessionDomain(userId, "profile");
+      const durableProjection = fromValue(document?.payload);
+      if (durableProjection && document) {
+        await this.writeSessionDomainCache(userId, new Map([["profile", document.payload]]), { profile: document.version }, ["profile"]);
+        return durableProjection;
+      }
+    }
+
+    const raw = await this.r.get(this.sk(userId));
+    try {
+      const projection = fromValue(raw ? JSON.parse(raw) : undefined);
+      if (projection) return projection;
+    } catch { /* Fall through to the canonical empty projection. */ }
+    const session = fresh();
+    return fromValue(session)!;
+  }
+
+  async getSessionWebhooks(userId: number): Promise<UserSession["sdkWebhooks"]> {
+    const fromValue = (value: unknown): UserSession["sdkWebhooks"] => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+      const item = value as Record<string, unknown>;
+      const raw = Array.isArray(item.sdkWebhooks) ? item.sdkWebhooks : [];
+      return raw.flatMap((entry): NonNullable<UserSession["sdkWebhooks"]>[number][] => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const webhook = entry as Record<string, unknown>;
+        if (typeof webhook.id !== "string" || typeof webhook.url !== "string" || typeof webhook.secretCiphertext !== "string" || !Number.isSafeInteger(webhook.createdAt)) return [];
+        return [{ id: webhook.id.slice(0, 160), url: webhook.url.slice(0, 2_000), secretCiphertext: webhook.secretCiphertext, createdAt: Number(webhook.createdAt), ...(Number.isSafeInteger(webhook.disabledAt) ? { disabledAt: Number(webhook.disabledAt) } : {}) }];
+      }).slice(-100);
+    };
+    if (this.durableState && this.durableSdkTablesEnabled && userId !== 0) {
+      const cached = await this.r.get(this.sessionDomainKey(userId, "sdk"));
+      const parsed = parseSessionDomainCache(cached, "sdk");
+      if (parsed) return fromValue(parsed.payload);
+      const document = await this.durableState.readSessionDomain(userId, "sdk");
+      if (document) {
+        await this.writeSessionDomainCache(userId, new Map([["sdk", document.payload]]), { sdk: document.version }, ["sdk"]);
+        return fromValue(document.payload);
+      }
+      return [];
+    }
+    const raw = await this.r.get(this.sk(userId));
+    try { return fromValue(raw ? JSON.parse(raw) : undefined); } catch { return []; }
+  }
+
+  private async loadSession(userId: number, includeSdkTables = false, requestedDomains?: readonly DurableSessionDomain[]): Promise<UserSession> {
+    const domains = this.sessionDomainsForRead(includeSdkTables, requestedDomains);
+    const partialRead = domains.length < DURABLE_SESSION_DOMAINS.filter((domain) => includeSdkTables || domain !== "sdk").length;
     this.durableStorageMetrics.redisSessionCommands += 1;
     const raw = await this.r.get(this.sk(userId));
     if (raw) this.durableStorageMetrics.redisSessionBytesRead += Buffer.byteLength(raw, "utf8");
@@ -2461,8 +2694,8 @@ class RedisBackend implements Backend {
         const migrated = sessionUsesNeonDomains(session);
         if (migrated) {
           if (!this.durableState) throw new Error("This session has migrated to Neon durable state, but DURABLE_STATE_ENABLED is not configured.");
-          let documents = await this.readSessionDomains(userId, includeSdkTables);
-          const requiredDomainCount = includeSdkTables ? DURABLE_SESSION_DOMAINS.length : DURABLE_SESSION_DOMAINS.length - 1;
+          let documents = await this.readSessionDomains(userId, includeSdkTables, domains);
+          const requiredDomainCount = domains.length;
           if (documents.size < requiredDomainCount) {
             documents = await this.repairIncompleteSessionDomains(userId, session);
           }
@@ -2484,7 +2717,7 @@ class RedisBackend implements Backend {
           }
           const payloads = new Map([...documents].map(([domain, document]) => [domain, document.payload] as const));
           if (conversation?.history) payloads.set("conversation", { ...conversation, history: undefined });
-          session = joinSessionDomains(session, payloads, includeSdkTables);
+          session = joinSessionDomains(session, payloads, includeSdkTables, partialRead);
           const metadata = session as UserSession & DurableSessionMetadata;
           metadata.durableDomainVersions = Object.fromEntries([...documents].flatMap(([domain, document]) => document.version > 0 ? [[domain, document.version]] : [])) as DurableSessionMetadata["durableDomainVersions"];
           metadata.durableDomainHashes = Object.fromEntries([...documents].map(([domain, document]) => [domain, durableDomainHash(payloads.get(domain))])) as DurableSessionMetadata["durableDomainHashes"];
@@ -2509,8 +2742,8 @@ class RedisBackend implements Backend {
       }
     }
     if (this.durableState && userId !== 0) {
-      let documents = await this.readSessionDomains(userId, includeSdkTables);
-      const requiredDomainCount = includeSdkTables ? DURABLE_SESSION_DOMAINS.length : DURABLE_SESSION_DOMAINS.length - 1;
+      let documents = await this.readSessionDomains(userId, includeSdkTables, domains);
+      const requiredDomainCount = domains.length;
       if (documents.size > 0 && documents.size < requiredDomainCount) {
         documents = await this.repairIncompleteSessionDomains(userId, fresh());
       }
@@ -2536,7 +2769,7 @@ class RedisBackend implements Backend {
         } else {
           recovered.history = (await this.durableState.readRecentConversation(userId, HOT_CONVERSATION_MESSAGES)).map((message) => ({ ...message }));
         }
-        const session = joinSessionDomains(recovered, payloads, includeSdkTables) as UserSession & DurableSessionMetadata;
+        const session = joinSessionDomains(recovered, payloads, includeSdkTables, partialRead) as UserSession & DurableSessionMetadata;
         session.durableDomainVersions = Object.fromEntries([...documents].flatMap(([domain, document]) => document.version > 0 ? [[domain, document.version]] : [])) as DurableSessionMetadata["durableDomainVersions"];
         session.durableDomainHashes = Object.fromEntries([...documents].map(([domain, document]) => [domain, durableDomainHash(payloads.get(domain))])) as DurableSessionMetadata["durableDomainHashes"];
         session.durableDomainSnapshots = Object.fromEntries([...payloads].map(([domain, payload]) => [domain, structuredClone(payload)])) as DurableSessionMetadata["durableDomainSnapshots"];
@@ -2656,7 +2889,7 @@ class RedisBackend implements Backend {
           // Ordinary turns intentionally omit the SDK domain until an SDK
           // operation asks for it. Reconciliation must preserve that partial
           // load instead of treating the omitted domain as corruption.
-          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads, this.durableSdkTablesEnabled && sdkDomainLoaded), sdkState, {
+          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads, this.durableSdkTablesEnabled && sdkDomainLoaded, true), sdkState, {
             durableDomainVersions: { ...metadata.durableDomainVersions, ...latestVersions },
             durableDomainHashes: oldHashes,
             durableDomainSnapshots: oldSnapshots,
@@ -2687,7 +2920,7 @@ class RedisBackend implements Backend {
             domains.set(domain, merged);
           }
           const sdkState = { sdkThreads: withMessageIds.sdkThreads, sdkIdempotency: withMessageIds.sdkIdempotency, sdkAudit: withMessageIds.sdkAudit };
-          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads, this.durableSdkTablesEnabled && sdkDomainLoaded), sdkState);
+          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads, this.durableSdkTablesEnabled && sdkDomainLoaded, true), sdkState);
           ({ core, domains, sdkRuns } = splitSessionDomainsForSave(withMessageIds, this.durableSdkRunsEnabled || this.durableSdkTablesEnabled, this.durableSdkTablesEnabled));
           sdkTableChanges = this.durableSdkTablesEnabled && sdkDomainLoaded ? durableSdkTableChanges(userId, withMessageIds, metadata.durableSdkTablesSnapshot) : undefined;
           writeExpectedVersions = new Map([...changedDomains.keys()].map((domain) => [domain, latest.get(domain)?.version] as const));
@@ -2722,9 +2955,15 @@ class RedisBackend implements Backend {
     await this.r.setex(this.sk(userId), config.sessionTtl, encoded);
   }
 
-  private async readSessionDomains(userId: number, includeSdkTables = false): Promise<Map<DurableSessionDomain, DurableSessionDocument>> {
+  private sessionDomainsForRead(includeSdkTables: boolean, requested?: readonly DurableSessionDomain[]): DurableSessionDomain[] {
+    const allowed = new Set(DURABLE_SESSION_DOMAINS.filter((domain) => includeSdkTables || domain !== "sdk"));
+    const selected = requested?.filter((domain) => allowed.has(domain)) ?? [...allowed];
+    return [...new Set(selected)];
+  }
+
+  private async readSessionDomains(userId: number, includeSdkTables = false, requested?: readonly DurableSessionDomain[]): Promise<Map<DurableSessionDomain, DurableSessionDocument>> {
     if (!this.durableState) throw new Error("Durable session domains require Neon durable state.");
-    const domains = DURABLE_SESSION_DOMAINS.filter((domain) => includeSdkTables || domain !== "sdk");
+    const domains = this.sessionDomainsForRead(includeSdkTables, requested);
     const keys = domains.map((domain) => this.sessionDomainKey(userId, domain));
     this.durableStorageMetrics.redisSessionCommands += 1;
     const cached = await this.r.mget(...keys);
@@ -3645,12 +3884,39 @@ class RedisBackend implements Backend {
       await this.r.watch(legacyKey, indexKey, markerKey);
       if (await this.r.exists(markerKey)) { await this.r.unwatch(); this.migratedTaskOwners.add(userId); return; }
       const [legacyRaw, count] = await Promise.all([this.r.get(legacyKey), this.r.zcard(indexKey)]);
+      const existingIds = count > 0 ? await this.r.zrevrange(indexKey, 0, -1) : [];
+      const existingValues = existingIds.length ? await this.r.mget(...existingIds.map((id) => this.taskKey(userId, id))) : [];
       const tx = this.r.multi();
       if (count === 0 && legacyRaw) {
         let tasks: TaskRecord[] = [];
         try { const parsed = JSON.parse(legacyRaw); tasks = Array.isArray(parsed) ? parsed.map(normalizeTask) : []; } catch { /* migrate an empty set */ }
-        for (const task of tasks) { tx.set(this.taskKey(userId, task.id), JSON.stringify(task)).zadd(indexKey, task.updatedAt, task.id); if (["cancel_requested", "cancelled"].includes(task.status)) tx.set(this.taskCancellationKey(userId, task.id), "1", "EX", 604800); }
+        tx.del(this.openTaskIndexKey(userId), this.dueTaskIndexKey(userId));
+        for (const task of tasks) {
+          const encoded = JSON.stringify(task);
+          if (["completed", "cancelled"].includes(task.status)) tx.set(this.taskKey(userId, task.id), encoded, "EX", config.taskPayloadRetentionSeconds);
+          else tx.set(this.taskKey(userId, task.id), encoded);
+          tx.set(this.taskSummaryKey(userId, task.id), JSON.stringify(taskSummary(task))).zadd(indexKey, task.updatedAt, task.id);
+          if (!["completed", "cancelled"].includes(task.status)) tx.zadd(this.openTaskIndexKey(userId), task.updatedAt, task.id);
+          if (task.status === "queued" && task.runAt !== undefined) tx.zadd(this.dueTaskIndexKey(userId), task.runAt, task.id);
+          if (task.missionId) tx.zadd(this.taskMissionIndexKey(userId, task.missionId), task.updatedAt, task.id);
+          if (["cancel_requested", "cancelled"].includes(task.status)) tx.set(this.taskCancellationKey(userId, task.id), "1", "EX", 604800);
+        }
         tx.del(legacyKey);
+      } else if (count > 0) {
+        // v3 adds bounded open-task and mission-local indexes for owners that
+        // already completed the v2 payload migration.
+        tx.del(this.openTaskIndexKey(userId), this.dueTaskIndexKey(userId));
+        existingValues.forEach((raw) => {
+          if (!raw) return;
+          try {
+            const task = normalizeTask(JSON.parse(raw) as TaskRecord);
+            if (["completed", "cancelled"].includes(task.status)) tx.expire(this.taskKey(userId, task.id), config.taskPayloadRetentionSeconds);
+            tx.set(this.taskSummaryKey(userId, task.id), JSON.stringify(taskSummary(task)));
+            if (!["completed", "cancelled"].includes(task.status)) tx.zadd(this.openTaskIndexKey(userId), task.updatedAt, task.id);
+            if (task.status === "queued" && task.runAt !== undefined) tx.zadd(this.dueTaskIndexKey(userId), task.runAt, task.id);
+            if (task.missionId) tx.zadd(this.taskMissionIndexKey(userId, task.missionId), task.updatedAt, task.id);
+          } catch { /* Keep malformed historical payloads out of secondary indexes. */ }
+        });
       }
       tx.set(markerKey, "1");
       if (await tx.exec()) { this.migratedTaskOwners.add(userId); return; }
@@ -3663,11 +3929,57 @@ class RedisBackend implements Backend {
   }
   private async writeTaskIfVersion(userId: number, expectedVersion: number, task: TaskRecord): Promise<boolean> {
     const cancelled = ["cancel_requested", "cancelled"].includes(task.status) ? "1" : "0";
-    const result = await this.r.eval("local v=redis.call('GET',KEYS[1]); if not v then return 0 end; local c=cjson.decode(v); if tonumber(c.version or 0) ~= tonumber(ARGV[1]) then return 0 end; redis.call('SET',KEYS[1],ARGV[2]); redis.call('ZADD',KEYS[2],ARGV[3],ARGV[4]); if ARGV[5]=='1' then redis.call('SET',KEYS[3],'1','EX',604800) else redis.call('DEL',KEYS[3]) end; return 1", 3, this.taskKey(userId, task.id), this.taskIndexKey(userId), this.taskCancellationKey(userId, task.id), String(expectedVersion), JSON.stringify(task), String(task.updatedAt), task.id, cancelled);
+    const result = await this.r.eval("local v=redis.call('GET',KEYS[1]); if not v then return 0 end; local c=cjson.decode(v); if tonumber(c.version or 0) ~= tonumber(ARGV[1]) then return 0 end; local oldStatus=tostring(c.status or ''); local oldOpen=oldStatus~='completed' and oldStatus~='cancelled'; local newOpen=ARGV[6]~='completed' and ARGV[6]~='cancelled'; if oldOpen and not newOpen then redis.call('ZREM',KEYS[4],ARGV[4]) elseif not oldOpen and newOpen then redis.call('ZADD',KEYS[4],ARGV[3],ARGV[4]) elseif newOpen then redis.call('ZADD',KEYS[4],ARGV[3],ARGV[4]) end; local oldDue=oldStatus=='queued' and c.runAt ~= nil; local newDue=ARGV[6]=='queued' and ARGV[9] ~= ''; if oldDue and (not newDue or tonumber(c.runAt) ~= tonumber(ARGV[9])) then redis.call('ZREM',KEYS[7],ARGV[4]) end; if newDue then redis.call('ZADD',KEYS[7],tonumber(ARGV[9]),ARGV[4]) end; if ARGV[6]=='completed' or ARGV[6]=='cancelled' then redis.call('SET',KEYS[1],ARGV[2],'EX',ARGV[10]) else redis.call('SET',KEYS[1],ARGV[2]) end; redis.call('SET',KEYS[6],ARGV[8]); redis.call('ZADD',KEYS[2],ARGV[3],ARGV[4]); if ARGV[5]=='1' then redis.call('SET',KEYS[3],'1','EX',604800) else redis.call('DEL',KEYS[3]) end; if ARGV[7]=='1' then redis.call('ZADD',KEYS[5],ARGV[3],ARGV[4]) end; return 1", 7, this.taskKey(userId, task.id), this.taskIndexKey(userId), this.taskCancellationKey(userId, task.id), this.openTaskIndexKey(userId), this.taskMissionIndexKey(userId, task.missionId ?? "_none"), this.taskSummaryKey(userId, task.id), this.dueTaskIndexKey(userId), String(expectedVersion), JSON.stringify(task), String(task.updatedAt), task.id, cancelled, task.status, task.missionId ? "1" : "0", JSON.stringify(taskSummary(task)), task.runAt === undefined ? "" : String(task.runAt), String(config.taskPayloadRetentionSeconds));
     return Number(result) === 1;
   }
   async getTasks(userId: number): Promise<TaskRecord[]> {
     await this.ensureTaskMigration(userId); const ids = await this.r.zrevrange(this.taskIndexKey(userId), 0, -1); if (!ids.length) return [];
+    const values = await this.r.mget(...ids.map((id) => this.taskKey(userId, id)));
+    return values.flatMap((raw) => { try { return raw ? [normalizeTask(JSON.parse(raw) as TaskRecord)] : []; } catch { return []; } });
+  }
+  async getTasksSince(userId: number, afterMs: number, limit: number): Promise<TaskRecord[]> {
+    await this.ensureTaskMigration(userId);
+    const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    const ids = await this.r.zrevrangebyscore(this.taskIndexKey(userId), "+inf", `(${Math.max(0, Math.floor(afterMs))}`, "LIMIT", 0, boundedLimit);
+    if (!ids.length) return [];
+    const values = await this.r.mget(...ids.map((id) => this.taskKey(userId, id)));
+    return values.flatMap((raw) => { try { return raw ? [normalizeTask(JSON.parse(raw) as TaskRecord)] : []; } catch { return []; } });
+  }
+  async getOpenTasks(userId: number, limit: number): Promise<TaskRecord[]> {
+    await this.ensureTaskMigration(userId);
+    const boundedLimit = Math.max(1, Math.min(2000, Math.floor(limit)));
+    const ids = await this.r.zrevrange(this.openTaskIndexKey(userId), 0, boundedLimit - 1);
+    if (!ids.length) return [];
+    const values = await this.r.mget(...ids.map((id) => this.taskKey(userId, id)));
+    return values.flatMap((raw) => { try { return raw ? [normalizeTask(JSON.parse(raw) as TaskRecord)] : []; } catch { return []; } });
+  }
+  async getOpenTaskSummaries(userId: number, limit: number): Promise<TaskSummary[]> {
+    await this.ensureTaskMigration(userId);
+    const boundedLimit = Math.max(1, Math.min(2000, Math.floor(limit)));
+    const ids = await this.r.zrevrange(this.openTaskIndexKey(userId), 0, boundedLimit - 1);
+    if (!ids.length) return [];
+    const values = await this.r.mget(...ids.map((id) => this.taskSummaryKey(userId, id)));
+    return values.flatMap((raw) => {
+      try {
+        if (!raw) return [];
+        const parsed = JSON.parse(raw) as TaskSummary;
+        return parsed && typeof parsed.id === "string" && parsed.userId === userId ? [parsed] : [];
+      } catch { return []; }
+    });
+  }
+  async getDueTasks(userId: number, nowMs: number, limit: number): Promise<TaskRecord[]> {
+    await this.ensureTaskMigration(userId);
+    const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    const ids = await this.r.zrangebyscore(this.dueTaskIndexKey(userId), "-inf", Math.max(0, Math.floor(nowMs)), "LIMIT", 0, boundedLimit);
+    if (!ids.length) return [];
+    const values = await this.r.mget(...ids.map((id) => this.taskKey(userId, id)));
+    return values.flatMap((raw) => { try { return raw ? [normalizeTask(JSON.parse(raw) as TaskRecord)] : []; } catch { return []; } });
+  }
+  async getTasksForMission(userId: number, missionId: string, limit: number): Promise<TaskRecord[]> {
+    await this.ensureTaskMigration(userId);
+    const boundedLimit = Math.max(1, Math.min(2000, Math.floor(limit)));
+    const ids = await this.r.zrevrange(this.taskMissionIndexKey(userId, missionId), 0, boundedLimit - 1);
+    if (!ids.length) return [];
     const values = await this.r.mget(...ids.map((id) => this.taskKey(userId, id)));
     return values.flatMap((raw) => { try { return raw ? [normalizeTask(JSON.parse(raw) as TaskRecord)] : []; } catch { return []; } });
   }
@@ -3690,9 +4002,15 @@ class RedisBackend implements Backend {
     const oldIds = await this.r.zrange(this.taskIndexKey(userId), 0, -1);
     const tx = this.r.multi();
     for (const id of oldIds) tx.del(this.taskKey(userId, id), this.taskCancellationKey(userId, id));
-    tx.del(this.taskIndexKey(userId));
+    tx.del(this.taskIndexKey(userId), this.openTaskIndexKey(userId));
+    tx.del(this.dueTaskIndexKey(userId));
     for (const task of tasks.map(normalizeTask)) {
-      tx.set(this.taskKey(userId, task.id), JSON.stringify(task)).zadd(this.taskIndexKey(userId), task.updatedAt, task.id);
+      if (["completed", "cancelled"].includes(task.status)) tx.set(this.taskKey(userId, task.id), JSON.stringify(task), "EX", config.taskPayloadRetentionSeconds);
+      else tx.set(this.taskKey(userId, task.id), JSON.stringify(task));
+      tx.set(this.taskSummaryKey(userId, task.id), JSON.stringify(taskSummary(task))).zadd(this.taskIndexKey(userId), task.updatedAt, task.id);
+      if (!["completed", "cancelled"].includes(task.status)) tx.zadd(this.openTaskIndexKey(userId), task.updatedAt, task.id);
+      if (task.status === "queued" && task.runAt !== undefined) tx.zadd(this.dueTaskIndexKey(userId), task.runAt, task.id);
+      if (task.missionId) tx.zadd(this.taskMissionIndexKey(userId, task.missionId), task.updatedAt, task.id);
       if (["cancel_requested", "cancelled"].includes(task.status)) tx.set(this.taskCancellationKey(userId, task.id), "1", "EX", 604800);
     }
     await tx.exec();
@@ -3701,10 +4019,17 @@ class RedisBackend implements Backend {
     await this.ensureTaskMigration(userId);
     const key = this.taskKey(userId, task.id);
     for (let attempt = 0; attempt < 3; attempt++) {
-      await this.r.watch(key, this.taskIndexKey(userId));
+      await this.r.watch(key, this.taskIndexKey(userId), this.openTaskIndexKey(userId), this.dueTaskIndexKey(userId), this.taskSummaryKey(userId, task.id), ...(task.missionId ? [this.taskMissionIndexKey(userId, task.missionId)] : []));
       const raw = await this.r.get(key);
       if (raw) { await this.r.unwatch(); return normalizeTask(JSON.parse(raw) as TaskRecord); }
-      const result = await this.r.multi().set(key, JSON.stringify(task)).zadd(this.taskIndexKey(userId), task.updatedAt, task.id).exec();
+      const tx = this.r.multi();
+      if (["completed", "cancelled"].includes(task.status)) tx.set(key, JSON.stringify(task), "EX", config.taskPayloadRetentionSeconds);
+      else tx.set(key, JSON.stringify(task));
+      tx.set(this.taskSummaryKey(userId, task.id), JSON.stringify(taskSummary(task))).zadd(this.taskIndexKey(userId), task.updatedAt, task.id);
+      if (!["completed", "cancelled"].includes(task.status)) tx.zadd(this.openTaskIndexKey(userId), task.updatedAt, task.id);
+      if (task.status === "queued" && task.runAt !== undefined) tx.zadd(this.dueTaskIndexKey(userId), task.runAt, task.id);
+      if (task.missionId) tx.zadd(this.taskMissionIndexKey(userId, task.missionId), task.updatedAt, task.id);
+      const result = await tx.exec();
       if (result) return task;
     }
     throw new Error("Task creation changed concurrently; please retry");
@@ -3758,6 +4083,14 @@ class RedisBackend implements Backend {
       return records.map((record) => this.missionFromDurable(record));
     }
     return this.readRedisMissions(userId);
+  }
+  async getMissionsPage(userId: number, limit: number): Promise<MissionRecord[]> {
+    const boundedLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+    if (await this.missionOwnerUsesNeon(userId)) {
+      const page = await this.durableState!.listMissions(userId, boundedLimit);
+      return page.map((record) => this.missionFromDurable(record));
+    }
+    return (await this.readRedisMissions(userId)).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, boundedLimit);
   }
   private async readRedisMissions(userId: number): Promise<MissionRecord[]> {
     const raw = await this.r.get(this.missionk(userId));
@@ -3901,9 +4234,17 @@ class RedisBackend implements Backend {
     if (legacy.length) await this.saveReminders(userId, legacy);
     return legacy;
   }
+  async getReminderSummaries(userId: number): Promise<ReminderSummary[]> {
+    const raw = await this.r.get(this.reminderSummaryKey(userId));
+    if (raw) { try { const parsed = JSON.parse(raw); if (Array.isArray(parsed)) return parsed as ReminderSummary[]; } catch { /* Rebuild from the canonical capped list. */ } }
+    const summaries = (await this.getReminders(userId)).map(reminderSummary);
+    if (summaries.length) await this.r.set(this.reminderSummaryKey(userId), JSON.stringify(summaries));
+    return summaries;
+  }
   async saveReminders(userId: number, reminders: ReminderRecord[]): Promise<void> {
     // Scheduling state must outlive the conversational session TTL.
-    await this.r.set(this.reminderk(userId), JSON.stringify(reminders.slice(-100)));
+    const bounded = reminders.slice(-100);
+    await this.r.multi().set(this.reminderk(userId), JSON.stringify(bounded)).set(this.reminderSummaryKey(userId), JSON.stringify(bounded.map(reminderSummary))).exec();
   }
   async addReminder(userId: number, reminder: ReminderRecord, maxActive: number): Promise<void> {
     const key = this.reminderk(userId);
@@ -3918,7 +4259,8 @@ class RedisBackend implements Backend {
         await this.r.unwatch();
         throw new Error(`You have reached the limit of ${maxActive} active reminders. Cancel or complete one before adding another.`);
       }
-      const result = await this.r.multi().set(key, JSON.stringify([...reminders.filter((item) => item.id !== reminder.id), reminder].slice(-100))).exec();
+       const next = [...reminders.filter((item) => item.id !== reminder.id), reminder].slice(-100);
+       const result = await this.r.multi().set(key, JSON.stringify(next)).set(this.reminderSummaryKey(userId), JSON.stringify(next.map(reminderSummary))).exec();
       if (result) return;
     }
     throw new Error("Reminder list changed concurrently; retry creating the reminder");
@@ -3935,7 +4277,8 @@ class RedisBackend implements Backend {
       if (!current || !expectedStatuses.includes(current.status)) { await this.r.unwatch(); return undefined; }
       const next = { ...current, ...patch, id: current.id, userId: current.userId };
       reminders[index] = next;
-      const result = await this.r.multi().set(key, JSON.stringify(reminders.slice(-100))).exec();
+       const nextList = reminders.slice(-100);
+       const result = await this.r.multi().set(key, JSON.stringify(nextList)).set(this.reminderSummaryKey(userId), JSON.stringify(nextList.map(reminderSummary))).exec();
       if (result) return next;
     }
     throw new Error("Reminder state changed concurrently; retry the action");
@@ -3949,9 +4292,17 @@ class RedisBackend implements Backend {
     if (legacy.length) await this.saveJobs(userId, legacy);
     return legacy;
   }
+  async getJobSummaries(userId: number): Promise<JobSummary[]> {
+    const raw = await this.r.get(this.jobSummaryKey(userId));
+    if (raw) { try { const parsed = JSON.parse(raw); if (Array.isArray(parsed)) return parsed as JobSummary[]; } catch { /* Rebuild from the canonical capped list. */ } }
+    const summaries = (await this.getJobs(userId)).map(jobSummary);
+    if (summaries.length) await this.r.set(this.jobSummaryKey(userId), JSON.stringify(summaries));
+    return summaries;
+  }
   async saveJobs(userId: number, jobs: JobRecord[]): Promise<void> {
     // Scheduling state must outlive the conversational session TTL.
-    await this.r.set(this.jobk(userId), JSON.stringify(jobs.slice(-100)));
+    const bounded = jobs.slice(-100);
+    await this.r.multi().set(this.jobk(userId), JSON.stringify(bounded)).set(this.jobSummaryKey(userId), JSON.stringify(bounded.map(jobSummary))).exec();
   }
   async addJob(userId: number, job: JobRecord, maxActive: number): Promise<void> {
     const key = this.jobk(userId);
@@ -3966,7 +4317,8 @@ class RedisBackend implements Backend {
         await this.r.unwatch();
         throw new Error(`You have reached the limit of ${maxActive} active recurring jobs. Cancel one before adding another.`);
       }
-      const result = await this.r.multi().set(key, JSON.stringify([...jobs.filter((item) => item.id !== job.id), job].slice(-100))).exec();
+       const next = [...jobs.filter((item) => item.id !== job.id), job].slice(-100);
+       const result = await this.r.multi().set(key, JSON.stringify(next)).set(this.jobSummaryKey(userId), JSON.stringify(next.map(jobSummary))).exec();
       if (result) return;
     }
     throw new Error("Recurring-job list changed concurrently; retry creating the job");
@@ -4502,9 +4854,28 @@ class MemoryBackend implements Backend {
 
   async close(): Promise<void> {}
 
-  async getSession(userId: number, _includeSdkTables = false) {
+  async getSession(userId: number, _includeSdkTables = false, _options?: SessionReadOptions) {
     const session = this.sessions.get(userId);
     return session ? structuredClone(session) : fresh();
+  }
+  async getSessionProfile(userId: number): Promise<SessionProfileProjection> {
+    const session = await this.getSession(userId);
+    return {
+      model: session.model,
+      totalMessages: session.totalMessages,
+      totalCost: session.totalCost,
+      ...(session.telegramChatId === undefined ? {} : { telegramChatId: session.telegramChatId }),
+      ...(session.voiceReplies === undefined ? {} : { voiceReplies: session.voiceReplies }),
+      ...(session.voicePreferences ? { voicePreferences: session.voicePreferences } : {}),
+      scratchpad: structuredClone(session.scratchpad),
+      triggerIds: [...session.triggerIds],
+      triggerInstructions: { ...(session.triggerInstructions ?? {}) },
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+    };
+  }
+  async getSessionWebhooks(userId: number): Promise<UserSession["sdkWebhooks"]> {
+    return structuredClone((this.sessions.get(userId)?.sdkWebhooks ?? []).slice(-100));
   }
   async readConversationBefore(_userId: number, _before: { createdAt: number; id: string }, _limit: number): Promise<DurableConversationMessage[] | undefined> { return undefined; }
   async getDurableStateHealth(): Promise<DurableStateStatus> { return { enabled: false, reachable: false, schemaReady: false }; }
@@ -4755,6 +5126,7 @@ class MemoryBackend implements Backend {
     this.reminders.set(userId, legacy);
     return legacy;
   }
+  async getReminderSummaries(userId: number) { return (await this.getReminders(userId)).map(reminderSummary); }
   async saveReminders(userId: number, reminders: ReminderRecord[]) { this.reminders.set(userId, reminders.slice(-100)); }
   async addReminder(userId: number, reminder: ReminderRecord, maxActive: number) {
     const reminders = this.reminders.get(userId) ?? (this.sessions.get(userId) ?? fresh()).reminders ?? [];
@@ -4778,6 +5150,7 @@ class MemoryBackend implements Backend {
     this.jobs.set(userId, legacy);
     return legacy;
   }
+  async getJobSummaries(userId: number) { return (await this.getJobs(userId)).map(jobSummary); }
   async saveJobs(userId: number, jobs: JobRecord[]) { this.jobs.set(userId, jobs.slice(-100)); }
   async addJob(userId: number, job: JobRecord, maxActive: number) {
     const jobs = this.jobs.get(userId) ?? (this.sessions.get(userId) ?? fresh()).jobs ?? [];
@@ -5050,6 +5423,21 @@ class MemoryBackend implements Backend {
   async listTaskOwnerIds(limit = 1000) { return [...this.tasks.keys()].filter((id) => Number.isSafeInteger(id) && id > 0).sort((a, b) => a - b).slice(0, limit); }
   async listJobOwnerIds(limit = 1000) { return [...new Set([...await this.listSessionOwnerIds(limit), ...this.jobs.keys()])].filter((id) => id >= 0).sort((a, b) => a - b).slice(0, limit); }
   async getTasks(userId: number) { return this.tasks.get(userId) ?? []; }
+  async getTasksSince(userId: number, afterMs: number, limit: number) {
+    return [...(this.tasks.get(userId) ?? [])].filter((task) => task.updatedAt > afterMs).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, Math.max(1, Math.min(500, Math.floor(limit))));
+  }
+  async getOpenTasks(userId: number, limit: number) {
+    return [...(this.tasks.get(userId) ?? [])].filter((task) => !["completed", "cancelled"].includes(task.status)).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, Math.max(1, Math.min(2000, Math.floor(limit))));
+  }
+  async getOpenTaskSummaries(userId: number, limit: number) {
+    return (await this.getOpenTasks(userId, limit)).map(taskSummary);
+  }
+  async getDueTasks(userId: number, nowMs: number, limit: number) {
+    return [...(this.tasks.get(userId) ?? [])].filter((task) => task.status === "queued" && task.runAt !== undefined && task.runAt <= nowMs).sort((a, b) => (a.runAt ?? 0) - (b.runAt ?? 0)).slice(0, Math.max(1, Math.min(500, Math.floor(limit))));
+  }
+  async getTasksForMission(userId: number, missionId: string, limit: number) {
+    return [...(this.tasks.get(userId) ?? [])].filter((task) => task.missionId === missionId).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, Math.max(1, Math.min(2000, Math.floor(limit))));
+  }
   async getTask(userId: number, id: string) { return (this.tasks.get(userId) ?? []).find((task) => task.id === id); }
   async isTaskCancellationRequested(userId: number, id: string) { return this.taskCancellationRequests.has(`${userId}:${id}`); }
   async setTaskCancellationRequested(userId: number, id: string, requested: boolean) {
@@ -5102,6 +5490,7 @@ class MemoryBackend implements Backend {
     tasks[index] = next; this.tasks.set(userId, tasks); return next;
   }
   async getMissions(userId: number) { return this.missions.get(userId) ?? []; }
+  async getMissionsPage(userId: number, limit: number) { return [...(this.missions.get(userId) ?? [])].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, Math.max(1, Math.min(200, Math.floor(limit)))); }
   async getMission(userId: number, id: string) { return (this.missions.get(userId) ?? []).find((mission) => mission.id === id); }
   async saveMissions(userId: number, missions: MissionRecord[]) { this.missions.set(userId, missions); }
   async createMissionIfAbsent(userId: number, mission: MissionRecord) {
@@ -5454,6 +5843,7 @@ export async function initStore(options: { memoryOnly?: boolean; suppressStorage
   if (!options.memoryOnly && config.durableRecallTranscriptArchiveEnabled) await durableState!.assertRecallTranscriptArchiveSchema();
   if (!options.memoryOnly && config.durableStateMissionsEnabled) await durableState!.assertMissionSchema();
   if (!options.memoryOnly && config.durableStorageMetricsEnabled) await durableState!.assertStorageMetricsSchema();
+  if (!options.memoryOnly && config.durableStorageMetricsEnabled) await durableState!.assertRedisRouteMetricsSchema();
   if (!options.memoryOnly && config.durableStorageMetricsEnabled) await durableState!.assertQueryMetricsSchema();
   if (config.redisUrl && !options.memoryOnly) {
     try {
@@ -5479,6 +5869,7 @@ export async function initStore(options: { memoryOnly?: boolean; suppressStorage
           {
             readTotals: (sinceMs, windowDays) => durableState.storageMetricTotals(sinceMs, windowDays),
             prune: (beforeMs, limit) => durableState.pruneStorageMetrics(beforeMs, limit),
+            writeRouteBatch: (instanceId, batchId, observedAt, samples) => durableState.recordRedisRouteMetricBatch(instanceId, batchId, observedAt, samples),
             onError: (error, phase) => logger.warn({ phase, errorType: error instanceof Error ? error.name : "StorageMetricsError" }, "Durable storage metrics persistence failed"),
           })
         : undefined;
@@ -5969,8 +6360,8 @@ function normalizeE2BBrowserStream(value: unknown): E2BBrowserRecord["stream"] |
   return { startedAt: Number(item.startedAt), expiresAt: Number(item.expiresAt), port: Number(item.port), ...(provider ? { provider } : {}), ...(mode ? { mode } : {}), ...(viewerId ? { viewerId } : {}), ...(ticketCiphertext ? { ticketCiphertext } : {}) };
 }
 
-export async function getSession(uid: number, includeSdkTables = false): Promise<UserSession> {
-  const raw = await backend.getSession(uid, includeSdkTables) as UserSession & { faceTimeCalls?: Array<Record<string, unknown>> };
+export async function getSession(uid: number, includeSdkTables = false, options?: SessionReadOptions): Promise<UserSession> {
+  const raw = await backend.getSession(uid, includeSdkTables, options) as UserSession & { faceTimeCalls?: Array<Record<string, unknown>> };
   // Read and migrate the old persisted field once, without carrying the obsolete
   // key or provider secrets/bridge session identifiers into the current model.
   const { faceTimeCalls: legacyCalls, ...s } = raw;
@@ -6142,6 +6533,15 @@ export async function getSession(uid: number, includeSdkTables = false): Promise
   })) : [];
   s.approvalEscalations = Array.isArray(s.approvalEscalations) ? s.approvalEscalations.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.approvalId === "string" && ["pending", "escalated", "acknowledged", "closed", "failed"].includes(item.status)).slice(-500) : [];
   return { ...fresh(), ...s, providerProofs: uid === 0 && Array.isArray(s.providerProofs) ? s.providerProofs.filter((item): item is ProviderProof => Boolean(item) && typeof item.surface === "string" && typeof item.correlationId === "string" && Number.isFinite(item.verifiedAt) && Number.isFinite(item.expiresAt)).slice(-100) : [], voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], autonomyRuns: Array.isArray(s.autonomyRuns) ? s.autonomyRuns.flatMap((item) => { const normalized = normalizeAutonomyRun(item, uid); return normalized ? [normalized] : []; }).slice(-200) : [], jobOccurrences: Array.isArray(s.jobOccurrences) ? s.jobOccurrences.flatMap((item) => { const normalized = normalizeJobOccurrence(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], externalActions: Array.isArray(s.externalActions) ? s.externalActions.flatMap((item) => { const normalized = normalizeExternalAction(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], reliabilitySamples: Array.isArray(s.reliabilitySamples) ? s.reliabilitySamples.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.operation === "string" && Number.isFinite(item.at) && ["success", "failure", "uncertain", "timeout"].includes(item.status)).slice(-2000) : [], outcomeVerifications: Array.isArray(s.outcomeVerifications) ? s.outcomeVerifications.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.status === "string").slice(-200) : [], compensations: Array.isArray(s.compensations) ? s.compensations.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.originalActionId === "string" && typeof item.objective === "string").slice(-500) : [], reliabilityTrace: Array.isArray(s.reliabilityTrace) ? s.reliabilityTrace.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.kind === "string" && typeof item.type === "string" && typeof item.summary === "string" && Number.isFinite(item.at)).slice(-5000) : [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, mcpConnections: Array.isArray(s.mcpConnections) ? s.mcpConnections.flatMap((item) => { const normalized = normalizeMcpConnectionRecord(item); return normalized ? [normalized] : []; }).slice(0, 50) : [], browserPlaybooks, browserAudit, browserHandoffs, meetingRooms: uid === 0 && Array.isArray(s.meetingRooms) ? s.meetingRooms.map(normalizeMeetingRoom).filter((item): item is MeetingRoomRecord => Boolean(item)).slice(0, 100) : [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, ...(typeof meeting.roomId === "string" && /^room_[A-Za-z0-9_-]{1,96}$/.test(meeting.roomId) ? { roomId: meeting.roomId } : { roomId: undefined }), ...(typeof meeting.organizationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(meeting.organizationId) ? { organizationId: meeting.organizationId } : { organizationId: undefined }), ...(typeof meeting.teamId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(meeting.teamId) ? { teamId: meeting.teamId } : { teamId: undefined }), ...(typeof meeting.projectId === "string" && /^proj_[A-Za-z0-9_-]{1,120}$/.test(meeting.projectId) ? { projectId: meeting.projectId } : { projectId: undefined }), ...(Array.isArray(meeting.roomAllowedComposioTools) ? { roomAllowedComposioTools: meeting.roomAllowedComposioTools.filter((tool): tool is string => typeof tool === "string").slice(0, 100) } : {}), ...(Array.isArray(meeting.roomAllowedNativeTools) ? { roomAllowedNativeTools: meeting.roomAllowedNativeTools.filter((tool): tool is string => typeof tool === "string").slice(0, 50) } : {}), visibility: meeting.visibility === "team" || meeting.visibility === "organization" ? meeting.visibility : undefined, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, visualContextEnabled: meeting.visualContextEnabled === true, transcriptRetentionDays: [1, 7, 30].includes(meeting.transcriptRetentionDays as number) ? meeting.transcriptRetentionDays as 1 | 7 | 30 : undefined, transcriptExpiresAt: Number.isSafeInteger(meeting.transcriptExpiresAt) && Number(meeting.transcriptExpiresAt) > 0 ? Number(meeting.transcriptExpiresAt) : undefined, transcriptStatus: ["processing", "ready", "failed"].includes(meeting.transcriptStatus as string) ? meeting.transcriptStatus as "processing" | "ready" | "failed" : undefined, transcriptErrorCode: typeof meeting.transcriptErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? meeting.transcriptErrorCode : undefined, mission: normalizeMeetingMission(meeting.mission), calendarAttendees: normalizeCalendarAttendees(meeting.calendarAttendees), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 180) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], attendees: normalizeCalendarAttendees(item.attendees), sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
+}
+
+/** Read only the compact profile projection used by dashboard/identity reads. */
+export async function getSessionProfile(uid: number): Promise<SessionProfileProjection> {
+  return backend.getSessionProfile(uid);
+}
+
+export async function getSessionWebhooks(uid: number): Promise<UserSession["sdkWebhooks"]> {
+  return backend.getSessionWebhooks(uid);
 }
 
 type DurableSdkTableSnapshot = { threads: Record<string, string>; audit: Record<string, string>; idempotency: Record<string, string> };
@@ -8293,6 +8693,33 @@ export async function listTasks(userId: number, statuses?: TaskStatus[]): Promis
   return tasks.filter((task) => !statuses?.length || statuses.includes(task.status)).sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
+/** Read only the bounded task delta needed by dashboard/CLI cursors. */
+export async function listTasksSince(userId: number, afterMs: number, limit = 50, statuses?: TaskStatus[]): Promise<TaskRecord[]> {
+  const safeAfter = Number.isFinite(afterMs) ? Math.max(0, Math.floor(afterMs)) : 0;
+  const tasks = (await backend.getTasksSince(userId, safeAfter, Math.max(1, Math.min(500, Math.floor(limit))))).map(normalizeTask);
+  return tasks.filter((task) => !statuses?.length || statuses.includes(task.status)).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/** Read only non-terminal task payloads for recovery and autonomy workers. */
+export async function listOpenTasks(userId: number, limit = 2000): Promise<TaskRecord[]> {
+  return (await backend.getOpenTasks(userId, Math.max(1, Math.min(2000, Math.floor(limit))))).map(normalizeTask).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/** Read only compact queue metadata; never hydrates checkpoint/event payloads. */
+export async function listOpenTaskSummaries(userId: number, limit = 2000): Promise<TaskSummary[]> {
+  return (await backend.getOpenTaskSummaries(userId, Math.max(1, Math.min(2000, Math.floor(limit))))).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/** Read only tasks whose durable timer is due; used by recovery workers. */
+export async function listDueTasks(userId: number, nowMs = Date.now(), limit = 100): Promise<TaskRecord[]> {
+  return (await backend.getDueTasks(userId, nowMs, Math.max(1, Math.min(500, Math.floor(limit))))).map(normalizeTask).sort((a, b) => (a.runAt ?? 0) - (b.runAt ?? 0));
+}
+
+/** Read only the task payloads attached to one mission. */
+export async function listTasksForMission(userId: number, missionId: string, limit = 2000): Promise<TaskRecord[]> {
+  return (await backend.getTasksForMission(userId, missionId, Math.max(1, Math.min(2000, Math.floor(limit))))).map(normalizeTask).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
 export async function getTask(userId: number, id: string): Promise<TaskRecord | undefined> {
   const task = await backend.getTask(userId, id);
   return task ? normalizeTask(task) : undefined;
@@ -9003,6 +9430,12 @@ export async function listMissions(userId: number, statuses?: MissionStatus[]): 
     .sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
+export async function listMissionsPage(userId: number, limit = 100, statuses?: MissionStatus[]): Promise<MissionRecord[]> {
+  return (await backend.getMissionsPage(userId, Math.max(1, Math.min(200, limit)))).map(normalizeMission)
+    .filter((mission) => !statuses?.length || statuses.includes(mission.status))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
 export async function getMission(userId: number, id: string): Promise<MissionRecord | undefined> {
   const mission = await backend.getMission(userId, id);
   return mission ? normalizeMission(mission) : undefined;
@@ -9032,8 +9465,8 @@ export async function listMissionEvents(userId: number, id: string, limit = 1000
 
 /** Cancel every durable slice belonging to a mission, including parallel branches. */
 export async function cancelMissionTasks(userId: number, missionId: string): Promise<void> {
-  const tasks = await listTasks(userId);
-  await Promise.all(tasks.filter((task) => task.missionId === missionId && !["completed", "cancelled"].includes(task.status)).map((task) => cancelTask(userId, task.id)));
+  const tasks = await listTasksForMission(userId, missionId);
+  await Promise.all(tasks.filter((task) => !["completed", "cancelled"].includes(task.status)).map((task) => cancelTask(userId, task.id)));
 }
 
 /** Bounded, human-readable proof record for dashboards and external agents. */
@@ -9917,6 +10350,10 @@ export async function listReminders(uid: number): Promise<ReminderRecord[]> {
   return (await backend.getReminders(uid)).filter((r) => r.status === "scheduled" || r.status === "waiting" || r.status === "paused").sort((a, b) => a.runAt - b.runAt);
 }
 
+export async function listReminderSummaries(uid: number): Promise<ReminderSummary[]> {
+  return (await backend.getReminderSummaries(uid)).filter((r) => r.status === "scheduled" || r.status === "waiting" || r.status === "paused").sort((a, b) => a.runAt - b.runAt);
+}
+
 /** Owner-scoped reminder history for diagnostics; normal user listings stay active-only. */
 export async function listAllReminders(uid: number): Promise<ReminderRecord[]> {
   return (await backend.getReminders(uid)).slice(-100).sort((a, b) => b.runAt - a.runAt);
@@ -9946,6 +10383,10 @@ export async function addJob(uid: number, job: JobRecord): Promise<void> {
 
 export async function listJobs(uid: number): Promise<JobRecord[]> {
   return (await backend.getJobs(uid)).filter((j) => j.status === "active" || j.status === "paused");
+}
+
+export async function listJobSummaries(uid: number): Promise<JobSummary[]> {
+  return (await backend.getJobSummaries(uid)).filter((j) => j.status === "active" || j.status === "paused");
 }
 
 export async function listAllJobs(uid: number): Promise<JobRecord[]> {

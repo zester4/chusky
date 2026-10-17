@@ -23,7 +23,7 @@ import {
   upsertMeetingContact, listMeetingContacts, deleteMeetingContact, getMeetingContact, updateMeetingContact,
   readScratchpad, updateJob, updateReminder, transitionReminderStatus, writeScratchpad,
   forgetMemory, searchMemories, updateMemory, upsertMemoryAndContext,
-  blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, getApproval, getAgentRun, setApprovalStatus, updateTask, getHandoffRecord,
+  blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, listTasksForMission, retryTask, scheduleTask, getApproval, getAgentRun, setApprovalStatus, updateTask, getHandoffRecord,
   blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, createMission, finalizeMissionIfReady, getMission, listMissions, missionProof, pauseMission, startMission, updateMission, updateMissionControl, waitMission, recordTrustedMissionEvidence, verifyMission, repairMission, missionBudgetPreflight, missingMissionEvidenceRequirements, MissionReplanConflictError,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
   countLeadCampaignCandidates, createLeadCampaign, finalizeLeadCampaign, getLeadCampaign, getLeadCampaignCandidate, listLeadCampaigns, listLeadCampaignCandidates, reserveLeadCampaignTregSpend, settleLeadCampaignTregSpend, updateLeadCampaign, updateLeadCampaignCandidate, upsertLeadCampaignCandidates, withLeadCampaignTregLease,
@@ -2645,7 +2645,7 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
       const mission = await getMission(userId, text(args.id, 160));
       if (!mission) throw new Error("Mission not found or not owned by you");
       const [tasks, compensations] = await Promise.all([
-        listTasks(userId),
+        listTasksForMission(userId, mission.id),
         listCompensations(userId),
       ]);
       return diagnoseMission({ mission, tasks, compensations });

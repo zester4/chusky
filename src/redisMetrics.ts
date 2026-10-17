@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 export const REDIS_METRIC_FAMILIES = [
   "session",
   "tasks",
@@ -28,6 +30,28 @@ export interface RedisCommandFamilyMetrics {
   responseBytes: number;
   durationMs: number;
   maxValueBytes: number;
+}
+
+export interface RedisRouteMetricSample extends RedisCommandFamilyMetrics {
+  route: string;
+  family: RedisMetricFamily;
+}
+
+interface RedisMetricContext {
+  route: string;
+  commands: number;
+  responseBytes: number;
+  maxCommands?: number;
+  maxResponseBytes?: number;
+  exceeded: boolean;
+  onExceeded?: (context: { route: string; commands: number; responseBytes: number }) => void;
+}
+const redisMetricRoute = new AsyncLocalStorage<RedisMetricContext>();
+
+/** Attribute Redis traffic to a bounded API/worker surface without retaining owner data. */
+export function withRedisMetricRoute<T>(route: string, work: () => Promise<T>, budget: Pick<RedisMetricContext, "maxCommands" | "maxResponseBytes" | "onExceeded"> = {}): Promise<T> {
+  const bounded = route.replace(/[^A-Za-z0-9_ ./:-]/g, "").slice(0, 120) || "unknown";
+  return redisMetricRoute.run({ route: bounded, commands: 0, responseBytes: 0, exceeded: false, ...budget }, work);
 }
 
 export type RedisCommandMetricsSnapshot = Record<RedisMetricFamily, RedisCommandFamilyMetrics>;
@@ -172,6 +196,7 @@ export class RedisCommandMetrics {
   private readonly values: RedisCommandMetricsSnapshot = Object.fromEntries(
     REDIS_METRIC_FAMILIES.map((family) => [family, EMPTY_METRICS()]),
   ) as RedisCommandMetricsSnapshot;
+  private readonly routeValues = new Map<string, RedisCommandFamilyMetrics>();
 
   record(command: RedisMetricCommand, outcome: { result?: unknown; error?: boolean; durationMs?: number }): void {
     const family = redisOperationFamily(command);
@@ -184,6 +209,31 @@ export class RedisCommandMetrics {
     current.responseBytes += replyBytes;
     current.durationMs += Math.max(0, Math.floor(outcome.durationMs ?? 0));
     current.maxValueBytes = Math.max(current.maxValueBytes, valueBytes(command, outcome.result));
+    const context = redisMetricRoute.getStore();
+    if (context) {
+      context.commands += 1;
+      context.responseBytes += replyBytes;
+      if (!context.exceeded && ((context.maxCommands !== undefined && context.commands > context.maxCommands) || (context.maxResponseBytes !== undefined && context.responseBytes > context.maxResponseBytes))) {
+        context.exceeded = true;
+        try { context.onExceeded?.({ route: context.route, commands: context.commands, responseBytes: context.responseBytes }); } catch { /* Budget telemetry must never alter the request. */ }
+      }
+      const routeKey = `${context.route}\u0000${family}`;
+      let routed = this.routeValues.get(routeKey);
+      if (!routed) {
+        // Route cardinality is intentionally bounded. Overflow is grouped into
+        // one label so a user-controlled path can never grow this map without
+        // limit.
+        if (this.routeValues.size >= 400) return;
+        routed = EMPTY_METRICS();
+        this.routeValues.set(routeKey, routed);
+      }
+      routed.commands += 1;
+      if (outcome.error) routed.errors += 1;
+      routed.requestBytes += requestBytes;
+      routed.responseBytes += replyBytes;
+      routed.durationMs += Math.max(0, Math.floor(outcome.durationMs ?? 0));
+      routed.maxValueBytes = Math.max(routed.maxValueBytes, valueBytes(command, outcome.result));
+    }
   }
 
   snapshot(): RedisCommandMetricsSnapshot {
@@ -194,6 +244,15 @@ export class RedisCommandMetrics {
     const snapshot = this.snapshot();
     for (const family of REDIS_METRIC_FAMILIES) this.values[family] = EMPTY_METRICS();
     return snapshot;
+  }
+
+  takeRouteSnapshot(): RedisRouteMetricSample[] {
+    const samples = [...this.routeValues.entries()].map(([key, value]) => {
+      const separator = key.lastIndexOf("\u0000");
+      return { route: key.slice(0, separator), family: key.slice(separator + 1) as RedisMetricFamily, ...value };
+    });
+    this.routeValues.clear();
+    return samples;
   }
 
   flatten(snapshot: RedisCommandMetricsSnapshot = this.values): Record<string, number> {

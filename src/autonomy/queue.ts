@@ -1,16 +1,16 @@
 import {
   listAttentionRecords,
   listCalendarMeetingPreparations,
-  listJobs,
-  listMissions,
-  listReminders,
-  listTasks,
+  listJobSummaries,
+  listMissionsPage,
+  listReminderSummaries,
+  listOpenTaskSummaries,
   type AutonomyProfileRecord,
   type AutonomyWatchRecord,
   type MissionRecord,
-  type ReminderRecord,
-  type JobRecord,
-  type TaskRecord,
+  type ReminderSummary,
+  type JobSummary,
+  type TaskSummary,
   type OpenLoopRecord,
 } from "../store.js";
 
@@ -58,7 +58,7 @@ function priority(value: unknown, fallback = 0): number {
   return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : fallback;
 }
 
-function taskItem(task: TaskRecord): AutonomyQueueItem {
+function taskItem(task: TaskSummary): AutonomyQueueItem {
   return { id: task.id, kind: "task", title: task.title, status: task.status, source: "durable_task", priority: task.status === "blocked" ? 95 : 60, nextAction: task.nextAction ?? task.checkpoint, ...(task.status === "blocked" && task.error ? { blockedReason: task.error } : {}), ...(task.runAt ? { nextCheckAt: task.runAt } : {}), updatedAt: task.updatedAt };
 }
 
@@ -71,11 +71,11 @@ function openLoopItem(loop: OpenLoopRecord): AutonomyQueueItem {
   return { id: loop.id, kind: "open_loop", title: loop.title, status: loop.status, source: loop.source ?? "attention_state", priority: priority(loop.priority, 50), nextAction: loop.nextAction, ...(loop.waitingFor ? { blockedReason: loop.waitingFor } : {}), ...(loop.dueAt ? { nextCheckAt: loop.dueAt } : {}), updatedAt: loop.updatedAt };
 }
 
-function reminderItem(reminder: ReminderRecord): AutonomyQueueItem {
+function reminderItem(reminder: ReminderSummary): AutonomyQueueItem {
   return { id: reminder.id, kind: "reminder", title: reminder.text, status: reminder.status, source: "reminder", priority: 55, nextAction: reminder.nextAction, nextCheckAt: reminder.runAt, updatedAt: reminder.createdAt };
 }
 
-function jobItem(job: JobRecord): AutonomyQueueItem {
+function jobItem(job: JobSummary): AutonomyQueueItem {
   return { id: job.id, kind: "job", title: job.text, status: job.status, source: job.kind === "attention_pulse" ? "attention_pulse" : "recurring_job", priority: job.kind === "attention_pulse" ? 45 : 50, nextAction: job.nextAction, updatedAt: job.createdAt };
 }
 
@@ -89,11 +89,11 @@ function isActiveStatus(status: string): boolean {
  */
 export async function getAutonomyQueue(userId: number, mode: "personal" | "business" = "personal", limit = 100): Promise<AutonomyQueueItem[]> {
   const [tasks, missions, loops, reminders, jobs, watches, meetings] = await Promise.all([
-    listTasks(userId),
-    listMissions(userId),
+    listOpenTaskSummaries(userId, 500),
+    listMissionsPage(userId, 200),
     listAttentionRecords(userId, "open_loop", { limit: 200 }) as Promise<OpenLoopRecord[]>,
-    listReminders(userId),
-    listJobs(userId),
+    listReminderSummaries(userId),
+    listJobSummaries(userId),
     listAttentionRecords(userId, "autonomy_watch", { limit: 200 }) as Promise<AutonomyWatchRecord[]>,
     listCalendarMeetingPreparations(userId, 30),
   ]);

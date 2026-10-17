@@ -4,7 +4,7 @@ import {
   createTask,
   getTask,
   listTaskOwnerIds,
-  listTasks,
+  listOpenTasks,
   mergeLinkedWebSession,
   requeueExpiredTask,
   retryTask,
@@ -132,7 +132,7 @@ export async function recoverWebSessionReconciliationTasks(
   const now = options.now ?? Date.now();
   const report: WebSessionReconciliationRecoveryReport = { owners: ownerIds.length, checked: 0, republished: 0, skipped: 0, failures: [] };
   for (const userId of ownerIds) {
-    const tasks = await listTasks(userId);
+    const tasks = await listOpenTasks(userId);
     for (const task of tasks) {
       if (task.taskKind !== "web_session_reconciliation") continue;
       report.checked += 1;

@@ -1,6 +1,7 @@
 import { claimTask, getTask, renewTaskLease, settleTaskRun, type TaskFailureClass, type TaskRecord } from "./store.js";
 import { logger } from "./logger.js";
 import { decideRecovery } from "./autonomy/decisionLoop.js";
+import { withRedisMetricRoute } from "./redisMetrics.js";
 
 export interface TaskRunPayload { userId: number; taskId: string; }
 
@@ -37,7 +38,7 @@ export interface TaskRunnerDependencies {
  * Claims one task exactly once for its lease. The result is persisted through a
  * token-checked settlement, so a stale worker can never overwrite a recovered run.
  */
-export async function executeDurableTask(payload: TaskRunPayload, deps: TaskRunnerDependencies): Promise<{ claimed: boolean; task?: TaskRecord }> {
+async function executeDurableTaskInternal(payload: TaskRunPayload, deps: TaskRunnerDependencies): Promise<{ claimed: boolean; task?: TaskRecord }> {
   const leaseMs = Math.max(10_000, Math.min(10 * 60_000, deps.leaseMs ?? DURABLE_TASK_LEASE_MS));
   const task = await claimTask(payload.userId, payload.taskId, deps.workerId, leaseMs);
   if (!task?.lease) {
@@ -158,6 +159,11 @@ export async function executeDurableTask(payload: TaskRunPayload, deps: TaskRunn
   } finally {
     clearInterval(renewal);
   }
+}
+
+/** Attribute durable worker Redis traffic without putting owner or task IDs in metrics. */
+export function executeDurableTask(payload: TaskRunPayload, deps: TaskRunnerDependencies): Promise<{ claimed: boolean; task?: TaskRecord }> {
+  return withRedisMetricRoute("worker:task", () => executeDurableTaskInternal(payload, deps));
 }
 
 /** Read-only operator helper for reconciler/administrative callers. */

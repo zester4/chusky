@@ -15,7 +15,7 @@ import {
   getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
   getChannelConversation, appendChannelConversationMessages, setChannelConversationModel, clearChannelConversationHistory,
   setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies, listVideoJobs, registerImageAsset,
-  setLiveVoicePreference, claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, cancelMissionTasks, retryTask, listApprovals, listJobs, listReminders, listTasks, listMissions, getMission, updateMission, updateTask, pauseMission, resumeMission, cancelMission,
+  setLiveVoicePreference, claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, cancelMissionTasks, retryTask, listApprovals, listJobs, listReminders, listOpenTasks, listMissions, getMission, updateMission, updateTask, pauseMission, resumeMission, cancelMission,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile, listRecallMeetings, listCalendarMeetingPreparations, listMeetingContacts, deleteMeetingContact,
   searchMemories, readScratchpad, listBrowserPlaybooks, listBrowserAudit, listBrowserHandoffs,
 } from "./store.js";
@@ -470,7 +470,7 @@ async function showWorkspace(ctx: Context, messageId?: number): Promise<void> {
     listTriggers(ctx.from!.id).catch((error) => { logger.warn({ err: error, userId: ctx.from!.id }, "Could not load workspace trigger summary"); return []; }),
     listReminders(ctx.from!.id),
     listJobs(ctx.from!.id),
-    listTasks(ctx.from!.id),
+    listOpenTasks(ctx.from!.id, 500),
     listMissions(ctx.from!.id),
     listRecallMeetings(ctx.from!.id, 20),
     listCalendarMeetingPreparations(ctx.from!.id, 20),
@@ -2284,7 +2284,7 @@ export function registerHandlers(bot: Bot): void {
         return;
       }
       if (action === "tasks") {
-        const tasks = (await listTasks(ctx.from!.id)).filter((task) => !["completed", "cancelled"].includes(task.status));
+        const tasks = (await listOpenTasks(ctx.from!.id, 2000)).filter((task) => !["completed", "cancelled"].includes(task.status));
         const card: TelegramCard = {
           title: "📋 Active tasks",
           body: tasks.length
@@ -2557,7 +2557,7 @@ export function registerHandlers(bot: Bot): void {
           return;
         }
         if (command === "tasks") {
-          const tasks = (await listTasks(uid)).filter((task) => !["completed", "cancelled"].includes(task.status));
+          const tasks = (await listOpenTasks(uid, 2000)).filter((task) => !["completed", "cancelled"].includes(task.status));
           await replyHtml(ctx, tasks.length ? `<b>Active tasks</b>\n\n${tasks.map((task) => `• <code>${escapeTelegramHtml(task.id)}</code> · <b>${escapeTelegramHtml(task.status)}</b>\n  ${escapeTelegramHtml(task.title)}\n  ${escapeTelegramHtml(task.objective)}`).join("\n")}` : "No active tasks.");
           return;
         }

@@ -7,8 +7,8 @@ import {
   getMissionRecoveryMissionCursor,
   getMissionRecoveryOwnerCursor,
   listMissionOwnerIds,
-  listMissions,
-  listTasks,
+  listMissionsPage,
+  listTasksForMission,
   quarantineExpiredTask,
   releaseMissionRecoveryLease,
   renewMissionRecoveryLease,
@@ -44,7 +44,7 @@ export interface MissionRecoveryOptions {
   recoveryLeaseToken?: string;
 }
 
-function expiredLeaseRecoveryText(task: Awaited<ReturnType<typeof listTasks>>[number]): { reason: string; nextAction: string } {
+function expiredLeaseRecoveryText(task: Awaited<ReturnType<typeof listTasksForMission>>[number]): { reason: string; nextAction: string } {
   const allowed = task.missionAllowedTools ?? [];
   const externalTools = allowed.filter((tool) => !tool.startsWith("CHUCK_"));
   if (allowed.length > 0 && externalTools.length === 0) {
@@ -72,8 +72,7 @@ export async function recoverMissionsForOwner(
 ): Promise<MissionRecoveryReport> {
   const report: MissionRecoveryReport = { ownersScanned: 1, missionsScanned: 0, repaired: 0, republished: 0, timerWakes: 0, quarantined: 0, blocked: 0, errors: 0 };
   const now = options.now ?? Date.now();
-  const activeMissions = (await listMissions(userId))
-    .filter((mission) => ["running", "waiting", "failed"].includes(mission.status))
+  const activeMissions = (await listMissionsPage(userId, 200, ["running", "waiting", "failed"]))
     .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
   const maxMissions = Math.max(1, Math.floor(options.maxMissionsPerOwner ?? 100));
   const missionCursor = await getMissionRecoveryMissionCursor(userId);
@@ -85,13 +84,9 @@ export async function recoverMissionsForOwner(
   // Read the owner's task collection once per sweep. Loading it for every
   // mission makes recovery O(missions × tasks), which grows sharply for active
   // accounts with many long-running objectives.
-  const tasksByMission = new Map<string, Awaited<ReturnType<typeof listTasks>>>();
-  for (const task of await listTasks(userId)) {
-    if (!task.missionId) continue;
-    const tasks = tasksByMission.get(task.missionId) ?? [];
-    tasks.push(task);
-    tasksByMission.set(task.missionId, tasks);
-  }
+  const tasksByMission = new Map<string, Awaited<ReturnType<typeof listTasksForMission>>>();
+  const missionTasks = await Promise.all(missions.map((candidate) => listTasksForMission(userId, candidate.id)));
+  missions.forEach((candidate, index) => tasksByMission.set(candidate.id, missionTasks[index] ?? []));
   report.missionsScanned = missions.length;
   const reconciledMissionIds = new Set<string>();
   const versionChangedMissionIds = new Set<string>();
@@ -234,9 +229,9 @@ export async function recoverMissionsForOwner(
     }
   }
   if (reconciledMissionIds.size) {
-    const finalTasks = await listTasks(userId);
-    for (const missionId of reconciledMissionIds) {
-      const published = finalTasks.some((task) => task.missionId === missionId && task.status === "queued" && typeof task.workflowRunId === "string" && !task.workflowRunId.startsWith("pending:"));
+    const finalTasks = await Promise.all([...reconciledMissionIds].map((missionId) => listTasksForMission(userId, missionId)));
+    for (const [index, missionId] of [...reconciledMissionIds].entries()) {
+      const published = (finalTasks[index] ?? []).some((task) => task.status === "queued" && typeof task.workflowRunId === "string" && !task.workflowRunId.startsWith("pending:"));
       if (published) report.republished++;
       if (published || versionChangedMissionIds.has(missionId)) report.repaired++;
     }

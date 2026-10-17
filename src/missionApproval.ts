@@ -4,7 +4,8 @@ import {
   createApproval,
   getMission,
   listApprovals,
-  listTasks,
+  listMissionsPage,
+  listTasksForMission,
   missionBudgetPreflight,
   resumeMissionFromApproval,
   retryTask,
@@ -110,13 +111,15 @@ export async function requestMissionDurationApproval(
 
 /** Find the precise durable slice named by a mission's approval wait. */
 export async function findMissionApprovalTarget(userId: number, approvalId: string): Promise<MissionApprovalTarget | undefined> {
-  for (const task of await listTasks(userId)) {
-    if (!task.missionId) continue;
-    const mission = await getMission(userId, task.missionId);
-    const waiting = mission?.waiting;
-    if (mission?.status !== "waiting" || waiting?.kind !== "approval" || waiting.key !== approvalId) continue;
-    if (waiting.stepId && task.missionStepId && waiting.stepId !== task.missionStepId) continue;
-    return { mission, task };
+  const waitingMissions = (await listMissionsPage(userId, 200, ["waiting"])).filter((mission) =>
+    mission.waiting?.kind === "approval"
+    && mission.waiting.key === approvalId);
+  for (const mission of waitingMissions) {
+    for (const task of await listTasksForMission(userId, mission.id)) {
+      const waiting = mission.waiting;
+      if (waiting?.stepId && task.missionStepId && waiting.stepId !== task.missionStepId) continue;
+      return { mission, task };
+    }
   }
   return undefined;
 }

@@ -10,6 +10,7 @@ import { needsTurnOpening, type TurnOpening } from "./turnOpening.js";
 import { assertAgentExecutionEnabled } from "./builderControl.js";
 import { canonicalSdkFingerprint, stableSdkUserId } from "./sdkIdentity.js";
 import { withNeonQueryMetricRoute, type DurableObjectMetadata } from "./neonDurableState.js";
+import { withRedisMetricRoute } from "./redisMetrics.js";
 import { promoteSdkFileUpload } from "./sdkFilePromotion.js";
 import { getAuth } from "./auth.js";
 import { ApprovalRequiredError, createTrigger, createUserOutcomeReadAdapter, deleteTrigger, disconnectConnectedAccount, executeExactComposioAction, fetchModels, getConnectionUrl, getReconnectUrl, getToolkitStatesPage, listConnectedAccounts, listMeetingComposioCapabilities, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, transcriptionFormatForMimeType, updateTriggerInstructions, transcribeAudio, queueVideoWorkflow, type AgentToolActivity } from "./agent.js";
@@ -19,11 +20,15 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, appendSdkAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createCliDevice, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, deleteSdkThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkIdempotency, getSdkRun, getSdkThread, listSdkAuditEvents, listSdkRuns, listSdkThreads, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, saveSdkIdempotency, saveSdkRun, saveSdkThread, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type TriggerEventRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, appendSdkAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createCliDevice, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, deleteSdkThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkIdempotency, getSdkRun, getSdkThread, listSdkAuditEvents, listSdkRuns, listSdkThreads, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listTasksSince, listOpenTasks, listTasksForMission, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, saveSdkIdempotency, saveSdkRun, saveSdkThread, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type TriggerEventRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
 import { getSdkRunUsage } from "./store.js";
+import { getSessionProfile, getSessionWebhooks } from "./store.js";
+import { listOpenTaskSummaries } from "./store.js";
+import { listMissionsPage } from "./store.js";
+import { listReminderSummaries, listJobSummaries } from "./store.js";
 import { listJobOccurrences } from "./store.js";
 import { appendSdkRunHistory, appendSdkRunHistoryToSession, mutateSession } from "./store.js";
 import { updateTriggerEvent } from "./store.js";
@@ -46,7 +51,7 @@ import type { VoiceCallProfileInput } from "./calls/voiceProfile.js";
 import { normalizePhoneCallOutcome } from "./calls/outcome.js";
 import { isBlandVoiceConfigured } from "./calls/bland.js";
 import { isTwilioVoiceConfigured } from "./calls/twilio.js";
-import { cancelJob, cancelReminder, nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow, scheduleJob, setReminder, syncAttentionPulseProactiveState, syncDefaultProactiveWatchesForConnectedAccounts } from "./nativeTools.js";
+import { cancelJob, cancelReminder, nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow, scheduleJob, setReminder, syncAttentionPulseProactiveState } from "./nativeTools.js";
 import { confirmRecallMeetingParticipant } from "./meetings/service.js";
 import { defaultMediaInstruction } from "./mediaInput.js";
 import { fetchPublicWebsite, normalizePublicWebsiteUrl } from "./onboardingWebsite.js";
@@ -475,6 +480,7 @@ function sdkUser(c: any): SdkOwner | undefined { return c.get("sdkOwner") as Sdk
 // sweep can republish it after a process crash.
 const webSessionReconciliationInFlight = new Map<string, Promise<boolean>>();
 const webSessionReconciliationScheduled = new Set<string>();
+const connectedAppInventorySyncAt = new Map<number, number>();
 
 function scheduleWebSessionReconciliation(sourceUserId: number, telegramUserId?: number): Promise<boolean> | undefined {
   const key = telegramUserId ? `linked:${sourceUserId}:${telegramUserId}` : `web:${sourceUserId}`;
@@ -1652,7 +1658,7 @@ export function registerSdkApi(app: Hono): void {
         return a2aJsonRpcResult(c, id, method === "GetTask" ? task : { task });
       }
       if (method === "ListTasks" || method === "tasks/list") {
-        const missions = await listMissions(owner.userId);
+        const missions = await listMissionsPage(owner.userId, 200);
         const result = page(missions, typeof record.pageToken === "string" ? record.pageToken : undefined, String(a2aPageSize(params)));
         return a2aJsonRpcResult(c, id, { tasks: result.data.map((mission) => a2aTaskView(owner, mission)), nextPageToken: result.nextCursor ?? "" });
       }
@@ -1768,7 +1774,11 @@ export function registerSdkApi(app: Hono): void {
   app.use("/v1/*", cors({ origin: (origin) => origin && config.betterAuthTrustedOrigins.includes(origin) ? origin : "", credentials: true, allowHeaders: ["Authorization", "Content-Type", "Idempotency-Key", "X-Chusky-User-Id", "X-Chusky-Provider-Proof-Signature"], allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] }));
   app.use("/v1/*", async (c, next) => {
     const route = `${c.req.method} ${routePath(c, -1) || "/v1/*"}`;
-    return withNeonQueryMetricRoute(route, () => next());
+    return withRedisMetricRoute(route, () => withNeonQueryMetricRoute(route, () => next()), {
+      maxCommands: config.redisReadBudgetCommands,
+      maxResponseBytes: config.redisReadBudgetBytes,
+      onExceeded: (budget) => logger.warn({ route: budget.route, commands: budget.commands, responseBytes: budget.responseBytes }, "Redis request read budget exceeded"),
+    });
   });
   app.use("/v1/*", async (c, next) => {
     const token = (c.req.header("Authorization") ?? "").replace(/^Bearer\s+/i, "");
@@ -1856,9 +1866,10 @@ export function registerSdkApi(app: Hono): void {
   });
 
   app.get("/v1/account/overview", async (c) => {
+    c.header("Cache-Control", "private, max-age=2, stale-while-revalidate=10");
     const owner = sdkUser(c)!;
     const webAuthUserId = (c as any).get("webAuthUserId") as string | undefined;
-    const session = await getSession(owner.userId);
+    const [profile, sessionWebhooks] = await Promise.all([getSessionProfile(owner.userId), getSessionWebhooks(owner.userId)]);
     const memoryProjection = searchMemories(owner.userId, undefined, { limit: 20 }).then((memory) => ({ memory, status: "available" as const })).catch((error) => {
       // Memory is a dashboard projection, not the source of truth for
       // approvals, candidates, jobs, or delivery state. Keep those actionable
@@ -1878,7 +1889,7 @@ export function registerSdkApi(app: Hono): void {
       listTriggerEvents(owner.userId, 50),
       listApprovals(owner.userId, 100),
       listAttentionRecords(owner.userId, "attention_candidate", { limit: 50 }),
-      listMissions(owner.userId).then((items) => items.filter((item) => ["completed", "failed", "cancelled"].includes(item.status) && Number.isSafeInteger(item.webNotificationEligibleAt)).slice(0, 50)),
+      listMissionsPage(owner.userId, 100, ["completed", "failed", "cancelled"]).then((items) => items.filter((item) => Number.isSafeInteger(item.webNotificationEligibleAt)).slice(0, 50)),
     ]);
     // Mission state is authoritative and durable. Reconcile terminal records
     // into the chat projection on account refresh so a process crash between
@@ -1903,9 +1914,9 @@ export function registerSdkApi(app: Hono): void {
     const pulseOccurrence = pulseJob ? (await listJobOccurrences(owner.userId, pulseJob.id, 1))[0] : undefined;
     return c.json({
       features: { attentionPulse: config.elenaEnabled },
-      model: session.model,
-      voiceReplies: Boolean(session.voiceReplies),
-      voicePreferences: session.voicePreferences ?? {},
+      model: profile.model,
+      voiceReplies: Boolean(profile.voiceReplies),
+      voicePreferences: profile.voicePreferences ?? {},
       approvals: visibleApprovals.filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map((item) => ({ id: item.id, toolSlug: item.toolSlug, request: item.request, status: item.status, ...(item.missionId ? { missionId: item.missionId } : {}), channelProvider: item.channelProvider, createdAt: new Date(item.createdAt).toISOString(), expiresAt: new Date(item.expiresAt).toISOString() })),
       attentionCandidates: config.elenaEnabled ? (attentionCandidates as AttentionCandidateRecord[]).filter((item) => !isTriggerAttentionCandidate(item) && item.status === "pending" && (!item.availableAt || item.availableAt <= Date.now()) && (!item.expiresAt || item.expiresAt > Date.now())).slice(0, 12).map((item) => {
         return {
@@ -1925,8 +1936,8 @@ export function registerSdkApi(app: Hono): void {
       attentionPulse: config.elenaEnabled && pulseOccurrence ? { lastOccurrence: occurrenceView(pulseOccurrence) } : undefined,
       memory: memoryProjectionResult.memory.map(memoryView),
       memoryStatus: memoryProjectionResult.status,
-      scratchpad: Object.entries(session.scratchpad).map(([key, item]) => ({ key, content: item.content, updatedAt: new Date(item.updatedAt).toISOString() })),
-      triggers: session.triggerIds,
+      scratchpad: Object.entries(profile.scratchpad).map(([key, item]) => ({ key, content: item.content, updatedAt: new Date(item.updatedAt).toISOString() })),
+      triggers: profile.triggerIds,
       triggerEvents: triggerEvents.map((event) => ({
         id: event.eventId,
         triggerId: event.triggerId,
@@ -1946,9 +1957,95 @@ export function registerSdkApi(app: Hono): void {
       missionNotifications,
       devices: devices.filter((item) => !item.revokedAt).map(({ tokenHash, ...item }) => ({ ...item, id: createHash("sha256").update(tokenHash).digest("hex").slice(0, 24), createdAt: new Date(item.createdAt).toISOString(), lastSeenAt: new Date(item.lastSeenAt).toISOString() })),
       workspace: workspace ? { sandboxId: workspace.sandboxId, name: workspace.name, lastKnownState: workspace.lastKnownState, createdAt: new Date(workspace.createdAt).toISOString(), updatedAt: new Date(workspace.updatedAt).toISOString(), ptySessions: workspace.ptySessions?.length ?? 0, lastUrl: workspace.browser?.lastUrl } : null,
-      webhooks: (session.sdkWebhooks ?? []).filter((item) => !item.disabledAt).map(({ secretCiphertext: _secret, ...item }) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
+      webhooks: (sessionWebhooks ?? []).filter((item) => !item.disabledAt).map(({ secretCiphertext: _secret, ...item }) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
       telegramLink: { linked: Boolean(webAuthUserId && await getTelegramUserIdForWebAuth(webAuthUserId)) },
       deliveries: deliveries.filter((item) => item.userId === owner.userId && !item.webhook).sort((a, b) => b.createdAt - a.createdAt).slice(0, 20).map((item) => ({ id: item.id, provider: item.provider, status: item.status, kind: item.kind, attempts: item.attempts, providerStatus: item.providerStatus, lastError: item.lastError, durationMs: item.deliveredAt ? Math.max(0, item.deliveredAt - item.createdAt) : undefined, createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString(), deliveredAt: item.deliveredAt ? new Date(item.deliveredAt).toISOString() : undefined })),
+    });
+  });
+
+  app.get("/v1/account/dashboard-overview", async (c) => {
+    c.header("Cache-Control", "private, max-age=2, stale-while-revalidate=10");
+    const owner = sdkUser(c)!;
+    const degradedSources: string[] = [];
+    const optional = async <T>(label: string, promise: Promise<T>, fallback: T): Promise<T> => {
+      try { return await promise; }
+      catch (error) {
+        degradedSources.push(label);
+        logger.warn({ errorName: error instanceof Error ? error.name : "UnknownError", userId: owner.userId, source: label }, "Dashboard overview projection unavailable");
+        return fallback;
+      }
+    };
+    const emptyActivity = { now: Date.now(), approvals: [], tasks: [], reminders: [], jobs: [], attentionCandidates: [] };
+    const emptyAutonomy = {
+      userId: owner.userId,
+      mode: "personal" as const,
+      profile: {
+        id: `dashboard_default_personal_${owner.userId}`,
+        userId: owner.userId,
+        mode: "personal" as const,
+        enabled: false,
+        defaultAuthority: "observe" as const,
+        maxChecksPerDay: 0,
+        maxAutonomousActionsPerDay: 0,
+        notifyOn: "silent" as const,
+        allowedDomains: [],
+        deniedDomains: [],
+        createdAt: 0,
+        updatedAt: 0,
+      },
+      watches: [],
+      queue: [],
+      counts: { task: 0, mission: 0, open_loop: 0, reminder: 0, job: 0, watch: 0, meeting: 0, blocked: 0, overdue: 0 },
+      generatedAt: Date.now(),
+    } satisfies Awaited<ReturnType<typeof getAutonomySnapshot>>;
+    const profile = await getSessionProfile(owner.userId);
+    const [assets, runs, openTasks, threads, health, approvals, workers, activity, autonomy, missions, channels, deliveries, connectedAccounts, mcpConnections] = await Promise.all([
+      optional("artifacts", getSession(owner.userId, false, { domains: ["assets"] }), { artifacts: [], sdkFiles: [] } as unknown as Awaited<ReturnType<typeof getSession>>),
+      optional("usage", getSdkRunUsage(owner.userId), { count: 0, active: 0 }),
+      optional("tasks", listOpenTaskSummaries(owner.userId, 2000), []),
+      optional("conversations", listSdkThreads(owner.userId).then((items) => items.filter((item) => item.metadata.archived !== true).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 5)), []),
+      Promise.resolve({ ok: isDurableStore(), status: isDurableStore() ? "operational" as const : "degraded" as const, persistence: isDurableStore() ? "redis" as const : "memory" as const }),
+      optional("approvals", listApprovals(owner.userId, 50).then((items) => visibleApprovalsForDashboard(owner.userId, items)), []),
+      optional("workers", listHandoffRecords(owner.userId).then((items) => items.slice(0, 20).map(workerView).filter((item): item is NonNullable<typeof item> => Boolean(item))), []),
+      optional("activity", Promise.all([
+        listApprovals(owner.userId, 50),
+        listTasksSince(owner.userId, 0, 50),
+        listReminderSummaries(owner.userId),
+        listJobSummaries(owner.userId),
+        listAttentionRecords(owner.userId, "attention_candidate", { limit: 50 }),
+      ]).then(async ([activityApprovals, tasks, reminders, jobs, attentionCandidates]) => ({
+        now: Date.now(),
+        approvals: (await visibleApprovalsForDashboard(owner.userId, activityApprovals)).filter((item) => item.status === "pending" && item.expiresAt > Date.now()),
+        tasks,
+        reminders: reminders.slice(0, 50),
+        jobs: jobs.slice(0, 50),
+        attentionCandidates: config.elenaEnabled ? (attentionCandidates as AttentionCandidateRecord[]).filter((item) => !isTriggerAttentionCandidate(item) && item.status === "pending").slice(0, 20).map((item) => ({ id: item.id, reason: item.reason.replace(/^\[(connection-gap|action-gap):[^\]]+\]\s*/, ""), suggestedActions: item.suggestedActions, updatedAt: item.updatedAt })) : [],
+      })), emptyActivity),
+      config.elenaEnabled ? optional("attention pulse", syncAttentionPulseProactiveState(owner.userId).then(() => getAutonomySnapshot(owner.userId, "personal")), emptyAutonomy) : Promise.resolve(emptyAutonomy),
+      optional("missions", listMissionsPage(owner.userId, 20), []),
+      optional("channels", listChannelIdentities(owner.userId).then((items) => items.filter((item) => !item.disabledAt).map((item) => ({ id: identityFingerprint(item), provider: item.provider, externalUserId: item.externalUserId, workspaceId: item.workspaceId, displayName: item.displayName, verifiedAt: new Date(item.verifiedAt).toISOString(), proactiveOptIn: item.proactiveOptIn !== false }))), []),
+      optional("deliveries", listOutbox(undefined, 20, owner.userId).then((items) => items.filter((item) => !item.webhook).sort((a, b) => b.createdAt - a.createdAt).map((item) => ({ id: item.id, provider: item.provider, status: item.status, kind: item.kind, attempts: item.attempts, providerStatus: item.providerStatus, lastError: item.lastError, durationMs: item.deliveredAt ? Math.max(0, item.deliveredAt - item.createdAt) : undefined, createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString(), deliveredAt: item.deliveredAt ? new Date(item.deliveredAt).toISOString() : undefined }))), []),
+      optional("connected apps", listConnectedAccounts(owner.userId), []),
+      optional("MCP connections", listMcpConnections(owner.userId), []),
+    ]);
+    const toolsSummary = { total: chuckTools.length, nativeTotal: chuckTools.length, composioTotal: 0 };
+    return c.json({
+      observedAt: Date.now(),
+      degradedSources,
+      health,
+      usage: { messages: profile.totalMessages, cost: profile.totalCost, files: { count: assets.sdkFiles?.length ?? 0, declaredBytes: (assets.sdkFiles ?? []).reduce((total, file) => total + file.size, 0), available: (assets.sdkFiles ?? []).filter((file) => file.status === "available").length }, runs, tasks: { count: openTasks.length } },
+      threads: { data: threads.map(threadView) },
+      account: { features: { attentionPulse: config.elenaEnabled }, approvals: approvals.filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map((item) => ({ id: item.id, toolSlug: item.toolSlug, request: item.request, status: item.status, ...(item.missionId ? { missionId: item.missionId } : {}), ...(item.channelProvider ? { channelProvider: item.channelProvider } : {}), createdAt: new Date(item.createdAt).toISOString(), expiresAt: new Date(item.expiresAt).toISOString() })), triggers: profile.triggerIds },
+      workers,
+      artifacts: (assets.artifacts ?? []).slice(-8).reverse().map(artifactView),
+      channels,
+      deliveries,
+      activity,
+      autonomy,
+      missions,
+      connectedAccounts,
+      mcpConnections,
+      tools: toolsSummary,
     });
   });
 
@@ -2300,19 +2397,15 @@ export function registerSdkApi(app: Hono): void {
     try {
       const userId = sdkUser(c)!.userId;
       const accounts = await listConnectedAccounts(userId);
-      // A connected-account refresh is the earliest reliable signal that a
-      // provider is ready for Pulse. Repair the durable starter-watch
-      // projection here instead of making the owner wait for QStash's next
-      // hourly invocation. This remains bounded to the accounts returned by
-      // the authenticated inventory call and only runs for an active Pulse.
-      const pulseActive = config.elenaEnabled && (await listJobs(userId)).some((job) => job.kind === "attention_pulse" && job.status === "active");
-      if (pulseActive) {
-        try {
-          await syncDefaultProactiveWatchesForConnectedAccounts(userId, accounts);
-        } catch (error) {
-          logger.warn({ err: error, userId }, "Connected account inventory succeeded but Attention Pulse watch sync was deferred");
-        }
+      // Inventory is a read-only dashboard projection. Watch reconciliation is
+      // still bootstrapped for a new owner, but the short owner-scoped gate
+      // prevents every dashboard refresh from writing jobs/watch records.
+      const lastSync = connectedAppInventorySyncAt.get(userId) ?? 0;
+      if (Date.now() - lastSync >= 60_000) {
+        connectedAppInventorySyncAt.set(userId, Date.now());
+        await syncAttentionPulseProactiveState(userId);
       }
+      c.header("Cache-Control", "private, max-age=10, stale-while-revalidate=30");
       return c.json({ data: accounts });
     }
     catch (error) { return apiError(c, 502, "connections_unavailable", error instanceof Error ? error.message : "Connected accounts are temporarily unavailable."); }
@@ -3525,6 +3618,10 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/approvals", async (c) => { const userId = sdkUser(c)!.userId; const data = (await visibleApprovalsForDashboard(userId, await listApprovals(userId, 100))).filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map(approvalView); return c.json({ data }); });
   app.get("/v1/tools", async (c) => {
     const query = (c.req.query("query") ?? "").trim(); const source = c.req.query("source"); const toolkit = (c.req.query("toolkit") ?? "").toLowerCase();
+    if (c.req.query("summary") === "true" && !query && !toolkit) {
+      const nativeTotal = source === "composio" ? 0 : chuckTools.length;
+      return c.json({ data: [], total: nativeTotal, nativeTotal, composioTotal: 0 });
+    }
     const native = chuckTools.map((item) => ({ slug: item.function.name, description: item.function.description, source: "native" as const, parameters: item.function.parameters as Record<string, unknown>, execution: "durable_run" as const })).filter((item) => (!query || `${item.slug} ${item.description}`.toLowerCase().includes(query.toLowerCase())) && source !== "composio");
     let composio: any[] = [];
     if (source !== "native" && query) { try { composio = (await searchTools(sdkUser(c)!.userId, query)).slice(0, 50).map((item: any) => ({ slug: String(item.slug ?? item.name ?? ""), description: String(item.description ?? item.name ?? ""), source: "composio", toolkit: item.toolkit ?? item.appName, connected: Boolean(item.connection?.isActive ?? item.connected) })).filter((item: any) => item.slug); } catch { composio = []; } }
@@ -3751,10 +3848,19 @@ export function registerSdkApi(app: Hono): void {
     }
   });
   app.delete("/v1/memory/:id", async (c) => { const removed = await forgetMemory(sdkUser(c)!.userId, decodeURIComponent(c.req.param("id"))); return removed ? c.body(null, 204) : apiError(c, 404, "memory_not_found", "Memory not found."); });
-  app.get("/v1/tasks", async (c) => c.json({ data: await listTasks(sdkUser(c)!.userId) }));
+  app.get("/v1/tasks", async (c) => {
+    const userId = sdkUser(c)!.userId;
+    const since = Number(c.req.query("since") ?? 0) || 0;
+    const limit = Math.max(1, Math.min(500, Number(c.req.query("limit") ?? 100) || 100));
+    return c.json({ data: await listTasksSince(userId, since, limit) });
+  });
   app.post("/v1/tasks/:taskId/retry", async (c) => { const userId = sdkUser(c)!.userId; const task = await retryTask(userId, c.req.param("taskId")); if (!task) return apiError(c, 409, "task_not_retryable", "Only failed, blocked, or cancelled tasks can be retried."); try { const workflowRunId = await enqueueTaskWithClaim(userId, task.id, task.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer); if (!workflowRunId) return apiError(c, 409, "task_enqueue_in_progress", "This task is already being queued."); const updated = await getTask(userId, task.id); return c.json(updated ?? task); } catch (error) { return apiError(c, 503, "task_enqueue_failed", error instanceof Error ? error.message : "Task could not be queued."); } });
   app.post("/v1/tasks/:taskId/cancel", async (c) => { const task = await cancelTask(sdkUser(c)!.userId, c.req.param("taskId")); return task ? c.json(task) : apiError(c, 409, "task_not_cancellable", "This task is already completed or cancelled."); });
-  app.get("/v1/missions", async (c) => c.json({ data: await listMissions(sdkUser(c)!.userId) }));
+  app.get("/v1/missions", async (c) => {
+    const limit = Math.max(1, Math.min(200, Number(c.req.query("limit") ?? 100) || 100));
+    c.header("Cache-Control", "private, max-age=2, stale-while-revalidate=10");
+    return c.json({ data: await listMissionsPage(sdkUser(c)!.userId, limit) });
+  });
   app.post("/v1/missions/:missionId/notification/read", async (c) => {
     const userId = sdkUser(c)!.userId;
     const current = await getMission(userId, c.req.param("missionId"));
@@ -3806,7 +3912,7 @@ export function registerSdkApi(app: Hono): void {
     } catch (error) { return apiError(c, 400, "mission_create_failed", error instanceof Error ? error.message : "Mission could not be created."); }
   });
   app.get("/v1/missions/:missionId", async (c) => { const mission = await getMission(sdkUser(c)!.userId, c.req.param("missionId")); return mission ? c.json(mission) : apiError(c, 404, "not_found", "Mission not found."); });
-  app.get("/v1/missions/:missionId/doctor", async (c) => { const owner = sdkUser(c)!; const mission = await getMission(owner.userId, c.req.param("missionId")); if (!mission) return apiError(c, 404, "not_found", "Mission not found."); return c.json(diagnoseMission({ mission, tasks: await listTasks(owner.userId), compensations: await listCompensations(owner.userId) })); });
+  app.get("/v1/missions/:missionId/doctor", async (c) => { const owner = sdkUser(c)!; const mission = await getMission(owner.userId, c.req.param("missionId")); if (!mission) return apiError(c, 404, "not_found", "Mission not found."); return c.json(diagnoseMission({ mission, tasks: await listTasksForMission(owner.userId, mission.id), compensations: await listCompensations(owner.userId) })); });
   app.get("/v1/missions/:missionId/events", async (c) => { const events = await listMissionEvents(sdkUser(c)!.userId, c.req.param("missionId"), Number(c.req.query("limit") ?? 1000)); return (await getMission(sdkUser(c)!.userId, c.req.param("missionId"))) ? c.json({ data: events }) : apiError(c, 404, "not_found", "Mission not found."); });
   app.get("/v1/missions/:missionId/proof", async (c) => { const mission = await getMission(sdkUser(c)!.userId, c.req.param("missionId")); return mission ? c.json(missionProof(mission)) : apiError(c, 404, "not_found", "Mission not found."); });
   app.post("/v1/missions/:missionId/evidence", async (c) => {
@@ -3942,6 +4048,7 @@ export function registerSdkApi(app: Hono): void {
   });
   app.get("/v1/audit-events", async (c) => { c.header("Cache-Control", "private, max-age=1, stale-while-revalidate=4"); const after = Number(c.req.query("after") ?? 0) || 0; return c.json({ data: await listSdkAuditEvents(sdkUser(c)!.userId, after, 500) }); });
   app.get("/v1/activity", async (c) => {
+    c.header("Cache-Control", "private, max-age=2, stale-while-revalidate=10");
     const userId = sdkUser(c)!.userId;
     const since = Number(c.req.query("since") ?? 0) || 0;
     const now = Date.now();
@@ -3950,9 +4057,9 @@ export function registerSdkApi(app: Hono): void {
     // large durable Neon session-domain read) on every refresh.
     const [approvals, tasks, reminders, jobs, attentionCandidates] = await Promise.all([
       listApprovals(userId, 50),
-      listTasks(userId),
-      listReminders(userId),
-      listJobs(userId),
+      listTasksSince(userId, since, 50),
+      listReminderSummaries(userId),
+      listJobSummaries(userId),
       listAttentionRecords(userId, "attention_candidate", { limit: 50 }),
     ]);
     const visibleApprovals = await visibleApprovalsForDashboard(userId, approvals);
@@ -4069,7 +4176,7 @@ export function registerSdkApi(app: Hono): void {
     const files = session.sdkFiles!;
     return c.json({ messages: session.totalMessages, cost: session.totalCost,
       files: { count: files.length, declaredBytes: files.reduce((total, file) => total + file.size, 0), available: files.filter((file) => file.status === "available").length },
-      runs, tasks: { count: (await listTasks(owner.userId)).length } });
+      runs, tasks: { count: (await listOpenTaskSummaries(owner.userId, 2000)).filter((task) => !["completed", "cancelled", "failed"].includes(task.status)).length } });
   });
   app.post("/v1/webhooks", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { url?: string }; let url: URL; try { url = new URL(String(body.url ?? "")); } catch { return apiError(c, 400, "invalid_webhook", "A valid HTTPS webhook URL is required."); } if (!isSafeWebhookUrl(url)) return apiError(c, 400, "invalid_webhook", "Webhook URLs must use public HTTPS endpoints."); const session = await getSessionWithSdkTables(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); const secret = `whsec_${randomBytes(24).toString("base64url")}`; const hook = { id: `wh_${randomUUID()}`, url: url.toString(), secretCiphertext: sealWebhookSecret(secret), createdAt: Date.now() }; const response = { id: hook.id, url: hook.url, secret, createdAt: new Date(hook.createdAt).toISOString() }; session.sdkWebhooks!.push(hook); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); return c.json(response, 201); });
   app.get("/v1/webhooks", async (c) => { const hooks = (await getSession(sdkUser(c)!.userId)).sdkWebhooks!.filter((item) => !item.disabledAt).map(({ secretCiphertext: _secretCiphertext, ...item }) => item); return c.json({ data: hooks }); });

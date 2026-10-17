@@ -2749,7 +2749,7 @@ async function executeAgent(
   // Build message array for OpenRouter
   const durable = options?.ephemeral && !ownerPrivateRun
     ? { summaries: [], imageAssets: [], history: [] as Message[], approvals: [] as Awaited<ReturnType<typeof getSession>>["approvals"] }
-    : await getSession(userId);
+    : await getSession(userId, false, { domains: ["profile", "conversation", "assets"] });
   const forcedApproval = options?.forceApprovedAction && approvedApprovalId
     ? await getApproval(userId, approvedApprovalId).then((approval) => approval?.status === "approved" && approval.expiresAt > Date.now() ? approval : undefined)
     : undefined;

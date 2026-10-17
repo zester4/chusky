@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { RedisCommandMetrics, instrumentRedisClient, redisOperationFamily } from "../src/redisMetrics.js";
+import { RedisCommandMetrics, instrumentRedisClient, redisOperationFamily, withRedisMetricRoute } from "../src/redisMetrics.js";
 
 test("Redis telemetry groups key families without retaining owner keys", () => {
   assert.equal(redisOperationFamily({ name: "get", args: ["chuck:session:12345"] }), "session");
@@ -59,4 +59,13 @@ test("instrumentation observes commands without changing command outcomes", asyn
 
   assert.equal(metrics.snapshot().missions.commands, 2);
   assert.equal(metrics.snapshot().missions.errors, 1);
+});
+
+test("Redis telemetry attributes bounded route samples without owner identity", async () => {
+  const metrics = new RedisCommandMetrics();
+  await withRedisMetricRoute("GET /v1/activity?user=private", async () => {
+    metrics.record({ name: "mget", args: ["chuck:tasks:123", "chuck:tasks:123:summary"] }, { result: ["x", "y"], durationMs: 2 });
+  });
+  const samples = metrics.takeRouteSnapshot();
+  assert.deepEqual(samples.map(({ route, family, commands, responseBytes }) => ({ route, family, commands, responseBytes })), [{ route: "GET /v1/activityuserprivate", family: "tasks", commands: 1, responseBytes: 2 }]);
 });

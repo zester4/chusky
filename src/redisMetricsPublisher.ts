@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { REDIS_METRIC_FAMILIES, RedisCommandMetrics, type RedisCommandMetricsSnapshot, type RedisMetricFamily } from "./redisMetrics.js";
+import { REDIS_METRIC_FAMILIES, RedisCommandMetrics, type RedisCommandMetricsSnapshot, type RedisMetricFamily, type RedisRouteMetricSample } from "./redisMetrics.js";
 import type { StorageMetricSample, StorageMetricTotals } from "./neonDurableState.js";
 
 export type StorageMetricBatchWriter = (instanceId: string, batchId: number, observedAt: number, samples: readonly StorageMetricSample[]) => Promise<void>;
 export type StorageMetricTotalsReader = (sinceMs: number, windowDays: number) => Promise<StorageMetricTotals>;
 export type StorageMetricPruner = (beforeMs: number, limit?: number) => Promise<number>;
+export type RedisRouteMetricBatchWriter = (instanceId: string, batchId: number, observedAt: number, samples: readonly RedisRouteMetricSample[]) => Promise<void>;
 
 interface PendingMetricBatch {
   batchId: number;
@@ -27,6 +28,7 @@ export class RedisMetricsPublisher {
       readTotals?: StorageMetricTotalsReader;
       prune?: StorageMetricPruner;
       onError?: (error: unknown, phase: "write" | "prune") => void;
+      writeRouteBatch?: RedisRouteMetricBatchWriter;
     } = {},
   ) {}
 
@@ -71,6 +73,14 @@ export class RedisMetricsPublisher {
     if (samples.length) {
       this.pending = { batchId: this.nextBatchId, observedAt: this.options.now?.() ?? Date.now(), samples };
       if (!(await this.persistPending())) return false;
+    }
+    const routes = this.metrics.takeRouteSnapshot();
+    if (routes.length && this.options.writeRouteBatch) {
+      try {
+        await this.options.writeRouteBatch(this.options.instanceId ?? (this.options.instanceId = randomUUID()), this.nextBatchId, this.options.now?.() ?? Date.now(), routes);
+      } catch (error) {
+        try { this.options.onError?.(error, "write"); } catch { /* Telemetry reporting cannot affect Redis operations. */ }
+      }
     }
     await this.pruneIfDue();
     return true;

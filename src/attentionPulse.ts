@@ -1,12 +1,12 @@
 import {
-  listMissions,
-  listTasks,
+  listMissionsPage,
+  listOpenTaskSummaries,
   listAttentionRecords,
   listApprovals,
-  listAllReminders,
+  listReminderSummaries,
   listCalendarMeetingPreparations,
   listJobOccurrences,
-  listJobs,
+  listJobSummaries,
   listRecallMeetings,
   createAttentionRecord,
   updateAttentionRecord,
@@ -20,7 +20,7 @@ import {
   type AutonomyProfileRecord,
   type OpenLoopRecord,
   type RecallMeetingRecord,
-  type ReminderRecord,
+  type ReminderSummary,
   type ObservationRecord,
   type StandingOrderRecord,
   type TaskRecord,
@@ -538,7 +538,7 @@ function meetingSignals(meetings: RecallMeetingRecord[], preparations: Awaited<R
   return signals;
 }
 
-function automationSignals(jobs: Awaited<ReturnType<typeof listJobs>>, occurrences: Awaited<ReturnType<typeof listJobOccurrences>>, now: number): OperationalSignal[] {
+function automationSignals(jobs: Awaited<ReturnType<typeof listJobSummaries>>, occurrences: Awaited<ReturnType<typeof listJobOccurrences>>, now: number): OperationalSignal[] {
   const activeJobs = new Map(jobs.filter((job) => job.status === "active").map((job) => [job.id, job]));
   const signals: OperationalSignal[] = jobs.filter((job) => Boolean(job.deliveryError || job.scheduleError)).map((job) => ({
     id: `job:${job.id}`, kind: "automation", title: compact(job.text, 120), status: `${job.status}; ${job.scheduleError ? "schedule recovery error" : "delivery error"}`,
@@ -558,7 +558,7 @@ function automationSignals(jobs: Awaited<ReturnType<typeof listJobs>>, occurrenc
   return signals;
 }
 
-function reminderSignals(reminders: ReminderRecord[], now: number): OperationalSignal[] {
+function reminderSignals(reminders: ReminderSummary[], now: number): OperationalSignal[] {
   return reminders.filter((reminder) => reminder.status === "failed"
     || (reminder.status === "waiting" && reminder.runAt <= now))
     .slice(0, 8)
@@ -575,17 +575,17 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now(), 
     listAttentionRecords(userId, "open_loop", { limit: 100 }),
     listAttentionRecords(userId, "attention_candidate", { limit: 100 }),
     listAttentionRecords(userId, "standing_order", { limit: 100, status: "active" }),
-    listTasks(userId),
-    listMissions(userId),
+    listOpenTaskSummaries(userId, 500),
+    listMissionsPage(userId, 200),
     listAttentionRecords(userId, "autonomy_watch", { limit: 100, status: "active" }),
     listAttentionRecords(userId, "observation", { limit: 100, status: "new" }),
     listAttentionRecords(userId, "autonomy_profile", { limit: 20 }),
     listRecallMeetings(userId, 30),
     listCalendarMeetingPreparations(userId, 30),
     listApprovals(userId, 100),
-    listJobs(userId),
+    listJobSummaries(userId),
     listJobOccurrences(userId, undefined, 100),
-    listAllReminders(userId),
+    listReminderSummaries(userId),
     readAttentionChecklist(userId),
   ]);
   const actionableLoops = (loops as OpenLoopRecord[])

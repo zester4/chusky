@@ -5,7 +5,7 @@ import {
   createTask,
   finalizeMissionIfReady,
   getMission,
-  listTasks,
+  listTasksForMission,
   recordMissionEvidence,
   replanMission,
   resumeMission,
@@ -79,7 +79,7 @@ export async function rescheduleQueuedMissionTasks(userId: number, mission: Miss
   if (mission.status !== "running") return;
   const active = new Set(mission.activeStepIds?.length ? mission.activeStepIds : mission.currentStepId ? [mission.currentStepId] : []);
   const runAt = nextMissionWorkAt(mission.workSchedule, now);
-  const tasks = await listTasks(userId);
+  const tasks = await listTasksForMission(userId, mission.id);
   await Promise.all(tasks
     .filter((task) => task.missionId === mission.id && task.status === "queued" && active.has(task.missionStepId ?? ""))
     .map((task) => updateMissionTaskSchedule(userId, task.id, runAt)));
@@ -132,8 +132,8 @@ export async function reconcileMissionExecution(userId: number, missionId: strin
   if (finalized.status !== "running") return finalized;
 
   const active = new Set(finalized.activeStepIds?.length ? finalized.activeStepIds : finalized.currentStepId ? [finalized.currentStepId] : []);
-  const obsoleteTasks = (await listTasks(userId)).filter((task) => task.missionId === missionId
-    && task.missionStepId
+  const obsoleteTasks = (await listTasksForMission(userId, missionId)).filter((task) =>
+    task.missionStepId
     && task.id !== preserveTaskId
     && !["completed", "cancelled"].includes(task.status)
     && (!active.has(task.missionStepId) || finalized.steps.find((step) => step.id === task.missionStepId)?.status !== "running"));
@@ -225,7 +225,7 @@ export async function scheduleMissionSteps(userId: number, mission: MissionRecor
   if (!current || !["running", "waiting"].includes(current.status)) return current;
   const active = current.activeStepIds?.length ? current.activeStepIds : current.currentStepId ? [current.currentStepId] : [];
   if (!active.length) return current;
-  const tasks = await listTasks(userId);
+  const tasks = await listTasksForMission(userId, current.id);
   const assigned = new Map<string, string>();
   const taskAttempts = new Map<string, number>();
   const enqueuedStepIds = new Set<string>();

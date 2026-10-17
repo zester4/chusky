@@ -190,6 +190,7 @@ test("durable session snapshots never leak into the Redis core payload", () => {
 test("durable saves never synthesize an unloaded SDK domain", () => {
   const partial = { ...session(), durableDomainSnapshots: { profile: { totalMessages: 1 } } } as UserSession & { durableDomainSnapshots: Record<string, unknown> };
   assert.equal(splitSessionDomainsForSave(partial, true, false).domains.has("sdk"), false);
+  assert.equal(splitSessionDomainsForSave(partial, true, false).domains.has("memories"), false);
   const loaded = { ...partial, durableDomainSnapshots: { ...partial.durableDomainSnapshots, sdk: { sdkThreads: [] } } };
   assert.equal(splitSessionDomainsForSave(loaded, true, false).domains.has("sdk"), true);
 });

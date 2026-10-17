@@ -109,7 +109,20 @@ export function splitSessionDomains(session: UserSession, separateSdkRuns = fals
   const domains: DurableSessionPayloads = new Map<DurableSessionDomain, unknown>([
     // updatedAt is intentionally excluded: saveSession refreshes it for every
     // turn, and persisting it here would rewrite the profile on every message.
-    ["profile", { model: session.model, totalMessages: session.totalMessages, totalCost: session.totalCost, ...(typeof session.telegramChatId === "number" ? { telegramChatId: session.telegramChatId } : {}), ...(typeof session.voiceReplies === "boolean" ? { voiceReplies: session.voiceReplies } : {}), ...(session.voicePreferences ? { voicePreferences: session.voicePreferences } : {}), createdAt: session.createdAt }],
+    ["profile", {
+      model: session.model,
+      totalMessages: session.totalMessages,
+      totalCost: session.totalCost,
+      ...(typeof session.telegramChatId === "number" ? { telegramChatId: session.telegramChatId } : {}),
+      ...(typeof session.voiceReplies === "boolean" ? { voiceReplies: session.voiceReplies } : {}),
+      ...(session.voicePreferences ? { voicePreferences: session.voicePreferences } : {}),
+      // Dashboard identity state belongs in the compact profile projection so
+      // overview/channel reads do not hydrate conversation or asset domains.
+      ...(Object.keys(session.scratchpad ?? {}).length ? { scratchpad: session.scratchpad } : {}),
+      ...(session.triggerIds?.length ? { triggerIds: session.triggerIds } : {}),
+      ...(Object.keys(session.triggerInstructions ?? {}).length ? { triggerInstructions: session.triggerInstructions } : {}),
+      createdAt: session.createdAt,
+    }],
     ["conversation", { summaries: session.summaries }],
     ["memories", { memories: session.memories }],
     ["assets", { imageAssets: session.imageAssets, sdkFiles: session.sdkFiles ?? [], artifacts: session.artifacts ?? [], artifactRegistrationIntents: session.artifactRegistrationIntents ?? [] }],
@@ -127,17 +140,23 @@ export function splitSessionDomains(session: UserSession, separateSdkRuns = fals
 export function splitSessionDomainsForSave(session: UserSession, separateSdkRuns = false, separateSdkTables = false): ReturnType<typeof splitSessionDomains> {
   const split = splitSessionDomains(session, separateSdkRuns, separateSdkTables);
   const snapshots = (session as UserSession & { durableDomainSnapshots?: Partial<Record<DurableSessionDomain, unknown>> }).durableDomainSnapshots;
-  if (!snapshots || !Object.hasOwn(snapshots, "sdk")) split.domains.delete("sdk");
+  if (snapshots) {
+    for (const domain of split.domains.keys()) {
+      if (!Object.hasOwn(snapshots, domain)) split.domains.delete(domain);
+    }
+  } else {
+    split.domains.delete("sdk");
+  }
   return split;
 }
 
 function object(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 
 /** Rehydrate a normal UserSession only when all canonical Neon documents exist. */
-export function joinSessionDomains(core: UserSession, documents: ReadonlyMap<DurableSessionDomain, unknown>, includeSdkTables = true): UserSession {
+export function joinSessionDomains(core: UserSession, documents: ReadonlyMap<DurableSessionDomain, unknown>, includeSdkTables = true, allowPartial = false): UserSession {
   const requiredDomains = includeSdkTables ? DURABLE_SESSION_DOMAINS : DURABLE_SESSION_DOMAINS.filter((domain) => domain !== "sdk");
   const missingDomains = requiredDomains.filter((domain) => !documents.has(domain));
-  if (missingDomains.length) throw new DurableSessionDocumentsIncompleteError(missingDomains);
+  if (missingDomains.length && !allowPartial) throw new DurableSessionDocumentsIncompleteError(missingDomains);
   const conversation = object(documents.get("conversation"));
   const profile = object(documents.get("profile"));
   const memories = object(documents.get("memories"));
@@ -154,6 +173,9 @@ export function joinSessionDomains(core: UserSession, documents: ReadonlyMap<Dur
     ...(profile.voicePreferences && typeof profile.voicePreferences === "object" && !Array.isArray(profile.voicePreferences) ? { voicePreferences: profile.voicePreferences as UserSession["voicePreferences"] } : {}),
     ...(Number.isSafeInteger(profile.createdAt) && Number(profile.createdAt) >= 0 ? { createdAt: Number(profile.createdAt) } : {}),
     ...(Number.isSafeInteger(profile.updatedAt) && Number(profile.updatedAt) >= 0 ? { updatedAt: Number(profile.updatedAt) } : {}),
+    scratchpad: profile.scratchpad && typeof profile.scratchpad === "object" && !Array.isArray(profile.scratchpad) ? profile.scratchpad as UserSession["scratchpad"] : core.scratchpad,
+    triggerIds: Array.isArray(profile.triggerIds) ? profile.triggerIds.filter((id): id is string => typeof id === "string") : core.triggerIds,
+    triggerInstructions: profile.triggerInstructions && typeof profile.triggerInstructions === "object" && !Array.isArray(profile.triggerInstructions) ? profile.triggerInstructions as UserSession["triggerInstructions"] : core.triggerInstructions,
     history: Array.isArray(conversation.history) ? conversation.history as Message[] : Array.isArray(core.history) ? core.history.slice(-HOT_CONVERSATION_MESSAGES) : [],
     summaries: Array.isArray(conversation.summaries) ? conversation.summaries as string[] : [],
     memories: Array.isArray(memories.memories) ? memories.memories as MemoryFact[] : [],

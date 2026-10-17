@@ -1,7 +1,7 @@
 import type { QueryResultRow } from "pg";
 import { createHash, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { REDIS_METRIC_FAMILIES, type RedisCommandFamilyMetrics, type RedisMetricFamily } from "./redisMetrics.js";
+import { REDIS_METRIC_FAMILIES, type RedisCommandFamilyMetrics, type RedisMetricFamily, type RedisRouteMetricSample } from "./redisMetrics.js";
 
 export const DURABLE_SESSION_DOMAINS = ["profile", "conversation", "memories", "assets", "sdk"] as const;
 export type DurableSessionDomain = typeof DURABLE_SESSION_DOMAINS[number];
@@ -687,6 +687,47 @@ export class NeonDurableState {
     }
   }
 
+  /** Persist bounded Redis route/family aggregates without owner IDs or keys. */
+  async recordRedisRouteMetricBatch(instanceId: string, batchId: number, observedAt: number, samples: readonly RedisRouteMetricSample[]): Promise<void> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(instanceId) || !Number.isSafeInteger(batchId) || batchId <= 0 || !Number.isSafeInteger(observedAt) || observedAt <= 0 || !samples.length || samples.length > 400) throw new Error("Redis route metric batch is invalid.");
+    const seen = new Set<string>();
+    for (const sample of samples) {
+      if (!sample.route || sample.route.length > 120 || !REDIS_FAMILY_SET.has(sample.family) || seen.has(`${sample.route}\u0000${sample.family}`)) throw new Error("Redis route metric label is invalid or duplicated.");
+      seen.add(`${sample.route}\u0000${sample.family}`);
+      for (const value of [sample.commands, sample.errors, sample.requestBytes, sample.responseBytes, sample.durationMs, sample.maxValueBytes]) if (!Number.isSafeInteger(value) || value < 0) throw new Error("Redis route metric aggregate is invalid.");
+      if (sample.errors > sample.commands) throw new Error("Redis route metric error count exceeds command count.");
+    }
+    await this.measuredQuery(this.database,
+      `INSERT INTO chusky_redis_route_metric_sample
+       (instance_id, batch_id, route, family, observed_at, commands, errors, request_bytes, response_bytes, duration_ms, max_value_bytes)
+       SELECT $1::uuid, $2::bigint, metric.route, metric.family, to_timestamp($3 / 1000.0), metric.commands, metric.errors,
+         metric.request_bytes, metric.response_bytes, metric.duration_ms, metric.max_value_bytes
+       FROM jsonb_to_recordset($4::jsonb) AS metric(route text, family text, commands bigint, errors bigint, request_bytes bigint, response_bytes bigint, duration_ms bigint, max_value_bytes bigint)
+       ON CONFLICT (instance_id, batch_id, route, family) DO NOTHING`,
+      [instanceId, batchId, observedAt, JSON.stringify(samples.map((sample) => ({ route: sample.route, family: sample.family, commands: sample.commands, errors: sample.errors, request_bytes: sample.requestBytes, response_bytes: sample.responseBytes, duration_ms: sample.durationMs, max_value_bytes: sample.maxValueBytes })))]);
+  }
+
+  /** Aggregate route-attributed Redis transfer for operator burn-rate diagnosis. */
+  async redisRouteMetricTotals(sinceMs: number, windowDays = 1): Promise<Record<string, number>> {
+    if (!Number.isSafeInteger(sinceMs) || sinceMs <= 0 || !Number.isSafeInteger(windowDays) || windowDays < 1 || windowDays > 30) throw new Error("Redis route metric window is invalid.");
+    const result = await this.measuredQuery<Record<string, unknown>>(this.database,
+      `SELECT route, family, COALESCE(SUM(commands), 0)::text AS commands, COALESCE(SUM(errors), 0)::text AS errors,
+         COALESCE(SUM(request_bytes), 0)::text AS request_bytes, COALESCE(SUM(response_bytes), 0)::text AS response_bytes,
+         COALESCE(SUM(duration_ms), 0)::text AS duration_ms, COALESCE(MAX(max_value_bytes), 0)::text AS max_value_bytes
+       FROM chusky_redis_route_metric_sample
+       WHERE observed_at >= GREATEST(to_timestamp($1 / 1000.0), now() - ($2::integer * interval '1 day'))
+       GROUP BY route, family ORDER BY (SUM(request_bytes) + SUM(response_bytes)) DESC LIMIT 200`, [sinceMs, windowDays]);
+    const count = (value: unknown): number => { const parsed = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN; if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error("Redis route metric aggregate is invalid."); return parsed; };
+    const output: Record<string, number> = {};
+    for (const row of result.rows) {
+      if (typeof row.route !== "string" || typeof row.family !== "string") continue;
+      const label = `${row.route}|${row.family}`;
+      const key = label.replace(/[^A-Za-z0-9_-]+/g, "_").slice(0, 88) + "_" + createHash("sha256").update(label).digest("hex").slice(0, 8);
+      for (const [field, source] of [["commands", "commands"], ["errors", "errors"], ["request_bytes", "request_bytes"], ["response_bytes", "response_bytes"], ["duration_ms", "duration_ms"], ["max_value_bytes", "max_value_bytes"]] as const) output[`redis.route.${key}.${field}.1d`] = count(row[source]);
+    }
+    return output;
+  }
+
   /** Aggregate only a bounded recent window; raw process IDs are never returned. */
   async storageMetricTotals(sinceMs: number, windowDays = 1): Promise<StorageMetricTotals> {
     if (!Number.isSafeInteger(sinceMs) || sinceMs <= 0) throw new Error("Storage metric window start is invalid.");
@@ -725,6 +766,13 @@ export class NeonDurableState {
        )
        DELETE FROM chusky_storage_metric_sample target USING expired
        WHERE target.ctid = expired.ctid RETURNING target.family`, [beforeMs, limit]);
+    await this.measuredQuery(this.database,
+      `WITH expired AS (
+         SELECT ctid FROM chusky_redis_route_metric_sample WHERE observed_at < to_timestamp($1 / 1000.0)
+         ORDER BY observed_at LIMIT $2
+       )
+       DELETE FROM chusky_redis_route_metric_sample target USING expired
+       WHERE target.ctid = expired.ctid`, [beforeMs, limit]);
     return result.rows.length;
   }
 
@@ -843,6 +891,10 @@ export class NeonDurableState {
   async assertStorageMetricsSchema(): Promise<void> {
     await this.measuredQuery(this.database,
       "SELECT instance_id, batch_id, family, observed_at, commands, errors, request_bytes, response_bytes, duration_ms, max_value_bytes FROM chusky_storage_metric_sample LIMIT 0");
+  }
+
+  async assertRedisRouteMetricsSchema(): Promise<void> {
+    await this.measuredQuery(this.database, "SELECT instance_id, batch_id, route, family, observed_at, commands, errors, request_bytes, response_bytes, duration_ms, max_value_bytes FROM chusky_redis_route_metric_sample LIMIT 0");
   }
 
   /** Fail startup when the opt-in object catalog is enabled without migration 0008. */

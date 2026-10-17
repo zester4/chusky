@@ -812,6 +812,13 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // ── Redis ──────────────────────────────────────────────────────────
   redisUrl: optional("REDIS_URL", ""),
   sessionTtl: positiveInt("SESSION_TTL", 60 * 60 * 24 * 30),
+  // Per-request read guardrails are warnings rather than hard failures: a
+  // diagnostic must not turn a busy dashboard into an outage.
+  redisReadBudgetBytes: boundedInt("REDIS_READ_BUDGET_BYTES", 2_000_000, 64_000, 50_000_000),
+  redisReadBudgetCommands: boundedInt("REDIS_READ_BUDGET_COMMANDS", 1_000, 50, 20_000),
+  // Full task checkpoints are execution state, not permanent history. Keep
+  // compact summaries/indexes after this window while bounding Redis memory.
+  taskPayloadRetentionSeconds: boundedInt("TASK_PAYLOAD_RETENTION_SECONDS", 30 * 24 * 60 * 60, 24 * 60 * 60, 365 * 24 * 60 * 60),
 
   // ── Server ─────────────────────────────────────────────────────────
   port: positiveInt("PORT", 8080),

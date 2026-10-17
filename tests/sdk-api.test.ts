@@ -251,6 +251,37 @@ test("native tool discovery returns executable JSON schemas for all reliability 
   }
 });
 
+test("native tool summary returns counts without serializing tool schemas", async () => {
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tool-summary-owner" };
+  const response = await api.fetch(new Request("http://local/v1/tools?summary=true", { headers }));
+  assert.equal(response.status, 200);
+  const body = await response.json() as { data: unknown[]; total: number; nativeTotal: number; composioTotal: number };
+  assert.deepEqual(body.data, []);
+  assert.equal(body.total, body.nativeTotal + body.composioTotal);
+  assert.ok(body.nativeTotal > 0);
+});
+
+test("dashboard overview is a bounded owner-scoped projection", async () => {
+  const previousElenaEnabled = config.elenaEnabled;
+  (config as { elenaEnabled: boolean }).elenaEnabled = false;
+  try {
+    const api = app();
+    const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "dashboard-overview-owner" };
+    const response = await api.fetch(new Request("http://local/v1/account/dashboard-overview", { headers }));
+    assert.equal(response.status, 200);
+    const body = await response.json() as { observedAt: number; degradedSources: string[]; usage: { runs: { active: number } }; tools: { total: number }; threads: { data: unknown[] }; artifacts: unknown[] };
+    assert.ok(Number.isFinite(body.observedAt));
+    assert.ok(Array.isArray(body.degradedSources));
+    assert.ok(body.usage.runs.active >= 0);
+    assert.ok(body.tools.total > 0);
+    assert.ok(body.threads.data.length <= 5);
+    assert.ok(body.artifacts.length <= 8);
+  } finally {
+    (config as { elenaEnabled: boolean }).elenaEnabled = previousElenaEnabled;
+  }
+});
+
 test("operator reliability surfaces are owner-scoped and expose honest provider proof", async () => {
   const api = app();
   const ownerHeaders = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "operator-owner" };
