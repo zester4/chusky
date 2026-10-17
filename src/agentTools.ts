@@ -1,5 +1,6 @@
 import { E2B_BROWSER_ACTIONS } from "./lib/e2b/types.js";
 import { config } from "./config.js";
+import { sanitizeModelFacingText as sanitizeInfrastructureText } from "./modelFacing.js";
 import { isElenaToolSlug } from "./proactive/featureFlag.js";
 
 /**
@@ -376,17 +377,10 @@ function modelFacingNativeToolSlug(name: string): string {
   return name;
 }
 
-function sanitizeComputerProviderText(value: string): string {
-  return value
-    .replace(/\bCHUCK_DAYTONA_COMPUTER\b/g, "CHUCK_COMPUTER")
-    .replace(/\bCHUCK_DAYTONA_/g, "CHUCK_COMPUTER_")
-    .replace(/\bDaytona\b/gi, "private computer");
-}
-
 function sanitizeModelFacingSchema(value: unknown): unknown {
   if (typeof value === "string") {
     if (value.toLowerCase() === "daytona") return "computer";
-    return sanitizeComputerProviderText(value);
+    return sanitizeInfrastructureText(value);
   }
   if (Array.isArray(value)) return value.map(sanitizeModelFacingSchema);
   if (!value || typeof value !== "object") return value;
@@ -394,7 +388,7 @@ function sanitizeModelFacingSchema(value: unknown): unknown {
 }
 
 export function sanitizeModelFacingText(value: string): string {
-  return sanitizeComputerProviderText(value);
+  return sanitizeInfrastructureText(value);
 }
 
 /** Browser operations are exposed through the provider-neutral CHUCK_BROWSER tools. */
@@ -440,7 +434,7 @@ export const modelFacingChuckTools: NativeToolDefinition[] = chuckTools
     function: {
       ...tool.function,
       name: modelFacingNativeToolSlug(tool.function.name),
-      description: sanitizeComputerProviderText(tool.function.description),
+      description: sanitizeInfrastructureText(tool.function.description),
       parameters: sanitizeModelFacingSchema(tool.function.parameters),
     },
   }));

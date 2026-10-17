@@ -110,9 +110,10 @@ test("verified trigger runs execute an unfamiliar toolkit write and pause a refu
     const answers: Record<string, unknown> = {};
     for (const [key, question] of Object.entries<any>(body.questions ?? {})) {
       if (question.type === "noul") { answers[key] = { type: "noul", noul: 0.99 }; continue; }
-      const ids = Object.keys(question.criteria).filter((id) => id !== "__none__");
+      const criteria = question.criteria ?? {};
+      const ids = Object.keys(criteria).filter((id) => id !== "__none__");
       const winner = ids.find((id) => id === selected) ?? ids[0] ?? "__none__";
-      const probabilities = Object.fromEntries(Object.keys(question.criteria).map((id) => [id, id === winner ? 0.99 : 0.01 / Math.max(1, Object.keys(question.criteria).length - 1)]));
+      const probabilities = Object.fromEntries(Object.keys(criteria).map((id) => [id, id === winner ? 0.99 : 0.01 / Math.max(1, Object.keys(criteria).length - 1)]));
       answers[key] = { type: "choice", choice: winner, confidence: 0.99, probabilities };
     }
     return new Response(JSON.stringify({ model: body.model, answers, usage: { input_tokens: 20, cost: 0 } }), { status: 200, headers: { "content-type": "application/json" } });
@@ -233,9 +234,10 @@ test("mission provider allowlists receive the routed direct action schema", asyn
     const answers: Record<string, unknown> = {};
     for (const [key, question] of Object.entries<any>(body.questions ?? {})) {
       if (question.type === "noul") { answers[key] = { type: "noul", noul: 0.99 }; continue; }
-      const ids = Object.keys(question.criteria).filter((id) => id !== "__none__");
+      const criteria = question.criteria ?? {};
+      const ids = Object.keys(criteria).filter((id) => id !== "__none__");
       const selected = ids.find((id) => id === "GMAIL_FETCH_EMAILS") ?? ids.find((id) => id.toLowerCase() === "gmail") ?? ids[0] ?? "__none__";
-      const probabilities = Object.fromEntries(Object.keys(question.criteria).map((id) => [id, id === selected ? 0.99 : 0.01 / Math.max(1, Object.keys(question.criteria).length - 1)]));
+      const probabilities = Object.fromEntries(Object.keys(criteria).map((id) => [id, id === selected ? 0.99 : 0.01 / Math.max(1, Object.keys(criteria).length - 1)]));
       answers[key] = { type: "choice", choice: selected, confidence: 0.99, probabilities };
     }
     return new Response(JSON.stringify({ model: body.model, answers, usage: { input_tokens: 20, cost: 0 } }), { status: 200, headers: { "content-type": "application/json" } });
@@ -305,9 +307,10 @@ test("ordinary Composio turns expose JEV's exact action even when its slug start
     const answers: Record<string, unknown> = {};
     for (const [key, question] of Object.entries<any>(body.questions ?? {})) {
       if (question.type === "noul") { answers[key] = { type: "noul", noul: 0.99 }; continue; }
-      const ids = Object.keys(question.criteria).filter((id) => id !== "__none__");
+      const criteria = question.criteria ?? {};
+      const ids = Object.keys(criteria).filter((id) => id !== "__none__");
       const selected = ids.find((id) => id === "COMPOSIO_SEARCH_WALMART") ?? ids.find((id) => id === "walmart") ?? ids[0] ?? "__none__";
-      const probabilities = Object.fromEntries(Object.keys(question.criteria).map((id) => [id, id === selected ? 0.99 : 0.01 / Math.max(1, Object.keys(question.criteria).length - 1)]));
+      const probabilities = Object.fromEntries(Object.keys(criteria).map((id) => [id, id === selected ? 0.99 : 0.01 / Math.max(1, Object.keys(criteria).length - 1)]));
       answers[key] = { type: "choice", choice: selected, confidence: 0.99, probabilities };
     }
     return new Response(JSON.stringify({ model: body.model, answers, usage: { input_tokens: 20, cost: 0 } }), { status: 200, headers: { "content-type": "application/json" } });
@@ -1171,9 +1174,20 @@ test("turn-wide Jev none keeps irrelevant connected-app schemas out of a convers
     jevRequests.push(body);
     const answers: Record<string, unknown> = {};
     for (const [key, question] of Object.entries<any>(body.questions ?? {})) {
-      answers[key] = question.type === "choice"
-        ? { type: "choice", choice: "__none__", confidence: 0.98, probabilities: Object.fromEntries(Object.keys(question.criteria).map((id) => [id, id === "__none__" ? 0.98 : 0.02 / Math.max(1, Object.keys(question.criteria).length - 1)])) }
-        : { type: "noul", noul: 0.02 };
+      if (question.type === "choice") {
+        const criteria = question.criteria ?? {};
+        const choice = Object.prototype.hasOwnProperty.call(criteria, "__none__")
+          ? "__none__"
+          : Object.keys(criteria)[0];
+        answers[key] = {
+          type: "choice",
+          choice,
+          confidence: 0.98,
+          probabilities: choice ? { [choice]: 0.98 } : {},
+        };
+      } else {
+        answers[key] = { type: "noul", noul: key === "action_required" ? 0.02 : 0.01 };
+      }
     }
     return new Response(JSON.stringify({ model: body.model, answers }), { status: 200 });
   }) as typeof fetch }));
@@ -2269,8 +2283,22 @@ test("a fresh mission request exposes start and preflight agrees with the routed
   config.jevTurnBudgetMs = 5000;
   setJevClientForTests(new JevClient({ apiKey: "test-key", fetchImpl: (async (_url, init) => {
     const body = JSON.parse(String(init?.body));
-    const probabilities = Object.fromEntries(Object.keys(body.questions.rank.criteria).map((id) => [id, id === "CHUCK_TASK_WAIT" ? 0.9 : 0]));
-    return new Response(JSON.stringify({ answers: { rank: { type: "choice", choice: "CHUCK_TASK_WAIT", confidence: 0.9, probabilities } } }), { status: 200 });
+    const answers = Object.fromEntries(Object.entries<any>(body.questions ?? {}).map(([key, question]) => {
+      if (question.type === "noul") {
+        const candidateId = question.instructions?.candidate?.id;
+        const needed = key.includes("action_required") || candidateId === "CHUCK_MISSION_START";
+        return [key, { type: "noul", noul: needed ? 0.99 : 0.01 }];
+      }
+      const criteria = question.criteria ?? {};
+      const choice = key.includes("action_required")
+        ? Object.keys(criteria).find((id) => id !== "__none__") ?? "__none__"
+        : Object.prototype.hasOwnProperty.call(criteria, "CHUCK_TASK_WAIT")
+        ? "CHUCK_TASK_WAIT"
+        : Object.keys(criteria)[0] ?? "__none__";
+      const probabilities = Object.fromEntries(Object.keys(criteria).map((id) => [id, id === choice ? 0.9 : 0]));
+      return [key, { type: "choice", choice, confidence: 0.9, probabilities }];
+    }));
+    return new Response(JSON.stringify({ model: body.model, answers }), { status: 200 });
   }) as typeof fetch }));
   const requests: Array<Record<string, any>> = [];
   try {
@@ -2287,7 +2315,7 @@ After waking, continue the same mission ID. Do not create another mission.`, [
     }, false, undefined, (body) => requests.push(body));
     for (const request of requests) {
       const names = request.tools.map((tool: any) => tool.function.name);
-      for (const slug of ["CHUCK_MISSION_START", "CHUCK_MISSION_RESUME", "CHUCK_MISSION_VERIFY", "CHUCK_MISSION_COMPLETE"]) assert.ok(names.includes(slug), `${slug} must stay callable`);
+      for (const slug of ["CHUCK_MISSION_START", "CHUCK_MISSION_RESUME", "CHUCK_MISSION_VERIFY", "CHUCK_MISSION_COMPLETE"]) assert.ok(names.includes(slug), `${slug} must stay callable; available: ${names.join(",")}`);
       assert.ok(!names.includes("CHUCK_BROWSER"));
     }
     const results = requests.at(-1)?.messages.filter((message: any) => message.role === "tool") ?? [];

@@ -55,7 +55,7 @@ test("the model sees a private computer, not the infrastructure provider", () =>
   const computerTools = modelFacingChuckTools.filter((tool) => tool.function.name.startsWith("CHUCK_COMPUTER"));
   assert.ok(computerTools.some((tool) => tool.function.name === "CHUCK_COMPUTER_APP"));
   assert.ok(computerTools.some((tool) => tool.function.name === "CHUCK_COMPUTER"));
-  assert.equal(/daytona/i.test(JSON.stringify(modelFacingChuckTools)), false);
+  assert.equal(/daytona|e2b|kernel/i.test(JSON.stringify(modelFacingChuckTools)), false);
   assert.equal(canonicalNativeToolSlug("CHUCK_COMPUTER_APP"), "CHUCK_DAYTONA_APP");
   validateNativeToolArguments("CHUCK_COMPUTER_APP", { action: "status" });
   const image = { prompt: "a workspace illustration", destination: "computer" } as Record<string, unknown>;

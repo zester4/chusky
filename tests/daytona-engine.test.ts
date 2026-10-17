@@ -756,7 +756,10 @@ test("emits the reusable Zawiatul PDF templates with bounded editable fields", a
   assert.match(generatorScript, /payload\.get\('template'\)/);
   assert.match(generatorScript, /Main Master of Ceremonies/);
   assert.match(generatorScript, /named PDF template must produce exactly one page/);
-  const syntax = spawnSync("python", ["-c", "import sys; compile(sys.stdin.buffer.read().decode('utf-8'), '<zawiatul-template>', 'exec')"], { input: Buffer.from(generatorScript, "utf8"), encoding: "utf8" });
+  // Pass the generated source as an argument instead of piping stdin. The
+  // managed test runner can leave child processes blocked on stdin pipes;
+  // syntax validation itself does not need a streaming input path.
+  const syntax = spawnSync("python", ["-c", "import ast,sys; ast.parse(sys.argv[1], '<zawiatul-template>')", generatorScript], { encoding: "utf8" });
   assert.equal(syntax.status, 0, syntax.stderr || "named template generator did not compile");
   await assert.rejects(() => e.createPdf(820026, { title: "Bad template", template: "unknown", sections: [{ body: "Nope" }] }), /template must be zawiatul_invitation or zawiatul_support_letter/);
 });

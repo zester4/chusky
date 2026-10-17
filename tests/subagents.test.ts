@@ -659,7 +659,7 @@ test("rejects delegation contract with invalid tools not in manifest allowlist",
 
 test("blocks worker capability from executing tools outside its whitelist boundary", async () => {
   const userId = 991002;
-  // Leo (Marketing) is NOT allowed to execute CHUCK_DAYTONA_DELETE_FILE
+  // Leo (Marketing) is NOT allowed to execute the computer delete action.
   const result = await executeDelegation(userId, {
     worker: "leo",
     objective: "Attempt unauthorized system file deletion",
@@ -672,7 +672,7 @@ test("blocks worker capability from executing tools outside its whitelist bounda
   });
 
   assert.equal(result.status, "failed");
-  assert.match(result.output, /Security boundary error: Tool CHUCK_DAYTONA_DELETE_FILE is not permitted for worker capability leo/);
+  assert.match(result.output, /Security boundary error: Tool CHUCK_COMPUTER_DELETE_FILE is not permitted for worker capability leo/);
 });
 
 test("enforces maxToolCalls budget limit on worker delegation contract", async () => {

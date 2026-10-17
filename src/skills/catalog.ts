@@ -1,5 +1,6 @@
 import { lstat, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import { sanitizeModelFacingText } from "../modelFacing.js";
 
 const DEFAULT_SKILLS_ROOT = path.resolve(process.cwd(), ".chusky", "skills");
 const MAX_SKILLS = 200;
@@ -18,11 +19,7 @@ const FALLBACK_GENERIC_TERMS = new Set([
  * infrastructure names and internal workspace slugs out of the agent's mental
  * model while preserving the source files for developers and dispatch. */
 function sanitizeSkillText(value: string): string {
-  return value
-    .replace(/\bCHUCK_DAYTONA_COMPUTER\b/g, "CHUCK_COMPUTER")
-    .replace(/\bCHUCK_DAYTONA_/g, "CHUCK_COMPUTER_")
-    .replace(/\bDAYTONA_/g, "COMPUTER_")
-    .replace(/\bdaytona\b/gi, "computer");
+  return sanitizeModelFacingText(value);
 }
 
 export type SkillManifest = {

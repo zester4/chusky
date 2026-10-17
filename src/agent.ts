@@ -3272,7 +3272,7 @@ async function executeAgent(
     }
     : undefined;
   const upgradeContext = pendingUpgrade
-    ? `\n\n${formatAgentReleaseContext(pendingUpgrade, announceUpgrade)}`
+    ? `\n\n${sanitizeModelFacingText(formatAgentReleaseContext(pendingUpgrade, announceUpgrade))}`
     : "";
   const temporalContext = buildTemporalContext(history, { ...options?.temporalContext, timezone: options?.temporalContext?.timezone ?? config.timezone });
   const triggerAutonomy = triggerAutonomyInstructions(channelContext?.triggerEventId);
@@ -3294,8 +3294,18 @@ async function executeAgent(
     ],
     developerInstructions: options?.instructions ? `Developer instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : undefined,
   });
-  const dynamicSystemContext = `${temporalContext}${accountContext ? `\n\n${accountContext}` : ""}${composioRouteContext ? `\n\n${composioRouteContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\n${mediaRequest ? "Media skill preflight" : "Relevant project skill guidance"} (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}${imageRetryContext}`;
-  const promptHistory = voiceTurn ? boundedVoiceHistory(history) : history;
+  // Keep provider-specific implementation names out of every trusted context
+  // block, not only the static system prompt. Memory, route cards, upgrade
+  // notes, and prior assistant messages can all contain old implementation
+  // vocabulary from before the provider-neutral boundary was introduced.
+  const dynamicSystemContext = sanitizeModelFacingText(`${temporalContext}${accountContext ? `\n\n${accountContext}` : ""}${composioRouteContext ? `\n\n${composioRouteContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\n${mediaRequest ? "Media skill preflight" : "Relevant project skill guidance"} (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}${imageRetryContext}`);
+  const promptHistory = (voiceTurn ? boundedVoiceHistory(history) : history).map((message) => ({
+    ...message,
+    // Preserve the user's exact wording while preventing prior assistant
+    // output from reintroducing an internal provider name into the model's
+    // working context.
+    content: message.role === "assistant" ? sanitizeModelFacingText(message.content) : message.content,
+  }));
   // Preparation has run concurrently with the lightweight opening. Finish its
   // delivery before the main model can emit a tool call or final answer.
   await options?.opening?.ready;

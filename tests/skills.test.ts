@@ -77,6 +77,7 @@ test("routes game requests to game-scaffold", () => {
 test("sanitizes provider names from model-facing skill context", async () => {
   const context = await routedSkillContext("Build an app in Daytona and use the computer workspace");
   assert.doesNotMatch(context, /daytona/i);
+  assert.doesNotMatch(context, /e2b|kernel/i);
   assert.doesNotMatch(context, /CHUCK_DAYTONA_/i);
   assert.match(context, /private computer|computer workspace/i);
 });
