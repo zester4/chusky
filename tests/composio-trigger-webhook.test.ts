@@ -53,3 +53,19 @@ test("accepts signed Composio lifecycle events without a trigger id", async () =
   assert.equal(event?.triggerId, undefined);
   assert.equal(event?.connectionId, "ca_988");
 });
+
+test("rejects forged or replayed Composio webhook signatures", async () => {
+  const secret = "whsec_test";
+  const webhookId = "msg_v3_replay";
+  const body = JSON.stringify({ id: webhookId, type: "composio.trigger.message", metadata: { trigger_slug: "GITHUB_COMMIT_EVENT", trigger_id: "ti_123", user_id: "user_987" }, data: {} });
+  const timestamp = String(Math.floor(Date.now() / 1000) - 301);
+  const signature = createHmac("sha256", secret).update(`${webhookId}.${timestamp}.${body}`).digest("base64");
+  await assert.rejects(
+    parseTriggerWebhook(Buffer.from(body), { "webhook-id": webhookId, "webhook-timestamp": timestamp, "webhook-signature": `v1,${signature}` }, secret),
+    /replay window|signature/i,
+  );
+  await assert.rejects(
+    parseTriggerWebhook(Buffer.from(body), { "webhook-id": webhookId, "webhook-timestamp": String(Math.floor(Date.now() / 1000)), "webhook-signature": "v1,forged" }, secret),
+    /signature/i,
+  );
+});

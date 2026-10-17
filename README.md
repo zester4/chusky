@@ -1580,6 +1580,7 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `REMINDER_WORKFLOW_URL` | reminders | — | Public `.../workflows/reminder` URL |
 | `JOB_WORKFLOW_URL` | recurring jobs | — | Public `.../workflows/job` URL |
 | `TRIGGER_WORKFLOW_URL` | Composio triggers | — | Public `.../workflows/trigger-event` URL; defaults from `WEBHOOK_URL` |
+| `WORKFLOW_FAILURE_PROCESSING_URL` | QStash failure recovery | — | Optional public `.../workflows/failure-process` URL; defaults from `WEBHOOK_URL` |
 | `SYSTEM_PROMPT` | — | Chusky's default | Agent personality |
 | `ENABLE_MANAGE_CONNECTIONS` | — | `true` | OAuth link tool |
 | `COMPOSIO_CALLBACK_URL` | — | — | Post-connect redirect URL |

@@ -14,7 +14,7 @@ import { listAttentionRecords } from "./store.js";
 import { updateAttentionRecord } from "./store.js";
 import type { AttentionCandidateRecord, AutonomyProfileRecord, DeliveryPreferenceRecord, ObservationRecord, AutonomyWatchRecord, TriggerEventRecord } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
-import { initStore, getTelegramChatId, createTriggerEventIfAbsent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkRunById, listSdkRunsForUser, saveSdkRun, saveSdkThread, deleteSdkThread, saveSession, appendMessages, appendPhoneCallTranscriptTurn, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, listTasksSince, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, appendPhoneCallEvent, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, saveRecallMeetingMissionState, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
+import { initStore, getTelegramChatId, createTriggerEventIfAbsent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkRunById, listSdkRunsForUser, saveSdkRun, saveSdkThread, deleteSdkThread, saveSession, appendMessages, appendPhoneCallTranscriptTurn, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, withScopedKeyLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, listTasksSince, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, appendPhoneCallEvent, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, saveRecallMeetingMissionState, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, OpenRouterTimeoutError, invalidateSession, transcriptionFormatForMimeType, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
 import type { AgentResult } from "./agent.js";
 import { listOpenTasks, listTasksForMission } from "./store.js";
@@ -47,7 +47,7 @@ import { ensureXchatActivitySubscriptions, type XchatSetupStatus } from "./chann
 import { XAdapter, type XSetupStatus } from "./channels/x.js";
 import { TelegramAdapter } from "./channels/telegram.js";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "./telegramWebhook.js";
-import { enqueueAutonomyApprovalResume, enqueueTaskWorkflow, parseWorkflowFailureRequestPayload, triggerWorkflowVersionForPayload, TRIGGER_AGENT_WORKFLOW_TIMEOUT, TRIGGER_WORKFLOW_VERSION, triggerAgentWorkflowRunId, triggerAgentWorkflowUrl, triggerWorkflowUrl, workflowClient, workflowFailureUrl, workflowServeOptions } from "./triggerWorkflow.js";
+import { enqueueAutonomyApprovalResume, enqueueTaskWorkflow, enqueueWorkflowFailureProcessing, parseWorkflowFailureRequestPayload, triggerWorkflowVersionForPayload, TRIGGER_AGENT_WORKFLOW_TIMEOUT, TRIGGER_WORKFLOW_VERSION, triggerAgentWorkflowRunId, triggerAgentWorkflowUrl, triggerWorkflowUrl, workflowClient, workflowFailureProcessingUrl, workflowFailureUrl, workflowServeOptions, type WorkflowFailureWork } from "./triggerWorkflow.js";
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
 import type { TinyFishResearchRunRecord } from "./store.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
@@ -150,9 +150,17 @@ function meetingRoomToolAllowlist(policy: NonNullable<ReturnType<typeof meetingR
   return [...new Set([...policy.allowedComposioTools, ...policy.allowedNativeTools])];
 }
 
-async function persistCalendarMeetingPreparation(userId: number, eventId: string, triggerSlug: string, payload: Record<string, unknown>) {
-  const candidate = parseGoogleCalendarMeetingTrigger(triggerSlug, payload);
+async function persistCalendarMeetingPreparation(
+  userId: number,
+  eventId: string,
+  triggerSlug: string,
+  payload: Record<string, unknown>,
+  storedCandidate?: TriggerEventRecord["calendarPreparation"],
+) {
+  const parsedCandidate = storedCandidate ? undefined : parseGoogleCalendarMeetingTrigger(triggerSlug, payload);
+  const candidate = storedCandidate ?? parsedCandidate;
   if (!candidate) return undefined;
+  const sealedMeetingUrl = storedCandidate?.sealedMeetingUrl ?? (parsedCandidate?.meetingUrl ? sealCalendarMeetingUrl(parsedCandidate.meetingUrl) : undefined);
   const stable = candidate.calendarEventId ?? eventId;
   const id = `cmp_${createHash("sha256").update(`${userId}:${stable}`).digest("hex").slice(0, 40)}`;
   return saveCalendarMeetingPreparation(userId, {
@@ -162,13 +170,13 @@ async function persistCalendarMeetingPreparation(userId: number, eventId: string
     ...(candidate.calendarEventId ? { calendarEventId: candidate.calendarEventId } : {}),
     lifecycle: candidate.lifecycle,
     status: candidate.lifecycle === "cancelled" ? "cancelled" : "prepared",
-    meetingUrlAvailable: Boolean(candidate.meetingUrl),
+    meetingUrlAvailable: Boolean(sealedMeetingUrl),
     ...(candidate.title ? { title: candidate.title } : {}),
     ...(candidate.startAt ? { startAt: candidate.startAt } : {}),
     ...(candidate.endAt ? { endAt: candidate.endAt } : {}),
     participants: candidate.participants,
     attendees: candidate.attendees,
-    ...(candidate.meetingUrl ? { sealedMeetingUrl: sealCalendarMeetingUrl(candidate.meetingUrl) } : {}),
+    ...(sealedMeetingUrl ? { sealedMeetingUrl } : {}),
     createdAt: Date.now(),
     updatedAt: Date.now(),
   });
@@ -207,6 +215,47 @@ function boundedRecallChatReply(value: string, maxCharacters: number): string {
   const characters = [...clean];
   if (characters.length <= maxCharacters) return clean;
   return `${characters.slice(0, Math.max(1, maxCharacters - 1)).join("").trimEnd()}…`;
+}
+
+function composioWebhookOwnerId(value: unknown): number | undefined {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const raw = String(value).trim();
+  const match = /^(?:user_)?([1-9]\d{0,18})$/.exec(raw);
+  if (!match) return undefined;
+  const userId = Number(match[1]);
+  return Number.isSafeInteger(userId) && userId > 0 ? userId : undefined;
+}
+
+async function processWorkflowFailureWork(work: WorkflowFailureWork): Promise<void> {
+  const errorMessage = "QStash delivery failed after retry exhaustion";
+  if (typeof work.eventId === "string" && work.eventId.length > 0) {
+    const event = await getTriggerEvent(work.eventId);
+    if (event && event.userId === work.userId) {
+      const failure = triggerWorkflowExhaustion(event);
+      if (failure) {
+        await updateTriggerEvent(event.eventId, failure);
+        const projection = await ensureTriggerWebProjection({ userId: work.userId, eventId: event.eventId, triggerSlug: event.triggerSlug, summary: event.summary, result: failure.result, status: failure.status });
+        await updateTriggerEvent(event.eventId, { webThreadId: projection.threadId, webRunId: projection.runId });
+        await publishWebNotification({ userId: work.userId, eventId: event.eventId, threadId: projection.threadId, runId: projection.runId });
+      }
+    }
+  }
+  if (typeof work.reminderId === "string") {
+    const reminder = await getReminder(work.userId, work.reminderId);
+    if (reminder && reminder.status !== "paused" && reminder.status !== "cancelled") {
+      await updateReminder(work.userId, work.reminderId, { status: "failed", deliveryError: errorMessage });
+    }
+  }
+  if (typeof work.jobId === "string") await updateJob(work.userId, work.jobId, { deliveryError: errorMessage });
+  if (work.workflowRunId && work.workflowPath === "/workflows/task") {
+    let taskPayload;
+    try { taskPayload = parseTaskWorkflowPayload({ userId: work.userId, taskId: work.taskId }); }
+    catch { taskPayload = undefined; }
+    if (taskPayload && taskPayload.userId === work.userId) {
+      const recovery = await recoverTaskAfterWorkflowFailure(taskPayload.userId, taskPayload.taskId, work.workflowRunId);
+      if (recovery?.shouldEnqueue) await enqueueTaskWithClaim(taskPayload.userId, taskPayload.taskId, recovery.task.runAt ?? Date.now());
+    }
+  }
 }
 
 async function sdkTaskMessage(task: Awaited<ReturnType<typeof getTask>>, missionInput?: string): Promise<string | ContentPart[]> {
@@ -661,6 +710,12 @@ async function main(): Promise<void> {
       try { return await work(); } finally { clearInterval(renewal); await releaseUserLock(userId, token); }
     };
     const withCliLock = withUserLock;
+    const withVoiceCallLock = <T>(userId: number, callId: string, signal: AbortSignal | undefined, work: () => Promise<T>): Promise<T> => withScopedKeyLock(`voice-call:${userId}:${callId}`, work, {
+      signal,
+      leaseSeconds: 180,
+      acquisitionAttempts: 1200,
+      retryDelayMs: 100,
+    });
 
     type TriggerPreparation = Awaited<ReturnType<typeof getCalendarMeetingPreparationForTrigger>>;
 
@@ -930,12 +985,16 @@ async function main(): Promise<void> {
       if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000) return c.json({ ok: false, error: "invalid Twilio voice turn" }, 400);
       const call = await getPhoneCall(userId, callId);
       if (!call || !["bridging", "active"].includes(call.status)) return c.json({ ok: false, error: "unknown or inactive call" }, 404);
-      if (!(await checkRateLimit(userId))) return c.json({ ok: false, error: "rate limit exceeded" }, 429);
-      if (!(await canSpend(userId))) return c.json({ ok: false, error: "usage cap reached" }, 402);
+      const [rateAllowed, spendAllowed] = await Promise.all([checkRateLimit(userId), canSpend(userId)]);
+      if (!rateAllowed) return c.json({ ok: false, error: "rate limit exceeded" }, 429);
+      if (!spendAllowed) return c.json({ ok: false, error: "usage cap reached" }, 402);
       try {
-        const result = await withCliLock(userId, c.req.raw.signal, async () => {
-          const liveCall = await getPhoneCall(userId, callId) ?? call;
-          return runAgent(userId, twilioVoiceTranscript(liveCall, transcript, body.interruptedAssistantSpeech), twilioVoiceHistory(liveCall), config.voiceModel, undefined, c.req.raw.signal, undefined, undefined,
+        const result = await withVoiceCallLock(userId, callId, c.req.raw.signal, async () => {
+          // The call was authenticated and loaded immediately above. Avoid a
+          // second serial store read on every turn; status callbacks remain the
+          // authoritative guard for the next turn.
+          const liveCall = call;
+          const result = await runAgent(userId, twilioVoiceTranscript(liveCall, transcript, body.interruptedAssistantSpeech), twilioVoiceHistory(liveCall), config.voiceModel, undefined, c.req.raw.signal, undefined, undefined,
             { accountId: `account_${userId}`, provider: "voice", conversationId: callId, scope: "private" }, {
             instructions: twilioVoiceInstructions(liveCall),
             ...(speculative ? { toolAllow: [] } : { ownerPrivateRun: true }),
@@ -943,15 +1002,16 @@ async function main(): Promise<void> {
             voiceSessionId: `twilio:${callId}`,
             voiceRoutingHint: liveCall.purpose,
           });
+          if (!speculative) {
+            await appendMessages(userId, [{ role: "user", content: `[Voice call ${callId}] ${transcript}` }, { role: "assistant", content: result.text }]);
+            if (result.cost) await addUsage(userId, result.cost);
+          }
+          return result;
         });
         // Flux can signal an eager end-of-turn before the caller is fully
         // finished. A speculative result is never written to history or usage
         // until the bridge receives the definitive EndOfTurn event and commits
         // it through the idempotent route below.
-        if (!speculative) {
-          await appendMessages(userId, [{ role: "user", content: `[Voice call ${callId}] ${transcript}` }, { role: "assistant", content: result.text }]);
-          if (result.cost) await addUsage(userId, result.cost);
-        }
         return c.json({ ok: true, text: normalizeVoiceText(result.text).slice(0, 5000), cost: result.cost ?? 0, speculative });
       } catch (error) {
         if (error instanceof ApprovalRequiredError && !speculative) {
@@ -1074,17 +1134,21 @@ async function main(): Promise<void> {
       if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000) return c.json({ ok: false, error: "invalid Twilio voice turn" }, 400);
       const call = await getPhoneCall(userId, callId);
       if (!call || !["bridging", "active"].includes(call.status)) return c.json({ ok: false, error: "unknown or inactive call" }, 404);
-      if (!(await checkRateLimit(userId))) return c.json({ ok: false, error: "rate limit exceeded" }, 429);
-      if (!(await canSpend(userId))) return c.json({ ok: false, error: "usage cap reached" }, 402);
+      const [rateAllowed, spendAllowed] = await Promise.all([checkRateLimit(userId), canSpend(userId)]);
+      if (!rateAllowed) return c.json({ ok: false, error: "rate limit exceeded" }, 429);
+      if (!spendAllowed) return c.json({ ok: false, error: "usage cap reached" }, 402);
       const encoder = new TextEncoder();
       const stream = new ReadableStream<Uint8Array>({
         async start(controller) {
           const send = (event: unknown) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
           try {
-            const result = await withCliLock(userId, c.req.raw.signal, async () => {
-              if (!speculative) await appendPhoneCallEvent(userId, callId, { type: "turn_started", summary: "The agent started processing a caller turn." });
-              send({ type: "start", model: config.voiceModel, speculative });
-              const liveCall = await getPhoneCall(userId, callId) ?? call;
+            // Tell the media bridge that generation has started before waiting
+            // on the per-call lease or any observability write. This is the
+            // first latency-sensitive response on the live voice path.
+            send({ type: "start", model: config.voiceModel, speculative });
+            if (!speculative) void appendPhoneCallEvent(userId, callId, { type: "turn_started", summary: "The agent started processing a caller turn." }).catch(() => undefined);
+            const result = await withVoiceCallLock(userId, callId, c.req.raw.signal, async () => {
+              const liveCall = call;
               return runAgent(userId, twilioVoiceTranscript(liveCall, transcript, body.interruptedAssistantSpeech), twilioVoiceHistory(liveCall), config.voiceModel, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined,
                 { accountId: `account_${userId}`, provider: "voice", conversationId: callId, scope: "private" }, {
                 instructions: twilioVoiceInstructions(liveCall),
@@ -1096,12 +1160,12 @@ async function main(): Promise<void> {
                 onToolActivity: async (activity) => {
                   if (speculative) return;
                   const eventType = activity.status === "started" ? "tool_started" : activity.status === "completed" ? "tool_completed" : activity.status === "failed" ? "tool_failed" : undefined;
-                  if (eventType) await appendPhoneCallEvent(userId, callId, { type: eventType, summary: normalizeVoiceText(activity.message).slice(0, 400), toolSlug: activity.toolSlug, ...(activity.receiptId ? { receiptId: activity.receiptId } : {}) });
+                  if (eventType) void appendPhoneCallEvent(userId, callId, { type: eventType, summary: normalizeVoiceText(activity.message).slice(0, 400), toolSlug: activity.toolSlug, ...(activity.receiptId ? { receiptId: activity.receiptId } : {}) }).catch(() => undefined);
                 },
               });
             });
-            if (!speculative) await appendPhoneCallEvent(userId, callId, { type: "turn_completed", summary: "The agent completed the caller turn." });
             send({ type: "done", text: normalizeVoiceText(result.text).slice(0, 5000), cost: result.cost ?? 0, speculative });
+            if (!speculative) void appendPhoneCallEvent(userId, callId, { type: "turn_completed", summary: "The agent completed the caller turn." }).catch(() => undefined);
           } catch (error) {
             if (error instanceof ApprovalRequiredError && !speculative) {
               await notifyOwnerApproval(bot, userId, error);
@@ -2706,8 +2770,29 @@ async function main(): Promise<void> {
     }, workflowServeOptions(resolveWorkflowEndpoint(config.reminderWorkflowUrl, config.webhookUrl, "/workflows/reminder", "Reminder workflows"))));
 
     // QStash failure callbacks are authenticated separately from Workflow
-    // requests. Persist the useful owner-facing state, while keeping the raw
-    // provider payload out of logs and user history.
+    // requests. The callback only validates and enqueues a bounded owner-scoped
+    // work item; projections, notifications, and task recovery run in their
+    // own durable workflow so a slow dashboard/provider cannot exhaust the
+    // callback's delivery window.
+    app.post("/workflows/failure-process", serveWorkflow(async (workflow) => {
+      const payload = workflow.requestPayload as Record<string, unknown>;
+      const userId = Number(payload.userId);
+      if (!Number.isSafeInteger(userId) || userId <= 0) throw new WorkflowNonRetryableError("Invalid workflow failure owner");
+      const bounded = (value: unknown, max = 240): string | undefined => typeof value === "string" && value.trim().length > 0 && value.length <= max ? value.trim() : undefined;
+      const work: WorkflowFailureWork = {
+        userId,
+        ...(bounded(payload.eventId) ? { eventId: bounded(payload.eventId) } : {}),
+        ...(bounded(payload.reminderId) ? { reminderId: bounded(payload.reminderId) } : {}),
+        ...(bounded(payload.jobId) ? { jobId: bounded(payload.jobId) } : {}),
+        ...(bounded(payload.taskId) ? { taskId: bounded(payload.taskId) } : {}),
+        ...(bounded(payload.workflowRunId) ? { workflowRunId: bounded(payload.workflowRunId) } : {}),
+        ...(bounded(payload.workflowPath, 120) ? { workflowPath: bounded(payload.workflowPath, 120) } : {}),
+      };
+      await workflow.run("process-workflow-failure", async () => processWorkflowFailureWork(work));
+    }, workflowServeOptions(resolveWorkflowEndpoint("", config.webhookUrl, "/workflows/failure-process", "Workflow failure processing"))));
+
+    // QStash failure callbacks are authenticated separately from Workflow
+    // requests. Keep this acknowledgement path intentionally small.
     app.post("/workflows/failure", async (c) => {
       const signature = c.req.header("upstash-signature");
       const raw = await c.req.text();
@@ -2728,57 +2813,29 @@ async function main(): Promise<void> {
       const userId = Number(nested.userId);
       const errorMessage = "QStash delivery failed after retry exhaustion";
       recordFailure("workflow_failure", new Error(errorMessage), { workflow: "qstash-failure-callback", userId: Number.isSafeInteger(userId) ? userId : undefined });
-      if (Number.isSafeInteger(userId) && userId > 0) {
-        if (typeof nested.eventId === "string" && nested.eventId.length > 0) {
-          const event = await getTriggerEvent(nested.eventId);
-          if (event && event.userId === userId) {
-            const failure = triggerWorkflowExhaustion(event);
-            if (failure) {
-              await updateTriggerEvent(event.eventId, failure);
-              const projection = await ensureTriggerWebProjection({
-                userId,
-                eventId: event.eventId,
-                triggerSlug: event.triggerSlug,
-                summary: event.summary,
-                result: failure.result,
-                status: failure.status,
-              });
-              await updateTriggerEvent(event.eventId, { webThreadId: projection.threadId, webRunId: projection.runId });
-              await publishWebNotification({ userId, eventId: event.eventId, threadId: projection.threadId, runId: projection.runId });
-            }
-          }
-        }
-        // A queued attempt can fail after the owner pauses a reminder. The
-        // pause is authoritative; a stale QStash callback must not resurrect
-        // failure state or make the dashboard show a false terminal error.
-        if (typeof nested.reminderId === "string") {
-          const reminder = await getReminder(userId, nested.reminderId);
-          if (reminder && reminder.status !== "paused" && reminder.status !== "cancelled") {
-            await updateReminder(userId, nested.reminderId, { status: "failed", deliveryError: errorMessage });
-          }
-        }
-        if (typeof nested.jobId === "string") await updateJob(userId, nested.jobId, { deliveryError: errorMessage });
-        const failedRunId = typeof body.workflowRunId === "string" ? body.workflowRunId : undefined;
-        const workflowUrl = typeof body.url === "string" ? body.url : body.workflowUrl;
-        const workflowPath = typeof workflowUrl === "string" ? (() => { try { return new URL(workflowUrl as string).pathname; } catch { return ""; } })() : "";
-        if (failedRunId && workflowPath === "/workflows/task") {
-          let taskPayload;
-          try { taskPayload = parseTaskWorkflowPayload(nested); }
-          catch { taskPayload = undefined; }
-          if (taskPayload && taskPayload.userId === userId) {
-            try {
-              const recovery = await recoverTaskAfterWorkflowFailure(taskPayload.userId, taskPayload.taskId, failedRunId);
-              if (recovery?.shouldEnqueue) {
-                await enqueueTaskWithClaim(taskPayload.userId, taskPayload.taskId, recovery.task.runAt ?? Date.now());
-              }
-            } catch (error) {
-              logger.warn({ userId, taskId: taskPayload.taskId, workflowRunId: failedRunId, errorClass: error instanceof Error ? error.name : "unknown" }, "Task workflow failure recovery could not be queued");
-              return c.json({ ok: false, error: "task recovery could not be queued" }, 503);
-            }
-          }
-        }
+      if (!Number.isSafeInteger(userId) || userId <= 0) return c.json({ ok: true, accepted: true, ignored: true }, 202);
+      const failedRunId = typeof body.workflowRunId === "string" ? body.workflowRunId.trim().slice(0, 240) : undefined;
+      const workflowUrl = typeof body.url === "string" ? body.url : body.workflowUrl;
+      const workflowPath = typeof workflowUrl === "string" ? (() => { try { return new URL(workflowUrl).pathname; } catch { return ""; } })() : "";
+      const bounded = (value: unknown, max = 240): string | undefined => typeof value === "string" && value.trim().length > 0 && value.length <= max ? value.trim() : undefined;
+      const work: WorkflowFailureWork = {
+        userId,
+        ...(bounded(nested.eventId) ? { eventId: bounded(nested.eventId) } : {}),
+        ...(bounded(nested.reminderId) ? { reminderId: bounded(nested.reminderId) } : {}),
+        ...(bounded(nested.jobId) ? { jobId: bounded(nested.jobId) } : {}),
+        ...(bounded(nested.taskId) ? { taskId: bounded(nested.taskId) } : {}),
+        ...(failedRunId ? { workflowRunId: failedRunId } : {}),
+        ...(workflowPath ? { workflowPath } : {}),
+      };
+      try {
+        const processingWorkflowRunId = await enqueueWorkflowFailureProcessing(work);
+        logger.info({ userId, workflowRunId: processingWorkflowRunId, failedWorkflowRunId: failedRunId, workflowPath }, "QStash failure work queued");
+        return c.json({ ok: true, accepted: true, workflowRunId: processingWorkflowRunId }, 202);
+      } catch (error) {
+        logger.warn({ userId, failedWorkflowRunId: failedRunId, errorName: error instanceof Error ? error.name : "UnknownError" }, "QStash failure work could not be queued");
+        c.header("Retry-After", "15");
+        return c.json({ ok: false, error: "failure work could not be queued", retryable: true }, 503);
       }
-      return c.json({ ok: true });
     });
 
     app.post("/workflows/job", serveWorkflow(async (workflow) => {
@@ -3361,7 +3418,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
       const payload = workflow.requestPayload as { eventId: string; userId: number; workflowVersion?: unknown };
       // Existing queued runs have no version field and retain their original
       // step graph. New publications pin their graph in the durable payload.
-      let workflowVersion: "legacy" | "v2" | "v3";
+      let workflowVersion: "legacy" | "v2" | "v3" | "v4";
       try { workflowVersion = triggerWorkflowVersionForPayload(payload.workflowVersion); }
       catch (error) { throw new WorkflowNonRetryableError(error instanceof Error ? error.message : "Unsupported trigger workflow version."); }
       const context = await workflow.run("load-trigger-event-context", async () => {
@@ -3373,8 +3430,34 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
         const representativeProfile = preparation ? await getMeetingRepresentativeProfile(event.userId) : undefined;
         return { event, preparation, representativeProfile };
       });
-      const { event, preparation, representativeProfile } = context;
+      let { preparation, representativeProfile } = context;
+      const { event } = context;
       if (event.status === "completed") return;
+      if (workflowVersion === "v4") {
+        await workflow.run("prepare-trigger-event", async () => {
+          const prepared = preparation ?? await persistCalendarMeetingPreparation(event.userId, event.eventId, event.triggerSlug, {}, event.calendarPreparation);
+          const operating = await recordOperatingSignal(event.userId, {
+            eventId: event.eventId,
+            triggerSlug: event.triggerSlug,
+            summary: event.summary,
+            ...(prepared ? { calendarMeeting: { id: prepared.id, title: prepared.title, lifecycle: prepared.lifecycle, startAt: prepared.startAt } } : {}),
+          });
+          await updateTriggerEvent(event.eventId, {
+            operatingAction: operating.action,
+            operatingReason: operating.reason,
+            operatingObservationId: operating.observationId,
+            ...(operating.commitmentId ? { operatingCommitmentId: operating.commitmentId } : {}),
+            error: undefined,
+          });
+          await resumeMissionsFromComposioEvent(event.userId, event.eventId);
+        });
+        if (!preparation && event.calendarPreparation) {
+          ({ preparation, representativeProfile } = await workflow.run("load-prepared-trigger-context", async () => ({
+            preparation: await getCalendarMeetingPreparationForTrigger(event.userId, event.eventId),
+            representativeProfile: await getMeetingRepresentativeProfile(event.userId),
+          })));
+        }
+      }
       const saveEventStep = (stepName: string, patch: Parameters<typeof updateTriggerEvent>[1]) => workflow.run(stepName, async () => {
         await updateTriggerEvent(event.eventId, patch);
       });
@@ -3417,7 +3500,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
         const executeTriggerAgent = async () => {
           return executeTriggerAgentForEvent(event);
         };
-        const workflowResult = workflowVersion === "v3"
+        const workflowResult = workflowVersion === "v3" || workflowVersion === "v4"
           ? await (async (): Promise<TriggerAgentExecutionResponse> => {
             const response = await workflow.call<{ ok?: boolean } & TriggerAgentExecutionResponse>("run-trigger-agent", {
               url: triggerAgentWorkflowUrl(),
@@ -3517,7 +3600,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             return;
           }
           let resumedModelTimedOut = false;
-          const resumed = workflowVersion === "v3"
+          const resumed = workflowVersion === "v3" || workflowVersion === "v4"
             ? await (async (): Promise<Awaited<ReturnType<typeof runAgent>>> => {
               const response = await workflow.call<{ ok?: boolean } & TriggerAgentExecutionResponse>("resume-trigger-agent", {
                 url: triggerAgentWorkflowUrl(),
@@ -4109,17 +4192,35 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
         );
         const event = await parseTriggerWebhook(body, headers, config.composioWebhookSecret);
         if (event) {
-          const numericUserId = Number(event.userId.replace(/^user_/, ""));
-          if (!Number.isSafeInteger(numericUserId) || numericUserId <= 0 || !event.userId) return c.json({ ok: false, error: "trigger owner is not verified" }, 403);
-          const session = await getSession(numericUserId);
+          const numericUserId = composioWebhookOwnerId(event.userId);
+          if (!numericUserId) {
+            logger.warn({ eventId: event.eventId, eventType: event.eventType, triggerId: event.triggerId }, "Composio webhook owner identity was rejected");
+            return c.json({ ok: false, error: "trigger owner is not verified" }, 403);
+          }
+          // Trigger ownership lives in the compact profile domain. Do not
+          // hydrate history, assets, or SDK rows on an authenticated webhook.
+          const session = await getSession(numericUserId, false, { domains: ["profile"] });
           const triggerId = event.triggerId;
           // Ordinary trigger messages must match an explicitly registered
           // trigger. Composio lifecycle events can be emitted without one;
           // their signed owner identity is still required, but they must not
           // be mistaken for an instruction to execute an external action.
-          if (event.eventType === "composio.trigger.message" && (!triggerId || !session.triggerIds.includes(triggerId))) return c.json({ ok: false, error: "trigger owner is not verified" }, 403);
+          if (event.eventType === "composio.trigger.message" && (!triggerId || !session.triggerIds.includes(triggerId))) {
+            logger.warn({ eventId: event.eventId, eventType: event.eventType, triggerId, userId: numericUserId }, "Composio webhook trigger ownership was rejected");
+            return c.json({ ok: false, error: "trigger owner is not verified" }, 403);
+          }
           const summary = safeTriggerSummary(event);
           const agentContext = safeTriggerAgentContext(event);
+          const calendarCandidate = parseGoogleCalendarMeetingTrigger(event.triggerSlug, event.payload);
+          const calendarPreparation = calendarCandidate
+            ? (() => {
+              const { meetingUrl, ...safeCandidate } = calendarCandidate;
+              return {
+                ...safeCandidate,
+                ...(meetingUrl ? { sealedMeetingUrl: sealCalendarMeetingUrl(meetingUrl) } : {}),
+              };
+            })()
+            : undefined;
           const intake = await createTriggerEventIfAbsent({
             eventId: event.eventId,
             userId: numericUserId,
@@ -4130,6 +4231,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             triggerSlug: event.triggerSlug,
             summary,
             ...(agentContext ? { agentContext } : {}),
+            ...(calendarPreparation ? { calendarPreparation } : {}),
             status: "queued",
             createdAt: Date.now(),
             updatedAt: Date.now(),
@@ -4144,22 +4246,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           // An event without a workflow ID is safe to resume after a process
           // crash: QStash receives the same deterministic workflowRunId.
           if (!intake.created && (record.workflowRunId || record.status !== "queued")) return c.json({ ok: true, duplicate: true });
-          const preparation = await persistCalendarMeetingPreparation(numericUserId, event.eventId, event.triggerSlug, event.payload);
-          const operating = await recordOperatingSignal(numericUserId, {
-            eventId: event.eventId,
-            triggerSlug: event.triggerSlug,
-            summary,
-            ...(preparation ? { calendarMeeting: { id: preparation.id, title: preparation.title, lifecycle: preparation.lifecycle, startAt: preparation.startAt } } : {}),
-          });
-          await updateTriggerEvent(event.eventId, {
-            operatingAction: operating.action,
-            operatingReason: operating.reason,
-            operatingObservationId: operating.observationId,
-            ...(operating.commitmentId ? { operatingCommitmentId: operating.commitmentId } : {}),
-            error: undefined,
-          });
           try {
-            const resumedMissions = await resumeMissionsFromComposioEvent(numericUserId, event.eventId);
             const queued = await workflowClient().trigger({
               url: triggerWorkflowUrl(),
               body: { eventId: event.eventId, userId: numericUserId, workflowVersion: TRIGGER_WORKFLOW_VERSION },
@@ -4170,8 +4257,8 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
               ...(workflowFailureUrl() ? { failureUrl: workflowFailureUrl() } : {}),
             });
             await updateTriggerEvent(event.eventId, { workflowRunId: queued.workflowRunId });
-            logger.info({ triggerSlug: event.triggerSlug, userId: numericUserId, workflowRunId: queued.workflowRunId, resumedMissions }, "Trigger queued");
-            return c.json({ ok: true, queued: true, eventId: event.eventId, workflowRunId: queued.workflowRunId, ...(resumedMissions ? { resumedMissions } : {}) }, 202);
+            logger.info({ triggerSlug: event.triggerSlug, userId: numericUserId, workflowRunId: queued.workflowRunId }, "Trigger queued");
+            return c.json({ ok: true, queued: true, eventId: event.eventId, workflowRunId: queued.workflowRunId }, 202);
           } catch (error) {
             await updateTriggerEvent(event.eventId, { status: "queued", error: "Trigger workflow could not be queued; Composio may safely retry this event." });
             logger.error({ errorName: error instanceof Error ? error.name : "UnknownError", userId: numericUserId, eventId: event.eventId }, "Trigger workflow enqueue failed");

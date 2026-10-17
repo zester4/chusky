@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import { JevClient } from "../src/decisions/jev.js";
-import { computeNativeToolRoute, nativeToolManifest, routeNativeToolsForTurn, searchComposioGatewayManifest, searchDiscoveredToolManifest, searchNativeToolManifest } from "../src/decisions/nativeToolRouter.js";
+import { computeNativeToolRoute, enforceDirectMeetingJoinRoute, isDirectMeetingJoinRequest, nativeToolManifest, routeNativeToolsForTurn, searchComposioGatewayManifest, searchDiscoveredToolManifest, searchNativeToolManifest } from "../src/decisions/nativeToolRouter.js";
 
 const mutableConfig = config as unknown as Record<string, unknown>;
 
@@ -171,6 +171,22 @@ test("native discovery finds the primary tool across browser, meeting, artifact,
     const found = searchNativeToolManifest(query);
     assert.equal(found[0]?.slug, expectedSlug, `${query} should rank ${expectedSlug} first`);
   }
+});
+
+test("direct meeting links use the dedicated join route and cannot fall through to browser", () => {
+  const direct = [...tools(), { type: "function", function: { name: "CHUCK_MEETING_JOIN", description: "Join a supported meeting", parameters: { type: "object", properties: { meetingUrl: { type: "string" } }, required: ["meetingUrl"] } } }];
+  const query = "Join this meeting and tell me how it went: https://meet.google.com/uhi-ovkv-njt";
+  assert.equal(isDirectMeetingJoinRequest(query), true);
+  const route = enforceDirectMeetingJoinRoute(direct, {
+    tools: direct,
+    source: "fallback",
+    candidateCount: direct.length,
+    selected: direct.map((tool: any) => tool.function.name),
+  }, query);
+  const names = route.tools.map((tool: any) => tool.function.name);
+  assert.ok(names.includes("CHUCK_MEETING_JOIN"));
+  assert.ok(!names.includes("CHUCK_BROWSER"));
+  assert.ok(!route.selected.includes("CHUCK_BROWSER"));
 });
 
 test("native discovery routes durable lead-generation campaigns to their campaign controller", () => {

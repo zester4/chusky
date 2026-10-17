@@ -37,8 +37,9 @@ test("workflow endpoints always use the configured public HTTPS URL", () => {
 test("trigger workflow payloads keep old runs on the legacy step graph and pin new runs", () => {
   assert.equal(triggerWorkflowVersionForPayload(undefined), "legacy");
   assert.equal(triggerWorkflowVersionForPayload(2), "v2");
-  assert.equal(triggerWorkflowVersionForPayload(TRIGGER_WORKFLOW_VERSION), "v3");
-  assert.throws(() => triggerWorkflowVersionForPayload(4), /Unsupported trigger workflow version/);
+  assert.equal(triggerWorkflowVersionForPayload(3), "v3");
+  assert.equal(triggerWorkflowVersionForPayload(TRIGGER_WORKFLOW_VERSION), "v4");
+  assert.throws(() => triggerWorkflowVersionForPayload(5), /Unsupported trigger workflow version/);
   assert.equal(triggerAgentWorkflowRunId("evt_123"), triggerAgentWorkflowRunId("evt_123"));
   assert.notEqual(triggerAgentWorkflowRunId("evt_123"), triggerAgentWorkflowRunId("evt_456"));
 });

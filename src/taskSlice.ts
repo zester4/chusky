@@ -1,8 +1,8 @@
 import { extendMissionDurationIfEligible } from "./store.js";
 import { config } from "./config.js";
-import { appendSdkRunHistoryToSession, getMeetingRepresentativeProfile } from "./store.js";
+import { appendSdkRunHistory, appendSdkRunHistoryToSession, getMeetingRepresentativeProfile } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
-import { getTelegramChatId, getSession, getSessionWithSdkRuns, saveSession, addUsage, canSpend, getApproval, getTask, getMission, isTaskCancellationRequested, recordMissionSlice, waitMission, resumeMissionFromTimer, checkpointMission, completeTask, updateTask, updateMission, acquireMissionLease, renewMissionLease, releaseMissionLease, acquireMissionStepLease, renewMissionStepLease, releaseMissionStepLease, missionBudgetPreflight, MISSION_ZERO_COST_BUDGET_ERROR, getRecallMeeting, getMeetingContact } from "./store.js";
+import { getTelegramChatId, getSession, getSessionWithSdkRuns, getSdkRun, saveSdkRun, saveSession, addUsage, canSpend, getApproval, getTask, getMission, isTaskCancellationRequested, recordMissionSlice, waitMission, resumeMissionFromTimer, checkpointMission, completeTask, updateTask, updateMission, acquireMissionLease, renewMissionLease, releaseMissionLease, acquireMissionStepLease, renewMissionStepLease, releaseMissionStepLease, missionBudgetPreflight, MISSION_ZERO_COST_BUDGET_ERROR, getRecallMeeting, getMeetingContact } from "./store.js";
 import { runAgent as defaultRunAgent, ApprovalRequiredError } from "./agent.js";
 import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
@@ -26,6 +26,37 @@ export const MISSION_STEP_LEASE_RENEWAL_MS = 30_000;
 // turning every active worker into a fixed-rate Redis traffic source. The
 // workflow lease and task state remain the durable stop authorities.
 const TASK_CANCELLATION_CHECK_MS = 60_000;
+
+/** Update an SDK run in its durable row instead of rewriting the whole owner
+ * session. The session fallback is retained for memory/legacy deployments. */
+async function updateTaskSdkRun(
+  task: TaskRecord,
+  mutator: (run: NonNullable<Awaited<ReturnType<typeof getSdkRun>>>) => void,
+  history?: Parameters<typeof appendSdkRunHistory>[3],
+): Promise<NonNullable<Awaited<ReturnType<typeof getSdkRun>>> | undefined> {
+  if (!task.sdkRunId || !task.sdkThreadId) return undefined;
+  const direct = await getSdkRun(task.userId, task.sdkThreadId, task.sdkRunId);
+  if (direct) {
+    const next = structuredClone(direct);
+    mutator(next);
+    try {
+      if (await saveSdkRun(task.userId, task.sdkThreadId, next)) {
+        if (history?.length) await appendSdkRunHistory(task.userId, task.sdkThreadId, next.id, history);
+        return next;
+      }
+    } catch (error) {
+      logger.debug({ errorName: error instanceof Error ? error.name : "UnknownError", taskId: task.id, runId: task.sdkRunId }, "Direct task SDK run update unavailable; using legacy session projection");
+    }
+  }
+  const current = await getSessionWithSdkRuns(task.userId, task.sdkThreadId);
+  const thread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId);
+  const run = thread?.runs.find((item) => item.id === task.sdkRunId);
+  if (!run) return undefined;
+  mutator(run);
+  if (history?.length) appendSdkRunHistoryToSession(current, task.sdkThreadId, run.id, history);
+  await saveSession(task.userId, current);
+  return run;
+}
 
 export interface TaskSliceContext {
   workflowRunId?: string;
@@ -252,8 +283,13 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
     const durationSeconds = mission ? Math.max(1, Math.floor(missionBudgetPreflight(mission, { steps: 0 }).remaining.durationSeconds)) : task.composerBudgetSeconds ?? sdkDurationSeconds(task.sdkBudget?.duration);
     if (task.sdkRunId && durationSeconds && task.sdkStartedAt && Date.now() - task.sdkStartedAt >= durationSeconds * 1000) throw new Error("The configured SDK run duration budget has been exhausted.");
     if (task.sdkRunId && task.sdkThreadId) {
-      const current = await getSessionWithSdkRuns(task.userId, task.sdkThreadId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
-      if (sdkRun && sdkRun.status === "queued") { sdkRun.status = "running"; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.started", at: Date.now() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); }
+      const sdkRun = await updateTaskSdkRun(task, (run) => {
+        if (run.status !== "queued") return;
+        run.status = "running";
+        run.events.push({ id: `evt_${randomUUID()}`, type: "run.started", at: Date.now() });
+        run.updatedAt = Date.now();
+      });
+      if (sdkRun) await persistSdkCompanyRun(sdkRun);
     }
     const budgetAbort = new AbortController();
     const onLeaseLost = () => budgetAbort.abort(new Error("Durable task lease lost; stopping before another worker can continue."));
@@ -346,8 +382,12 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
     catch (error) {
       const cancelled = (await getTask(task.userId, task.id))?.status === "cancel_requested" || (await getTask(task.userId, task.id))?.status === "cancelled";
       if (cancelled && task.sdkRunId && task.sdkThreadId) {
-        const current = await getSessionWithSdkRuns(task.userId, task.sdkThreadId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
-        if (sdkRun) { sdkRun.status = "cancelled"; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.cancelled", at: Date.now() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); }
+        const sdkRun = await updateTaskSdkRun(task, (run) => {
+          run.status = "cancelled";
+          run.events.push({ id: `evt_${randomUUID()}`, type: "run.cancelled", at: Date.now() });
+          run.updatedAt = Date.now();
+        });
+        if (sdkRun) await persistSdkCompanyRun(sdkRun);
       }
       const missionLeaseReason = missionLeaseLost?.signal.reason;
       if (mission && missionLeaseReason instanceof Error && /Mission lease/.test(missionLeaseReason.message)) {
@@ -445,8 +485,14 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
         }
       }
       if (task.sdkRunId && task.sdkThreadId) {
-        const current = await getSessionWithSdkRuns(task.userId, task.sdkThreadId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
-        if (sdkRun) { sdkRun.status = "queued"; sdkRun.output = undefined; sdkRun.error = undefined; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.waiting_for_task", at: Date.now(), text: new Date(result.taskWait.runAt).toISOString() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); }
+        const sdkRun = await updateTaskSdkRun(task, (run) => {
+          run.status = "queued";
+          run.output = undefined;
+          run.error = undefined;
+          run.events.push({ id: `evt_${randomUUID()}`, type: "run.waiting_for_task", at: Date.now(), text: new Date(result.taskWait!.runAt).toISOString() });
+          run.updatedAt = Date.now();
+        });
+        if (sdkRun) await persistSdkCompanyRun(sdkRun);
       }
       return { status: "queued" as const, waiting: true, message: result.text, checkpoint: result.taskWait.checkpoint, nextAction: postWakeNextAction, runAt: result.taskWait.runAt };
     }
@@ -530,11 +576,20 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
     }
     if (task.sdkRunId && task.sdkThreadId) {
       if (result.cost) await addUsage(task.userId, result.cost);
-      const current = await getSessionWithSdkRuns(task.userId, task.sdkThreadId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
-      if (sdkRun) { sdkRun.status = "completed"; sdkRun.output = result.text; sdkRun.artifacts = sdkRunArtifacts(result.generatedFiles); sdkRun.cost = result.cost; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.completed", at: Date.now() }); sdkRun.updatedAt = Date.now(); if (sdkThread) { sdkThread.updatedAt = sdkRun.updatedAt; appendSdkRunHistoryToSession(current, sdkThread.id, sdkRun.id, [
-        { role: "user", content: `${sdkRun.input || "Attached file(s)"}${sdkRun.attachments?.length ? `\n[Attachments: ${sdkRun.attachments.map((file) => file.name).join(", ")}]` : ""}`, createdAt: sdkRun.createdAt },
-        { role: "assistant", content: result.text, createdAt: sdkRun.updatedAt },
-      ]); } await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); }
+      const runInput = await getSdkRun(task.userId, task.sdkThreadId, task.sdkRunId);
+      const settledAt = Date.now();
+      const sdkRun = await updateTaskSdkRun(task, (run) => {
+        run.status = "completed";
+        run.output = result.text;
+        run.artifacts = sdkRunArtifacts(result.generatedFiles);
+        run.cost = result.cost;
+        run.events.push({ id: `evt_${randomUUID()}`, type: "run.completed", at: settledAt });
+        run.updatedAt = settledAt;
+      }, runInput ? [
+        { role: "user", content: `${runInput.input || "Attached file(s)"}${runInput.attachments?.length ? `\n[Attachments: ${runInput.attachments.map((file) => file.name).join(", ")}]` : ""}`, createdAt: runInput.createdAt },
+        { role: "assistant", content: result.text, createdAt: settledAt },
+      ] : undefined);
+      if (sdkRun) await persistSdkCompanyRun(sdkRun);
       await completeTask(task.userId, task.id, result.text);
     }
     if (task.meetingFollowUp) {
@@ -550,7 +605,15 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
     return { status: "blocked" as const, message: "Task ran and is awaiting review or a next instruction", checkpoint: latest?.checkpoint, nextAction: latest?.nextAction ?? "Review the task update and continue when ready." };
   } catch (error) {
     if (error instanceof ApprovalRequiredError) {
-      if (task.sdkRunId && task.sdkThreadId) { const current = await getSessionWithSdkRuns(task.userId, task.sdkThreadId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId); if (sdkRun) { sdkRun.status = "requires_approval"; sdkRun.approvalId = error.approvalId; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.approval_required", at: Date.now() }); sdkRun.updatedAt = Date.now(); await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); } }
+      if (task.sdkRunId && task.sdkThreadId) {
+        const sdkRun = await updateTaskSdkRun(task, (run) => {
+          run.status = "requires_approval";
+          run.approvalId = error.approvalId;
+          run.events.push({ id: `evt_${randomUUID()}`, type: "run.approval_required", at: Date.now() });
+          run.updatedAt = Date.now();
+        });
+        if (sdkRun) await persistSdkCompanyRun(sdkRun);
+      }
       if (mission) {
         const approval = await getApproval(task.userId, error.approvalId);
         const expiresAt = approval?.expiresAt;
@@ -559,7 +622,16 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
       }
       return { status: "blocked" as const, message: `Approval required for ${error.toolSlug}`, nextAction: "Approve or deny the pending action, then retry the task." };
     }
-    if (task.sdkRunId && task.sdkThreadId) { const current = await getSessionWithSdkRuns(task.userId, task.sdkThreadId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId); if (sdkRun) { sdkRun.status = "failed"; sdkRun.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.failed", at: Date.now(), text: sdkRun.error.message }); sdkRun.updatedAt = Date.now(); await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); } }
+    if (task.sdkRunId && task.sdkThreadId) {
+      const message = error instanceof Error ? error.message : "Agent failed";
+      const sdkRun = await updateTaskSdkRun(task, (run) => {
+        run.status = "failed";
+        run.error = { code: "agent_error", message };
+        run.events.push({ id: `evt_${randomUUID()}`, type: "run.failed", at: Date.now(), text: message });
+        run.updatedAt = Date.now();
+      });
+      if (sdkRun) await persistSdkCompanyRun(sdkRun);
+    }
     throw error;
   }
 }

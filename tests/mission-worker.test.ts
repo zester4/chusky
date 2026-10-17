@@ -92,6 +92,7 @@ test("mission worker fences provider tools while retaining lifecycle controls", 
   assert.deepEqual(allowed?.filter((tool) => tool === "GMAIL_SEND_EMAIL" || tool === "HUBSPOT_CREATE_NOTE"), ["GMAIL_SEND_EMAIL", "HUBSPOT_CREATE_NOTE"]);
   assert.equal(allowed?.includes("GITHUB_DELETE_REPOSITORY"), false);
   for (const control of MISSION_WORKER_CONTROL_TOOLS) assert.equal(allowed?.includes(control), true);
+  assert.ok(missionWorkerToolAllowlist(["COMPOSIO_MULTI_EXECUTE_TOOL"])?.includes("COMPOSIO_EXECUTE_TOOL"));
   assert.deepEqual(missionWorkerToolAllowlist(undefined, ["TEST_SAFE_TOOL"]), ["TEST_SAFE_TOOL"]);
 });
 

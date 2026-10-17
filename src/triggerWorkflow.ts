@@ -8,22 +8,24 @@ import { createHash } from "node:crypto";
 
 export { resolveWorkflowEndpoint } from "./workflowUrls.js";
 
-// v3 moves the long-running agent execution behind WorkflowContext.call. Keep
-// v2 and legacy graphs readable so an already queued workflow can replay its
-// original durable steps without a step-name or ordering mismatch.
-export const TRIGGER_WORKFLOW_VERSION = 3 as const;
+// v4 moves provider-event preparation behind the durable workflow as well as
+// keeping the long-running agent execution behind WorkflowContext.call. Keep
+// older graphs readable so already queued workflows can replay their original
+// durable steps without a step-name or ordering mismatch.
+export const TRIGGER_WORKFLOW_VERSION = 4 as const;
 
 // WorkflowContext.call forwards duration strings to QStash. Keep the unit
 // explicit because the installed SDK's numeric timeout shorthand is passed
 // through as a unitless value and rejected by the workflow service.
 export const TRIGGER_AGENT_WORKFLOW_TIMEOUT = "900s" as const;
 
-export type TriggerWorkflowVersion = "legacy" | "v2" | "v3";
+export type TriggerWorkflowVersion = "legacy" | "v2" | "v3" | "v4";
 
 export function triggerWorkflowVersionForPayload(version: unknown): TriggerWorkflowVersion {
   if (version === undefined) return "legacy";
   if (version === 2) return "v2";
-  if (version === TRIGGER_WORKFLOW_VERSION) return "v3";
+  if (version === 3) return "v3";
+  if (version === TRIGGER_WORKFLOW_VERSION) return "v4";
   throw new Error("Unsupported trigger workflow version.");
 }
 
@@ -95,6 +97,43 @@ export function workflowServeOptions(url: string): {
 export function workflowFailureUrl(): string | undefined {
   if (!config.webhookUrl || !config.qstashCurrentSigningKey || !config.qstashNextSigningKey) return undefined;
   return `${config.webhookUrl.replace(/\/+$/, "")}/workflows/failure`;
+}
+
+export type WorkflowFailureWork = {
+  userId: number;
+  eventId?: string;
+  reminderId?: string;
+  jobId?: string;
+  taskId?: string;
+  workflowRunId?: string;
+  workflowPath?: string;
+};
+
+/** Internal durable queue for the signed failure callback's slow projections. */
+export function workflowFailureProcessingUrl(): string {
+  return resolveWorkflowEndpoint(config.workflowFailureProcessingUrl, config.webhookUrl, "/workflows/failure-process", "Workflow failure processing");
+}
+
+export async function enqueueWorkflowFailureProcessing(payload: WorkflowFailureWork): Promise<string> {
+  if (!config.webhookUrl || !config.qstashToken) throw new Error("Workflow failure processing requires WEBHOOK_URL and QSTASH_TOKEN");
+  const stable = createHash("sha256").update(JSON.stringify([
+    payload.userId,
+    payload.eventId ?? "",
+    payload.reminderId ?? "",
+    payload.jobId ?? "",
+    payload.taskId ?? "",
+    payload.workflowRunId ?? "",
+    payload.workflowPath ?? "",
+  ])).digest("hex").slice(0, 40);
+  const workflow = await workflowClient().trigger({
+    url: workflowFailureProcessingUrl(),
+    body: payload,
+    workflowRunId: `workflow-failure-${stable}`,
+    retries: 3,
+    retryDelay: "1000 * (1 + retried)",
+    flowControl: { key: `chusky-failure-user-${payload.userId}`, parallelism: 2, rate: 2, period: "1s" },
+  });
+  return workflow.workflowRunId;
 }
 
 /**

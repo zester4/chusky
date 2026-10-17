@@ -115,6 +115,62 @@ export function setSdkTaskWorkflowEnqueuerForTests(enqueuer?: typeof enqueueTask
 }
 
 const activeRuns = new Map<string, AbortController>();
+type AccountOverviewPayload = Record<string, unknown>;
+type AccountOverviewCacheEntry = {
+  value: AccountOverviewPayload;
+  freshUntil: number;
+  staleUntil: number;
+  refresh?: Promise<AccountOverviewPayload>;
+};
+const accountOverviewCache = new Map<string, AccountOverviewCacheEntry>();
+const ACCOUNT_OVERVIEW_FRESH_MS = 2_000;
+const ACCOUNT_OVERVIEW_STALE_MS = 10_000;
+const ACCOUNT_OVERVIEW_CACHE_LIMIT = 256;
+
+function cloneAccountOverview(value: AccountOverviewPayload): AccountOverviewPayload {
+  return structuredClone(value);
+}
+
+function pruneAccountOverviewCache(now = Date.now()): void {
+  for (const [key, entry] of accountOverviewCache) {
+    if (entry.staleUntil <= now && !entry.refresh) accountOverviewCache.delete(key);
+  }
+  while (accountOverviewCache.size > ACCOUNT_OVERVIEW_CACHE_LIMIT) {
+    const oldest = [...accountOverviewCache.entries()].sort((left, right) => left[1].freshUntil - right[1].freshUntil)[0];
+    if (!oldest) break;
+    accountOverviewCache.delete(oldest[0]);
+  }
+}
+
+/** Test-only invalidation; production entries expire quickly and are owner-keyed. */
+export function clearAccountOverviewCacheForTests(): void {
+  accountOverviewCache.clear();
+}
+
+function accountOverviewCacheKey(owner: SdkOwner, webAuthUserId?: string): string {
+  return `${owner.userId}:${webAuthUserId ?? "-"}`;
+}
+
+function refreshAccountOverview(key: string, load: () => Promise<AccountOverviewPayload>): Promise<AccountOverviewPayload> {
+  const existing = accountOverviewCache.get(key);
+  if (existing?.refresh) return existing.refresh;
+  const refresh = load().then((value) => {
+    const now = Date.now();
+    accountOverviewCache.set(key, { value: cloneAccountOverview(value), freshUntil: now + ACCOUNT_OVERVIEW_FRESH_MS, staleUntil: now + ACCOUNT_OVERVIEW_FRESH_MS + ACCOUNT_OVERVIEW_STALE_MS });
+    pruneAccountOverviewCache(now);
+    return cloneAccountOverview(value);
+  }).catch((error) => {
+    const current = accountOverviewCache.get(key);
+    if (current?.refresh === refresh) {
+      current.refresh = undefined;
+      if (current.staleUntil <= Date.now()) accountOverviewCache.delete(key);
+    }
+    throw error;
+  });
+  if (existing) existing.refresh = refresh;
+  else accountOverviewCache.set(key, { value: {}, freshUntil: 0, staleUntil: 0, refresh });
+  return refresh;
+}
 type SdkAuditWriter = (userId: number, action: string, requestId: string, status: number) => Promise<void>;
 let sdkAuditWriterForTests: SdkAuditWriter | undefined;
 /** Test-only seam for failures in post-response SDK audit persistence. */
@@ -1453,25 +1509,37 @@ async function loadSdkExecutionContext(userId: number, threadId: string): Promis
   return { session: legacySession, thread: legacyThread, legacyProjection: true };
 }
 
-function dashboardAgentHistory(c: any, session: Awaited<ReturnType<typeof getSession>>, threadHistory: AccountHistoryMessage[]): AccountHistoryMessage[] {
-  if (!dashboardRequest(c) || !session.history.length) return threadHistory;
-  // Keep the SDK thread as a UI projection while the account session remains
-  // the canonical private conversation shared with iMessage and other private
-  // channel adapters. Remove entries already projected into the thread without
-  // collapsing repeated user messages with identical text.
-  const remaining = new Map<string, number>();
-  for (const message of session.history) {
-    const key = `${message.role}\u0000${message.content}`;
-    remaining.set(key, (remaining.get(key) ?? 0) + 1);
-  }
-  const threadOnly = threadHistory.filter((message) => {
-    const key = `${message.role}\u0000${message.content}`;
-    const count = remaining.get(key) ?? 0;
-    if (!count) return true;
-    remaining.set(key, count - 1);
-    return false;
+/**
+ * Rebuild the model-facing dashboard history from this thread's own settled
+ * runs. The persisted thread history is a projection and older deployments
+ * could have polluted it with account-wide history, so it is not trusted as a
+ * model-context boundary during migration. An unavailable run list fails
+ * closed to an empty context rather than risking another cross-thread leak.
+ */
+export function dashboardThreadHistoryFromRuns(runs: SdkRunRecord[], maxMessages = Math.min(80, Math.max(2, config.maxHistory * 2))): SdkThreadRecord["history"] {
+  const seen = new Set<string>();
+  const ordered = [...runs]
+    .filter((run) => {
+      if (seen.has(run.id)) return false;
+      seen.add(run.id);
+      return run.status === "completed" || run.status === "failed";
+    })
+    .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+  const messages = ordered.flatMap((run) => {
+    const settled = run.status === "completed"
+      ? [
+        { role: "user" as const, content: `${run.input || "Attached file(s)"}${run.attachments?.length ? `\n[Attachments: ${run.attachments.map((file) => file.name).join(", ")}]` : ""}`, createdAt: run.createdAt },
+        { role: "assistant" as const, content: run.output ?? "", createdAt: run.updatedAt },
+      ]
+      : failedSdkRunHistory(run);
+    return settled.map((message, index) => ({ ...message, sourceId: `sdk-run:${run.id}:${index}` }));
   });
-  return [...session.history, ...threadOnly];
+  return messages.slice(-Math.max(2, Math.min(80, maxMessages)));
+}
+
+async function dashboardThreadHistoryForRun(userId: number, thread: SdkThreadRecord): Promise<SdkThreadRecord["history"]> {
+  const runs = thread.runs.length ? thread.runs : await listSdkRuns(userId, thread.id);
+  return dashboardThreadHistoryFromRuns(runs);
 }
 
 function accountHistoryView(session: Awaited<ReturnType<typeof getSession>>): AccountHistoryMessage[] {
@@ -1882,6 +1950,11 @@ export function registerSdkApi(app: Hono): void {
     c.header("Cache-Control", "private, max-age=2, stale-while-revalidate=10");
     const owner = sdkUser(c)!;
     const webAuthUserId = (c as any).get("webAuthUserId") as string | undefined;
+    const cacheKey = accountOverviewCacheKey(owner, webAuthUserId);
+    const cached = accountOverviewCache.get(cacheKey);
+    const now = Date.now();
+    if (cached && cached.value && Object.keys(cached.value).length && cached.freshUntil > now) return c.json(cloneAccountOverview(cached.value));
+    const build = async (): Promise<AccountOverviewPayload> => {
     const [profile, sessionWebhooks] = await Promise.all([getSessionProfile(owner.userId), getSessionWebhooks(owner.userId)]);
     const memoryProjection = searchMemories(owner.userId, undefined, { limit: 20 }).then((memory) => ({ memory, status: "available" as const })).catch((error) => {
       // Memory is a dashboard projection, not the source of truth for
@@ -1922,7 +1995,7 @@ export function registerSdkApi(app: Hono): void {
     const visibleJobs = config.elenaEnabled ? jobs : jobs.filter((item) => item.kind !== "attention_pulse");
     const pulseJob = config.elenaEnabled ? jobs.find((item) => item.kind === "attention_pulse") : undefined;
     const pulseOccurrence = pulseJob ? (await listJobOccurrences(owner.userId, pulseJob.id, 1))[0] : undefined;
-    return c.json({
+    return {
       features: { attentionPulse: config.elenaEnabled },
       model: profile.model,
       voiceReplies: Boolean(profile.voiceReplies),
@@ -1970,7 +2043,20 @@ export function registerSdkApi(app: Hono): void {
       webhooks: (sessionWebhooks ?? []).filter((item) => !item.disabledAt).map(({ secretCiphertext: _secret, ...item }) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
       telegramLink: { linked: Boolean(webAuthUserId && await getTelegramUserIdForWebAuth(webAuthUserId)) },
       deliveries: deliveries.filter((item) => item.userId === owner.userId && !item.webhook).sort((a, b) => b.createdAt - a.createdAt).slice(0, 20).map((item) => ({ id: item.id, provider: item.provider, status: item.status, kind: item.kind, attempts: item.attempts, providerStatus: item.providerStatus, lastError: item.lastError, durationMs: item.deliveredAt ? Math.max(0, item.deliveredAt - item.createdAt) : undefined, createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString(), deliveredAt: item.deliveredAt ? new Date(item.deliveredAt).toISOString() : undefined })),
-    });
+    };
+    };
+    if (cached && cached.value && Object.keys(cached.value).length && cached.staleUntil > now) {
+      void refreshAccountOverview(cacheKey, build).catch((error) => logger.warn({ errorName: error instanceof Error ? error.name : "UnknownError", userId: owner.userId }, "Account overview refresh failed"));
+      return c.json(cloneAccountOverview(cached.value));
+    }
+    try {
+      return c.json(await refreshAccountOverview(cacheKey, build));
+    } catch (error) {
+      // Do not serve an empty placeholder if the first build fails. The route
+      // retains its normal error semantics; later requests can retry cleanly.
+      accountOverviewCache.delete(cacheKey);
+      throw error;
+    }
   });
 
   app.get("/v1/account/dashboard-overview", async (c) => {
@@ -3261,15 +3347,17 @@ export function registerSdkApi(app: Hono): void {
     if (prior.replay) return c.json(prior.replay, 201);
     let resolved: Awaited<ReturnType<typeof resolveRunInput>>; try { resolved = await resolveRunInput(session, body); } catch (error) { return apiError(c, 400, error instanceof Error && error.message === "invalid_attachment" ? "invalid_attachment" : "invalid_input", error instanceof Error && error.message === "invalid_attachment" ? "Each attachment must be a verified upload owned by this account." : "Provide 1–30000 characters or up to five verified attachments."); }
     if (dashboardRequest(c)) {
-      const sharedHistory = dashboardAgentHistory(c, session, thread.history);
-      thread.history = sharedHistory;
-      session.history = sharedHistory;
+      // A dashboard thread is its own model-context boundary. Account history
+      // remains a separate owner-scoped projection for other channels; it must
+      // never be copied into, or overwrite, this thread.
+      thread.history = await dashboardThreadHistoryForRun(owner.userId, thread);
       if (!legacyProjection && !(await saveSdkThread(owner.userId, thread))) {
         const legacySession = await getSessionWithSdkRuns(owner.userId, thread.id);
         const legacyThread = legacySession.sdkThreads?.find((item) => item.id === thread.id);
         if (!legacyThread) return apiError(c, 404, "not_found", "Thread not found.");
         session = legacySession;
         thread = legacyThread;
+        thread.history = await dashboardThreadHistoryForRun(owner.userId, thread);
         legacyProjection = true;
       }
     }
@@ -3364,15 +3452,17 @@ export function registerSdkApi(app: Hono): void {
     let legacyProjection = executionContext.legacyProjection;
     let resolved: Awaited<ReturnType<typeof resolveRunInput>>; try { resolved = await resolveRunInput(session, body); } catch (error) { return apiError(c, 400, error instanceof Error && error.message === "invalid_attachment" ? "invalid_attachment" : "invalid_input", error instanceof Error && error.message === "invalid_attachment" ? "Each attachment must be a verified upload owned by this account." : "Provide 1–30000 characters or up to five verified attachments."); }
     if (dashboardRequest(c)) {
-      const sharedHistory = dashboardAgentHistory(c, session, thread.history);
-      thread.history = sharedHistory;
-      session.history = sharedHistory;
+      // Never merge the account-wide private projection into a dashboard
+      // thread. Rebuild only from this thread's own settled runs so older
+      // polluted projections are repaired before the model sees them.
+      thread.history = await dashboardThreadHistoryForRun(owner.userId, thread);
       if (!legacyProjection && !(await saveSdkThread(owner.userId, thread))) {
         const legacySession = await getSessionWithSdkRuns(owner.userId, thread.id);
         const legacyThread = legacySession.sdkThreads?.find((item) => item.id === thread.id);
         if (!legacyThread) return apiError(c, 404, "not_found", "Thread not found.");
         session = legacySession;
         thread = legacyThread;
+        thread.history = await dashboardThreadHistoryForRun(owner.userId, thread);
         legacyProjection = true;
       }
     }
