@@ -35,7 +35,6 @@ import { logger } from "./logger.js";
 import { createApproval, createVideoJob, getAgentRun, getApproval, getImageAsset, getSession, isAgentRunCancellationRequested, listLinkedWebSessionSourceUserIds, readScratchpad, recordTrustedMissionEvidence, saveAgentRun, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
 import type { AgentRunRecord, Message } from "./store.js";
 import { nativeTool, type MissionWaitRequest, type NativeToolRuntime } from "./nativeTools.js";
-import { MissionDurationApprovalRequiredError } from "./missionApproval.js";
 import { beginExternalAction, externalArgumentsHash, failExternalAction, finishExternalAction, isExternalWriteTool, reconcileExternalActionByRead, type ExternalActionClaim, type TrustedProviderAction } from "./autonomy/actions.js";
 import { isReadOnlyToolSlug, isRiskyToolSlug, requiresToolApproval, humanProgressStatus, humanToolStatus } from "./policy.js";
 import { registerComposioToolMetadata } from "./composioRisk.js";
@@ -87,7 +86,7 @@ import { createComposioOutcomeReadAdapter } from "./reliability/composioReadAdap
 import { browserRunHasProgress, browserRunProgressMarker } from "./lib/e2b/runProgress.js";
 import { executeOutcomeVerification, type OutcomeReadAdapter } from "./reliability/outcomeEngine.js";
 import type { OutcomeCheck } from "./reliability/contracts.js";
-import { buildComposioBatchActions, collectComposioToolPresentations, composioActivityActionLabel, composioToolkitSlugsNeedingMetadata, enrichComposioToolPresentationsFromToolkits, settleComposioBatchActions, successfulComposioBatchActions, type ComposioBatchAction, type ComposioToolPresentation } from "./toolActivity.js";
+import { buildComposioBatchActions, collectComposioToolPresentations, composioActivityActionLabel, fallbackActivityActionLabel, nativeActivityActionLabel, composioToolkitSlugsNeedingMetadata, enrichComposioToolPresentationsFromToolkits, settleComposioBatchActions, successfulComposioBatchActions, type ComposioBatchAction, type ComposioToolPresentation } from "./toolActivity.js";
 import { MISSION_WORKER_CONTROL_TOOLS } from "./missionWorker.js";
 import { ELENA_DISABLED_PROMPT } from "./proactive/featureFlag.js";
 
@@ -3532,8 +3531,21 @@ async function executeAgent(
             : [...nativeToolRoute.tools, ...preloadedMissionTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools]
     )
       .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index);
+    // A routed turn may intentionally expose only meta-tools or a small
+    // capability slice. Approval resume is different: it must replay the
+    // exact already-approved action, using a schema from the trusted catalog,
+    // while still obeying this run's allow/deny fences. Without this fallback
+    // a valid approval can be claimed, then fail as
+    // `approved_action_not_executed` because the direct action was omitted
+    // from the compact routed payload.
+    const approvalToolCandidates = forcedApproval && !sharedScope
+      ? [...availableTools, ...fullComposioTools, ...mcpTools]
+      : availableTools;
     const approvalResumeTool = forcedApproval
-      ? availableTools.find((tool) => toolSchemaName(tool) === forcedApproval.toolSlug)
+      ? approvalToolCandidates.find((tool) => {
+        const name = toolSchemaName(tool);
+        return name === forcedApproval.toolSlug && !deny.has(name) && (!allow || allow.has(name));
+      })
       : undefined;
     const routedToolsWithApproval = approvalResumeTool
       ? [...routedTools, approvalResumeTool].filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index)
@@ -3765,7 +3777,8 @@ async function executeAgent(
       // render “I’m taking care of that…” instead of the real action.
       let activityPresentation: ComposioToolPresentation | undefined = presentationForActivityCall(slug, auditArgs, composioToolPresentations);
       let activityActionLabel = composioActivityLabelForCall(slug, auditArgs, composioToolPresentations)
-        ?? (slug.startsWith("COMPOSIO_") ? "Connected app action" : undefined);
+        ?? nativeActivityActionLabel(slug, auditArgs)
+        ?? (slug.startsWith("COMPOSIO_") ? fallbackActivityActionLabel(slug) : undefined);
       let activityMessage = (activityActionLabel ?? toolStatus(slug)).slice(0, 4000);
       let batchActivityActions: ComposioBatchAction[] = [];
       await reportToolActivity({
@@ -3859,7 +3872,9 @@ async function executeAgent(
             await reportToolActivity({ toolSlug: slug, callId: call.id, status: "started", message: activityMessage, actionLabel: activityMessage, batchActions: batchActivityActions });
           }
         } else {
-          activityActionLabel = composioActivityLabelForCall(slug, args, composioToolPresentations) ?? activityActionLabel;
+          activityActionLabel = composioActivityLabelForCall(slug, args, composioToolPresentations)
+            ?? nativeActivityActionLabel(slug, args)
+            ?? activityActionLabel;
           if (activityActionLabel) {
             activityMessage = activityActionLabel;
             await reportToolActivity({ toolSlug: slug, callId: call.id, status: "started", message: activityMessage, ...toolPresentationActivityFields(activityPresentation), actionLabel: activityActionLabel });
@@ -4458,12 +4473,6 @@ async function executeAgent(
         }
         if (approvedForTool) await setApprovalStatus(userId, approvedApprovalId!, "consumed");
       } catch (e) {
-        if (e instanceof MissionDurationApprovalRequiredError) {
-          const approval = new ApprovalRequiredError(e.approvalId, "CHUCK_MISSION_RESUME", e.args);
-          batchActivityActions = batchActivityActions.map((action) => ({ ...action, status: "approval_required", summary: "Waiting for approval before this mission can continue" }));
-          await reportToolActivity({ toolSlug: slug, callId: call.id, status: "approval_required", message: activityMessage, ...toolPresentationActivityFields(activityPresentation), ...(activityActionLabel ? { actionLabel: activityActionLabel } : {}), ...(batchActivityActions.length ? { batchActions: batchActivityActions } : {}), durationMs: Math.max(0, Date.now() - toolStartedAt) });
-          throw approval;
-        }
         if (e instanceof ApprovalRequiredError) {
           batchActivityActions = batchActivityActions.map((action) => ({ ...action, status: "approval_required", summary: "Waiting for approval before this batch can run" }));
           await reportToolActivity({ toolSlug: slug, callId: call.id, status: "approval_required", message: activityMessage, ...toolPresentationActivityFields(activityPresentation), ...(activityActionLabel ? { actionLabel: activityActionLabel } : {}), ...(batchActivityActions.length ? { batchActions: batchActivityActions } : {}), durationMs: Math.max(0, Date.now() - toolStartedAt) });

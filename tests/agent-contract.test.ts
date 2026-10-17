@@ -2157,6 +2157,56 @@ test("approval resume executes the stored action before model regeneration", asy
   } finally { globalThis.fetch = originalFetch; config.durableMemoryEnabled = originalDurableMemoryEnabled; }
 });
 
+test("approval resume restores an exact action omitted from a large routed catalog", async () => {
+  const userId = 830060;
+  const originalDurableMemoryEnabled = config.durableMemoryEnabled;
+  config.durableMemoryEnabled = false;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  let toolsCalls = 0;
+  let providerCalls = 0;
+  let chatCalls = 0;
+  const directAction = { type: "function", function: { name: "GITHUB_DELETE_REPOSITORY", parameters: { type: "object", required: ["owner", "repo"], properties: { owner: { type: "string" }, repo: { type: "string" } } } } };
+  const session = {
+    sessionId: "approval-resume-large-catalog",
+    tools: async () => {
+      toolsCalls++;
+      if (toolsCalls === 1) return [directAction];
+      return [directAction, ...Array.from({ length: 100 }, (_, index) => ({ type: "function", function: { name: `GITHUB_READ_${index}`, parameters: { type: "object" } } }))];
+    },
+    execute: async (_slug: string, args: Record<string, unknown>) => { providerCalls++; assert.deepEqual(args, { owner: "owner", repo: "archive" }); return { successful: true, data: { deleted: true } }; },
+  };
+  const originalFetch = globalThis.fetch;
+  setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/chat/completions")) {
+      chatCalls++;
+      const request = JSON.parse(String(init?.body));
+      if (chatCalls === 1) return toolResponse("GITHUB_DELETE_REPOSITORY", JSON.stringify({ owner: "owner", repo: "archive" }));
+      assert.equal(request.messages.at(-1)?.role, "tool");
+      return chatResponse({ role: "assistant", content: "The approved repository action completed." });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      () => runAgent(userId, "Delete the archived repository.", [], "test/model", undefined, undefined, undefined, undefined,
+        { accountId: `account_${userId}`, provider: "telegram", conversationId: "approval-resume-large-catalog", scope: "private" },
+        { ownerPrivateRun: true }),
+      (error: unknown) => error instanceof ApprovalRequiredError && error.toolSlug === "GITHUB_DELETE_REPOSITORY",
+    );
+    const approval = (await getSession(userId)).approvals.at(-1);
+    assert.ok(approval);
+    await setApprovalStatus(userId, approval!.id, "approved");
+    const result = await runAgent(userId, approval!.request, approval!.history, approval!.model, undefined, undefined, undefined, approval!.id,
+      { accountId: `account_${userId}`, provider: "telegram", conversationId: "approval-resume-large-catalog", scope: "private" },
+      { ownerPrivateRun: true, forceApprovedAction: true });
+    assert.match(result.text, /approved repository action completed/i);
+    assert.equal(providerCalls, 1, "the exact approved action must execute once even when routing omitted it from the compact catalog");
+    assert.equal((await getApproval(userId, approval!.id))?.status, "consumed");
+  } finally { globalThis.fetch = originalFetch; config.durableMemoryEnabled = originalDurableMemoryEnabled; }
+});
+
 test("shared meeting rooms expose only explicitly granted connected actions", async () => {
   const userId = 830056;
   await initStore({ memoryOnly: true });

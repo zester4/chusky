@@ -4461,7 +4461,7 @@ export function registerSdkApi(app: Hono): void {
     if (!pending || pending.status !== "pending" || pending.expiresAt <= Date.now()) return apiError(c, 404, "not_found", "Pending approval not found.");
     if (body.decision !== "approve" && body.decision !== "deny") return apiError(c, 400, "invalid_decision", "decision must be approve or deny.");
     if (body.decision === "deny") {
-      await setApprovalStatus(owner.userId, pending.id, "denied");
+      if (!await setApprovalStatus(owner.userId, pending.id, "denied")) return apiError(c, 409, "approval_unavailable", "Approval was already decided, expired, or consumed.");
       if (pending.triggerEventId) {
         try { await notifyTriggerApproval(pending.id, false, pending.triggerEventId); }
         catch (error) { logger.warn({ err: error, userId: owner.userId, approvalId: pending.id }, "Web trigger denial notification failed"); }

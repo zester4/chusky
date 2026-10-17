@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildComposioBatchActions, collectComposioToolPresentations, composioActivityActionLabel, correlateComposioBatchOutcomes, enrichComposioToolPresentationsFromToolkits, settleComposioBatchActions, successfulComposioBatchActions } from "../src/toolActivity.js";
+import { buildComposioBatchActions, collectComposioToolPresentations, composioActivityActionLabel, correlateComposioBatchOutcomes, enrichComposioToolPresentationsFromToolkits, nativeActivityActionLabel, fallbackActivityActionLabel, settleComposioBatchActions, successfulComposioBatchActions } from "../src/toolActivity.js";
 
 test("extracts explicit, safe app metadata from nested Composio discovery output", () => {
   const metadata = collectComposioToolPresentations({ data: { tools: [{ tool_slug: "GMAIL_SEARCH_EMAILS", name: "Search emails", human_description: "Find matching messages", toolkit: { slug: "gmail", name: "Gmail", logo: "https://assets.example/gmail.svg" }, arguments: { query: "private search" } }] } });
@@ -64,6 +64,14 @@ test("derives bounded contextual labels for searches, email sends, and nested ex
   assert.equal(composioActivityActionLabel("GMAIL_SEND_EMAIL", { recipient_email: "tony@example.com", body: "private" }), "Sending the email to Tony");
   assert.equal(composioActivityActionLabel("COMPOSIO_EXECUTE_TOOL", { tool_slug: "GOOGLEMAPS_SEARCH_BUSINESSES", arguments: { query: "Acme" } }), "Searching for Acme");
   assert.equal(composioActivityActionLabel("GMAIL_SEND_EMAIL", { recipient_email: "api-key-secret@example.com" }), "Sending the email");
+});
+
+test("derives human-readable Treg, Monid, and remote activity labels without exposing arguments", () => {
+  assert.equal(nativeActivityActionLabel("CHUCK_TREG_COMPANY_SEARCH", { query: "B2B SaaS companies in Florida" }), "Searching for companies matching B2B SaaS companies in Florida");
+  assert.equal(nativeActivityActionLabel("CHUCK_MONID_INSPECT", { provider: "lead_sourcing", api_key: "private" }), "Inspecting the selected capability with lead_sourcing");
+  assert.equal(nativeActivityActionLabel("COMPOSIO_REMOTE_WORKBENCH"), "Working in the remote workspace");
+  assert.equal(fallbackActivityActionLabel("COMPOSIO_SEARCH_TOOLS"), "Finding the right connected capability");
+  assert.equal(nativeActivityActionLabel("CHUCK_MONID_RUN", { provider: "api-key-secret" }), "Running the research action");
 });
 
 test("correlates outcomes only by an explicit unique action slug and explicit result status", () => {

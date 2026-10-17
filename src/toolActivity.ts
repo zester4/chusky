@@ -135,6 +135,56 @@ export function composioActivityActionLabel(
   return normalizeToolSlug(actionSlug) ? fallbackComposioActionLabel(actionSlug) : undefined;
 }
 
+/**
+ * Build truthful labels for Chusky-owned capability tools. These labels are
+ * derived from the tool slug and a very small allowlist of safe arguments so
+ * the timeline explains the current operation without exposing tool payloads.
+ */
+export function nativeActivityActionLabel(toolSlug: string, args?: ActivityCallArguments): string | undefined {
+  const upper = toolSlug.toUpperCase();
+  const query = safeActivityContext(firstActivityArgument(args, ["query", "search_query", "searchQuery", "term", "keywords", "location", "name", "company", "domain"]));
+  const provider = safeActivityContext(firstActivityArgument(args, ["provider", "provider_slug", "providerSlug", "toolkit", "toolkitSlug"]));
+  const subject = query ? ` matching ${query}` : "";
+  const providerSuffix = provider ? ` with ${provider}` : "";
+
+  if (upper === "CHUCK_TREG_SEARCH") return `Finding research capabilities${subject}`;
+  if (upper === "CHUCK_TREG_COMPANY_SEARCH") return `Searching for companies${subject}`;
+  if (upper === "CHUCK_TREG_PEOPLE_SEARCH") return `Searching for people${subject}`;
+  if (upper === "CHUCK_TREG_COMPANY_JOBS_SEARCH") return `Searching for company jobs${subject}`;
+  if (upper === "CHUCK_TREG_ENRICH_COMPANY") return "Enriching the selected company";
+  if (upper === "CHUCK_TREG_ENRICH_PERSON") return "Enriching the selected person";
+  if (upper === "CHUCK_TREG_RESOLVE") return "Resolving the requested data";
+  if (upper === "CHUCK_TREG_CALL") return `Calling the approved endpoint${providerSuffix}`;
+
+  if (upper === "CHUCK_MONID_PLAN") return `Planning the research${subject}`;
+  if (upper === "CHUCK_MONID_SEARCH") return `Finding research capabilities${subject}`;
+  if (upper === "CHUCK_MONID_INSPECT") return `Inspecting the selected capability${providerSuffix}`;
+  if (upper === "CHUCK_MONID_RUN") return `Running the research action${providerSuffix}`;
+  if (upper === "CHUCK_MONID_RUN_GET") return "Checking the research run";
+  if (upper === "CHUCK_MONID_RUNS_LIST") return "Listing research runs";
+  if (upper === "CHUCK_MONID_BALANCE" || upper === "CHUCK_MONID_USAGE") return "Checking usage";
+
+  if (upper === "COMPOSIO_REMOTE_BASH_TOOL") return "Running a remote shell command";
+  if (upper === "COMPOSIO_REMOTE_WORKBENCH") return "Working in the remote workspace";
+  if (upper === "COMPOSIO_EXECUTE_TOOL") return "Running the connected action";
+  if (upper === "COMPOSIO_MULTI_EXECUTE_TOOL") return "Running connected actions";
+  return undefined;
+}
+
+/** A useful fallback for wrapper/meta-tools when the provider has no metadata. */
+export function fallbackActivityActionLabel(toolSlug: string): string | undefined {
+  switch (toolSlug.toUpperCase()) {
+    case "COMPOSIO_SEARCH_TOOLS": return "Finding the right connected capability";
+    case "COMPOSIO_GET_TOOL_SCHEMAS": return "Loading the connected action details";
+    case "COMPOSIO_SEARCH_APPS": return "Searching connected apps";
+    case "COMPOSIO_REMOTE_BASH_TOOL": return "Running a remote shell command";
+    case "COMPOSIO_REMOTE_WORKBENCH": return "Working in the remote workspace";
+    case "COMPOSIO_EXECUTE_TOOL": return "Running the connected action";
+    case "COMPOSIO_MULTI_EXECUTE_TOOL": return "Running connected actions";
+    default: return toolSlug.startsWith("COMPOSIO_") ? "Running the connected action" : undefined;
+  }
+}
+
 export function fallbackComposioActionLabel(toolSlug: string): string {
   const parts = toolSlug.split("_");
   return parts.length > 1
