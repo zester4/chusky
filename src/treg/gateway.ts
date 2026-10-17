@@ -3,6 +3,7 @@ import { config } from "../config.js";
 import type { TregCallReceipt, TregCategory, TregCompanyJobResult, TregCompanySearchResult, TregEndpointHit, TregEvidenceBundle, TregEvidenceItem, TregOAuthConnection, TregOwnTool, TregPersonSearchResult, TregPlatformOption } from "./types.js";
 import type { TregSpendGuard } from "./spend.js";
 import type { TregEndpointJudge } from "../decisions/tregRouter.js";
+import { buildTregAdminRequest, sanitizeTregAdminResult } from "./management.js";
 
 export interface TregGatewayDeps {
   spend: TregSpendGuard;
@@ -177,10 +178,14 @@ function mapCategory(raw: JsonObject): TregCategory {
   return "other";
 }
 
-function payloadRows(data: unknown): unknown[] {
+function payloadRows(data: unknown, depth = 0): unknown[] {
   if (Array.isArray(data)) return data;
-  if (!isObject(data)) return [];
-  for (const key of ["results", "endpoints", "tools", "platforms", "data"]) if (Array.isArray(data[key])) return data[key] as unknown[];
+  if (!isObject(data) || depth >= 4) return [];
+  for (const key of ["results", "endpoints", "tools", "platforms", "orgs", "items", "rows", "members", "data"]) if (Array.isArray(data[key])) return data[key] as unknown[];
+  for (const key of ["data", "result", "response"]) if (isObject(data[key])) {
+    const nested = payloadRows(data[key], depth + 1);
+    if (nested.length) return nested;
+  }
   return [];
 }
 
@@ -189,16 +194,25 @@ function evidenceValue(value: unknown): string | number | boolean | null {
   return (JSON.stringify(value) ?? String(value)).slice(0, 2000);
 }
 
-function sanitizeProviderResult(value: unknown, depth = 0): unknown {
+function sanitizeProviderResult(value: unknown, depth = 0, budget: { nodes: number; characters: number } = { nodes: 0, characters: 0 }): unknown {
+  budget.nodes += 1;
+  if (budget.nodes > 5_000 || budget.characters >= 44_000) return "[result truncated]";
   if (value === null || typeof value === "boolean" || typeof value === "number") return value;
-  if (typeof value === "string") return value.slice(0, 4000);
+  if (typeof value === "string") {
+    const safe = value.slice(0, Math.min(4_000, 44_000 - budget.characters))
+      .replace(/Bearer\s+[A-Za-z0-9._~+/-]{12,}/gi, "Bearer [redacted]")
+      .replace(/\b(?:sk|pk|rk|ghp|gho|xox[baprs])_[A-Za-z0-9_-]{16,}/gi, "[redacted credential]")
+      .replace(/([?&](?:access_token|refresh_token|token|api_key|password|signature|sig)=)[^&#\s]+/gi, "$1[redacted]");
+    budget.characters += safe.length;
+    return safe;
+  }
   if (depth >= 5) return "[nested result omitted]";
-  if (Array.isArray(value)) return value.slice(0, 25).map((item) => sanitizeProviderResult(item, depth + 1));
+  if (Array.isArray(value)) return value.slice(0, 25).map((item) => sanitizeProviderResult(item, depth + 1, budget));
   if (!isObject(value)) return undefined;
   return Object.fromEntries(Object.entries(value)
     .filter(([key]) => !/(?:secret|token|password|authorization|credential|api[_-]?key)/i.test(key))
     .slice(0, 50)
-    .map(([key, item]) => [key.slice(0, 120), sanitizeProviderResult(item, depth + 1)]));
+    .map(([key, item]) => [key.slice(0, 120), sanitizeProviderResult(item, depth + 1, budget)]));
 }
 
 function providerScore(row: Record<string, unknown>): number | undefined {
@@ -545,6 +559,34 @@ export class TregGateway {
     return payloadRows(result.data).map(normalizeOwnTool).filter((item): item is TregOwnTool => Boolean(item)).slice(0, 100);
   }
 
+  /** Run one explicitly registered Treg customer-management operation. */
+  async manage(action: string, args: Record<string, unknown>, organizationId?: string, idempotencyKey?: string): Promise<unknown> {
+    const request = buildTregAdminRequest(action, args);
+    if (request.orgId) {
+      const listed = await this.request<unknown>("GET", "/orgs", undefined, undefined, undefined, organizationId);
+      const rows = payloadRows(listed.data);
+      const accessible = rows.some((row) => {
+        if (!isObject(row)) return false;
+        return String(row.id ?? row.org_id ?? row.orgId ?? "") === request.orgId;
+      });
+      if (!accessible) throw new Error("That Treg organization is not available to this authenticated account.");
+    }
+    const result = await this.request<unknown>(request.method, request.path, request.body,
+      request.query ? Object.fromEntries(Object.entries(request.query).map(([key, value]) => [key, String(value)])) : undefined,
+      request.isRead ? undefined : idempotencyKey, organizationId);
+    const safeData = sanitizeTregAdminResult(result.data);
+    let data = safeData;
+    try {
+      const serialized = JSON.stringify(safeData);
+      if (serialized && Buffer.byteLength(serialized, "utf8") > 48_000) {
+        data = { truncated: true, preview: serialized.slice(0, 40_000), note: "Response was bounded to protect private context; use a more specific query if available." };
+      }
+    } catch {
+      data = { note: "Treg returned a result that could not be safely summarized." };
+    }
+    return { action, statusCode: result.status, data };
+  }
+
   async searchPeople(options: { userId: number; query?: string; companyDomain?: string; title?: string; country?: string; limit?: number; missionId?: string; maxSpendUsd?: number; organizationId?: string }): Promise<{ query: string; people: TregPersonSearchResult[]; endpoint: string; callId: string; servedBy?: string; tried?: string[]; totalCostUsd: number; warnings: string[]; incomplete: boolean; generatedAt: string }> {
     const endpoint = "treg.people.search";
     const query = [options.query, options.companyDomain ? `company domain ${options.companyDomain}` : "", options.title ? `title ${options.title}` : "", options.country ? `country ${options.country}` : ""].filter(Boolean).join("; ").slice(0, 1000);
@@ -825,7 +867,7 @@ export class TregGateway {
     }
     await this.deps.recordReceipt(receipt);
     if (upstreamFailed) throw new Error(`${receipt.error}; callId ${receipt.callId}; charged $${cost.toFixed(6)}.`);
-    return { result: row.result ?? response.data, receipt };
+    return { result: sanitizeProviderResult(row.result ?? response.data), receipt };
   }
 
   async enrichPerson(options: { userId: number; name?: string; domain?: string; company?: string; linkedinUrl?: string; missionId?: string; maxSpendUsd?: number; organizationId?: string }): Promise<TregEvidenceBundle> {

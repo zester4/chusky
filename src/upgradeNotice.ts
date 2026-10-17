@@ -142,6 +142,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "First-seen and changed signal evidence is fingerprinted per owner/watch, so repeats are suppressed and material updates become private durable observations.",
     "Checks run only when the owner enables the Attention Pulse, require Treg configuration, obey existing spend controls, and never contact leads or write to connected apps.",
   ],
+  tregWorkspaceManagement: [
+    "Expanded Treg beyond provider search with owner-scoped organization, member, invite, project, agent and API-key metadata, billing, usage, audit, health, connection/resource, tool, bundle and Hub operations.",
+    "Added explicit Treg policy controls for tag budgets, deny rules, capability pins, organization settings and access changes; every change requires approval of the exact operation and arguments.",
+    "Treg organizations are checked against the authenticated account, management responses are bounded and credential-redacted, and one-time API keys or secret values are never returned to the model.",
+  ],
   tregIntelligence: [
     "Added reusable, read-only Treg research playbooks for account research, people discovery, qualified lead enrichment and generation, buying signals, hiring, technology, and market mapping, plus general research; endpoint choices and prices remain discovered live.",
     "People search distinguishes provider-returned email from explicitly verified email and reports ignored filters, pending jobs, and incomplete results; pending calls can be inspected without blind retries.",

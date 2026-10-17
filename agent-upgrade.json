@@ -1,11 +1,11 @@
 {
-  "id": "release-4.61.0",
-  "version": "4.61.0",
+  "id": "release-4.62.0",
+  "version": "4.62.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Interactive requests now receive a short intent response while Chusky prepares the context and tools for the actual work.",
-    "The opening has a bounded model deadline and a local fallback; cancellation, account isolation, and tool approval checks still apply.",
-    "Telegram and linked channels show the opening separately; web chat preserves it alongside live activity and the final answer, including after reconnecting."
+    "Expanded Treg beyond provider search with owner-scoped organization, member, invite, project, agent and API-key metadata, billing, usage, audit, health, connection/resource, tool, bundle and Hub operations.",
+    "Added explicit Treg policy controls for tag budgets, deny rules, capability pins, organization settings and access changes; every change requires approval of the exact operation and arguments.",
+    "Treg organizations are checked against the authenticated account, management responses are bounded and credential-redacted, and one-time API keys or secret values are never returned to the model."
   ],
-  "createdAt": "2026-10-15T13:59:32.992Z"
+  "createdAt": "2026-10-17T15:26:12.913Z"
 }

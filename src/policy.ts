@@ -1,6 +1,7 @@
 //src/policy.ts
 import { composioMetadataPolicy, composioMetadataRequiresCriticalApproval } from "./composioRisk.js";
 import { canonicalNativeToolSlug } from "./agentTools.js";
+import { isTregAdminReadAction } from "./treg/management.js";
 
 // Restricted/background runs use risk classification and explicit grants.
 // Authenticated owner-private interactive runs get broad tool access while
@@ -209,6 +210,7 @@ function composioActionPolicy(slug: string): ToolApprovalPolicy {
  */
 export function toolApprovalPolicy(slug: string, args: Record<string, unknown> = {}): ToolApprovalPolicy {
   slug = canonicalPolicySlug(slug);
+  if (slug === "CHUCK_TREG_ADMIN") return isTregAdminReadAction(String(args.action ?? "")) ? "private" : "approval_required";
   if (slug === "CHUCK_MISSION_RESUME" && args.maxDurationSeconds !== undefined) return "approval_required";
   if (slug === "CHUCK_MISSION_START" && Number(args.maxAutomaticExtensions ?? 0) > 0) return "approval_required";
   if (TINYFISH_AUTONOMOUS_TOOLS.has(slug)) return "private";
@@ -257,6 +259,7 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
 
 const STATUSES: Record<string, string> = {
   CHUCK_TREG_PLAN: "🧭 I’m mapping the Treg research steps…",
+  CHUCK_TREG_ADMIN: "🔐 I’m checking your Treg workspace…",
   CHUCK_BROWSER_RETAILER_START: "🌐 I’m opening the fastest verified site entry point…",
   CHUCK_LEAD_CAMPAIGN: "🎯 I’m setting up a durable, source-backed lead campaign…",
   CHUCK_FIND_TOOLS: "🧭 I’m finding the relevant tools…",
@@ -482,6 +485,7 @@ function triggerCriticalToolCall(slug: string, args: Record<string, unknown>, de
 
 export function requiresToolApproval(slug: string, args: Record<string, unknown> = {}, forceApproval = false, ownerPrivateRun = false, triggerRun = false): boolean {
   if (canonicalPolicySlug(slug) === "CHUCK_MONID_RUN") return true;
+  if (canonicalPolicySlug(slug) === "CHUCK_TREG_ADMIN") return forceApproval || !isTregAdminReadAction(String(args.action ?? ""));
   if (triggerRun) return forceApproval || triggerCriticalToolCall(slug, args);
   if (BROWSER_HANDOFF_CONTROL_TOOLS.has(canonicalPolicySlug(slug))) return false;
   if (TINYFISH_AUTONOMOUS_TOOLS.has(canonicalPolicySlug(slug))) return false;

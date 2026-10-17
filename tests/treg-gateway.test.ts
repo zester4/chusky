@@ -180,6 +180,32 @@ test("TregGateway accepts a caller idempotency key and settles the documented re
   }
 });
 
+test("generic Treg call results are bounded and redact credential-shaped fields", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken, retries: config.tregMaxRetries };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  config.tregMaxRetries = 0;
+  let calls = 0;
+  const spend = new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} });
+  try {
+    const gateway = new TregGateway({
+      spend,
+      recordReceipt: async () => {},
+      fetchImpl: async () => {
+        calls += 1;
+        if (calls === 1) return new Response(JSON.stringify({ id: "endpoint-1", price_usd: 0.01, price_unit: "call" }));
+        return new Response(JSON.stringify({ result: { title: "safe", token: "private-token-value", nested: { authorization: "Bearer abcdefghijklmnop" }, url: "https://example.test/path?api_key=private" } }));
+      },
+    });
+    const result = await gateway.call({ userId: 1, endpointId: "endpoint-1" });
+    assert.deepEqual(result.result, { title: "safe", nested: {}, url: "https://example.test/path?api_key=[redacted]" });
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+    config.tregMaxRetries = previous.retries;
+  }
+});
+
 test("routed people search enforces a hard route cost cap and preserves evidence and pending state", async () => {
   const previous = { enabled: config.tregEnabled, token: config.tregToken, cap: config.tregPerCallSoftCapUsd };
   config.tregEnabled = true;

@@ -85,6 +85,17 @@ execution.
    tool. Reuse `idempotencyKey` only for the same request after a lost response.
 7. Use `CHUCK_TREG_BALANCE` for Treg's upstream balance and
    `CHUCK_TREG_USAGE` for Chusky's owner-scoped spend ledger and receipts.
+8. Use `CHUCK_TREG_ADMIN` for Treg customer-account operations not covered by
+   those research tools: organization/member/invite/project management, budget
+   and policy controls, billing and usage history, call/activity audit, catalog
+   search/detail, tool, bundle, secret and connection/resource inventory, health, skill
+   registration, and Hub publishing/runs/listings. Start
+   with `orgs.list`; pass only an organization ID returned by that account.
+   The action registry is explicit; never build a Treg URL or arbitrary admin
+   route yourself. Reads are bounded and credential-redacted. Changes require
+   approval of the exact operation and arguments. Do not ask the model to
+   create/rotate one-time API keys or submit secret values; use Treg's secure
+   connection flow for credentials.
 
 Treg returns live data from the selected external provider. Treat a successful
 provider response as returned business data, and include its provider/source
@@ -114,6 +125,11 @@ capacity checks, and idempotency rules. Calls to registered organization-owned
 tools remain approval-gated because they can change company systems. OAuth
 start and revoke remain approval-gated because they change an external account
 authorization.
+
+`CHUCK_TREG_ADMIN` management reads are owner-scoped and autonomous. Every
+management write is approval-gated, including reversible changes; billing,
+membership, policy, secret deletion, and key revocation therefore cannot be
+authorized by a model-selected action alone.
 
 ## Delegated business research
 

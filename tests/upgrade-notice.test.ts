@@ -235,6 +235,15 @@ test("Treg lead-signal preset describes durable monitoring and external-action b
   assert.match(bullets[2], /never contact leads or write to connected apps/);
 });
 
+test("Treg workspace management preset documents scoped administration and approval boundaries", () => {
+  const bullets = getAgentUpgradePreset("tregWorkspaceManagement");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.tregWorkspaceManagement]);
+  assert.match(bullets[0], /organization, member, invite, project/);
+  assert.match(bullets[1], /every change requires approval/);
+  assert.match(bullets[2], /one-time API keys or secret values are never returned/);
+});
+
 test("Treg intelligence preset describes routed discovery, evidence, and spend controls", () => {
   const bullets = getAgentUpgradePreset("tregIntelligence");
   assert.equal(bullets.length, 3);
@@ -286,11 +295,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces concurrent early responses accurately", async () => {
+test("current upgrade manifest announces the Treg workspace management expansion", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.61.0");
-  assert.equal(notice?.version, "4.61.0");
-  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("fastResponses"));
+  assert.equal(notice?.id, "release-4.62.0");
+  assert.equal(notice?.version, "4.62.0");
+  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("tregWorkspaceManagement"));
 });
 
 test("lead campaign preset describes durable, discovery-first work and bounded enrichment", () => {

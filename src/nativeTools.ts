@@ -93,6 +93,7 @@ import { TregGateway } from "./treg/gateway.js";
 import { buildTregPlan } from "./treg/engine.js";
 import { TregSpendGuard } from "./treg/spend.js";
 import { TregOAuth } from "./treg/oauth.js";
+import { isTregAdminReadAction } from "./treg/management.js";
 import { MonidGateway } from "./monid/gateway.js";
 import { buildMonidPlan } from "./monid/engine.js";
 import { MonidSpendGuard } from "./monid/spend.js";
@@ -2144,6 +2145,17 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
       if (!/^\d{4}-\d{2}-\d{2}$/.test(dayKey)) throw new Error("dayKey must use YYYY-MM-DD");
       const spend = await getTregSpend(userId, dayKey);
       return { spend: spend ?? { userId, dayKey, spentUsd: 0, reservedUsd: 0, missionSpent: {}, missionReserved: {}, rateWindowCalls: 0 }, receipts: await listTregReceipts(userId, args.limit === undefined ? 25 : Number(args.limit), runtime.organizationId) };
+    }
+    case "CHUCK_TREG_ADMIN": {
+      const action = text(args.action, 80);
+      if (!isTregAdminReadAction(action) && !runtime.approvedApprovalId) {
+        throw new Error("This Treg account change requires approval of the exact action and arguments before it can run.");
+      }
+      const request = { action, orgId: args.orgId, id: args.id, memberId: args.memberId, projectId: args.projectId, dimension: args.dimension, value: args.value, query: args.query, input: args.input };
+      const idempotencyKey = args.idempotencyKey
+        ? text(args.idempotencyKey, 200)
+        : runScopedIdempotencyKey(userId, `treg-admin-${action}`, request, runtime);
+      return tregGateway().manage(action, request, runtime.organizationId, idempotencyKey);
     }
     case "CHUCK_TREG_OAUTH_START": {
       const provider = text(args.provider, 120);

@@ -341,6 +341,20 @@ stores only an expiring owner-scoped state hash and safe connection metadata;
 Treg retains provider credentials. For company deployments, use
 `TREG_ORG_TOKENS_JSON` to map trusted `org_*` IDs to server-only Treg tokens.
 
+`CHUCK_TREG_ADMIN` adds an explicit operation registry for customer workspace
+management and operations: organization/member/invite/project access, agent and
+API-key metadata, budgets and deny/pin policies, billing and usage reports,
+calls and activity, provider connections and resource selection, secret/tool/
+bundle inventory, health, catalog search and endpoint details, skill registration,
+and Hub publishing, runs, and listings.
+It never accepts an arbitrary Treg REST path. Organization
+IDs are first checked against the organizations visible to the authenticated
+Treg credential, each action has its own query/body allowlist, reads return
+bounded credential-redacted data, and every write requires approval of the
+exact arguments. One-time API-key creation/rotation and secret creation are not
+model-facing because their responses or inputs contain credentials; use Treg's
+secure account flow for those. Billing changes also require exact approval.
+
 ### Monid external API catalog
 
 Monid is an optional second catalog for external API capabilities. Chusky
