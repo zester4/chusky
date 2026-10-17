@@ -147,6 +147,13 @@ export function clearAccountOverviewCacheForTests(): void {
   accountOverviewCache.clear();
 }
 
+function invalidateAccountOverviewCacheForUser(userId: number): void {
+  const prefix = `${userId}:`;
+  for (const key of accountOverviewCache.keys()) {
+    if (key.startsWith(prefix)) accountOverviewCache.delete(key);
+  }
+}
+
 function accountOverviewCacheKey(owner: SdkOwner, webAuthUserId?: string): string {
   return `${owner.userId}:${webAuthUserId ?? "-"}`;
 }
@@ -3968,6 +3975,7 @@ export function registerSdkApi(app: Hono): void {
     if (!["completed", "failed", "cancelled"].includes(current.status)) return apiError(c, 409, "mission_not_terminal", "Only a finished mission update can be marked as read.");
     const updated = await updateMission(userId, current.id, (mission) => ({ webNotificationReadVersion: mission.version + 1 }));
     if (!updated) return apiError(c, 409, "mission_changed", "The mission changed while its notification was being marked read. Refresh and try again.");
+    invalidateAccountOverviewCacheForUser(userId);
     return c.json({ ok: true, missionId: updated.id, readVersion: updated.webNotificationReadVersion });
   });
   app.post("/v1/missions", async (c) => {
@@ -4478,6 +4486,20 @@ export function registerSdkApi(app: Hono): void {
       }
       return c.json({ id: pending.id, status: "denied" });
     }
+    const missionResumeCandidate = pending.toolSlug === "CHUCK_MISSION_RESUME"
+      && (typeof pending.missionId === "string" || typeof pending.args.id === "string");
+    // Validate the durable mission wait before claiming the approval. A claim
+    // is an externally visible state transition; doing it first can leave an
+    // approved approval attached to a run that still requires approval when a
+    // stale/missing task is encountered.
+    const preflightMissionApprovalTarget = missionResumeCandidate
+      ? await findMissionApprovalTarget(owner.userId, pending.id)
+      : undefined;
+    const missionResumeApproval = missionResumeCandidate
+      && (typeof pending.missionId === "string" || Boolean(preflightMissionApprovalTarget));
+    if (typeof pending.missionId === "string" && !preflightMissionApprovalTarget) {
+      return apiError(c, 409, "mission_approval_not_ready", "The mission's saved approval wait is not ready to resume. Refresh the mission and retry once its waiting task is visible.");
+    }
     const approval = await claimApproval(owner.userId, pending.id);
     if (!approval) return apiError(c, 409, "approval_unavailable", "Approval was already decided, expired, or consumed.");
     if (approval.triggerEventId) {
@@ -4502,6 +4524,91 @@ export function registerSdkApi(app: Hono): void {
       return apiError(c, 409, "run_in_progress", "Another Chusky request is already running for this user.");
     }
     try {
+      if (missionResumeApproval) {
+        // A mission resume approval is a control-plane handoff, not a normal
+        // model/tool approval. Never fall through to the generic run path:
+        // that path sees the mission's approval wait and creates the exact
+        // "accepted but not confirmed" loop this endpoint must prevent.
+        const missionApprovalTarget = preflightMissionApprovalTarget ?? await findMissionApprovalTarget(owner.userId, approval.id);
+        if (!missionApprovalTarget) {
+          await setApprovalStatus(owner.userId, approval.id, "pending");
+          return apiError(c, 409, "mission_approval_not_ready", "The mission's saved approval wait is not ready to resume. Refresh the mission and retry once its waiting task is visible.");
+        }
+        const missionResume = await resumeMissionTaskAfterApproval(owner.userId, approval.id, sdkTaskWorkflowEnqueuer, approval.args.maxDurationSeconds !== undefined
+          ? { maxDurationSeconds: Number(approval.args.maxDurationSeconds) }
+          : undefined);
+        let resumedMission = ("mission" in missionResume ? missionResume.mission : undefined) ?? await getMission(owner.userId, missionApprovalTarget.mission.id);
+        let continuationMessage = "Approval accepted; the durable mission is continuing from its saved checkpoint.";
+        if (missionResume.status === "task_running") {
+          // A concurrent worker won the task race after the approval was
+          // inspected. Only treat that as success after the mission read-back
+          // confirms that the approval wait was released; otherwise restore
+          // the approval so a stale worker cannot strand the run.
+          resumedMission = await getMission(owner.userId, missionApprovalTarget.mission.id);
+          if (!resumedMission || !["running", "completed"].includes(resumedMission.status)) {
+            await setApprovalStatus(owner.userId, approval.id, "pending");
+            return apiError(c, 409, "mission_task_running", "The mission task is still settling its approval. Retry after its saved state reports continuation.");
+          }
+          continuationMessage = "Approval accepted; the mission task is already running from its saved checkpoint.";
+        } else if (missionResume.status === "enqueue_failed") {
+          // The mission transition and task queue state are durable even when
+          // the provider publish is temporarily unavailable. Reconcile once
+          // here, then let the normal recovery sweep republish the queued task.
+          if (resumedMission?.status === "running") {
+            try { await reconcileMissionExecution(owner.userId, resumedMission.id, sdkTaskWorkflowEnqueuer, missionResume.taskId); }
+            catch (error) { logger.warn({ err: error, userId: owner.userId, missionId: resumedMission.id, taskId: missionResume.taskId }, "Mission approval continuation queued for recovery"); }
+            continuationMessage = "Approval accepted; the mission is continuing from its saved checkpoint and will be republished automatically if the workflow provider is still recovering.";
+          } else {
+            await setApprovalStatus(owner.userId, approval.id, "pending");
+            return apiError(c, 503, "mission_enqueue_failed", "The mission approval was not consumed because its saved task could not be resumed safely. Retry after the workflow service recovers.");
+          }
+        } else if (missionResume.status === "not_resumable" || missionResume.status === "not_mission") {
+          // If another request completed the handoff, treat this approval as
+          // an idempotent success. Otherwise restore pending so the user is
+          // never left with an approved approval and no continuation.
+          const currentTask = await getTask(owner.userId, missionApprovalTarget.task.id);
+          resumedMission = await getMission(owner.userId, missionApprovalTarget.mission.id);
+          if (resumedMission?.status === "running" && currentTask && ["queued", "running"].includes(currentTask.status)) {
+            continuationMessage = "Approval accepted; the mission continuation is already queued.";
+          } else {
+            await setApprovalStatus(owner.userId, approval.id, "pending");
+            return apiError(c, 409, "mission_not_resumable", "The mission approval could not be matched to a resumable task. Refresh the mission before retrying.");
+          }
+        }
+        if (!resumedMission) {
+          await setApprovalStatus(owner.userId, approval.id, "pending");
+          return apiError(c, 409, "mission_not_resumable", "The approved mission could not be read back safely. Refresh the mission before retrying.");
+        }
+        const handoffSession = await getSessionWithSdkRuns(owner.userId);
+        const handoffThread = handoffSession.sdkThreads?.find((item) => item.runs.some((run) => run.approvalId === approval.id));
+        const handoffRun = handoffThread?.runs.find((item) => item.approvalId === approval.id);
+        let handoffView: ReturnType<typeof runView> | undefined;
+        if (handoffThread && handoffRun) {
+          const approvedActivity = [...handoffRun.events].reverse().find((item) => item.type === "run.tool_activity" && item.toolSlug === approval.toolSlug && item.status === "approval_required");
+          if (approvedActivity) {
+            approvedActivity.status = "completed";
+            approvedActivity.message = continuationMessage;
+          }
+          handoffRun.status = "completed";
+          handoffRun.approvalId = undefined;
+          handoffRun.output = `Approval accepted. Mission ${resumedMission.id} is continuing automatically from its saved checkpoint. This approval turn is complete; the mission remains active until its persisted steps, verification, and completion finish.`;
+          handoffRun.error = undefined;
+          handoffRun.updatedAt = Date.now();
+          handoffRun.events.push(event("run.completed", continuationMessage));
+          handoffThread.updatedAt = handoffRun.updatedAt;
+          await persistSdkRunSnapshot(owner.userId, handoffThread.id, handoffRun, [
+            { role: "user", content: handoffRun.input, createdAt: handoffRun.createdAt },
+            { role: "assistant", content: handoffRun.output, createdAt: handoffRun.updatedAt },
+          ]);
+          const latestHandoffSession = await getSessionWithSdkRuns(owner.userId, handoffThread.id);
+          const latestHandoffThread = latestHandoffSession.sdkThreads?.find((item) => item.id === handoffThread.id);
+          const latestHandoffRun = latestHandoffThread?.runs.find((item) => item.id === handoffRun.id);
+          if (latestHandoffThread && latestHandoffRun) handoffView = runView(latestHandoffThread.id, latestHandoffRun);
+          await notifyWebhooks(owner.userId, latestHandoffSession.sdkWebhooks!, "run.completed", { threadId: handoffThread.id, runId: handoffRun.id, status: "completed", missionId: resumedMission.id, handoff: true });
+        }
+        const mission = await getMission(owner.userId, resumedMission.id) ?? resumedMission;
+        return c.json({ id: approval.id, status: "approved", mission, ...(handoffView ? { run: handoffView } : {}) }, 202);
+      }
       if (approval.toolSlug === "CHUCK_WORKFLOW_STAGE") {
         const workflowId = typeof approval.args.workflowId === "string" ? approval.args.workflowId : "";
         const workflow = workflowId ? await reconcileComposerWorkflow(owner.userId, workflowId, sdkTaskWorkflowEnqueuer) : undefined;
@@ -4555,50 +4662,6 @@ export function registerSdkApi(app: Hono): void {
           await setApprovalStatus(owner.userId, approval.id, "consumed");
           return apiError(c, 502, "call_start_failed", error instanceof Error ? error.message : "Phone call could not be started.");
         }
-      }
-      const missionResume = await resumeMissionTaskAfterApproval(owner.userId, approval.id, sdkTaskWorkflowEnqueuer, approval.toolSlug === "CHUCK_MISSION_RESUME" && approval.args.maxDurationSeconds !== undefined
-        ? { maxDurationSeconds: Number(approval.args.maxDurationSeconds) }
-        : undefined);
-      if (missionResume.status !== "not_mission") {
-        if (missionResume.status === "task_running") return apiError(c, 409, "mission_task_running", "The mission task is already running; its current worker will settle before another slice starts.");
-        if (missionResume.status === "not_resumable") return apiError(c, 409, "mission_not_resumable", "The mission approval no longer matches a resumable task.");
-        if (missionResume.status === "enqueue_failed") return apiError(c, 503, "mission_enqueue_failed", "Approval was recorded, but the mission could not be queued. The checkpoint is preserved for recovery.");
-        const resumedMission = missionResume.mission;
-        if (!resumedMission) return apiError(c, 409, "mission_not_resumable", "The mission approval no longer matches a resumable task.");
-        // The durable task now owns continuation. The interactive run must be
-        // settled as a handoff as well; otherwise the dashboard keeps showing
-        // the old approval/working state even though the mission was resumed.
-        // This is not mission completion: the persisted mission remains the
-        // source of truth for the remaining steps and final verification.
-        const handoffSession = await getSessionWithSdkRuns(owner.userId);
-        const handoffThread = handoffSession.sdkThreads?.find((item) => item.runs.some((run) => run.approvalId === approval.id));
-        const handoffRun = handoffThread?.runs.find((item) => item.approvalId === approval.id);
-        let handoffView: ReturnType<typeof runView> | undefined;
-        if (handoffThread && handoffRun) {
-          const approvedActivity = [...handoffRun.events].reverse().find((item) => item.type === "run.tool_activity" && item.toolSlug === approval.toolSlug && item.status === "approval_required");
-          if (approvedActivity) {
-            approvedActivity.status = "completed";
-            approvedActivity.message = "Approval accepted; the durable mission is continuing from its checkpoint.";
-          }
-          handoffRun.status = "completed";
-          handoffRun.approvalId = undefined;
-          handoffRun.output = `Approval accepted. Mission ${resumedMission.id} is continuing automatically from its saved checkpoint. This approval turn is complete; the mission remains active until its persisted steps, verification, and completion finish.`;
-          handoffRun.error = undefined;
-          handoffRun.updatedAt = Date.now();
-          handoffRun.events.push(event("run.completed", "Approval accepted; durable mission continuation is running."));
-          handoffThread.updatedAt = handoffRun.updatedAt;
-          await persistSdkRunSnapshot(owner.userId, handoffThread.id, handoffRun, [
-            { role: "user", content: handoffRun.input, createdAt: handoffRun.createdAt },
-            { role: "assistant", content: handoffRun.output, createdAt: handoffRun.updatedAt },
-          ]);
-          const latestHandoffSession = await getSessionWithSdkRuns(owner.userId, handoffThread.id);
-          const latestHandoffThread = latestHandoffSession.sdkThreads?.find((item) => item.id === handoffThread.id);
-          const latestHandoffRun = latestHandoffThread?.runs.find((item) => item.id === handoffRun.id);
-          if (latestHandoffThread && latestHandoffRun) handoffView = runView(latestHandoffThread.id, latestHandoffRun);
-          await notifyWebhooks(owner.userId, latestHandoffSession.sdkWebhooks!, "run.completed", { threadId: handoffThread.id, runId: handoffRun.id, status: "completed", missionId: resumedMission.id, handoff: true });
-        }
-        const mission = await getMission(owner.userId, resumedMission.id) ?? resumedMission;
-        return c.json({ id: approval.id, status: "approved", mission, ...(handoffView ? { run: handoffView } : {}) }, 202);
       }
       const session = await getSessionWithSdkRuns(owner.userId); const thread = session.sdkThreads!.find((item) => item.runs.some((run) => run.approvalId === approval.id));
       if (!thread) { await setApprovalStatus(owner.userId, approval.id, "denied"); return apiError(c, 409, "run_not_found", "The run that requested this approval no longer exists."); }
