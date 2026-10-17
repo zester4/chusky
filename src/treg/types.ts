@@ -15,7 +15,14 @@ export interface TregEndpointHit {
   /** Upstream provider method declared by Treg's endpoint metadata. */
   method?: string;
   priceUsd?: number;
-  priceUnit?: "call" | "result" | "row" | "unknown";
+  /** Treg's catalog `cost.type`; keep it separate from the billing unit. */
+  priceType?: "per_call" | "per_success" | "per_result" | "unknown";
+  /** May be absent on old catalog rows. */
+  priceUnit?: "call" | "result" | "row" | "target" | "domain" | "keyword" | "unknown";
+  /** True means `priceUsd` is a reference/minimum, not a safe upper bound. */
+  priceVaries?: boolean;
+  /** Catalog reference amount when pricing varies; never use it as an estimate. */
+  priceReferenceUsd?: number;
   successRate?: number;
   latencyMs?: number;
   requiresOwnAccount?: boolean;
@@ -84,6 +91,7 @@ export interface TregCallReceipt {
   replayed?: boolean;
   servedVia?: string;
   servedBy?: string;
+  upstreamFailed?: string;
   routeTried?: string[];
   ignoredFilters?: string[];
   pending?: boolean;

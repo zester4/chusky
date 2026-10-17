@@ -85,10 +85,12 @@ test("read-only Treg resolution inspects methods and skips write endpoints", asy
       return new Response(JSON.stringify([
         { id: "company.profile.write", title: "Company profile update", provider: "test", category: "company", price_usd: 0.01, price_unit: "call" },
         { id: "company.signal.read", title: "Company signal search", provider: "test", category: "company", price_usd: 0.01, price_unit: "call" },
+        { id: "company.signal.variable", title: "Variable company signal search", provider: "test", category: "company", cost: { type: "per_success", value: 0, usd: 0, unit: "call", varies: true } },
       ]), { status: 200 });
     }
     if (path.startsWith("/catalog/endpoints/")) {
       const id = decodeURIComponent(path.slice("/catalog/endpoints/".length));
+      if (id === "company.signal.variable") return new Response(JSON.stringify({ endpoint: { id, method: "GET", provider: "test", category: "company", title: id, cost: { type: "per_success", value: 0, usd: 0, unit: "call", varies: true } } }), { status: 200 });
       return new Response(JSON.stringify({ endpoint: { id, method: id.endsWith(".write") ? "PATCH" : "GET", provider: "test", category: "company", title: id, price_usd: 0.01, price_unit: "call" } }), { status: 200 });
     }
     if (path === "/call/company.signal.read") {
@@ -101,7 +103,9 @@ test("read-only Treg resolution inspects methods and skips write endpoints", asy
     const result = await gateway.resolveDataNeed({ userId: 1, need: "company hiring signals", maxCalls: 1, maxSpendUsd: 0.05, readOnlyOnly: true });
     assert.deepEqual(result.endpointsUsed, ["company.signal.read"]);
     assert.ok(result.warnings.some((warning) => warning.includes("company.profile.write") && warning.includes("not explicitly declared read-only")));
+    assert.ok(result.warnings.some((warning) => warning.includes("company.signal.variable") && warning.includes("per-call pricing could not be verified")));
     assert.equal(requests.some((request) => request.endsWith("/call/company.profile.write")), false);
+    assert.equal(requests.some((request) => request.endsWith("/call/company.signal.variable")), false);
     assert.equal(requests.some((request) => request === "GET /call/company.signal.read"), true);
   } finally {
     config.tregEnabled = previous.enabled;
@@ -190,7 +194,7 @@ test("routed people search enforces a hard route cost cap and preserves evidence
       fetchImpl: async (url, init) => {
         requests.push({ url, init });
         if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "treg.people.search", title: "People search", price_usd: 0.01 }), { status: 200 });
-        return new Response(JSON.stringify({ result: { people: [{ full_name: "Ada Lovelace", title: "VP Sales", company_domain: "example.com", email: "ada@example.com", email_verification_status: "verified", source_url: "https://example.com/profile", confidence: 92 }, { full_name: "Grace Hopper", company_domain: "example.com", email: "grace@example.com" }] }, _treg: { served_by: "provider-a", tried: ["provider-a"] } }), { status: 200, headers: { "X-Treg-Cost-Micro": "12000" } });
+        return new Response(JSON.stringify({ result: { people: [{ full_name: "Ada Lovelace", title: "VP Sales", company_domain: "example.com", email: "ada@example.com", email_verification_status: "verified", source_url: "https://example.com/profile", confidence: 92 }, { full_name: "Grace Hopper", company_domain: "example.com", email: "grace@example.com" }] }, _treg: { served_by: "provider-a", tried: ["provider-a"] } }), { status: 200, headers: { "X-Treg-Cost-Micro": "12000", "X-Treg-Ignored-Filters": "title" } });
       },
     });
     const result = await gateway.searchPeople({ userId: 5, companyDomain: "example.com", title: "VP Sales", limit: 4, maxSpendUsd: 0.05 });
@@ -203,9 +207,40 @@ test("routed people search enforces a hard route cost cap and preserves evidence
     assert.equal(result.people[1]?.emailVerified, undefined, "an absent verification state remains unknown");
     assert.equal(result.servedBy, "provider-a");
     assert.ok(result.warnings.some((warning) => /not treated as verified/i.test(warning)));
+    assert.ok(result.warnings.some((warning) => /could not apply: title/i.test(warning)));
+    assert.equal(result.incomplete, true);
     assert.equal(snapshot?.spentUsd, 0.012);
   } finally {
     config.tregEnabled = previous.enabled; config.tregToken = previous.token; config.tregPerCallSoftCapUsd = previous.cap;
+  }
+});
+
+test("TregGateway records charged upstream failures returned with HTTP 2xx", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  let snapshot: TregSpendSnapshot | undefined;
+  let receipt: import("../src/treg/types.js").TregCallReceipt | undefined;
+  let calls = 0;
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => snapshot, saveSnap: async (next) => { snapshot = next; } }),
+      recordReceipt: async (next) => { receipt = next; },
+      fetchImpl: async () => {
+        calls += 1;
+        if (calls === 1) return new Response(JSON.stringify({ id: "endpoint-1", price_usd: 0.05 }), { status: 200 });
+        return new Response(JSON.stringify({ result: null, _treg: { call_id: "call_paid_failure", charged_micro: 7000, upstream_failed: "status=500" } }), { status: 200, headers: { "X-Treg-Cost-Micro": "7000", "X-Treg-Call-Id": "call_paid_failure" } });
+      },
+    });
+    await assert.rejects(gateway.call({ userId: 1, endpointId: "endpoint-1", estimateUsd: 0.05 }), /upstream failure.*call_paid_failure.*charged \$0\.007000/i);
+    assert.equal(receipt?.ok, false);
+    assert.equal(receipt?.costUsd, 0.007);
+    assert.equal(receipt?.callId, "call_paid_failure");
+    assert.equal(snapshot?.spentUsd, 0.007);
+    assert.equal(snapshot?.reservedUsd, 0);
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
   }
 });
 
@@ -455,6 +490,54 @@ test("TregGateway sends the company enrichment contract and unwraps provider out
   }
 });
 
+test("Treg person enrichment omits route verification and the gateway restricts that header to find routes", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  let providerCalls = 0;
+  let enrichmentVerifyHeader: string | null = null;
+  let emailFindVerifyHeader: string | null = null;
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
+      recordReceipt: async () => {},
+      fetchImpl: async (url, init) => {
+        if (url.includes("/catalog/endpoints/")) {
+          const endpointId = decodeURIComponent(new URL(url).pathname.split("/").at(-1) ?? "");
+          return new Response(JSON.stringify({ endpoint: {
+            id: endpointId, provider: "treg", method: "POST", title: endpointId,
+            cost: { type: "per_success", value: 0.001, usd: 0.001, unit: "call", varies: false },
+          } }), { status: 200 });
+        }
+        providerCalls += 1;
+        const verifyHeader = new Headers(init.headers).get("X-Treg-Route-Verify");
+        if (url.endsWith("/call/treg.people.email.find")) emailFindVerifyHeader = verifyHeader;
+        else enrichmentVerifyHeader = verifyHeader;
+        return new Response(JSON.stringify({ result: { full_name: "A Person", email: "person@example.com" } }), {
+          status: 200,
+          headers: { "X-Treg-Call-Id": `call_person_${providerCalls}`, "X-Treg-Cost-Micro": "1000" },
+        });
+      },
+    });
+
+    const enrichment = await gateway.enrichPerson({ userId: 1, name: "A Person", domain: "example.com", maxSpendUsd: 0.05 });
+    assert.ok(enrichment.warnings.some((warning) => warning.includes("without explicit verified status")));
+    assert.equal(enrichmentVerifyHeader, null);
+
+    await gateway.call({ userId: 1, endpointId: "treg.people.email.find", body: { full_name: "A Person", domain: "example.com" }, estimateUsd: 0.05, routeVerify: true });
+    assert.equal(emailFindVerifyHeader, "true");
+
+    await assert.rejects(
+      gateway.call({ userId: 1, endpointId: "treg.people.enrich", body: { full_name: "A Person" }, estimateUsd: 0.05, routeVerify: true }),
+      /route verification is only supported for treg\.people\.email\.find and treg\.people\.phone\.find/,
+    );
+    assert.equal(providerCalls, 2, "the unsupported header is rejected before a provider call");
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+  }
+});
+
 test("TregGateway maps company query to exactly one Treg identity and preflights its price once", async () => {
   const previous = { enabled: config.tregEnabled, token: config.tregToken };
   config.tregEnabled = true;
@@ -551,6 +634,48 @@ test("Treg company search combines identity inputs into one q field and blocks a
       /estimate \$0\.120000 exceeds the \$0\.100000 limit; no provider call was made/,
     );
     assert.equal(providerCalls, 1, "over-cap requests stop after catalog inspection");
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+  }
+});
+
+test("Treg company search accepts current variable per-success catalog pricing under the owner route cap", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  let providerCalls = 0;
+  let routeMaxCost: string | null = null;
+  let requestBody: Record<string, unknown> | undefined;
+  let snapshot: { spentUsd: number; reservedUsd: number } | undefined;
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({
+        getSnap: async () => snapshot ? { userId: 1, dayKey: new Date().toISOString().slice(0, 10), ...snapshot, missionSpent: {}, missionReserved: {} } : null,
+        saveSnap: async (value) => { snapshot = { spentUsd: value.spentUsd, reservedUsd: value.reservedUsd }; },
+      }),
+      recordReceipt: async () => {},
+      fetchImpl: async (url, init) => {
+        if (url.includes("/catalog/endpoints/")) {
+          return new Response(JSON.stringify({ endpoint: {
+            id: "treg.companies.search", provider: "treg", method: "POST", title: "Routed company search",
+            cost: { type: "per_success", value: 0, usd: 0, currency: "USD", per: 1, unit: "call", varies: true },
+          } }), { status: 200 });
+        }
+        providerCalls += 1;
+        requestBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        routeMaxCost = new Headers(init.headers).get("X-Treg-Route-Max-Cost");
+        return new Response(JSON.stringify({ result: { companies: [] } }), { status: 200, headers: { "X-Treg-Call-Id": "call_company_live_shape", "X-Treg-Cost-Micro": "12000" } });
+      },
+    });
+
+    const result = await gateway.searchCompanies({ userId: 1, domain: "example.com", limit: 5, maxSpendUsd: 0.1 });
+    assert.equal(providerCalls, 1);
+    assert.deepEqual(requestBody, { domain: "example.com", limit: 5 });
+    assert.equal(routeMaxCost, "0.100000");
+    assert.equal(result.totalCostUsd, 0.012);
+    assert.equal(result.callId, "call_company_live_shape");
+    assert.deepEqual(snapshot, { spentUsd: 0.012, reservedUsd: 0 });
   } finally {
     config.tregEnabled = previous.enabled;
     config.tregToken = previous.token;

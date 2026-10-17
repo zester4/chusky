@@ -83,14 +83,27 @@ function normalizeHit(raw: unknown): TregEndpointHit {
   const inputFields = Object.keys(inputBody).slice(0, 50);
   const id = String(row.id ?? row.endpoint_id ?? row.slug ?? "").trim();
   if (!id) throw new Error("Treg returned an endpoint without an id");
+  const rawPrice = numberOrUndefined(row.price_usd ?? row.price ?? row.unit_price ?? cost.usd ?? cost.value);
+  const rawPriceType = String(cost.type ?? row.price_type ?? row.cost_type ?? "").trim().toLowerCase();
+  const priceType = ["per_call", "per_success", "per_result"].includes(rawPriceType)
+    ? rawPriceType as NonNullable<TregEndpointHit["priceType"]>
+    : rawPriceType ? "unknown" : undefined;
+  const rawPriceUnit = String(cost.unit ?? row.price_unit ?? "").trim().toLowerCase();
+  const priceUnit = ["call", "result", "row", "target", "domain", "keyword"].includes(rawPriceUnit)
+    ? rawPriceUnit as NonNullable<TregEndpointHit["priceUnit"]>
+    : "unknown";
+  const priceVaries = cost.varies === true || row.price_varies === true;
   return {
     id,
     title: String(row.title ?? row.name ?? id).slice(0, 240),
     provider: String(row.provider ?? row.platform ?? "unknown").slice(0, 120),
     category: mapCategory(row),
     ...(typeof row.method === "string" && row.method.trim() ? { method: row.method.trim().toUpperCase().slice(0, 16) } : {}),
-    priceUsd: numberOrUndefined(row.price_usd ?? row.price ?? row.unit_price ?? cost.usd ?? cost.value),
-    priceUnit: row.price_unit === "call" || row.price_unit === "result" || row.price_unit === "row" ? row.price_unit : "unknown",
+    ...(!priceVaries && rawPrice !== undefined ? { priceUsd: rawPrice } : {}),
+    ...(priceType ? { priceType } : {}),
+    priceUnit,
+    ...(priceVaries ? { priceVaries: true } : {}),
+    ...(priceVaries && rawPrice !== undefined ? { priceReferenceUsd: rawPrice } : {}),
     successRate: numberOrUndefined(row.success_rate ?? observed.ok_rate),
     latencyMs: numberOrUndefined(row.latency_ms ?? row.median_ms ?? observed.p50_ms),
     requiresOwnAccount: Boolean(row.requires_own_account ?? row.oauth),
@@ -99,6 +112,26 @@ function normalizeHit(raw: unknown): TregEndpointHit {
     ...(inputFields.length ? { inputFields } : numberArray(row.input_fields ?? row.required_fields ?? row.parameters) ? { inputFields: numberArray(row.input_fields ?? row.required_fields ?? row.parameters) } : {}),
     ...(numberArray(row.siblings) ? { siblings: numberArray(row.siblings) } : {}),
   };
+}
+
+function companySearchCostEstimate(metadata: TregEndpointHit, limit: number, routeCapUsd: number): number | undefined {
+  if (metadata.priceVaries) {
+    return metadata.priceType && metadata.priceType !== "unknown" ? routeCapUsd : undefined;
+  }
+  const priceUsd = metadata.priceUsd;
+  if (priceUsd === undefined || priceUsd < 0 || metadata.priceType === "unknown") return undefined;
+  if (metadata.priceType === "per_result") {
+    if (metadata.priceUnit === "row" || metadata.priceUnit === "result") return priceUsd * limit;
+    if (metadata.priceUnit === "target" || metadata.priceUnit === "domain" || metadata.priceUnit === "keyword") return priceUsd;
+    return undefined;
+  }
+  if (metadata.priceType === "per_call" || metadata.priceType === "per_success") {
+    return metadata.priceUnit === "call" ? priceUsd : undefined;
+  }
+  // Compatibility for older flat catalog entries that did not expose cost.type.
+  if (metadata.priceUnit === "row" || metadata.priceUnit === "result") return priceUsd * limit;
+  if (["call", "target", "domain", "keyword"].includes(metadata.priceUnit ?? "")) return priceUsd;
+  return undefined;
 }
 
 function normalizePlatform(raw: unknown): TregPlatformOption | undefined {
@@ -361,10 +394,10 @@ export function rankHits(hits: TregEndpointHit[], intent: string, maxSpendUsd?: 
       // With a semantic fit distribution, it replaces the keyword category
       // boost (up to 80 points); economics and input coverage still apply.
       const categoryBoost = semantic ? Math.max(0, Math.min(1, semantic[hit.id] ?? 0)) * 80 : query.includes("person") && hit.category === "enrichment_person" || query.includes("company") && hit.category === "enrichment_company" || query.includes("seo") && hit.category === "seo" || query.includes("social") && hit.category === "social_intel" || query.includes("ads") && hit.category === "ads_intel" || query.includes("web") && hit.category === "web_data" ? 50 : 0;
-      const affordable = hit.priceUsd === undefined || maxSpendUsd === undefined || hit.priceUsd <= maxSpendUsd ? 20 : -100;
+      const affordable = hit.priceVaries ? 0 : hit.priceUsd === undefined || maxSpendUsd === undefined || hit.priceUsd <= maxSpendUsd ? 20 : -100;
       const reliability = hit.successRate === undefined ? 0 : Math.max(0, Math.min(1, hit.successRate)) * 20;
       const latency = hit.latencyMs === undefined ? 0 : Math.max(-10, 10 - hit.latencyMs / 1000);
-      const price = hit.priceUsd === undefined ? -5 : Math.max(-10, 5 - hit.priceUsd * 10);
+      const price = hit.priceVaries || hit.priceUsd === undefined ? -5 : Math.max(-10, 5 - hit.priceUsd * 10);
       const compatibility = availableFields?.length && hit.inputFields?.length
         ? hit.inputFields.filter((field) => availableFields.includes(field)).length / hit.inputFields.length * 40
         : 0;
@@ -415,7 +448,7 @@ export class TregGateway {
     return { token, tregOrgId: scoped?.tregOrgId };
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, query?: Record<string, string | number | undefined>, idempotencyKey?: string, organizationId?: string, tregRoute?: { maxCostUsd?: number; verify?: boolean }): Promise<{ data: T; status: number; durationMs: number; meta: { callId?: string; costUsd?: number; replayed?: boolean; servedVia?: string; servedBy?: string } }> {
+  private async request<T>(method: string, path: string, body?: unknown, query?: Record<string, string | number | undefined>, idempotencyKey?: string, organizationId?: string, tregRoute?: { maxCostUsd?: number; verify?: boolean }): Promise<{ data: T; status: number; durationMs: number; meta: { callId?: string; costUsd?: number; replayed?: boolean; servedVia?: string; servedBy?: string; ignoredFilters?: string[]; upstreamFailed?: string } }> {
     const upper = method.toUpperCase();
     const url = new URL(this.base + path);
     for (const [key, value] of Object.entries(query ?? {})) if (value !== undefined && value !== "") url.searchParams.set(key, String(value));
@@ -459,6 +492,9 @@ export class TregGateway {
           throw new TregRequestError(`Treg ${upper} ${path} failed (${response.status})${errorCode ? ` ${errorCode}` : ""}: ${boundedError(detail)}.${suffix}`, response.status, errorCode, recovery);
         }
         const costMicro = numberOrUndefined(response.headers.get("X-Treg-Cost-Micro"));
+        const ignoredFiltersHeader = response.headers.get("X-Treg-Ignored-Filters");
+        const ignoredFilters = ignoredFiltersHeader?.split(",").map((item) => item.trim()).filter(Boolean).slice(0, 20);
+        const upstreamFailed = response.headers.get("X-Treg-Upstream-Failed")?.slice(0, 240);
         return {
           data: data as T,
           status: response.status,
@@ -469,6 +505,8 @@ export class TregGateway {
             ...(response.headers.get("X-Treg-Idempotent-Replay") === "true" ? { replayed: true } : {}),
             ...(response.headers.get("X-Treg-Served-Via") ? { servedVia: response.headers.get("X-Treg-Served-Via") ?? undefined } : {}),
             ...(response.headers.get("X-Treg-Served-By") ? { servedBy: response.headers.get("X-Treg-Served-By") ?? undefined } : {}),
+            ...(ignoredFilters?.length ? { ignoredFilters } : {}),
+            ...(upstreamFailed ? { upstreamFailed } : {}),
           },
         };
       } catch (error) {
@@ -550,12 +588,7 @@ export class TregGateway {
     const limit = Math.max(1, Math.min(25, Math.floor(options.limit ?? 10)));
     const metadata = await this.getEndpoint(endpoint, options.organizationId);
     if (metadata.id !== endpoint) throw new Error("Treg company-search catalog identity did not match; no provider call was made.");
-    if (metadata.priceUsd === undefined || metadata.priceUsd < 0) throw new Error("Treg company-search price is unavailable; no provider call was made.");
-    const estimatedCostUsd = metadata.priceUnit === "result" || metadata.priceUnit === "row"
-      ? metadata.priceUsd * limit
-      : metadata.priceUnit === "call"
-        ? metadata.priceUsd
-        : undefined;
+    const estimatedCostUsd = companySearchCostEstimate(metadata, limit, maxSpendUsd);
     if (estimatedCostUsd === undefined || !Number.isFinite(estimatedCostUsd)) throw new Error("Treg company-search price unit is unknown; no provider call was made.");
     if (estimatedCostUsd > maxSpendUsd) throw new Error(`Treg company-search estimate $${estimatedCostUsd.toFixed(6)} exceeds the $${maxSpendUsd.toFixed(6)} limit; no provider call was made.`);
     const identityBody: JsonObject = identities.length === 1
@@ -713,6 +746,9 @@ export class TregGateway {
   async call(options: { userId: number; endpointId: string; method?: string; body?: unknown; query?: Record<string, string | number | undefined>; missionId?: string; estimateUsd?: number; routeMaxCostUsd?: number; routeVerify?: boolean; organizationId?: string; idempotencyKey?: string; endpointMetadata?: TregEndpointHit }): Promise<{ result: unknown; receipt: TregCallReceipt }> {
     const target = options.endpointId.trim();
     if (!target || target.length > 500 || /[#?]/.test(target)) throw new Error("Invalid Treg endpoint or team-tool target");
+    if (options.routeVerify && !["treg.people.email.find", "treg.people.phone.find"].includes(target)) {
+      throw new Error("Treg route verification is only supported for treg.people.email.find and treg.people.phone.find");
+    }
     const isOwnTarget = /^https:\/\//i.test(target) || target.includes("/");
     if (options.endpointMetadata && (isOwnTarget || options.endpointMetadata.id !== target)) throw new Error("Pre-inspected Treg endpoint metadata does not match the requested catalog endpoint");
     const metadata = isOwnTarget ? undefined : options.endpointMetadata ?? await this.getEndpoint(target, options.organizationId).catch(() => undefined);
@@ -733,9 +769,12 @@ export class TregGateway {
     }
     const isRoutedEndpoint = /^treg\./i.test(target);
     const routeMaxCostUsd = isRoutedEndpoint ? options.routeMaxCostUsd ?? config.tregPerCallSoftCapUsd : undefined;
-    const estimate = isOwnTarget ? 0 : metadata?.priceUsd !== undefined
-      ? Math.max(metadata.priceUsd, options.estimateUsd ?? 0)
-      : options.estimateUsd ?? (isRoutedEndpoint ? routeMaxCostUsd ?? config.tregPerCallSoftCapUsd : undefined);
+    const hasUnknownPricing = metadata?.priceType === "unknown";
+    const estimate = isOwnTarget ? 0 : metadata?.priceVaries || hasUnknownPricing
+      ? options.estimateUsd ?? (isRoutedEndpoint ? routeMaxCostUsd ?? config.tregPerCallSoftCapUsd : undefined)
+      : metadata?.priceUsd !== undefined
+        ? Math.max(metadata.priceUsd, options.estimateUsd ?? 0)
+        : options.estimateUsd ?? (isRoutedEndpoint ? routeMaxCostUsd ?? config.tregPerCallSoftCapUsd : undefined);
     if (estimate === undefined) throw new Error("Treg endpoint price is unavailable; inspect the endpoint or provide an owner-approved estimate");
     const reservation = await this.deps.spend.reserve(options.userId, Math.max(estimate, routeMaxCostUsd ?? 0), options.missionId);
     const method = (options.method ?? "POST").toUpperCase();
@@ -756,9 +795,10 @@ export class TregGateway {
     }
 
     const row = isObject(response.data) ? response.data : {};
-    const responseMeta = (response as { meta?: { callId?: string; costUsd?: number; replayed?: boolean; servedVia?: string; servedBy?: string } }).meta ?? {};
+    const responseMeta = (response as { meta?: { callId?: string; costUsd?: number; replayed?: boolean; servedVia?: string; servedBy?: string; ignoredFilters?: string[]; upstreamFailed?: string } }).meta ?? {};
     const route = routeMetadata(response.data);
     const routeRow = isObject(row._treg) ? row._treg : {};
+    const upstreamFailed = responseMeta.upstreamFailed ?? (typeof routeRow.upstream_failed === "string" ? routeRow.upstream_failed.slice(0, 240) : routeRow.upstream_failed === true ? "Provider reported an upstream failure" : undefined);
     const reservedMicro = numberOrUndefined(routeRow.reserved_micro);
     const chargedMicro = numberOrUndefined(routeRow.charged_micro);
     const reportedCost = responseMeta.costUsd ?? numberOrUndefined(row.cost_usd ?? row.cost) ?? (chargedMicro === undefined ? undefined : chargedMicro / 1_000_000);
@@ -776,13 +816,15 @@ export class TregGateway {
       throw new Error(receipt.error);
     }
 
-    const receipt: TregCallReceipt = { callId: String(responseMeta.callId ?? row.call_id ?? routeRow.call_id ?? row.id ?? `treg_${randomUUID()}`), endpointId: target, userId: options.userId, missionId: options.missionId, ...(options.organizationId ? { organizationId: options.organizationId } : {}), costUsd: cost, ok: true, ...(route.pending ? { pending: true } : {}), ...(route.pending || reportedCost === undefined ? { costIsEstimate: true } : {}), ...(route.ignoredFilters?.length ? { ignoredFilters: route.ignoredFilters } : {}), statusCode: response.status, durationMs: response.durationMs, at: Date.now(), idempotencyKey, ...(responseMeta.replayed ? { replayed: true } : {}), ...(responseMeta.servedVia ? { servedVia: responseMeta.servedVia } : {}), ...(route.servedBy || responseMeta.servedBy ? { servedBy: route.servedBy ?? responseMeta.servedBy } : {}), ...(route.tried?.length ? { routeTried: route.tried } : {}) };
-    if (options.missionId && this.deps.recordMissionEvidence) {
+    const ignoredFilters = route.ignoredFilters?.length ? route.ignoredFilters : responseMeta.ignoredFilters;
+    const receipt: TregCallReceipt = { callId: String(responseMeta.callId ?? row.call_id ?? routeRow.call_id ?? row.id ?? `treg_${randomUUID()}`), endpointId: target, userId: options.userId, missionId: options.missionId, ...(options.organizationId ? { organizationId: options.organizationId } : {}), costUsd: cost, ok: !upstreamFailed, ...(upstreamFailed ? { upstreamFailed, error: `Treg provider reported an upstream failure: ${upstreamFailed}` } : {}), ...(route.pending ? { pending: true } : {}), ...(route.pending || reportedCost === undefined ? { costIsEstimate: true } : {}), ...(ignoredFilters?.length ? { ignoredFilters } : {}), statusCode: response.status, durationMs: response.durationMs, at: Date.now(), idempotencyKey, ...(responseMeta.replayed ? { replayed: true } : {}), ...(responseMeta.servedVia ? { servedVia: responseMeta.servedVia } : {}), ...(route.servedBy || responseMeta.servedBy ? { servedBy: route.servedBy ?? responseMeta.servedBy } : {}), ...(route.tried?.length ? { routeTried: route.tried } : {}) };
+    if (!upstreamFailed && options.missionId && this.deps.recordMissionEvidence) {
       try {
         receipt.missionEvidenceRecorded = await this.deps.recordMissionEvidence({ userId: options.userId, missionId: options.missionId, receipt, resultHash: safeResultHash(row.result ?? response.data) });
       } catch { receipt.missionEvidenceRecorded = false; }
     }
     await this.deps.recordReceipt(receipt);
+    if (upstreamFailed) throw new Error(`${receipt.error}; callId ${receipt.callId}; charged $${cost.toFixed(6)}.`);
     return { result: row.result ?? response.data, receipt };
   }
 
@@ -791,7 +833,7 @@ export class TregGateway {
     const routeCap = options.maxSpendUsd ?? config.tregPerCallSoftCapUsd;
     const routedHit = await this.getEndpoint("treg.people.enrich", options.organizationId).catch(() => undefined);
     if (routedHit?.id === "treg.people.enrich") {
-      const response = await this.call({ userId: options.userId, endpointId: routedHit.id, body: { full_name: options.name, domain: options.domain, company: options.company, linkedin_url: options.linkedinUrl }, missionId: options.missionId, organizationId: options.organizationId, estimateUsd: routeCap, routeMaxCostUsd: routeCap, routeVerify: true });
+      const response = await this.call({ userId: options.userId, endpointId: routedHit.id, body: { full_name: options.name, domain: options.domain, company: options.company, linkedin_url: options.linkedinUrl }, missionId: options.missionId, organizationId: options.organizationId, estimateUsd: routeCap, routeMaxCostUsd: routeCap });
       const items = normalizePersonPayload(response.result, routedHit);
       const pending = response.receipt.pending === true;
       return { query, intent: "enrich_person", items, endpointsUsed: [routedHit.id], callId: response.receipt.callId, totalCostUsd: response.receipt.costUsd, warnings: [
@@ -861,7 +903,7 @@ export class TregGateway {
         warnings.push(`Skipped ${hit.id}: endpoint is not explicitly declared read-only`);
         continue;
       }
-      if (inspected.id !== hit.id || inspected.priceUnit !== "call" || inspected.priceUsd === undefined) {
+      if (inspected.id !== hit.id || inspected.priceUnit !== "call" || inspected.priceUsd === undefined || inspected.priceVaries || inspected.priceType === "per_result" || inspected.priceType === "unknown") {
         warnings.push(`Skipped ${hit.id}: exact endpoint identity or per-call pricing could not be verified`);
         continue;
       }

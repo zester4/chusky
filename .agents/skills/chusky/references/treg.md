@@ -13,6 +13,13 @@ Telegram, SDK clients, or logs.
   MCP endpoint, not REST. An identity token may also use `x-treg-org`.
 - Search by job with `GET /catalog/search?q=...&limit=...`.
 - Inspect one endpoint with `GET /catalog/endpoints/{endpoint_id}`.
+- Catalog endpoint details may wrap the endpoint in `endpoint` and expose pricing as
+  `cost: { type, value, usd, unit, varies }`. Keep price type, unit, and variability
+  distinct. A varying catalog amount is not a safe estimate or maximum; for routed
+  calls reserve the owner's approved hard cap and send it as
+  `X-Treg-Route-Max-Cost`. For fixed `per_result` pricing, `row` scales with the
+  requested result limit, while `target`, `domain`, and `keyword` scale with the
+  corresponding inputs. `per_call` is flat. Settle using `X-Treg-Cost-Micro`.
 - Compare providers with `GET /catalog/platforms/{slug}` when you need to
   inspect alternatives. For standard jobs, prefer Treg's routed `treg.*`
   capabilities (for example `treg.people.search`, `treg.people.enrich`,
@@ -30,6 +37,10 @@ Telegram, SDK clients, or logs.
   marks async `202` results pending; never start another job while one is
   pending. Route metadata can identify the selected provider, attempted routes,
   and filters that could not be applied.
+- `X-Treg-Route-Verify` is valid only on `treg.people.email.find` and
+  `treg.people.phone.find`; other routes reject it with `422`. Person enrichment
+  may return an unverified email, which must remain explicitly unverified until
+  the separate verification tool is used.
 - Use the same `Idempotency-Key` for a retry of the exact same call. Use a new
   key for new work. Never blindly retry a pending or provider-mutating call.
 - The settled cost and provider call reference come from `X-Treg-Cost-Micro`
