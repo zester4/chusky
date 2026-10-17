@@ -708,7 +708,7 @@ function phoneCallingProvider(): "bland" | "twilio" | undefined {
   return isTwilioVoiceConfigured() ? "twilio" : undefined;
 }
 
-function callView(call: { id: string; provider?: string; direction?: string; phoneNumber: string; purpose: string; status: string; runtimeState?: string; error?: string; summary?: string; outcome?: unknown; outcomeStatus?: string; timeline?: unknown; qa?: unknown; createdAt: number; updatedAt: number }) {
+function callView(call: { id: string; provider?: string; direction?: string; phoneNumber: string; purpose: string; status: string; runtimeState?: string; error?: string; summary?: string; outcome?: unknown; outcomeStatus?: string; transcript?: unknown; timeline?: unknown; qa?: unknown; createdAt: number; updatedAt: number }) {
   const digits = call.phoneNumber.replace(/\D/g, "");
   const phoneNumber = digits.length > 4 ? `${call.phoneNumber.slice(0, Math.max(2, call.phoneNumber.length - 4)).replace(/\d/g, "•")}${digits.slice(-4)}` : "••••";
   const outcome = normalizePhoneCallOutcome(call.outcome);
@@ -716,11 +716,24 @@ function callView(call: { id: string; provider?: string; direction?: string; pho
     if (!item || typeof item !== "object" || Array.isArray(item)) return [];
     const row = item as Record<string, unknown>;
     return typeof row.id === "string" && typeof row.type === "string" && typeof row.at === "number" && typeof row.summary === "string"
-      ? [{ id: row.id, type: row.type, at: new Date(row.at).toISOString(), summary: row.summary, ...(typeof row.toolSlug === "string" ? { toolSlug: row.toolSlug } : {}), ...(typeof row.durationMs === "number" ? { durationMs: row.durationMs } : {}) }]
+      ? [{ id: row.id, type: row.type, at: new Date(row.at).toISOString(), summary: row.summary, ...(typeof row.toolSlug === "string" ? { toolSlug: row.toolSlug } : {}), ...(typeof row.receiptId === "string" ? { receiptId: row.receiptId } : {}), ...(typeof row.durationMs === "number" ? { durationMs: row.durationMs } : {}) }]
       : [];
   }).slice(-100) : [];
+  const transcript = call.transcript && typeof call.transcript === "object" && !Array.isArray(call.transcript)
+    ? (() => {
+      const value = call.transcript as Record<string, unknown>;
+      const turns = Array.isArray(value.turns) ? value.turns.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const row = entry as Record<string, unknown>;
+        return typeof row.id === "string" && typeof row.at === "number" && typeof row.caller === "string" && typeof row.assistant === "string"
+          ? [{ id: row.id, at: new Date(row.at).toISOString(), caller: row.caller, assistant: row.assistant }]
+          : [];
+      }).slice(-80) : [];
+      return turns.length ? { turns, truncated: value.truncated === true, updatedAt: typeof value.updatedAt === "number" ? new Date(value.updatedAt).toISOString() : undefined } : undefined;
+    })()
+    : undefined;
   const qa = call.qa && typeof call.qa === "object" && !Array.isArray(call.qa) ? call.qa : undefined;
-  return { id: call.id, provider: call.provider ?? "twilio", direction: call.direction ?? "outbound", phoneNumber, purpose: call.purpose, status: call.status, ...(call.runtimeState ? { runtimeState: call.runtimeState } : {}), summary: call.summary, ...(outcome ? { outcome } : {}), ...(call.outcomeStatus ? { outcomeStatus: call.outcomeStatus } : {}), ...(timeline.length ? { timeline } : {}), ...(qa ? { qa } : {}), error: call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
+  return { id: call.id, provider: call.provider ?? "twilio", direction: call.direction ?? "outbound", phoneNumber, purpose: call.purpose, status: call.status, ...(call.runtimeState ? { runtimeState: call.runtimeState } : {}), summary: call.summary, ...(outcome ? { outcome } : {}), ...(call.outcomeStatus ? { outcomeStatus: call.outcomeStatus } : {}), ...(transcript ? { transcript } : {}), ...(timeline.length ? { timeline } : {}), ...(qa ? { qa } : {}), error: call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
 }
 
 function meetingRoomView(room: MeetingRoomRecord) {
@@ -2623,9 +2636,9 @@ export function registerSdkApi(app: Hono): void {
       const continuityFromCallId = body.continuityFromCallId === undefined ? undefined : String(body.continuityFromCallId).trim();
       const call = await nativeTool(owner.userId, "CHUCK_START_PHONE_CALL", { phoneNumber, purpose, callProfile, ...(body.profile ? { profile: body.profile as VoiceCallProfileInput } : {}), ...(continuityFromCallId ? { continuityFromCallId } : {}) });
       if (!call || typeof call !== "object") throw new Error("Phone call did not return a call record");
-      const record = call as { id?: unknown; provider?: unknown; direction?: unknown; phoneNumber?: unknown; purpose?: unknown; status?: unknown; runtimeState?: unknown; error?: unknown; summary?: unknown; outcome?: unknown; outcomeStatus?: unknown; timeline?: unknown; qa?: unknown; createdAt?: unknown; updatedAt?: unknown };
+      const record = call as { id?: unknown; provider?: unknown; direction?: unknown; phoneNumber?: unknown; purpose?: unknown; status?: unknown; runtimeState?: unknown; error?: unknown; summary?: unknown; outcome?: unknown; outcomeStatus?: unknown; transcript?: unknown; timeline?: unknown; qa?: unknown; createdAt?: unknown; updatedAt?: unknown };
       if (typeof record.id !== "string" || typeof record.phoneNumber !== "string" || typeof record.purpose !== "string" || typeof record.status !== "string" || typeof record.createdAt !== "number" || typeof record.updatedAt !== "number") throw new Error("Phone call returned an invalid record");
-      const response = callView({ id: record.id, provider: typeof record.provider === "string" ? record.provider : undefined, direction: typeof record.direction === "string" ? record.direction : undefined, phoneNumber: record.phoneNumber, purpose: record.purpose, status: record.status, runtimeState: typeof record.runtimeState === "string" ? record.runtimeState : undefined, error: typeof record.error === "string" ? record.error : undefined, summary: typeof record.summary === "string" ? record.summary : undefined, outcome: record.outcome, outcomeStatus: typeof record.outcomeStatus === "string" ? record.outcomeStatus : undefined, timeline: record.timeline, qa: record.qa, createdAt: record.createdAt, updatedAt: record.updatedAt });
+      const response = callView({ id: record.id, provider: typeof record.provider === "string" ? record.provider : undefined, direction: typeof record.direction === "string" ? record.direction : undefined, phoneNumber: record.phoneNumber, purpose: record.purpose, status: record.status, runtimeState: typeof record.runtimeState === "string" ? record.runtimeState : undefined, error: typeof record.error === "string" ? record.error : undefined, summary: typeof record.summary === "string" ? record.summary : undefined, outcome: record.outcome, outcomeStatus: typeof record.outcomeStatus === "string" ? record.outcomeStatus : undefined, transcript: record.transcript, timeline: record.timeline, qa: record.qa, createdAt: record.createdAt, updatedAt: record.updatedAt });
       if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, response);
       return c.json(response, 201);
     } catch (error) {
@@ -2792,9 +2805,9 @@ export function registerSdkApi(app: Hono): void {
         ...(action === "transfer" ? { phoneNumber: String(body.phoneNumber).replace(/[\s().-]/g, "") } : {}),
       }, { ownerPrivateRun: true });
       if (!result || typeof result !== "object") throw new Error("Call control did not return a call record");
-      const record = result as { id?: unknown; provider?: unknown; direction?: unknown; phoneNumber?: unknown; purpose?: unknown; status?: unknown; runtimeState?: unknown; error?: unknown; summary?: unknown; outcome?: unknown; outcomeStatus?: unknown; createdAt?: unknown; updatedAt?: unknown };
+      const record = result as { id?: unknown; provider?: unknown; direction?: unknown; phoneNumber?: unknown; purpose?: unknown; status?: unknown; runtimeState?: unknown; error?: unknown; summary?: unknown; outcome?: unknown; outcomeStatus?: unknown; transcript?: unknown; timeline?: unknown; qa?: unknown; createdAt?: unknown; updatedAt?: unknown };
       if (typeof record.id !== "string" || typeof record.phoneNumber !== "string" || typeof record.purpose !== "string" || typeof record.status !== "string" || typeof record.createdAt !== "number" || typeof record.updatedAt !== "number") throw new Error("Phone call returned an invalid record");
-      return c.json(callView({ id: record.id, provider: typeof record.provider === "string" ? record.provider : undefined, direction: typeof record.direction === "string" ? record.direction : undefined, phoneNumber: record.phoneNumber, purpose: record.purpose, status: record.status, runtimeState: typeof record.runtimeState === "string" ? record.runtimeState : undefined, error: typeof record.error === "string" ? record.error : undefined, summary: typeof record.summary === "string" ? record.summary : undefined, outcome: record.outcome, outcomeStatus: typeof record.outcomeStatus === "string" ? record.outcomeStatus : undefined, createdAt: record.createdAt, updatedAt: record.updatedAt }));
+      return c.json(callView({ id: record.id, provider: typeof record.provider === "string" ? record.provider : undefined, direction: typeof record.direction === "string" ? record.direction : undefined, phoneNumber: record.phoneNumber, purpose: record.purpose, status: record.status, runtimeState: typeof record.runtimeState === "string" ? record.runtimeState : undefined, error: typeof record.error === "string" ? record.error : undefined, summary: typeof record.summary === "string" ? record.summary : undefined, outcome: record.outcome, outcomeStatus: typeof record.outcomeStatus === "string" ? record.outcomeStatus : undefined, transcript: record.transcript, timeline: record.timeline, qa: record.qa, createdAt: record.createdAt, updatedAt: record.updatedAt }));
     } catch (error) {
       return apiError(c, 400, "invalid_call_control", error instanceof Error ? error.message : "Call control failed.");
     }

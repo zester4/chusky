@@ -23,6 +23,8 @@ export interface VoiceCallEvent {
   at: number;
   summary: string;
   toolSlug?: string;
+  /** Provider receipt reference captured at the trusted execution boundary. */
+  receiptId?: string;
   durationMs?: number;
 }
 
@@ -31,6 +33,7 @@ export interface VoiceCallEventInput {
   summary: string;
   at?: number;
   toolSlug?: string;
+  receiptId?: string;
   durationMs?: number;
 }
 
@@ -50,10 +53,11 @@ export function createVoiceCallEvent(input: VoiceCallEventInput): VoiceCallEvent
   if (!EVENT_TYPES.has(input.type) || !summary) throw new Error("A voice call event requires a supported type and summary");
   const at = typeof input.at === "number" && Number.isFinite(input.at) ? Math.max(0, Math.floor(input.at)) : Date.now();
   const toolSlug = boundedText(input.toolSlug, 160).toUpperCase();
+  const receiptId = boundedText(input.receiptId, 240);
   const durationMs = typeof input.durationMs === "number" && Number.isFinite(input.durationMs) && input.durationMs >= 0
     ? Math.min(Math.floor(input.durationMs), 86_400_000)
     : undefined;
-  return { id: `vce_${randomUUID()}`, type: input.type, at, summary, ...(toolSlug ? { toolSlug } : {}), ...(durationMs !== undefined ? { durationMs } : {}) };
+  return { id: `vce_${randomUUID()}`, type: input.type, at, summary, ...(toolSlug ? { toolSlug } : {}), ...(receiptId ? { receiptId } : {}), ...(durationMs !== undefined ? { durationMs } : {}) };
 }
 
 export function normalizeVoiceCallEvents(value: unknown): VoiceCallEvent[] {
@@ -67,7 +71,8 @@ export function normalizeVoiceCallEvents(value: unknown): VoiceCallEvent[] {
     const summary = boundedText(row.summary, 500);
     if (!type || !id || at === undefined || !summary) return [];
     const toolSlug = boundedText(row.toolSlug, 160).toUpperCase();
+    const receiptId = boundedText(row.receiptId, 240);
     const durationMs = typeof row.durationMs === "number" && Number.isFinite(row.durationMs) && row.durationMs >= 0 ? Math.min(Math.floor(row.durationMs), 86_400_000) : undefined;
-    return [{ id, type, at, summary, ...(toolSlug ? { toolSlug } : {}), ...(durationMs !== undefined ? { durationMs } : {}) }];
+    return [{ id, type, at, summary, ...(toolSlug ? { toolSlug } : {}), ...(receiptId ? { receiptId } : {}), ...(durationMs !== undefined ? { durationMs } : {}) }];
   }).slice(-200);
 }

@@ -28,6 +28,8 @@ export interface VoiceCallControls {
 export interface VoiceCallProfile {
   identity: string;
   organization?: string;
+  /** Optional verified display name of the person the call is for. */
+  contactName?: string;
   mode: VoiceCallMode;
   tone: VoiceCallTone;
   opening?: string;
@@ -38,7 +40,7 @@ export interface VoiceCallProfile {
 }
 
 export interface VoiceCallProfileInput {
-  identity?: unknown; organization?: unknown; mode?: unknown; tone?: unknown; opening?: unknown;
+  identity?: unknown; organization?: unknown; contactName?: unknown; mode?: unknown; tone?: unknown; opening?: unknown;
   facts?: unknown; guardrails?: unknown; capabilities?: unknown; controls?: unknown;
 }
 
@@ -106,11 +108,13 @@ export function normalizeVoiceCallProfile(value: unknown): VoiceCallProfile {
     ? input.capabilities.filter((item): item is VoiceCallCapability => typeof item === "string" && CAPABILITIES.includes(item as VoiceCallCapability))
     : CAPABILITIES;
   const organization = clean(input.organization, 180);
+  const contactName = clean(input.contactName, 180);
   const opening = clean(input.opening, 500);
   const controls = normalizeVoiceCallControls(input.controls);
   return {
     identity: clean(input.identity, 180) ?? "Chusky",
     ...(organization ? { organization } : {}),
+    ...(contactName ? { contactName } : {}),
     mode: typeof input.mode === "string" && MODES.includes(input.mode as VoiceCallMode) ? input.mode as VoiceCallMode : "general",
     tone: typeof input.tone === "string" && TONES.includes(input.tone as VoiceCallTone) ? input.tone as VoiceCallTone : "professional",
     ...(opening ? { opening } : {}),
@@ -137,8 +141,8 @@ export function voiceProfileInstructions(profile: VoiceCallProfile | undefined, 
   const safe = profile ?? normalizeVoiceCallProfile(undefined);
   const identity = safe.organization ? `${safe.identity}, speaking on behalf of ${safe.organization}` : safe.identity;
   const callContext = direction === "outbound"
-    ? `Owner-authorized outbound call objective: ${purpose}. This is private working context. Use the owner's relevant private context and connected tools to handle the objective accurately.`
-    : "This is an authorized inbound call. Use public information first, then identify the caller, and disclose sensitive company or account details only after the configured verification tier is satisfied.";
+    ? `Owner-authorized outbound call objective: ${purpose}. This is private working context. Use only approved call context, bounded relevant memory, and purpose-approved connected tools; never use unrelated chat messages, files, or images.`
+    : "This is an authorized inbound call. Use public information first, then identify the caller, and disclose sensitive company or account details only after the configured verification tier is satisfied. Do not consult unrelated owner chat, files, or images.";
   const facts = safe.facts.length ? `LEAD AND CALL CONTEXT — approved facts only: ${safe.facts.join("; ")}.` : "LEAD AND CALL CONTEXT — no additional approved facts were supplied.";
   const guardrails = safe.guardrails.length ? `Owner communication preferences: ${safe.guardrails.join("; ")}.` : "";
   const opening = safe.opening ? `Optional caller-facing opening guidance; use only if it fits naturally and never read private instructions: ${safe.opening}` : "";

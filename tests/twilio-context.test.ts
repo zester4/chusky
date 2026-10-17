@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { callerFacingCallTopic, twilioVoiceInstructions, twilioVoiceKeyterms, twilioVoiceOpening, twilioVoiceTranscript } from "../src/calls/twilioContext.js";
+import { callerFacingCallTopic, twilioVoiceHistory, twilioVoiceInstructions, twilioVoiceKeyterms, twilioVoiceOpening, twilioVoiceTranscript } from "../src/calls/twilioContext.js";
 
 const base = {
   id: "twc_00000000-0000-0000-0000-000000000000", userId: 7, provider: "twilio" as const,
@@ -12,7 +12,7 @@ test("outbound Twilio turns receive the owner-authorized objective and private c
   const prompt = twilioVoiceInstructions({ ...base, direction: "outbound" });
   assert.match(prompt, /Owner-authorized outbound call objective: Confirm the implementation meeting/);
   assert.match(prompt, /objective as context, not authorization/i);
-  assert.match(prompt, /relevant owner-scoped history, memory, knowledge, and connected tools/i);
+  assert.match(prompt, /approved call context, bounded relevant memory, and purpose-approved connected tools/i);
   assert.match(prompt, /business call, do not volunteer unrelated personal information/i);
   assert.match(prompt, /Deletions, financial actions, permission changes, deployment\/push actions, and provider-declared high-risk actions retain their exact approval boundary/i);
   assert.doesNotMatch(prompt, /never load the owner's full memory/i);
@@ -29,6 +29,15 @@ test("Twilio opening reflects outbound caller role and objective", () => {
   });
   assert.equal(opening, "Hello, this is Amina, an AI assistant calling on behalf of Chusky Labs. May I confirm I’m speaking with the intended person?");
   assert.doesNotMatch(opening, /How may I help/i);
+});
+
+test("outbound opening names the supplied contact without inventing identity", () => {
+  const opening = twilioVoiceOpening({
+    ...base,
+    direction: "outbound",
+    voiceProfile: { identity: "Amina", organization: "Chusky Labs", contactName: "Collins", mode: "support", tone: "professional", facts: [], guardrails: [], capabilities: [] },
+  });
+  assert.equal(opening, "Hello, this is Amina, an AI assistant calling on behalf of Chusky Labs. May I speak with Collins?");
 });
 
 test("outbound opening never speaks private follow-up instructions", () => {
@@ -77,6 +86,15 @@ test("interrupted assistant speech is kept separate from the next caller turn", 
     twilioVoiceTranscript({ ...base, direction: "outbound" }, "Can we do two PM?", "I can offer ten AM or two PM"),
     "The assistant was interrupted after saying: I can offer ten AM or two PM. The external contact answering the outbound call said: Can we do two PM?",
   );
+});
+
+test("voice history is isolated to finalized turns from this call", () => {
+  const history = twilioVoiceHistory({
+    ...base,
+    direction: "outbound",
+    transcript: { turns: [{ id: "1", at: 1, caller: "I can do nine tomorrow.", assistant: "I will check that now." }], truncated: false, updatedAt: 1 },
+  });
+  assert.deepEqual(history.map((message) => message.content), ["The external contact said: I can do nine tomorrow.", "I will check that now."]);
 });
 
 test("inbound Twilio turns do not inherit an outbound objective", () => {

@@ -220,3 +220,57 @@ pushed, and deployed. After deployment, test at least:
 4. Consult question: confirm the live tool resolves the correct call ID.
 5. End the call: confirm one transcript/outcome/QA/follow-up record appears.
 6. Replay the provider post-call callback: confirm no duplicate outcome/task.
+
+## Latest voice reliability and transcript update
+
+The live Twilio voice path now keeps the phone call isolated from the owner's
+general chat context. Each non-speculative turn uses only the finalized turns
+already stored on that call, the approved call purpose/profile, and the
+purpose-approved tools. It does not pass unrelated chat messages, files, or
+images into the live voice model. Bland's private consultation path uses the
+same call-specific history boundary.
+
+The Deepgram final transcript is the source of truth for Twilio turns. The
+bridge sends the completed Deepgram text to `/internal/twilio/commit-turn`,
+where it is stored idempotently on the `PhoneCallRecord` (bounded to the most
+recent 80 turns). The dashboard exposes it under each call as a Deepgram
+transcript. No second transcription pass and no Twilio transcription service
+are required.
+
+Outbound profiles now accept an optional verified `contactName` and
+`organization`. When supplied, the transport greeting can say who Chusky is
+calling and which business it represents. The system must not invent either
+value; if the caller or dashboard does not provide them, it uses a truthful
+generic identity instead.
+
+Voice tool preparation is purpose-bounded. Calendar, CRM, email, support,
+billing, orders, documents, and meeting actions are preloaded by exact
+approved action slugs when the call purpose requires them. The full connected
+app catalogue and broad JEV routing are not loaded into the live phone turn.
+This reduces first-audio latency and prevents unrelated file/image tools from
+appearing in the call.
+
+Completed tool timeline events retain a bounded provider receipt ID. The
+post-call outcome handler re-reads the latest call record before synthesis and
+will only describe an appointment, message, or update as completed when a
+matching provider receipt exists. A model statement or a tool-start event is
+not proof that the external action succeeded.
+
+Local verification for this update:
+
+- Backend typecheck and production TypeScript build passed.
+- Dashboard typecheck and ESLint passed.
+- Focused voice tests passed: 12 call-context tests and 5 phone-outcome tests.
+- The standard `tsx` test command and dashboard production build could not run
+  in the managed sandbox because it blocks child-process/IPC creation; this is
+  an environment limitation, so a normal CI/Railway build is still required.
+- The change is not deployed until the backend and dashboard repositories are
+  committed, pushed, and deployed.
+
+After deployment, place one real test call that asks for a calendar booking:
+provide the contact name, business name, and an explicit time such as “nine AM
+tomorrow.” Confirm all four items in the Calls page: the opening names the
+contact/business, the Deepgram transcript is visible, the calendar timeline
+contains a completed event with a receipt, and the outcome says “confirmed”
+only if that receipt is present. If no receipt appears, the call must report
+that the appointment remains unconfirmed.

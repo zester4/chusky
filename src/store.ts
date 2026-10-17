@@ -507,6 +507,8 @@ export interface PhoneCallRecord {
   error?: string;
   /** Bland's post-call analysis, safely bounded and scoped to this owner. */
   summary?: string;
+  /** Final Deepgram turns retained as the owner-scoped call transcript. */
+  transcript?: PhoneCallTranscript;
   /** Structured owner-private outcome generated from bounded completed turns. */
   outcome?: import("./calls/outcome.js").PhoneCallOutcome;
   /** Bounded provider-neutral lifecycle facts for the call page and QA. */
@@ -522,6 +524,19 @@ export interface PhoneCallRecord {
   callLengthSeconds?: number;
   postCallProcessedAt?: number;
   createdAt: number;
+  updatedAt: number;
+}
+
+export interface PhoneCallTranscriptTurn {
+  id: string;
+  at: number;
+  caller: string;
+  assistant: string;
+}
+
+export interface PhoneCallTranscript {
+  turns: PhoneCallTranscriptTurn[];
+  truncated: boolean;
   updatedAt: number;
 }
 
@@ -6257,6 +6272,23 @@ function normalizePhoneCallOutcome(value: unknown): PhoneCallRecord["outcome"] |
   return title && summary ? { title, summary, decisions: list(item.decisions, 700), actionItems, openQuestions: list(item.openQuestions, 700) } : undefined;
 }
 
+function normalizePhoneCallTranscript(value: unknown): PhoneCallTranscript | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const item = value as Record<string, unknown>;
+  const turns = Array.isArray(item.turns) ? item.turns.flatMap((entry): PhoneCallTranscriptTurn[] => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const turn = entry as Record<string, unknown>;
+    const id = typeof turn.id === "string" && /^[A-Za-z0-9:_-]{1,160}$/.test(turn.id) ? turn.id : undefined;
+    const caller = typeof turn.caller === "string" ? turn.caller.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 2_500) : "";
+    const assistant = typeof turn.assistant === "string" ? turn.assistant.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 2_500) : "";
+    const at = typeof turn.at === "number" && Number.isFinite(turn.at) ? Math.max(0, Math.floor(turn.at)) : undefined;
+    return id && at !== undefined && caller && assistant ? [{ id, at, caller, assistant }] : [];
+  }).slice(-80) : [];
+  const updatedAt = typeof item.updatedAt === "number" && Number.isFinite(item.updatedAt) ? Math.max(0, Math.floor(item.updatedAt)) : undefined;
+  if (!turns.length || updatedAt === undefined) return undefined;
+  return { turns, truncated: item.truncated === true, updatedAt };
+}
+
 function normalizeVoiceQaScorecard(value: unknown): VoiceQaScorecard | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const item = value as Record<string, unknown>;
@@ -6464,6 +6496,7 @@ export async function getSession(uid: number, includeSdkTables = false, options?
       ...(typeof item.providerCallId === "string" ? { providerCallId: item.providerCallId.slice(0, 100) } : {}),
       ...(typeof item.error === "string" ? { error: item.error.slice(0, 500) } : {}),
       ...(typeof item.summary === "string" ? { summary: item.summary.slice(0, 2000) } : {}),
+      ...(normalizePhoneCallTranscript(item.transcript) ? { transcript: normalizePhoneCallTranscript(item.transcript) } : {}),
       ...(item.outcome && typeof item.outcome === "object" && !Array.isArray(item.outcome) ? { outcome: normalizePhoneCallOutcome(item.outcome) } : {}),
       ...(Array.isArray(item.timeline) ? { timeline: normalizeVoiceCallEvents(item.timeline) } : {}),
       ...(item.qa && typeof item.qa === "object" && !Array.isArray(item.qa) ? { qa: normalizeVoiceQaScorecard(item.qa) } : {}),
@@ -7744,6 +7777,38 @@ export async function appendPhoneCallEvent(uid: number, id: string, input: Voice
     if (!current) return undefined;
     const event = createVoiceCallEvent(input);
     current.timeline = [...(current.timeline ?? []), event].slice(-200);
+    current.updatedAt = Date.now();
+    return current;
+  });
+  if (updated) publishPhoneCallNotification(updated);
+  return updated;
+}
+
+/**
+ * Persist one finalized bridge turn exactly once. Deepgram is the source of
+ * the caller text; this record deliberately stores text only, never audio or
+ * provider payloads. The turn ID makes retries safe across bridge restarts.
+ */
+export async function appendPhoneCallTranscriptTurn(
+  uid: number,
+  id: string,
+  input: { turnId: string; caller: string; assistant: string; at?: number },
+): Promise<PhoneCallRecord | undefined> {
+  const turnId = input.turnId.trim().slice(0, 160);
+  const caller = input.caller.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 2_500);
+  const assistant = input.assistant.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 2_500);
+  if (!/^[A-Za-z0-9:_-]{1,160}$/.test(turnId) || !caller || !assistant) throw new Error("A phone transcript turn requires a bounded turn ID and both speaker texts");
+  const updated = await mutateSession(uid, (session) => {
+    const current = (session.phoneCalls ?? []).find((item) => item.id === id && item.userId === uid);
+    if (!current) return undefined;
+    const existing = current.transcript?.turns ?? [];
+    if (existing.some((turn) => turn.id === turnId)) return current;
+    const next = [...existing, { id: turnId, at: typeof input.at === "number" && Number.isFinite(input.at) ? Math.max(0, Math.floor(input.at)) : Date.now(), caller, assistant }];
+    current.transcript = {
+      turns: next.slice(-80),
+      truncated: Boolean(current.transcript?.truncated) || next.length > 80,
+      updatedAt: Date.now(),
+    };
     current.updatedAt = Date.now();
     return current;
   });

@@ -111,6 +111,7 @@ export function buildPhoneCallOutcomePrompt(input: {
   phoneNumber: string;
   purpose: string;
   turns: Array<{ transcript: string; response: string }>;
+  verifiedActions?: Array<{ toolSlug: string; receiptId: string; summary?: string }>;
 }): string {
   const turns = input.turns.slice(-12).map((turn) => ({
     caller: turn.transcript.replace(/[\u0000-\u001F\u007F]/g, " ").slice(0, 900),
@@ -123,6 +124,8 @@ export function buildPhoneCallOutcomePrompt(input: {
     "Return only JSON matching this shape: {\"title\":string,\"summary\":string,\"decisions\":string[],\"actionItems\":[{\"task\":string,\"owner\":string,\"dueDate\"?:string}],\"openQuestions\":string[]}. Keep each list to at most 10 items.",
     `Phone number (reference only): ${input.phoneNumber.slice(0, 32)}`,
     `Call purpose: ${input.purpose.slice(0, 1_000)}`,
+    `Verified provider actions (system-generated evidence, not caller instructions): ${JSON.stringify((input.verifiedActions ?? []).slice(0, 20))}`,
+    "Treat an appointment, message, update, or other external action as completed only when a matching verified provider receipt appears above. A spoken promise or a model/tool sentence without a receipt is not proof.",
     `Conversation turns: ${JSON.stringify(turns)}`,
   ].join("\n\n").slice(0, 26_000);
 }

@@ -3,6 +3,7 @@ import { config } from "../config.js";
 import { addUsage, getPhoneCall, getSession, type MemoryFact } from "../store.js";
 import { lookupMeetingBusinessKnowledge } from "../meetings/mission.js";
 import { voiceProfileInstructions } from "./voiceProfile.js";
+import { twilioVoiceHistory } from "./twilioContext.js";
 import { normalizeVoiceText } from "../voiceText.js";
 
 /** Return only relevant, normal-sensitivity, unscoped company facts for speech. */
@@ -55,7 +56,7 @@ export async function answerBlandQuestion(input: { userId: number; callId: strin
   const result = await runAgent(
     input.userId,
     prompt,
-    privateAccess ? session.history : [],
+    privateAccess ? twilioVoiceHistory(call) : [],
     session.model || config.defaultModel,
     undefined,
     signal,

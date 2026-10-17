@@ -2313,6 +2313,8 @@ export interface AgentToolActivity {
   batchActions?: ComposioBatchAction[];
   /** Content-free result metadata; never includes provider-returned values. */
   summary?: string;
+  /** Trusted provider receipt reference, when the action returned one. */
+  receiptId?: string;
   durationMs?: number;
 }
 
@@ -2561,6 +2563,11 @@ async function executeAgent(
   let meetingComposioAccountAliases = options?.meetingComposioAccountAliases;
   const toolsDisabled = allow?.size === 0;
   const voiceToolFreeTurn = voiceTurn && toolsDisabled;
+  // Live phone turns use exact purpose-bounded schemas below. Do not fetch the
+  // owner's full connected-app catalogue just to filter it back down; that
+  // catalogue is large enough to dominate first-audio latency and can expose
+  // unrelated file/image actions to the model.
+  const boundedVoicePreparation = voiceTurn && ownerPrivateRun && !voiceFastLane && !voiceToolFreeTurn;
   const toolName = (tool: any): string => canonicalNativeToolSlug(String(tool?.function?.name ?? tool?.name ?? ""));
   if (voiceTurn && !ownerPrivateRun && (!allow || [...allow].some((name) => !VOICE_TURN_TOOL_NAMES.has(name)))) {
     throw new Error("Voice turns require an explicit allowlist of read-only Chusky tools");
@@ -2602,7 +2609,7 @@ async function executeAgent(
   // this run remain available, while the model can discover any other action
   // through COMPOSIO_SEARCH_TOOLS and execute it through the session.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const fullComposioTools: any[] = sessionObj
+  const fullComposioTools: any[] = sessionObj && !boundedVoicePreparation
     ? voicePreparationKey
       ? await cachedVoiceToolSchemas(voicePreparationKey, () => sessionObj.tools())
       : await sessionObj.tools()
@@ -2611,7 +2618,9 @@ async function executeAgent(
   const voiceCalendarRequest = voiceTurn && ownerPrivateRun
     && /\b(?:calendar|calendars|schedule|scheduling|appointment|appointments|availability|available|book|booking|reschedule)\b/i.test(`${voiceRoutingText}\n${options?.voiceRoutingHint ?? ""}`);
   const voiceCalendarTools = voiceCalendarRequest
-    ? await discoverVoiceCalendarTools(sessionObj, fullComposioTools, signal)
+    ? voicePreparationKey
+      ? await cachedVoiceToolSchemas(`${voicePreparationKey}:calendar`, () => discoverVoiceCalendarTools(sessionObj, fullComposioTools, signal))
+      : await discoverVoiceCalendarTools(sessionObj, fullComposioTools, signal)
     : [];
   if (voiceCalendarRequest) logger.info({ count: voiceCalendarTools.length }, "Voice calendar tools preloaded");
   const voiceCapabilitySlugs = voiceTurn && ownerPrivateRun
@@ -2619,7 +2628,9 @@ async function executeAgent(
     : [];
   const voiceCalendarNames = new Set(voiceCalendarTools.map((tool) => composioActionSlug(toolName(tool))));
   const voiceCapabilityTools = voiceCapabilitySlugs.length
-    ? await discoverVoiceComposioTools(fullComposioTools, voiceCapabilitySlugs, signal)
+    ? voicePreparationKey
+      ? await cachedVoiceToolSchemas(`${voicePreparationKey}:capabilities:${voiceCapabilitySlugs.join(",")}`, () => discoverVoiceComposioTools(fullComposioTools, voiceCapabilitySlugs, signal))
+      : await discoverVoiceComposioTools(fullComposioTools, voiceCapabilitySlugs, signal)
     : [];
   const uniqueVoiceCapabilityTools = voiceCapabilityTools.filter((tool) => !voiceCalendarNames.has(composioActionSlug(toolName(tool))));
   const voiceCapabilityNames = new Set([
@@ -2987,6 +2998,7 @@ async function executeAgent(
     && (!options?.ephemeral || (voiceTurn && ownerPrivateRun))
     && !options?.meetingId
     && !options?.toolAllow?.length
+    && !boundedVoicePreparation
     && !channelContext?.triggerEventId
     && !persistedMissionRouting
     && !reusableMissionRouting
@@ -3119,6 +3131,8 @@ async function executeAgent(
   } else {
     turnActionDecision = voiceFastLane || voiceToolFreeTurn
       ? { noActionNeeded: true, reason: voiceFastLane ? "voice_fast_lane" : "voice_tool_free", actionProbability: 0 }
+      : boundedVoicePreparation
+      ? { noActionNeeded: false, reason: "voice_call_plan", actionProbability: 1 }
       : toolsDisabled && !forceCapabilityRouting
       ? { noActionNeeded: true, reason: "routing_disabled" }
       : await decideTurnAction(routingQuery, { recentContext: routingRecentContext, forceCapability: forceCapabilityRouting, signal, deadline: routingDeadline, sessionId: durableRunId });
@@ -3141,7 +3155,9 @@ async function executeAgent(
       : !actionRoutingLikely || sharedScope
       ? Promise.resolve(undefined)
       : (voicePreparationKey ? cachedVoiceConnectedAccounts(voicePreparationKey, () => listConnectedAccounts(userId)) : listConnectedAccounts(userId)).catch((error) => { logger.debug({ err: error, userId }, "Connected-account metadata unavailable for this run"); return undefined; });
-    composioRoutePromise = persistedMissionRouting || reusableMissionRouting
+    composioRoutePromise = boundedVoicePreparation
+      ? Promise.resolve(undefined)
+      : persistedMissionRouting || reusableMissionRouting
       ? Promise.resolve(reusableMissionRouting?.composioDecision)
       : accountsPromise.then((accounts) => actionRoutingLikely && accounts
       ? routeComposioForTurn(routingQuery, { accounts, listActions: listComposioToolkitActions, listToolkits: listComposioToolkitCatalogue, signal, deadline: routingDeadline, recentContext: routingRecentContext, sessionId: durableRunId })
@@ -3150,7 +3166,9 @@ async function executeAgent(
     // to start only after these calls completed, reusing their already-expired
     // deadline and turning a healthy native route into a timeout fallback.
     const nativeRoutingQuery = options?.missionToolHints?.length ? `${routingQuery}\nPlanner preload hints: ${options.missionToolHints.join(", ")}` : routingQuery;
-    nativeToolRoutePromise = actionRoutingLikely
+    nativeToolRoutePromise = boundedVoicePreparation
+      ? Promise.resolve({ tools: availableTools.filter((tool) => VOICE_TURN_TOOL_NAMES.has(toolName(tool))), source: "fallback" as const, candidateCount: availableTools.filter((tool) => toolName(tool).startsWith("CHUCK_")).length, selected: availableTools.filter((tool) => VOICE_TURN_TOOL_NAMES.has(toolName(tool))).map((tool) => toolName(tool)), fallbackReason: "voice_call_plan" })
+      : actionRoutingLikely
       ? routeNativeToolsForTurn(availableTools, nativeRoutingQuery, { signal, deadline: routingDeadline, recentContext: routingRecentContext, sessionId: durableRunId, preserveAll: Boolean(options?.toolAllow?.length && !options?.taskId && !options?.missionId) })
       : Promise.resolve({ tools: availableTools.filter((tool) => toolName(tool) === "CHUCK_FIND_TOOLS" || toolName(tool) === "COMPOSIO_SEARCH_TOOLS"), source: "fallback" as const, candidateCount: availableTools.filter((tool) => toolName(tool).startsWith("CHUCK_")).length, selected: [], noNativeTool: true, noNativeToolConfidence: 1 - (turnActionDecision.actionProbability ?? 0), fallbackReason: turnActionDecision.reason });
   }
@@ -4498,6 +4516,7 @@ async function executeAgent(
             : batchActivityActions,
         } : {}),
         ...(!toolFailed ? { summary: safeToolActivitySummary(execResult) } : {}),
+        ...(!toolFailed && toolReceiptId ? { receiptId: toolReceiptId } : {}),
         durationMs: Math.max(0, Date.now() - toolStartedAt),
       });
 
@@ -5077,7 +5096,25 @@ async function discoverVoiceCalendarTools(sessionObj: any, sessionTools: any[], 
     add(tool);
     if (discovered.size >= VOICE_CALENDAR_TOOL_LIMIT) return [...discovered.values()];
   }
-  if (discovered.size >= VOICE_CALENDAR_TOOL_LIMIT || typeof sessionObj?.search !== "function") return [...discovered.values()];
+  if (discovered.size >= VOICE_CALENDAR_TOOL_LIMIT) return [...discovered.values()];
+  if (typeof sessionObj?.search !== "function") {
+    // Compatibility with older ToolRouter clients that have no search API.
+    // This is a fallback only; current clients use the bounded search path and
+    // never load the complete connected-app catalogue for a voice turn.
+    if (typeof sessionObj?.tools === "function") {
+      try {
+        const legacyTools = await abortable(sessionObj.tools(), signal) as any[];
+        for (const tool of legacyTools) {
+          add(tool);
+          if (discovered.size >= VOICE_CALENDAR_TOOL_LIMIT) break;
+        }
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        logger.debug({ err: error }, "Voice calendar compatibility schema lookup unavailable");
+      }
+    }
+    return [...discovered.values()];
+  }
   try {
     const result = await abortable(sessionObj.search({ query: "Google Calendar availability events appointments create update reschedule" }), signal);
     for (const tool of normalizeComposioSearchResults(result)) {

@@ -25,6 +25,18 @@ test("phone outcome prompt treats bounded turns as conversation data", () => {
   assert.ok(prompt.length < 26_000);
 });
 
+test("phone outcome prompt requires a provider receipt before claiming completion", () => {
+  const prompt = buildPhoneCallOutcomePrompt({
+    phoneNumber: "+15550100000",
+    purpose: "Book an appointment",
+    turns: [{ transcript: "Tomorrow at nine works.", response: "I will check that." }],
+    verifiedActions: [{ toolSlug: "GOOGLECALENDAR_CREATE_EVENT", receiptId: "receipt_123", summary: "Created the calendar event." }],
+  });
+  assert.match(prompt, /GOOGLECALENDAR_CREATE_EVENT/);
+  assert.match(prompt, /receipt_123/);
+  assert.match(prompt, /only when a matching verified provider receipt appears/i);
+});
+
 test("phone outcome parser accepts fenced or prefixed JSON without weakening validation", () => {
   const wrapped = `Here is the outcome:\n\n\`\`\`json\n${JSON.stringify({
     title: "Appointment confirmed",

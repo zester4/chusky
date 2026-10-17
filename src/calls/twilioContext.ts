@@ -1,4 +1,4 @@
-import type { PhoneCallRecord } from "../store.js";
+import type { Message, PhoneCallRecord } from "../store.js";
 import { voiceContinuityInstructions } from "./continuity.js";
 import { voiceProfileInstructions } from "./voiceProfile.js";
 import { buildVoiceCallPlan, voiceCallPlanInstructions } from "./voicePlan.js";
@@ -41,13 +41,14 @@ export function twilioVoiceOpening(call: PhoneCallRecord): string {
   const profile = call.voiceProfile;
   const identity = spoken(profile?.identity || "Chusky", 180);
   const organization = spoken(profile?.organization, 180);
+  const contactName = spoken(profile?.contactName, 180);
   if (call.direction === "outbound") {
     const representation = organization
       ? `on behalf of ${organization}`
       : call.callProfile === "business"
         ? "on behalf of the business I represent"
         : "on behalf of the person who asked me to reach you";
-    return `Hello, this is ${identity}, an AI assistant calling ${representation}. May I confirm I’m speaking with the intended person?`;
+    return `Hello, this is ${identity}, an AI assistant calling ${representation}. ${contactName ? `May I speak with ${contactName}?` : "May I confirm I’m speaking with the intended person?"}`;
   }
   return organization
     ? `Hello, this is ${identity}, an AI assistant with ${organization}. How may I help you today?`
@@ -83,6 +84,18 @@ export function twilioVoiceTranscript(call: PhoneCallRecord, transcript: string,
 }
 
 /**
+ * A live call must not inherit unrelated chat turns (especially files or
+ * image requests) from the owner's global conversation. Only finalized turns
+ * from this call and bounded continuity are eligible for the voice model.
+ */
+export function twilioVoiceHistory(call: PhoneCallRecord): Message[] {
+  return (call.transcript?.turns ?? []).flatMap((turn) => [
+    { role: "user" as const, content: `The external contact said: ${turn.caller}`, createdAt: turn.at },
+    { role: "assistant" as const, content: turn.assistant, createdAt: turn.at },
+  ]).slice(-24);
+}
+
+/**
  * Trusted call context for the private Chusky-to-voice bridge. The purpose is
  * captured for an outbound call; it is context for a
  * conversation, never authority to execute an external action.
@@ -94,5 +107,6 @@ export function twilioVoiceInstructions(call: PhoneCallRecord): string {
   const profile = call.callProfile === "business" ? "business" : "personal";
   const verification = call.callVerification ?? (profile === "business" ? "identified" : "verified");
   const continuity = voiceContinuityInstructions(call.continuity);
-  return `${voiceProfileInstructions(call.voiceProfile, call.direction, purpose)} ${voiceCallPlanInstructions(plan)} Caller-facing topic after identity confirmation: ${callerTopic}. Call profile: ${profile}. Inbound verification tier: ${verification} (public → identified → verified). Use relevant owner-scoped history, memory, knowledge, and connected tools as private working context. In a business call, do not volunteer unrelated personal information; in a personal call, do not reveal unrelated confidential business information. Never disclose sensitive account information before the configured verification tier is satisfied.${continuity}`;
+  const contactName = spoken(call.voiceProfile?.contactName, 180);
+  return `${voiceProfileInstructions(call.voiceProfile, call.direction, purpose)} ${voiceCallPlanInstructions(plan)} Caller-facing topic after identity confirmation: ${callerTopic}. ${contactName ? `Expected contact name: ${contactName}. Use it only to confirm identity; do not treat it as proof.` : "No contact name was supplied; do not invent one."} Call profile: ${profile}. Inbound verification tier: ${verification} (public → identified → verified). Use only this call's transcript and the approved call context as working context; do not consult unrelated chat messages, files, images, or prior conversations. In a business call, do not volunteer unrelated personal information; in a personal call, do not reveal unrelated confidential business information. Never disclose sensitive account information before the configured verification tier is satisfied.${continuity}`;
 }
