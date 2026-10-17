@@ -29,6 +29,7 @@ import { appendSdkRunHistory, appendSdkRunHistoryToSession, mutateSession } from
 import { updateTriggerEvent } from "./store.js";
 import { markTriggerWebApprovalResuming } from "./store.js";
 import { ensureMissionWebProjection } from "./store.js";
+import { missionProjectionFailureDetails } from "./missionProjectionDiagnostics.js";
 import { notifyTriggerApproval } from "./triggerWorkflow.js";
 import { logger } from "./logger.js";
 import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
@@ -351,7 +352,7 @@ async function attachA2APushConfig(owner: A2AOwner, taskId: string, input: unkno
 async function enqueueA2AMissionUpdate(mission: any): Promise<void> {
   if (["completed", "failed", "cancelled"].includes(mission.status) && Number.isSafeInteger(mission.webNotificationEligibleAt)) {
     try { await ensureMissionWebProjection(mission); }
-    catch (error) { logger.warn({ errorType: error instanceof Error ? error.name : "UnknownError", missionId: mission.id }, "Mission chat notification projection failed"); }
+    catch (error) { logger.warn({ ...missionProjectionFailureDetails(error), missionId: mission.id }, "Mission chat notification projection failed"); }
   }
   if (!Array.isArray(mission.a2aPushNotifications) || mission.a2aPushNotifications.length === 0) return;
   const payload = {
@@ -1885,7 +1886,7 @@ export function registerSdkApi(app: Hono): void {
     const missionProjections = await Promise.allSettled(terminalMissions.map((mission) => ensureMissionWebProjection(mission)));
     const missionNotifications = terminalMissions.map((mission, index) => {
       const projection = missionProjections[index];
-      if (projection?.status === "rejected") logger.warn({ errorType: projection.reason instanceof Error ? projection.reason.name : "UnknownError", missionId: mission.id }, "Mission notification projection unavailable");
+      if (projection?.status === "rejected") logger.warn({ ...missionProjectionFailureDetails(projection.reason), missionId: mission.id }, "Mission notification projection unavailable");
       return {
         id: mission.id,
         title: mission.title,
