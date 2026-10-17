@@ -18,6 +18,7 @@ import { createVoiceCallEvent, normalizeVoiceCallEvents, type VoiceCallEvent, ty
 import type { VoiceQaScorecard } from "./calls/voiceEvaluation.js";
 import { logger } from "./logger.js";
 import { publishWebNotification } from "./webNotificationBus.js";
+import { MissionWebProjectionError, wrapMissionProjectionError } from "./missionProjectionDiagnostics.js";
 import { instrumentRedisClient, RedisCommandMetrics } from "./redisMetrics.js";
 import { flattenStorageMetricTotals, RedisMetricsPublisher } from "./redisMetricsPublisher.js";
 import { recordFailure, recordVectorFailure } from "./monitoring.js";
@@ -6893,52 +6894,61 @@ export async function ensureReminderWebProjection(input: {
 export async function ensureMissionWebProjection(mission: MissionRecord): Promise<{ threadId: string; runId: string; eventId: string; created: boolean }> {
   if (!Number.isSafeInteger(mission.userId) || mission.userId <= 0 || !/^mis_[A-Za-z0-9_-]{1,120}$/.test(mission.id)
     || !["completed", "failed", "cancelled"].includes(mission.status)) {
-    throw new Error("A valid owner-scoped terminal mission is required for its web notification.");
+    throw new MissionWebProjectionError("validate", "A valid owner-scoped terminal mission is required for its web notification.", false);
   }
   const terminalEvent = [...mission.events].reverse().find((event) => event.type === mission.status);
   const eventId = terminalEvent?.id ?? `mission:${mission.id}:${mission.status}:${mission.completedAt ?? mission.createdAt}`;
   const threadId = "thr_mission_updates";
   const runId = `run_mission_${createHash("sha256").update(eventId).digest("hex").slice(0, 32)}`;
-  const existingSession = await getSessionWithSdkRuns(mission.userId, threadId);
+  let existingSession: UserSession;
+  try {
+    existingSession = await getSessionWithSdkRuns(mission.userId, threadId);
+  } catch (error) {
+    throw wrapMissionProjectionError("read_session", error);
+  }
   const existing = existingSession.sdkThreads?.flatMap((thread) => thread.runs).find((run) => run.metadata?.missionEventId === eventId);
   if (existing) return { threadId, runId: existing.id, eventId, created: false };
 
   const now = Date.now();
-  const projection = await mutateSession(mission.userId, (session) => {
-    session.sdkThreads = session.sdkThreads ?? [];
-    let thread = session.sdkThreads.find((item) => item.id === threadId && item.metadata.source === "mission-notifications");
-    if (!thread) {
-      thread = { id: threadId, externalId: "mission-updates", metadata: { source: "mission-notifications", title: "Mission updates" }, history: [], runs: [], createdAt: now, updatedAt: now };
-      session.sdkThreads.push(thread);
-    }
-    const prior = thread.runs.find((run) => run.metadata?.missionEventId === eventId);
-    if (prior) return { threadId: thread.id, runId: prior.id, eventId, created: false };
+  let projection: { threadId: string; runId: string; eventId: string; created: boolean } | undefined;
+  try {
+    projection = await mutateSession(mission.userId, (session) => {
+      session.sdkThreads = session.sdkThreads ?? [];
+      let thread = session.sdkThreads.find((item) => item.id === threadId && item.metadata.source === "mission-notifications");
+      if (!thread) {
+        thread = { id: threadId, externalId: "mission-updates", metadata: { source: "mission-notifications", title: "Mission updates" }, history: [], runs: [], createdAt: now, updatedAt: now };
+        session.sdkThreads.push(thread);
+      }
+      const prior = thread.runs.find((run) => run.metadata?.missionEventId === eventId);
+      if (prior) return { threadId: thread.id, runId: prior.id, eventId, created: false };
 
-    const statusLabel = mission.status === "completed" ? "completed" : mission.status === "failed" ? "needs attention" : "was cancelled";
-    const detail = mission.status === "completed"
-      ? mission.result?.trim() || "The mission completed. Review its evidence and activity on the Missions page."
-      : mission.error?.trim() || mission.nextAction?.trim() || (mission.status === "failed" ? "The mission stopped before completion. Review the saved checkpoint and next action." : "The mission was cancelled before completion.");
-    const statusText = mission.status === "completed" ? "Mission completed" : mission.status === "failed" ? "Mission needs attention" : "Mission cancelled";
-    const run: SdkRunRecord = {
-      id: runId,
-      ownerPrivateRun: true,
-      status: "completed",
-      input: `${statusText}: ${mission.title}`.slice(0, 1000),
-      output: `${statusText}: ${mission.title}\n\n${detail}`.slice(0, 12_000),
-      model: session.model,
-      metadata: { source: "mission", missionId: mission.id, missionStatus: mission.status, missionEventId: eventId },
-      events: [
-        { id: `evt_${runId}_started`, type: "run.started", at: now },
-        { id: `evt_${runId}_completed`, type: "run.completed", at: now },
-      ],
-      createdAt: now,
-      updatedAt: now,
-    };
-    thread.runs.push(run);
-    thread.updatedAt = now;
-    return { threadId: thread.id, runId, eventId, created: true };
-  }, { sdkThreadId: threadId });
-  if (!projection) throw new Error("Mission notification could not be saved to the owner session.");
+      const detail = mission.status === "completed"
+        ? mission.result?.trim() || "The mission completed. Review its evidence and activity on the Missions page."
+        : mission.error?.trim() || mission.nextAction?.trim() || (mission.status === "failed" ? "The mission stopped before completion. Review the saved checkpoint and next action." : "The mission was cancelled before completion.");
+      const statusText = mission.status === "completed" ? "Mission completed" : mission.status === "failed" ? "Mission needs attention" : "Mission cancelled";
+      const run: SdkRunRecord = {
+        id: runId,
+        ownerPrivateRun: true,
+        status: "completed",
+        input: `${statusText}: ${mission.title}`.slice(0, 1000),
+        output: `${statusText}: ${mission.title}\n\n${detail}`.slice(0, 12_000),
+        model: session.model,
+        metadata: { source: "mission", missionId: mission.id, missionStatus: mission.status, missionEventId: eventId },
+        events: [
+          { id: `evt_${runId}_started`, type: "run.started", at: now },
+          { id: `evt_${runId}_completed`, type: "run.completed", at: now },
+        ],
+        createdAt: now,
+        updatedAt: now,
+      };
+      thread.runs.push(run);
+      thread.updatedAt = now;
+      return { threadId: thread.id, runId, eventId, created: true };
+    }, { sdkThreadId: threadId });
+  } catch (error) {
+    throw wrapMissionProjectionError("write_session", error);
+  }
+  if (!projection) throw new MissionWebProjectionError("write_session", "Mission notification could not be saved to the owner session.", true);
   if (projection.created) publishWebNotification({ userId: mission.userId, eventId, kind: "mission", missionId: mission.id, threadId: projection.threadId, runId: projection.runId });
   return projection;
 }
