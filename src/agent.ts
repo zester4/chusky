@@ -354,9 +354,24 @@ export function openRouterAttemptTimeoutMs(attempt: number): number {
   return Math.min(config.openRouterTimeoutMs * (retry + 1), 120_000);
 }
 
-function requestSignal(signal?: AbortSignal, timeoutMs = config.openRouterTimeoutMs): AbortSignal {
-  const timeout = AbortSignal.timeout(timeoutMs);
-  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+interface RequestSignal {
+  signal: AbortSignal;
+  cleanup: () => void;
+}
+
+function requestSignal(signal?: AbortSignal, timeoutMs = config.openRouterTimeoutMs): RequestSignal {
+  // AbortSignal.timeout() uses an unref'ed timer in Node. That is normally
+  // fine for a long-lived server, but it can leave a pending fetch promise
+  // unresolved when the request is the only remaining work in a short-lived
+  // process (including contract tests). Keep the deadline ref'ed until the
+  // request settles, then always clear it so completed requests do not retain
+  // timers.
+  const timeoutController = new AbortController();
+  const timeout = setTimeout(() => {
+    timeoutController.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+  }, timeoutMs);
+  const combined = signal ? AbortSignal.any([signal, timeoutController.signal]) : timeoutController.signal;
+  return { signal: combined, cleanup: () => clearTimeout(timeout) };
 }
 
 export class ApprovalRequiredError extends Error {
@@ -690,30 +705,34 @@ export async function orChat(
       const attemptTimeoutMs = Math.max(1, Math.min(openRouterAttemptTimeoutMs(attempt), remainingMs));
       attemptsMade += 1;
       if (trace) logger.info({ ...trace, model: model.slice(0, 160), attempt: attemptsMade, timeoutMs: attemptTimeoutMs }, "Trigger model request attempt started");
-      const attemptSignal = requestSignal(signal, attemptTimeoutMs);
-      const res = await fetch(OR_URL, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${config.openRouterApiKey}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": "https://chusky-agent.example.com",
-          "X-OpenRouter-Title": "Chusky AI Agent",
-        },
-        body: JSON.stringify({ ...body, stream: Boolean(onDelta), ...(onDelta ? { stream_options: { include_usage: true } } : {}) }),
-        signal: attemptSignal,
-      });
-      if (res.ok) {
-        const response = onDelta
-          ? await readStreamingChat(res, async (text) => { streamedOutputExposed = true; await onDelta(text); })
-          : await res.json() as ChatResponse;
-        if (trace) logger.info({ ...trace, model: model.slice(0, 160), finishReason: response.choices[0]?.finish_reason, attempt: attemptsMade, elapsedMs: Date.now() - requestStartedAt }, "Trigger model response received");
-        return response;
+      const attemptRequest = requestSignal(signal, attemptTimeoutMs);
+      try {
+        const res = await fetch(OR_URL, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${config.openRouterApiKey}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://chusky-agent.example.com",
+            "X-OpenRouter-Title": "Chusky AI Agent",
+          },
+          body: JSON.stringify({ ...body, stream: Boolean(onDelta), ...(onDelta ? { stream_options: { include_usage: true } } : {}) }),
+          signal: attemptRequest.signal,
+        });
+        if (res.ok) {
+          const response = onDelta
+            ? await readStreamingChat(res, async (text) => { streamedOutputExposed = true; await onDelta(text); })
+            : await res.json() as ChatResponse;
+          if (trace) logger.info({ ...trace, model: model.slice(0, 160), finishReason: response.choices[0]?.finish_reason, attempt: attemptsMade, elapsedMs: Date.now() - requestStartedAt }, "Trigger model response received");
+          return response;
+        }
+        const err = await res.text().catch(() => res.statusText);
+        if (![408, 429, 500, 502, 503, 504].includes(res.status)) {
+          throw new Error(`OpenRouter ${res.status}: ${err}`);
+        }
+        lastError = new Error(`OpenRouter ${res.status}: ${err}`);
+      } finally {
+        attemptRequest.cleanup();
       }
-      const err = await res.text().catch(() => res.statusText);
-      if (![408, 429, 500, 502, 503, 504].includes(res.status)) {
-        throw new Error(`OpenRouter ${res.status}: ${err}`);
-      }
-      lastError = new Error(`OpenRouter ${res.status}: ${err}`);
     } catch (e) {
       if (signal?.aborted) throw e;
       // Once text has reached the client, retrying a partially streamed answer
