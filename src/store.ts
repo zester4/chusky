@@ -1753,6 +1753,22 @@ export interface TriggerEventAction {
   prompt: string;
 }
 
+/**
+ * The calendar fields needed by the trigger workflow after webhook intake.
+ * Meeting URLs are sealed before this is persisted; the raw provider payload
+ * never crosses the webhook boundary into the durable trigger record.
+ */
+export interface TriggerCalendarPreparation {
+  lifecycle: CalendarMeetingPreparation["lifecycle"];
+  calendarEventId?: string;
+  title?: string;
+  startAt?: string;
+  endAt?: string;
+  participants: string[];
+  attendees?: RecallCalendarAttendee[];
+  sealedMeetingUrl?: string;
+}
+
 export interface TriggerEventRecord {
   eventId: string;
   userId: number;
@@ -1764,6 +1780,8 @@ export interface TriggerEventRecord {
   summary: string;
   /** Bounded private event context for the agent; never returned by account projections. */
   agentContext?: string;
+  /** Bounded calendar projection for asynchronous trigger preparation. */
+  calendarPreparation?: TriggerCalendarPreparation;
   status: "queued" | "running" | "awaiting_approval" | "completed" | "failed";
   workflowRunId?: string;
   approvalId?: string;
@@ -1959,6 +1977,8 @@ interface Backend {
   getSessionProfile(userId: number): Promise<SessionProfileProjection>;
   getSessionWebhooks(userId: number): Promise<UserSession["sdkWebhooks"]>;
   saveSession(userId: number, s: UserSession): Promise<void>;
+  /** Persist a session while the caller already owns the session-domain lease. */
+  saveSessionWithoutLease(userId: number, s: UserSession): Promise<void>;
   readConversationBefore(userId: number, before: { createdAt: number; id: string }, limit: number): Promise<DurableConversationMessage[] | undefined>;
   getSdkRun(userId: number, threadId: string, runId: string): Promise<SdkRunRecord | undefined>;
   getSdkRunById(userId: number, runId: string): Promise<{ threadId: string; run: SdkRunRecord } | undefined>;
@@ -2826,7 +2846,7 @@ class RedisBackend implements Backend {
   }
 
   async saveSession(userId: number, s: UserSession): Promise<void> {
-    if (!this.durableState || userId === 0) return this.saveSessionUnlocked(userId, s);
+    if (!this.durableState || userId === 0) return this.saveSessionWithoutLease(userId, s);
 
     // Session backfills and live writers must not interleave their Neon domain
     // writes and Redis promotion. The Redis lease is owner-scoped so unrelated
@@ -2837,13 +2857,13 @@ class RedisBackend implements Backend {
       acquire: async () => this.acquireKeyLock(lockKey, lockToken, 30),
       renew: async () => this.renewKeyLock(lockKey, lockToken, 30),
       release: async () => this.releaseKeyLock(lockKey, lockToken),
-    }, () => this.saveSessionUnlocked(userId, s), {
+    }, () => this.saveSessionWithoutLease(userId, s), {
       busyMessage: "Owner session is being migrated or saved concurrently; retry shortly.",
       lostMessage: "Owner session write lost its coordination lease; verify the session before retrying.",
     });
   }
 
-  private async saveSessionUnlocked(userId: number, s: UserSession): Promise<void> {
+  async saveSessionWithoutLease(userId: number, s: UserSession): Promise<void> {
     let persisted = s;
     if (this.durableState && userId !== 0) {
       const withMessageIds = { ...s, history: (s.history ?? []).map((message) => ({ ...message, id: message.id ?? (message.sourceId ? `msg_${createHash("sha256").update(message.sourceId).digest("hex").slice(0, 48)}` : `msg_${randomUUID()}`) })) } as UserSession & DurableSessionMetadata;
@@ -4962,6 +4982,7 @@ class MemoryBackend implements Backend {
   async markObjectDeleted(_userId: number, _objectId: string): Promise<boolean> { return false; }
   async markObjectFailed(_userId: number, _objectId: string): Promise<boolean> { return false; }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, structuredClone(s)); }
+  async saveSessionWithoutLease(userId: number, s: UserSession) { this.sessions.set(userId, structuredClone(s)); }
   async getSdkThread(userId: number, threadId: string) {
     const thread = this.sessions.get(userId)?.sdkThreads?.find((item) => item.id === threadId);
     return thread ? structuredClone({ ...thread, runs: [] }) : undefined;
@@ -6780,10 +6801,14 @@ export async function appendSdkRunHistory(uid: number, threadId: string, runId: 
   thread.updatedAt = Math.max(thread.updatedAt, run.updatedAt);
   if (!(await backend.saveSdkThread(uid, thread))) return false;
   if (run.ownerPrivateRun && !run.companyProjectId) {
+    // SDK threads/runs have their own durable tables. Project the settled
+    // result into the owner's conversation domain without loading or saving
+    // the SDK domain again; doing both in one session write created a stale
+    // `sdk` baseline and caused lease/version conflicts under concurrent runs.
     await mutateSession(uid, (session) => {
       const accountSourceIds = new Set(session.history.map((message) => message.sourceId).filter((value): value is string => typeof value === "string"));
       appendSessionHistory(session, tagged.filter((message) => !accountSourceIds.has(message.sourceId!)));
-    }, { includeSdkTables: true });
+    });
   }
   return true;
 }
@@ -7046,7 +7071,11 @@ export function mutateSession<T>(uid: number, mutator: (session: UserSession) =>
 export function mutateSession<T>(uid: number, mutator: (session: UserSession) => T | Promise<T>, options?: SessionMutationOptions): Promise<T>;
 export async function mutateSession<T>(uid: number, mutator: (session: UserSession) => T | Promise<T>, options: SessionMutationOptions = {}): Promise<T | undefined> {
   const token = randomUUID();
-  const key = `session-mutate:${uid}`;
+  // Use the same owner-scoped lease as direct session saves. The previous
+  // second lease (`session-mutate:*`) serialized mutations separately and then
+  // reacquired `session-domain:*`, creating avoidable contention and widening
+  // the stale-version window for SDK/worker writes.
+  const key = `session-domain:${uid}`;
   const busyMessage = "Session mutation is busy; retry shortly.";
   try {
     return await withDistributedLease({
@@ -7056,7 +7085,7 @@ export async function mutateSession<T>(uid: number, mutator: (session: UserSessi
     }, async () => {
       const session = options.allSdkRuns ? await getSessionWithSdkRuns(uid) : options.sdkThreadId ? await getSessionWithSdkRuns(uid, options.sdkThreadId) : options.includeSdkTables ? await getSessionWithSdkTables(uid) : await getSession(uid);
       const result = await mutator(session);
-      await saveSession(uid, session);
+      await backend.saveSessionWithoutLease(uid, session);
       return result;
     }, {
       acquisitionAttempts: options.skipIfBusy ? 1 : 20,
@@ -10446,6 +10475,38 @@ export async function releaseAutonomyWatchLock(userId: number, watchId: string, 
   return backend.releaseKeyLock(`autonomy-watch:${userId}:${watchId}`, token);
 }
 
+/**
+ * Serialize one narrow resource without blocking the owner's entire chat
+ * account. Voice turns use this per call so two turns cannot mutate the same
+ * call concurrently while ordinary chat, missions, and another call remain
+ * independent.
+ */
+export async function withScopedKeyLock<T>(
+  key: string,
+  work: () => Promise<T>,
+  options: {
+    signal?: AbortSignal;
+    leaseSeconds?: number;
+    acquisitionAttempts?: number;
+    retryDelayMs?: number;
+  } = {},
+): Promise<T> {
+  const token = randomUUID();
+  const leaseSeconds = Math.max(15, Math.min(600, Math.floor(options.leaseSeconds ?? 180)));
+  return withDistributedLease({
+    acquire: () => backend.acquireKeyLock(key, token, leaseSeconds),
+    renew: () => backend.renewKeyLock(key, token, leaseSeconds),
+    release: () => backend.releaseKeyLock(key, token),
+  }, work, {
+    signal: options.signal,
+    acquisitionAttempts: Math.max(1, Math.floor(options.acquisitionAttempts ?? 1200)),
+    retryDelayMs: Math.max(0, Math.floor(options.retryDelayMs ?? 100)),
+    renewalIntervalMs: Math.max(1_000, Math.floor(leaseSeconds * 1000 / 3)),
+    busyMessage: "The requested resource is busy; retry shortly.",
+    lostMessage: "The requested resource lease was lost; retry safely.",
+  });
+}
+
 export async function claimTelegramUpdate(updateId: number, ttlSeconds = 24 * 60 * 60): Promise<boolean> {
   if (!Number.isSafeInteger(updateId) || updateId < 0) return true;
   return backend.claimTelegramUpdate(updateId, ttlSeconds);
@@ -11245,8 +11306,19 @@ export async function forgetMemory(uid: number, key: string): Promise<boolean> {
 
 function imageExtension(contentType: ImageAsset["contentType"]): string { return contentType === "image/jpeg" ? "jpg" : contentType === "image/webp" ? "webp" : "png"; }
 
+function ownerScopedImageKey(userId: number, key: string): boolean {
+  if (!Number.isSafeInteger(userId) || userId <= 0 || typeof key !== "string" || key.length < 8 || key.length > 512) return false;
+  if (key.startsWith("/") || key.includes("..") || /[^A-Za-z0-9_./-]/.test(key)) return false;
+  return key.startsWith(`images/${userId}/`)
+    || key.startsWith(`sdk/${userId}/`)
+    || key.startsWith(`telegram/${userId}/`)
+    || new RegExp(`^channels/[A-Za-z0-9_-]{1,40}/${userId}/`).test(key);
+}
+
 export async function registerImageAsset(uid: number, input: { id?: string; name: string; purpose: string; description?: string; tags?: string[]; contentType: ImageAsset["contentType"]; r2Key: string; size: number; model?: string; generationRunId?: string; conversationId?: string }): Promise<ImageAsset> {
   if (!r2Configured()) throw new Error("R2 storage is not configured");
+  if (!ownerScopedImageKey(uid, input.r2Key)) throw new Error("Image asset storage key is not owner-scoped.");
+  if (!(input.contentType === "image/jpeg" || input.contentType === "image/png" || input.contentType === "image/webp") || !Number.isSafeInteger(input.size) || input.size < 1 || input.size > config.sdkMaxFileBytes) throw new Error("Image asset metadata is invalid.");
   const now = Date.now();
   const id = input.id ?? `img_${now}_${randomUUID().slice(0, 8)}`;
   const asset: ImageAsset = { id, userId: uid, name: input.name.trim().slice(0, 120), purpose: input.purpose.trim().slice(0, 500), description: (input.description ?? "").trim().slice(0, 4000), tags: [...new Set((input.tags ?? []).map((tag) => tag.trim().toLowerCase()).filter(Boolean))].slice(0, 30), r2Key: input.r2Key, contentType: input.contentType, size: input.size, ...(typeof input.model === "string" && input.model.trim() ? { model: input.model.trim().slice(0, 240) } : {}), ...(typeof input.generationRunId === "string" && input.generationRunId.trim() ? { generationRunId: input.generationRunId.trim().slice(0, 160) } : {}), ...(typeof input.conversationId === "string" && input.conversationId.trim() ? { conversationId: input.conversationId.trim().slice(0, 240) } : {}), createdAt: now, updatedAt: now };

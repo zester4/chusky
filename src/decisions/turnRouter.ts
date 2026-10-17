@@ -10,7 +10,7 @@ import { config } from "../config.js";
 import { composioDomainCatalog, resolveComposioRoute, toolkitKey, type ComposioDomain } from "../composioRouting.js";
 import { listSkillSummaries } from "../skills/catalog.js";
 import { explicitlyNamedSkills, type SkillRoute } from "./skillRouter.js";
-import { nativeToolCapabilityCard, nativeToolRouteFromJevScores, type NativeToolDescriptor, type NativeToolRoute } from "./nativeToolRouter.js";
+import { enforceDirectMeetingJoinRoute, nativeToolCapabilityCard, nativeToolRouteFromJevScores, type NativeToolDescriptor, type NativeToolRoute } from "./nativeToolRouter.js";
 import { TREG_TOOL_CRITERIA, type TregTurnRoute } from "./tregRouter.js";
 import { NONE_OPTION, type JevChoiceAnswer, type JevClient, type JevNoulAnswer, type JevQuestion, type JevResult, jevClient, jevEnabled, jevText } from "./jev.js";
 import { recordDecision } from "./telemetry.js";
@@ -431,7 +431,7 @@ export async function computeTurnRoutingPlan(input: TurnRoutingPlanInput): Promi
 
   const skillRoute = input.includeSkills && jevEnabled("skills") ? buildSkillRoute(query, skills, result, skillCandidates) : undefined;
   const nativeToolRoute = input.includeNative && input.availableNativeTools && config.jevNativeToolRouting && jevEnabled("native")
-    ? nativeToolRouteFromJevScores(input.availableNativeTools, {
+    ? enforceDirectMeetingJoinRoute(input.availableNativeTools, nativeToolRouteFromJevScores(input.availableNativeTools, {
       scores: Object.fromEntries(nativeCandidateList.map((candidate, index) => [candidate.id, answerNoul(result, `native_${index}`)])),
       candidateCount: nativeCandidateList.length,
       query,
@@ -439,7 +439,7 @@ export async function computeTurnRoutingPlan(input: TurnRoutingPlanInput): Promi
       preserveAll: input.preserveNativeTools,
       latencyMs: result.latencyMs,
       costUsd: result.costUsd,
-    })
+    }), [query, input.recentContext].filter(Boolean).join("\n"))
     : undefined;
   const composioStage1 = input.includeComposio && jevEnabled("composio") ? buildComposioStage1(query, accounts, result, toolkitCandidates) : undefined;
   const externalDataBackend = buildExternalDataBackend(result, query);

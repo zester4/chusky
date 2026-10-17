@@ -402,6 +402,41 @@ export function augmentNativeToolRoute(tools: ToolSchema[], route: NativeToolRou
   };
 }
 
+/**
+ * A supported meeting URL plus an explicit participation request is a
+ * deterministic meeting operation. It must not be treated as a generic web
+ * browsing task, including when the current turn says only "join it" and the
+ * URL is present in recent thread context.
+ */
+export function isDirectMeetingJoinRequest(query: string): boolean {
+  const hasSupportedMeetingUrl = /https?:\/\/(?:meet\.google\.com|(?:[a-z0-9-]+\.)?zoom\.us|(?:[a-z0-9-]+\.)?teams\.microsoft\.com|(?:[a-z0-9-]+\.)?webex\.com)\b/i.test(query);
+  const asksToParticipate = /\b(?:join|attend|enter|participate|listen|sit\s+in|summari[sz]e|how\s+(?:did|was)\s+the\s+meeting|what(?:'s|\s+is)\s+happening)\b/i.test(query);
+  return hasSupportedMeetingUrl && asksToParticipate;
+}
+
+/**
+ * Keep direct meeting joins on the dedicated meeting surface. Browser and
+ * computer tools are intentionally removed for this request so a model cannot
+ * silently replace a real meeting participant with an unrelated private
+ * browser session. This changes exposure only; the native execution policy and
+ * Recall/provider checks still decide whether the join can actually happen.
+ */
+export function enforceDirectMeetingJoinRoute(tools: ToolSchema[], route: NativeToolRoute, query: string): NativeToolRoute {
+  if (!isDirectMeetingJoinRequest(query)) return route;
+  const isGenericBrowser = (slug: string): boolean => /^CHUCK_(?:BROWSER(?:_|$)|VAULT_|DAYTONA_COMPUTER(?:_|$))/.test(slug);
+  const filtered = route.tools.filter((tool) => !isGenericBrowser(toolName(tool)));
+  const meetingJoin = tools.find((tool) => toolName(tool) === "CHUCK_MEETING_JOIN");
+  if (meetingJoin && !filtered.some((tool) => toolName(tool) === "CHUCK_MEETING_JOIN")) filtered.push(meetingJoin);
+  const selected = route.selected.filter((slug) => !isGenericBrowser(slug));
+  if (meetingJoin) selected.push("CHUCK_MEETING_JOIN");
+  return {
+    ...route,
+    tools: filtered.filter((tool, index, all) => all.findIndex((candidate) => toolName(candidate) === toolName(tool)) === index),
+    selected: [...new Set(selected)],
+    ...(meetingJoin ? { noNativeTool: false, noNativeToolConfidence: undefined } : {}),
+  };
+}
+
 function nativeToolCount(tools: ToolSchema[]): number {
   return tools.reduce((count, tool) => count + (descriptorBySlug.has(toolName(tool)) ? 1 : 0), 0);
 }
@@ -593,9 +628,9 @@ export async function routeNativeToolsForTurn(tools: ToolSchema[], query: string
   }
   const { value, failure } = await awaitRoute(run, options.deadline ? options.deadline.remaining() : config.jevTurnBudgetMs);
   if (!value || value.source !== "jev") {
-    const fallback = value ?? (config.nativeToolLoading === "bundle" && !options.preserveAll
+    const fallback = enforceDirectMeetingJoinRoute(tools, value ?? (config.nativeToolLoading === "bundle" && !options.preserveAll
       ? bundleFallbackRoute(tools, query, "bundle_route_failure")
-      : { ...baseline, ...(failure ? { fallbackReason: failure } : {}) });
+      : { ...baseline, ...(failure ? { fallbackReason: failure } : {}) }), query);
     log(fallback, false, failure ?? fallback.fallbackReason ?? "fallback");
     return fallback;
   }
@@ -603,11 +638,12 @@ export async function routeNativeToolsForTurn(tools: ToolSchema[], query: string
     const baselineNativeTools = nativeToolCount(tools);
     const exposedNativeTools = nativeToolCount(value.tools);
     if (exposedNativeTools >= baselineNativeTools) {
-      const fallback = bundleFallbackRoute(tools, query, "jev_route_not_reduced");
+      const fallback = enforceDirectMeetingJoinRoute(tools, bundleFallbackRoute(tools, query, "jev_route_not_reduced"), query);
       log(fallback, false, "jev_route_not_reduced");
       return fallback;
     }
   }
-  log(value, true);
-  return value;
+  const guarded = enforceDirectMeetingJoinRoute(tools, value, query);
+  log(guarded, true);
+  return guarded;
 }

@@ -5,7 +5,7 @@ import { Readable } from "node:stream";
 import { Hono } from "hono";
 import { config } from "../src/config.js";
 import { logger } from "../src/logger.js";
-import { browserFileDownloadResponse, persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, sdkRunImages, setOrganizationAccessResolverForTests, setSdkAuditWriterForTests, setSdkMemoryWriterForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
+import { browserFileDownloadResponse, dashboardThreadHistoryFromRuns, persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, sdkRunImages, setOrganizationAccessResolverForTests, setSdkAuditWriterForTests, setSdkMemoryWriterForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
@@ -38,6 +38,15 @@ afterEach(() => {
 
 function app(): Hono { const value = new Hono(); registerSdkApi(value); return value; }
 function request(body: unknown, key = "idem_1") { return new Request("http://local/v1/threads", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(body) }); }
+
+test("dashboard model history is reconstructed from the active thread's settled runs", () => {
+  const history = dashboardThreadHistoryFromRuns([
+    { id: "run_other", status: "completed", input: "Old account conversation", output: "Private image answer", events: [], createdAt: 1, updatedAt: 2 },
+    { id: "run_current", status: "completed", input: "Join the meeting", output: "Meeting join started", events: [], createdAt: 3, updatedAt: 4 },
+  ], 10);
+  assert.deepEqual(history.map((message) => message.content), ["Old account conversation", "Private image answer", "Join the meeting", "Meeting join started"]);
+  assert.ok(history.every((message) => message.sourceId?.startsWith("sdk-run:")));
+});
 
 test("stream sends the opening before tool preparation finishes and persists it for recovery", { timeout: 8000 }, async () => {
   const originalFetch = globalThis.fetch;

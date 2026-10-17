@@ -80,7 +80,13 @@ export function deriveMissionToolHints(objective: string): string[] {
 export function missionWorkerToolAllowlist(stepTools?: string[], inheritedTools?: string[]): string[] | undefined {
   if (stepTools === undefined) return inheritedTools;
   const inherited = inheritedTools ? new Set(inheritedTools) : undefined;
-  const selected = stepTools.filter((tool) => !inherited || inherited.has(tool));
+  const selected = new Set(stepTools.filter((tool) => !inherited || inherited.has(tool)));
+  // Image-bearing provider actions cannot use the batch executor: the media
+  // bridge must stage the file and verify the exact provider receipt through
+  // the single-action path. Keep both meta-tools available whenever a mission
+  // step requests batching so a model retry is not blocked by an incomplete
+  // permission fence.
+  if (selected.has("COMPOSIO_MULTI_EXECUTE_TOOL")) selected.add("COMPOSIO_EXECUTE_TOOL");
   return [...new Set([...MISSION_WORKER_CONTROL_TOOLS, ...selected])];
 }
 

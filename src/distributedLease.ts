@@ -8,6 +8,7 @@ export interface DistributedLeaseOptions {
   acquisitionAttempts?: number;
   retryDelayMs?: number;
   renewalIntervalMs?: number;
+  signal?: AbortSignal;
   busyMessage: string;
   lostMessage: string;
 }
@@ -22,6 +23,7 @@ export async function withDistributedLease<T>(
   const retryDelayMs = Math.max(0, Math.floor(options.retryDelayMs ?? 100));
   let acquired = false;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (options.signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
     if (await lease.acquire()) { acquired = true; break; }
     if (attempt + 1 < attempts && retryDelayMs) await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
   }
