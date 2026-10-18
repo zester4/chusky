@@ -20,7 +20,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, appendSdkAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createCliDevice, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, deleteSdkThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkIdempotency, getSdkRun, getSdkThread, listSdkAuditEvents, listSdkRuns, listSdkThreads, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listTasksSince, listOpenTasks, listTasksForMission, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, saveSdkIdempotency, saveSdkRun, saveSdkThread, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type TriggerEventRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, appendSdkAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createCliDevice, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, deleteSdkThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkIdempotency, getSdkRun, getSdkThread, listSdkAuditEvents, listSdkRuns, listSdkThreads, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, getVoiceInboundRoute, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, deleteVoiceInboundRoute, listVoiceInboundRoutes, saveVoiceInboundRoute, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listTasksSince, listOpenTasks, listTasksForMission, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, saveSdkIdempotency, saveSdkRun, saveSdkThread, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type TriggerEventRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
@@ -47,6 +47,7 @@ import { FLUX_TTS_VOICES } from "./voiceSettings.js";
 import { listBlandCuratedVoices } from "./calls/blandVoices.js";
 import { createLinkCode, identityFingerprint, unlinkChannelIdentity, updateLinkedChannelIdentity } from "./channels/identity.js";
 import type { ChannelProvider } from "./channels/contracts.js";
+import { normalizeVoiceInboundRouteInput, normalizeInboundPhone } from "./calls/inboundRoutes.js";
 import type { VoiceCallProfileInput } from "./calls/voiceProfile.js";
 import { normalizePhoneCallOutcome } from "./calls/outcome.js";
 import { isBlandVoiceConfigured } from "./calls/bland.js";
@@ -771,7 +772,7 @@ function phoneCallingProvider(): "bland" | "twilio" | undefined {
   return isTwilioVoiceConfigured() ? "twilio" : undefined;
 }
 
-function callView(call: { id: string; provider?: string; direction?: string; phoneNumber: string; purpose: string; status: string; runtimeState?: string; error?: string; summary?: string; outcome?: unknown; outcomeStatus?: string; transcript?: unknown; timeline?: unknown; qa?: unknown; followUpTaskIds?: string[]; followUpStatus?: string; followUpErrorCode?: string; createdAt: number; updatedAt: number }) {
+function callView(call: { id: string; provider?: string; direction?: string; callProfile?: string; phoneNumber: string; purpose: string; status: string; runtimeState?: string; providerStatus?: string; terminalReason?: string; callLengthSeconds?: number; error?: string; summary?: string; voiceProfile?: { toolPolicy?: unknown }; outcome?: unknown; outcomeStatus?: string; transcript?: unknown; timeline?: unknown; qa?: unknown; followUpTaskIds?: string[]; followUpStatus?: string; followUpErrorCode?: string; createdAt: number; updatedAt: number }) {
   const digits = call.phoneNumber.replace(/\D/g, "");
   const phoneNumber = digits.length > 4 ? `${call.phoneNumber.slice(0, Math.max(2, call.phoneNumber.length - 4)).replace(/\d/g, "•")}${digits.slice(-4)}` : "••••";
   const outcome = normalizePhoneCallOutcome(call.outcome);
@@ -796,7 +797,9 @@ function callView(call: { id: string; provider?: string; direction?: string; pho
     })()
     : undefined;
   const qa = call.qa && typeof call.qa === "object" && !Array.isArray(call.qa) ? call.qa : undefined;
-  return { id: call.id, provider: call.provider ?? "twilio", direction: call.direction ?? "outbound", phoneNumber, purpose: call.purpose, status: call.status, ...(call.runtimeState ? { runtimeState: call.runtimeState } : {}), summary: call.summary, ...(outcome ? { outcome } : {}), ...(call.outcomeStatus ? { outcomeStatus: call.outcomeStatus } : {}), ...(transcript ? { transcript } : {}), ...(timeline.length ? { timeline } : {}), ...(qa ? { qa } : {}), ...(Array.isArray(call.followUpTaskIds) && call.followUpTaskIds.length ? { followUpTaskIds: call.followUpTaskIds.slice(0, 10) } : {}), ...(call.followUpStatus ? { followUpStatus: call.followUpStatus } : {}), ...(call.followUpErrorCode ? { followUpErrorCode: call.followUpErrorCode } : {}), error: call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
+  const toolPolicy = call.voiceProfile?.toolPolicy && typeof call.voiceProfile.toolPolicy === "object" && !Array.isArray(call.voiceProfile.toolPolicy) ? call.voiceProfile.toolPolicy : undefined;
+  const reconciliationPending = call.terminalReason === "provider_accepted_reconciliation_pending";
+  return { id: call.id, provider: call.provider ?? "twilio", direction: call.direction ?? "outbound", callProfile: call.callProfile === "business" ? "business" : "personal", phoneNumber, status: call.status, ...(call.runtimeState ? { runtimeState: call.runtimeState } : {}), ...(call.providerStatus ? { providerStatus: call.providerStatus } : {}), ...(call.terminalReason ? { terminalReason: call.terminalReason } : {}), ...(call.callLengthSeconds !== undefined ? { callLengthSeconds: call.callLengthSeconds } : {}), ...(toolPolicy ? { toolPolicy } : {}), summary: call.summary, ...(outcome ? { outcome } : {}), ...(call.outcomeStatus ? { outcomeStatus: call.outcomeStatus } : {}), ...(transcript ? { transcript } : {}), ...(timeline.length ? { timeline } : {}), ...(qa ? { qa } : {}), ...(Array.isArray(call.followUpTaskIds) && call.followUpTaskIds.length ? { followUpTaskIds: call.followUpTaskIds.slice(0, 10) } : {}), ...(call.followUpStatus ? { followUpStatus: call.followUpStatus } : {}), ...(call.followUpErrorCode ? { followUpErrorCode: call.followUpErrorCode } : {}), error: reconciliationPending ? "The provider accepted this call, but its durable status is still being reconciled. Do not retry it." : call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
 }
 
 function meetingRoomView(room: MeetingRoomRecord) {
@@ -2712,6 +2715,76 @@ export function registerSdkApi(app: Hono): void {
     return c.json({ available: Boolean(provider), provider: provider ?? null, data: (await listPhoneCalls(owner.userId)).map(callView) });
   });
 
+  /**
+   * Small call-tool catalogue for the dashboard. It intentionally returns
+   * connected account metadata only; action schemas stay lazy and are loaded
+   * by the voice router for the selected purpose.
+   */
+  app.get("/v1/account/calls/capabilities", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before configuring calls.");
+    try {
+      const accounts = await listConnectedAccounts(owner.userId);
+      const active = accounts.filter((account) => !account.status || ["ACTIVE", "CONNECTED", "ENABLED"].includes(account.status.toUpperCase()));
+      const toolkits = [...new Set(active.map((account) => account.toolkit).filter(Boolean))].sort();
+      return c.json({ data: active.map(({ id, alias, toolkit, status, updatedAt }) => ({ id, alias, toolkit, status, ...(updatedAt ? { updatedAt } : {}) })), toolkits, lazySchemas: true });
+    } catch (error) {
+      return apiError(c, 502, "call_capabilities_unavailable", error instanceof Error ? error.message : "Connected call capabilities are temporarily unavailable.");
+    }
+  });
+
+  /**
+   * Public business-line routing is durable and account-scoped. Provider
+   * webhooks resolve the destination number through this index, so one
+   * deployment can safely serve many businesses without an environment
+   * variable containing every customer's owner ID.
+   */
+  app.get("/v1/account/calls/inbound-routes", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before configuring inbound lines.");
+    return c.json({ data: await listVoiceInboundRoutes(owner.userId) });
+  });
+
+  app.post("/v1/account/calls/inbound-routes", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before configuring inbound lines.");
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
+    const prior = await sdkIdempotency(c, owner.userId, fingerprint);
+    if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
+    if (prior.replay) return c.json(prior.replay, 201);
+    try {
+      const provider = body.provider === "twilio" || body.provider === "bland" ? body.provider : undefined;
+      const phoneNumber = normalizeInboundPhone(body.phoneNumber);
+      const existing = provider && phoneNumber ? await getVoiceInboundRoute(provider, phoneNumber) : undefined;
+      if (existing && existing.userId !== owner.userId) return apiError(c, 409, "inbound_line_already_claimed", "That inbound number is already assigned to another workspace.");
+      const route = normalizeVoiceInboundRouteInput(body, owner.userId, existing);
+      const saved = await saveVoiceInboundRoute(route);
+      if (!saved) return apiError(c, 409, "inbound_line_already_claimed", "That inbound number is already assigned to another workspace.");
+      const response = { data: route };
+      if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, response);
+      return c.json(response, 201);
+    } catch (error) {
+      return apiError(c, 400, "invalid_inbound_route", error instanceof Error ? error.message : "Invalid inbound route.");
+    }
+  });
+
+  app.delete("/v1/account/calls/inbound-routes/:provider/:phoneNumber", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before configuring inbound lines.");
+    const provider = c.req.param("provider");
+    const phoneNumber = normalizeInboundPhone(decodeURIComponent(c.req.param("phoneNumber")));
+    if ((provider !== "twilio" && provider !== "bland") || !phoneNumber) return apiError(c, 400, "invalid_inbound_route", "The provider or phone number is invalid.");
+    const fingerprint = createHash("sha256").update(`DELETE:${c.req.path}`).digest("hex");
+    const prior = await sdkIdempotency(c, owner.userId, fingerprint);
+    if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
+    if (prior.replay) return c.json(prior.replay);
+    const deleted = await deleteVoiceInboundRoute(provider, phoneNumber, owner.userId);
+    const response = { deleted };
+    if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, response);
+    return c.json(response);
+  });
+
   app.post("/v1/account/calls", async (c) => {
     // Dashboard users resolve to their linked Telegram owner; SDK callers use
     // the project/end-user session established by the v1 middleware.
@@ -2733,9 +2806,9 @@ export function registerSdkApi(app: Hono): void {
       const continuityFromCallId = body.continuityFromCallId === undefined ? undefined : String(body.continuityFromCallId).trim();
       const call = await nativeTool(owner.userId, "CHUCK_START_PHONE_CALL", { phoneNumber, purpose, callProfile, ...(body.profile ? { profile: body.profile as VoiceCallProfileInput } : {}), ...(continuityFromCallId ? { continuityFromCallId } : {}) });
       if (!call || typeof call !== "object") throw new Error("Phone call did not return a call record");
-      const record = call as { id?: unknown; provider?: unknown; direction?: unknown; phoneNumber?: unknown; purpose?: unknown; status?: unknown; runtimeState?: unknown; error?: unknown; summary?: unknown; outcome?: unknown; outcomeStatus?: unknown; transcript?: unknown; timeline?: unknown; qa?: unknown; createdAt?: unknown; updatedAt?: unknown };
+      const record = call as { id?: unknown; provider?: unknown; direction?: unknown; callProfile?: unknown; phoneNumber?: unknown; purpose?: unknown; status?: unknown; runtimeState?: unknown; providerStatus?: unknown; terminalReason?: unknown; callLengthSeconds?: unknown; voiceProfile?: { toolPolicy?: unknown }; error?: unknown; summary?: unknown; outcome?: unknown; outcomeStatus?: unknown; transcript?: unknown; timeline?: unknown; qa?: unknown; createdAt?: unknown; updatedAt?: unknown };
       if (typeof record.id !== "string" || typeof record.phoneNumber !== "string" || typeof record.purpose !== "string" || typeof record.status !== "string" || typeof record.createdAt !== "number" || typeof record.updatedAt !== "number") throw new Error("Phone call returned an invalid record");
-      const response = callView({ id: record.id, provider: typeof record.provider === "string" ? record.provider : undefined, direction: typeof record.direction === "string" ? record.direction : undefined, phoneNumber: record.phoneNumber, purpose: record.purpose, status: record.status, runtimeState: typeof record.runtimeState === "string" ? record.runtimeState : undefined, error: typeof record.error === "string" ? record.error : undefined, summary: typeof record.summary === "string" ? record.summary : undefined, outcome: record.outcome, outcomeStatus: typeof record.outcomeStatus === "string" ? record.outcomeStatus : undefined, transcript: record.transcript, timeline: record.timeline, qa: record.qa, createdAt: record.createdAt, updatedAt: record.updatedAt });
+      const response = callView({ id: record.id, provider: typeof record.provider === "string" ? record.provider : undefined, direction: typeof record.direction === "string" ? record.direction : undefined, callProfile: typeof record.callProfile === "string" ? record.callProfile : undefined, phoneNumber: record.phoneNumber, purpose: record.purpose, status: record.status, runtimeState: typeof record.runtimeState === "string" ? record.runtimeState : undefined, providerStatus: typeof record.providerStatus === "string" ? record.providerStatus : undefined, terminalReason: typeof record.terminalReason === "string" ? record.terminalReason : undefined, callLengthSeconds: typeof record.callLengthSeconds === "number" ? record.callLengthSeconds : undefined, voiceProfile: record.voiceProfile, error: typeof record.error === "string" ? record.error : undefined, summary: typeof record.summary === "string" ? record.summary : undefined, outcome: record.outcome, outcomeStatus: typeof record.outcomeStatus === "string" ? record.outcomeStatus : undefined, transcript: record.transcript, timeline: record.timeline, qa: record.qa, createdAt: record.createdAt, updatedAt: record.updatedAt });
       if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, response);
       return c.json(response, 201);
     } catch (error) {
@@ -2902,9 +2975,9 @@ export function registerSdkApi(app: Hono): void {
         ...(action === "transfer" ? { phoneNumber: String(body.phoneNumber).replace(/[\s().-]/g, "") } : {}),
       }, { ownerPrivateRun: true });
       if (!result || typeof result !== "object") throw new Error("Call control did not return a call record");
-      const record = result as { id?: unknown; provider?: unknown; direction?: unknown; phoneNumber?: unknown; purpose?: unknown; status?: unknown; runtimeState?: unknown; error?: unknown; summary?: unknown; outcome?: unknown; outcomeStatus?: unknown; transcript?: unknown; timeline?: unknown; qa?: unknown; createdAt?: unknown; updatedAt?: unknown };
+      const record = result as { id?: unknown; provider?: unknown; direction?: unknown; callProfile?: unknown; phoneNumber?: unknown; purpose?: unknown; status?: unknown; runtimeState?: unknown; providerStatus?: unknown; terminalReason?: unknown; callLengthSeconds?: unknown; voiceProfile?: { toolPolicy?: unknown }; error?: unknown; summary?: unknown; outcome?: unknown; outcomeStatus?: unknown; transcript?: unknown; timeline?: unknown; qa?: unknown; createdAt?: unknown; updatedAt?: unknown };
       if (typeof record.id !== "string" || typeof record.phoneNumber !== "string" || typeof record.purpose !== "string" || typeof record.status !== "string" || typeof record.createdAt !== "number" || typeof record.updatedAt !== "number") throw new Error("Phone call returned an invalid record");
-      return c.json(callView({ id: record.id, provider: typeof record.provider === "string" ? record.provider : undefined, direction: typeof record.direction === "string" ? record.direction : undefined, phoneNumber: record.phoneNumber, purpose: record.purpose, status: record.status, runtimeState: typeof record.runtimeState === "string" ? record.runtimeState : undefined, error: typeof record.error === "string" ? record.error : undefined, summary: typeof record.summary === "string" ? record.summary : undefined, outcome: record.outcome, outcomeStatus: typeof record.outcomeStatus === "string" ? record.outcomeStatus : undefined, transcript: record.transcript, timeline: record.timeline, qa: record.qa, createdAt: record.createdAt, updatedAt: record.updatedAt }));
+      return c.json(callView({ id: record.id, provider: typeof record.provider === "string" ? record.provider : undefined, direction: typeof record.direction === "string" ? record.direction : undefined, callProfile: typeof record.callProfile === "string" ? record.callProfile : undefined, phoneNumber: record.phoneNumber, purpose: record.purpose, status: record.status, runtimeState: typeof record.runtimeState === "string" ? record.runtimeState : undefined, providerStatus: typeof record.providerStatus === "string" ? record.providerStatus : undefined, terminalReason: typeof record.terminalReason === "string" ? record.terminalReason : undefined, callLengthSeconds: typeof record.callLengthSeconds === "number" ? record.callLengthSeconds : undefined, voiceProfile: record.voiceProfile, error: typeof record.error === "string" ? record.error : undefined, summary: typeof record.summary === "string" ? record.summary : undefined, outcome: record.outcome, outcomeStatus: typeof record.outcomeStatus === "string" ? record.outcomeStatus : undefined, transcript: record.transcript, timeline: record.timeline, qa: record.qa, createdAt: record.createdAt, updatedAt: record.updatedAt }));
     } catch (error) {
       return apiError(c, 400, "invalid_call_control", error instanceof Error ? error.message : "Call control failed.");
     }

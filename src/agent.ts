@@ -78,6 +78,7 @@ import { resolveComposioRoute } from "./composioRouting.js";
 import { buildArtifactEmailArguments, type ArtifactEmailFile } from "./artifactEmail.js";
 import { buildArtifactUploadArguments } from "./artifactBridge.js";
 import { boundMissionContext, compactModelMessages, compactModelMessagesWithSummary, contextSearchQuery } from "./agentContext.js";
+import { bindVoicePolicyAccount, normalizeVoiceToolPolicy, normalizeVoiceToolkit, voicePolicyAllowsExecution, voiceToolkitAllowed, type VoiceToolPolicy } from "./calls/voiceToolPolicy.js";
 import { ATTENTION_PULSE_IDENTITY, CAPABILITY_ROUTING_KERNEL, compactActionCustomization, compactConversationalCustomization, compactMissionCustomization, composeSystemPrompt } from "./prompt.js";
 import { contextPrompt } from "./contextGraph.js";
 import { withLatencyBudget } from "./voiceLatency.js";
@@ -2339,6 +2340,13 @@ export interface AgentRunOptions {
   voiceSessionId?: string;
   /** Trusted call objective used only to route connected-app tools before the first voice model turn. */
   voiceRoutingHint?: string;
+  /** Per-call connected-app/account grant; exact schemas remain lazy. */
+  voiceToolPolicy?: VoiceToolPolicy;
+  /** Public business inbound calls may use only the explicit voiceToolPolicy;
+   * they must not inherit owner memory, private files, or owner controls. */
+  voiceScopedAccess?: boolean;
+  /** Profile-controlled transfer permission propagated to the native boundary. */
+  voiceAllowHumanHandoff?: boolean;
   /** Trusted runtime fence for an explicit provider/tool-surface instruction. */
   executionScope?: ExclusiveCapabilityScope;
   /** Tools in this list always create an approval request, even if normally low-risk. */
@@ -2631,6 +2639,7 @@ async function executeAgent(
     ?? resolveExplicitCapabilityScope(voiceRoutingText);
   const sharedScope = channelContext?.scope === "shared";
   const ownerPrivateRun = options?.ownerPrivateRun === true && !sharedScope;
+  const voiceScopedAccess = voiceTurn && options?.voiceScopedAccess === true && !ownerPrivateRun && !sharedScope;
   // Start the small profile read before Composio session preparation. The same
   // promise is reused below, avoiding a second serial Redis/Neon read on every
   // action-bearing Twilio turn. Tool-free speculative shared turns do not need
@@ -2658,6 +2667,7 @@ async function executeAgent(
   };
 
   let allow = options?.toolAllow === undefined ? undefined : new Set(options.toolAllow);
+  const voiceToolPolicy = voiceTurn ? normalizeVoiceToolPolicy(options?.voiceToolPolicy) : undefined;
   let meetingComposioAccountAliases = options?.meetingComposioAccountAliases;
   const toolsDisabled = allow?.size === 0;
   const voiceToolFreeTurn = voiceTurn && toolsDisabled;
@@ -2665,9 +2675,9 @@ async function executeAgent(
   // owner's full connected-app catalogue just to filter it back down; that
   // catalogue is large enough to dominate first-audio latency and can expose
   // unrelated file/image actions to the model.
-  const boundedVoicePreparation = voiceTurn && ownerPrivateRun && !voiceFastLane && !voiceToolFreeTurn;
+  const boundedVoicePreparation = voiceTurn && (ownerPrivateRun || voiceScopedAccess) && !voiceFastLane && !voiceToolFreeTurn;
   const toolName = (tool: any): string => canonicalNativeToolSlug(String(tool?.function?.name ?? tool?.name ?? ""));
-  if (voiceTurn && !ownerPrivateRun && (!allow || [...allow].some((name) => !VOICE_TURN_TOOL_NAMES.has(name)))) {
+  if (voiceTurn && !ownerPrivateRun && !voiceScopedAccess && (!allow || [...allow].some((name) => !VOICE_TURN_TOOL_NAMES.has(name)))) {
     throw new Error("Voice turns require an explicit allowlist of read-only Chusky tools");
   }
 
@@ -2675,7 +2685,7 @@ async function executeAgent(
   // apps. Authenticated owner-private calls and meetings use the same app
   // session as private chat, while speculative audio drafts remain tool-free.
   const composioScope = !executionScope || executionScope.surface === "composio";
-  const sessionObj = toolsDisabled || !composioScope || voiceFastLane || (voiceTurn && !ownerPrivateRun) ? undefined : (await getOrCreateComposioSession(userId, voiceProfileSessionPromise)).sessionObj;
+  const sessionObj = toolsDisabled || !composioScope || voiceFastLane || (voiceTurn && !ownerPrivateRun && !voiceScopedAccess) ? undefined : (await getOrCreateComposioSession(userId, voiceProfileSessionPromise)).sessionObj;
 
   let discoveredMeetingTools: any[] = [];
   if (options?.meetingAppAccess && sessionObj && (allow || ownerPrivateRun)) {
@@ -2708,7 +2718,7 @@ async function executeAgent(
   // this run remain available, while the model can discover any other action
   // through COMPOSIO_SEARCH_TOOLS and execute it through the session.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const voiceCapabilitySlugsForFallback = voiceTurn && ownerPrivateRun && !voiceFastLane
+  const voiceCapabilitySlugsForFallback = voiceTurn && (ownerPrivateRun || voiceScopedAccess) && !voiceFastLane
     ? voiceComposioToolSlugs(`${voiceRoutingText}\n${options?.voiceRoutingHint ?? ""}`)
     : [];
   const composioExactLookupAvailable = typeof composio?.tools?.getRawComposioTools === "function"
@@ -2719,7 +2729,7 @@ async function executeAgent(
       : await sessionObj.tools()
     : [];
   fullComposioTools.forEach((tool: unknown) => registerComposioToolMetadata(tool));
-  const voiceCalendarRequest = voiceTurn && ownerPrivateRun
+  const voiceCalendarRequest = voiceTurn && (ownerPrivateRun || voiceScopedAccess)
     && /\b(?:calendar|calendars|schedule|scheduling|appointment|appointments|availability|available|book|booking|reschedule)\b/i.test(`${voiceRoutingText}\n${options?.voiceRoutingHint ?? ""}`);
   const voiceCalendarTools = voiceCalendarRequest
     ? voicePreparationKey
@@ -2739,7 +2749,7 @@ async function executeAgent(
     ...voiceCapabilitySlugs.map(composioActionSlug),
     ...uniqueVoiceCapabilityTools.map((tool) => composioActionSlug(toolName(tool))),
   ]);
-  const boundedOwnerVoice = voiceTurn && ownerPrivateRun && !options?.meetingId && !voiceFastLane && !voiceToolFreeTurn;
+  const boundedOwnerVoice = voiceTurn && (ownerPrivateRun || voiceScopedAccess) && !options?.meetingId && !voiceFastLane && !voiceToolFreeTurn;
   const voiceModelAllowed = (name: string): boolean => {
     if (!boundedOwnerVoice) return true;
     return voiceToolIsWithinCapabilityFence(name, voiceCapabilityNames, allow ?? []);
@@ -2768,15 +2778,26 @@ async function executeAgent(
     const name = toolName(tool);
     if (sharedScope && isSharedChannelToolDenied(name)) return false;
     if (executionScope && !toolBelongsToCapabilityScope(name, executionScope)) return false;
-    return (!allow || allow.has(name) || ownerPrivateRun && voiceCapabilityNames.has(composioActionSlug(name))) && voiceModelAllowed(name) && !deny.has(name);
+    return (!allow || allow.has(name) || (ownerPrivateRun || voiceScopedAccess) && voiceCapabilityNames.has(composioActionSlug(name))) && voiceModelAllowed(name) && !deny.has(name);
   });
+  // Keep discovery transport available for an enabled restricted call, but do
+  // not expose exact provider actions from an unselected toolkit. The final
+  // execution fence below still checks gateway calls and account selectors.
+  if (voiceTurn && voiceToolPolicy) {
+    availableTools = availableTools.filter((tool) => {
+      const name = toolName(tool);
+      if (!name || name.startsWith("CHUCK_")) return true;
+      if (name.startsWith("COMPOSIO_")) return voiceToolPolicy.enabled;
+      return voiceToolkitAllowed(name, voiceToolPolicy);
+    });
+  }
   // A bounded voice preload may resolve an exact action through Composio's
   // catalogue without that action appearing in session.tools(). Treat that
   // exact, purpose-routed schema as part of the trusted available surface so
   // the model can call it and the execution path can validate it. Never add a
   // broad catalogue here: voiceCapabilityTools contains only the slugs chosen
   // by the purpose router above.
-  if (voiceTurn && ownerPrivateRun && voiceCapabilityTools.length) {
+  if (voiceTurn && (ownerPrivateRun || voiceScopedAccess) && voiceCapabilityTools.length) {
     const present = new Set(availableTools.map((tool) => toolName(tool)));
     for (const tool of voiceCapabilityTools) {
       const name = toolName(tool);
@@ -2795,7 +2816,7 @@ async function executeAgent(
   // previous path only retained calendar discovery results; when that separate
   // search returned no rows, the voice model received zero tools even though
   // Composio routing had selected the correct application/action.
-  const preloadedVoiceCapabilityTools = voiceTurn && ownerPrivateRun
+  const preloadedVoiceCapabilityTools = voiceTurn && (ownerPrivateRun || voiceScopedAccess)
     ? [...availableTools, ...fullComposioTools, ...voiceCapabilityTools]
       .filter((tool, index, all) => all.findIndex((candidate) => toolName(candidate) === toolName(tool)) === index)
       .filter((tool) => voiceCapabilityNames.has(composioActionSlug(toolName(tool))))
@@ -3380,7 +3401,12 @@ async function executeAgent(
   let composioRouteContext = "";
   let connectedAccountSnapshot: ConnectedComposioAccount[] | undefined;
   if (!sharedScope && routedAccounts) {
-    const accounts = routedAccounts;
+    const accounts = routedAccounts.filter((account) => {
+      if (!voiceToolPolicy || (!voiceToolPolicy.allowedToolkits.length && !voiceToolPolicy.allowedConnectionIds.length)) return true;
+      const toolkitAllowed = !voiceToolPolicy.allowedToolkits.length || voiceToolPolicy.allowedToolkits.some((toolkit) => normalizeVoiceToolkit(toolkit) === normalizeVoiceToolkit(account.toolkit));
+      const accountAllowed = !voiceToolPolicy.allowedConnectionIds.length || voiceToolPolicy.allowedConnectionIds.some((id) => id.toLowerCase() === account.id.toLowerCase() || id.toLowerCase() === account.alias?.toLowerCase());
+      return toolkitAllowed && accountAllowed;
+    });
     connectedAccountSnapshot = accounts;
     if (accounts.length) {
       accountContext = `Connected Composio accounts (private metadata; credentials are never exposed):\n${accounts.map((account) => `- ${account.toolkit}: ${account.alias ?? account.id} (${account.status})`).join("\n")}\nWhen a direct app tool or a COMPOSIO_MULTI_EXECUTE_TOOL item supports account selection, use the alias above. For an explicit request to search all accounts, repeat only read-only actions once per relevant account.`;
@@ -3710,7 +3736,14 @@ async function executeAgent(
             ? [...missionRoutedNativeTools, ...preloadedMissionTools, ...missionDiscoveryTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools]
             : [...nativeToolRoute.tools, ...preloadedMissionTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools, ...preloadedVoiceMcpTools]
     )
-      .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index);
+      .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index)
+      .filter((tool) => {
+        if (!voiceToolPolicy) return true;
+        const name = toolSchemaName(tool);
+        if (name.startsWith("CHUCK_")) return true;
+        if (name.startsWith("COMPOSIO_")) return voiceToolPolicy.enabled;
+        return voiceToolkitAllowed(name, voiceToolPolicy);
+      });
     // A routed turn may intentionally expose only meta-tools or a small
     // capability slice. Approval resume is different: it must replay the
     // exact already-approved action, using a schema from the trusted catalog,
@@ -4097,6 +4130,16 @@ async function executeAgent(
           : args;
         if (options?.composioAccount && !slug.startsWith("CHUCK_")) executionArgs = { ...executionArgs, account: options.composioAccount };
         if (channelContext?.triggerEventId) executionArgs = bindTriggerSourceAccount(slug, executionArgs, channelContext, connectedAccountSnapshot);
+        if (voiceTurn && voiceToolPolicy && !slug.startsWith("CHUCK_")) {
+          const permittedAccounts = (connectedAccountSnapshot ?? []).filter((account) => {
+            if (!voiceToolPolicy.allowedConnectionIds.length) return true;
+            return voiceToolPolicy.allowedConnectionIds.some((id) => id.toLowerCase() === account.id.toLowerCase() || id.toLowerCase() === account.alias?.toLowerCase());
+          });
+          executionArgs = bindVoicePolicyAccount(executionArgs, voiceToolPolicy, permittedAccounts);
+          if (!voicePolicyAllowsExecution(slug, executionArgs, voiceToolPolicy, permittedAccounts)) {
+            throw new Error("This connected-app action is outside the call's approved app or account policy; no provider action was attempted.");
+          }
+        }
         const groupArtifactTool = channelContext?.scope === "shared" && GROUP_ARTIFACT_TOOLS.has(slug);
         const approved = approvedApprovalId ? await getApproval(userId, approvedApprovalId).then((a) => a?.status === "approved" && a.expiresAt > Date.now() ? a : undefined) : undefined;
         const approvedForTool = approved?.toolSlug === slug;
@@ -4398,7 +4441,7 @@ async function executeAgent(
             if (!receipt || receipt.status !== "succeeded" || receipt.receiptVerification !== "provider_read") throw new Error("Verified provider state could not be attached to a durable external-action receipt.");
             return { receiptId: receipt.id, ...(receipt.providerId ? { providerReceiptId: receipt.providerId } : {}), verificationId: verification.id, summary: `${input.toolSlug} recovery state verified using ${verifySlug}.` };
           } : undefined;
-        execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, onSubagentActivity: reportSubagentActivity, getComposioToolPresentation: (toolSlug) => composioToolPresentations.get(toolSlug), parentToolCallId: call.id, approvedApprovalId: approvedForTool ? approvedApprovalId : undefined, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, conversationId: channelContext?.conversationId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, ownerPrivateRun, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, missionStepId: options?.missionStepId, missionTimerResumed: options?.missionTimerResumed, missionWakeCheckpoint: options?.missionWakeCheckpoint, missionWakeNextAction: options?.missionWakeNextAction, tregMaxCalls: options?.tregMaxCalls, tregMaxSpendUsd: options?.tregMaxSpendUsd, organizationId: options?.organizationId, currentRunId: durableRunId, toolCatalog: modelAvailableTools, availableToolCatalog: availableTools, connectedAccounts: connectedAccountSnapshot, ...(options?.enqueueMissionTask ? { enqueueMissionTask: options.enqueueMissionTask } : {}), ...(slug === "CHUCK_MISSION_VERIFY" ? { outcomeReadAdapter: createSessionOutcomeReadAdapter(userId, sessionObj, availableTools, allow, deny, signal) } : {}), ...(executeMissionCompensation ? { executeMissionCompensation } : {}), requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
+        execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, onSubagentActivity: reportSubagentActivity, getComposioToolPresentation: (toolSlug) => composioToolPresentations.get(toolSlug), parentToolCallId: call.id, approvedApprovalId: approvedForTool ? approvedApprovalId : undefined, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, conversationId: channelContext?.conversationId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, ownerPrivateRun, voiceCallId: voiceTurn ? options?.voiceSessionId?.replace(/^[^:]+:/, "") : undefined, voiceProvider: voiceTurn ? (options?.voiceSessionId?.startsWith("bland:") ? "bland" : "twilio") : undefined, voiceAllowHumanHandoff: voiceTurn ? options?.voiceAllowHumanHandoff : undefined, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, missionStepId: options?.missionStepId, missionTimerResumed: options?.missionTimerResumed, missionWakeCheckpoint: options?.missionWakeCheckpoint, missionWakeNextAction: options?.missionWakeNextAction, tregMaxCalls: options?.tregMaxCalls, tregMaxSpendUsd: options?.tregMaxSpendUsd, organizationId: options?.organizationId, currentRunId: durableRunId, toolCatalog: modelAvailableTools, availableToolCatalog: availableTools, connectedAccounts: connectedAccountSnapshot, ...(options?.enqueueMissionTask ? { enqueueMissionTask: options.enqueueMissionTask } : {}), ...(slug === "CHUCK_MISSION_VERIFY" ? { outcomeReadAdapter: createSessionOutcomeReadAdapter(userId, sessionObj, availableTools, allow, deny, signal) } : {}), ...(executeMissionCompensation ? { executeMissionCompensation } : {}), requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
           if ((slug === "CHUCK_DELEGATE_SUBAGENT" || slug === "CHUCK_HANDOFF_SUBAGENT") && execResult && typeof execResult === "object") {
             const delegation = execResult as { status?: unknown; approvalId?: unknown; proposal?: { actionName?: unknown; payload?: unknown } };
             if (delegation.status === "requires_approval" && typeof delegation.approvalId === "string" && typeof delegation.proposal?.actionName === "string") {

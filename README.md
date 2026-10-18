@@ -1400,16 +1400,31 @@ For inbound calls, purchase a Twilio voice number and configure its incoming
 Voice URL as `https://chusky.up.railway.app/twilio/inbound` (POST). Set
 `TWILIO_INBOUND_ENABLED=true`, `TWILIO_INBOUND_OWNER_USER_ID` to the owner’s
 Telegram numeric ID, and `TWILIO_INBOUND_ALLOWED_CALLERS` to a comma-separated
-E.164 allowlist. Unknown callers are rejected before they can access private
-memory or the agent. Use `TWILIO_INBOUND_CALL_PROFILE=business` for a company
-line and configure `TWILIO_INBOUND_VERIFIED_CALLERS` for the higher identity
-verification tier before disclosing sensitive account details. An authenticated
-deployment can route multiple Twilio numbers with
-`TWILIO_INBOUND_ROUTES=+15550000001=123,+15550000002=456`; the legacy owner ID
-remains the fallback. Set `TWILIO_VOICEMAIL_ENABLED=true` and customize
+E.164 allowlist for personal lines. Personal lines reject unknown callers
+before they can access private memory or the agent. Use
+`TWILIO_INBOUND_CALL_PROFILE=business` for a company line: business lines may
+leave the allowlist empty so customers can call the number, but callers remain
+identified/public and can use only the server-owned business profile and its
+explicit call-scoped connected-app policy. Configure
+`TWILIO_INBOUND_VERIFIED_CALLERS` when a business wants a higher verification
+tier before disclosing sensitive account details. For a multi-business
+deployment, configure each provider number from the dashboard's Calls →
+Inbound business lines panel (or the `/v1/account/calls/inbound-routes` API).
+That durable provider-and-number route is checked first, is owner-claimed
+atomically, and carries the line's persona, verification lists, tool policy,
+and purpose. The environment route map remains a compatibility fallback for
+older single-owner deployments: `TWILIO_INBOUND_ROUTES=+15550000001=123,
++15550000002=456`; the legacy owner ID remains the final fallback. Set
+`TWILIO_VOICEMAIL_ENABLED=true` and customize
 `TWILIO_VOICEMAIL_MESSAGE` to enable synchronous `DetectMessageEnd` voicemail
 delivery for outbound calls. Chusky speaks the bounded message after Twilio
 detects the greeting/beep and does not start the agent bridge for that call.
+For the inbound line's caller-facing identity and connected-app boundary, set
+`TWILIO_INBOUND_VOICE_PROFILE` to a bounded JSON object with fields such as
+`identity`, `organization`, `mode`, `tone`, `opening`, `facts`, `guardrails`,
+and `toolPolicy`. Invalid JSON rejects the inbound request instead of silently
+using the wrong business profile. The profile is persisted on the call and the
+same account/tool boundary is enforced before every Composio dispatch.
 Outbound calls can also continue a prior ended owner call by passing its exact
 call ID as `continuityFromCallId`; only the prior structured outcome is carried,
 never raw audio or unrestricted history. An authenticated
@@ -1478,8 +1493,12 @@ status callbacks use a separate signed, per-call opaque URL. Health reports
 Bland as misconfigured until all five settings are valid.
 
 Bland inbound numbers are supported as provider-managed inbound conversations.
-Set `BLAND_INBOUND_ENABLED=true`, map each Bland number to the business's
-Chusky account/workspace anchor with
+Set `BLAND_INBOUND_ENABLED=true`. For multi-business deployments, add each
+line in Calls → Inbound business lines or through
+`/v1/account/calls/inbound-routes`; the durable route is resolved before the
+legacy environment map and cannot be claimed by a second workspace. For
+older deployments, map each Bland number to the business's Chusky
+account/workspace anchor with
 `BLAND_INBOUND_ROUTES=+15550000001=123456789`, and configure the optional
 `BLAND_INBOUND_ALLOWED_CALLERS` verification list. This route value is not a
 caller allowlist: callers are public by default. On the current Railway
@@ -1496,8 +1515,13 @@ public/unverified: they may ask public company questions, but Chusky will not
 expose private history, connected-app data, or state-changing tools until the
 caller is verified. The health check reports `blandInbound` separately when
 its route, webhook, tool, or secret configuration is incomplete. Organization-
-and team-level routing plus a dedicated safe public-action policy remain the
-next business voice expansion.
+and team-level policy can be layered onto the same durable route record later;
+the current route already isolates each workspace and applies a line-specific
+safe public-action policy.
+
+Set `BLAND_INBOUND_VOICE_PROFILE` to a server-owned JSON profile to configure
+the represented identity, organization, tone, mode, guardrails, and optional
+call-scoped Composio tool/account policy. Invalid profile JSON fails closed.
 
 Sendblue `content` is plain text, not rendered Markdown. Chusky converts common Markdown at the provider boundary: emphasis markers are removed, bullets become `•`, headings become uppercase, and links become `label: URL`. Typing indicators are sent through `POST /api/send-typing-indicator` before linked one-to-one agent work and stopped after delivery. Verified one-to-one inbound messages are marked read through `POST /api/mark-read`; this is best-effort and never blocks the reply. Generated images and supported audio/video artifacts are stored in R2 and sent using short-lived HTTPS URLs when R2 is configured. A linked user can reply to an iMessage and send `/react love`, `/react like`, `/react dislike`, `/react laugh`, `/react emphasize`, or `/react question` to send a tapback to the replied message. Reactions are private-chat only. Sendblue status callbacks are sent to `/sendblue/status` and update the durable outbox receipt. The Sendblue dashboard's “Typing Indicators” webhook section is only needed if Chusky later needs to receive user-typing events.
 
@@ -1669,6 +1693,7 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `BLAND_INBOUND_ROUTES` | Bland AI | — | Comma-separated `E.164=accountTelegramUserId` inbound number routes |
 | `BLAND_INBOUND_ALLOWED_CALLERS` | Bland AI | — | Optional comma-separated E.164 callers treated as verified |
 | `BLAND_INBOUND_CALL_PROFILE` | Bland AI | `personal` | `personal` or `business` inbound safety profile |
+| `BLAND_INBOUND_VOICE_PROFILE` | Bland AI | — | Server-owned JSON identity, guardrails, and optional connected-app policy for the inbound representative |
 | `BLAND_INBOUND_PURPOSE` | Bland AI | `Handle an inbound caller request` | Bounded internal purpose used by Chusky's consultation runtime |
 | `BLAND_INBOUND_FIRST_SENTENCE` | Bland AI | — | Optional provider-managed opening sentence |
 | `BLAND_INBOUND_PROMPT` | Bland AI | built-in safe prompt | Optional provider-managed inbound prompt override |

@@ -6,13 +6,16 @@ import {
   getBlandPhoneCallByProviderId,
   getPhoneCall,
   releaseDeliveryLease,
+  appendPhoneCallEvent,
   updatePhoneCall,
   type Message,
+  type PhoneCallRecord,
 } from "../store.js";
 import { isValidBlandToolSecret, readBlandCallToken, verifyBlandWebhookSignature } from "./blandSecurity.js";
 import { normalizeBlandInboundNumber, registerBlandInboundCall, type BlandInboundRoute } from "./blandInbound.js";
 import { schedulePhoneCallFollowUps } from "./followUp.js";
 import { scorePhoneCallTrace } from "./voiceEvaluation.js";
+import { providerStatusCanAdvance } from "./voiceEvents.js";
 
 const MAX_WEBHOOK_BYTES = 2 * 1024 * 1024;
 const MAX_TOOL_BYTES = 16 * 1024;
@@ -120,6 +123,29 @@ function blandCallStatus(body: Record<string, unknown>, isFinal: boolean): "star
   return undefined;
 }
 
+function blandProviderStatus(body: Record<string, unknown>, isFinal: boolean): NonNullable<PhoneCallRecord["providerStatus"]> | undefined {
+  const failed = typeof body.error_message === "string" && body.error_message.trim().length > 0;
+  if (isFinal) return failed ? "failed" : (body.completed === true || String(body.queue_status ?? "").toLowerCase() === "complete") ? "completed" : undefined;
+  const message = `${String(body.message ?? "")} ${String(body.status ?? "")}`.toLowerCase();
+  const category = String(body.category ?? "").toLowerCase();
+  const level = String(body.log_level ?? "").toLowerCase();
+  if ((category === "queue" || category === "call") && level === "error") return "failed";
+  if (/\b(ringing|ring)\b/.test(message)) return "ringing";
+  if (/\b(connected|answered|in progress)\b/.test(message)) return "in-progress";
+  if (/\b(ended|finished|completed|disconnected)\b/.test(message)) return "completed";
+  if (/\b(started|queued|dialing)\b/.test(message) || category === "queue") return "initiated";
+  return undefined;
+}
+
+function blandLifecycleEvent(providerStatus: NonNullable<PhoneCallRecord["providerStatus"]>): { type: "call_initiated" | "call_ringing" | "call_answered" | "call_ended" | "call_failed"; summary: string } | undefined {
+  if (providerStatus === "initiated") return { type: "call_initiated", summary: "Bland accepted the call and began dialing." };
+  if (providerStatus === "ringing") return { type: "call_ringing", summary: "The destination is ringing." };
+  if (providerStatus === "in-progress" || providerStatus === "answered") return { type: "call_answered", summary: "The call was answered and the voice session is active." };
+  if (providerStatus === "completed") return { type: "call_ended", summary: "The call ended normally." };
+  if (providerStatus === "failed") return { type: "call_failed", summary: "Bland reported that the call failed." };
+  return undefined;
+}
+
 function safeError(body: Record<string, unknown>): string | undefined {
   if (typeof body.error_message !== "string" || !body.error_message.trim()) return undefined;
   return body.error_message.replace(/[\u0000-\u001F]/g, " ").trim().slice(0, 500);
@@ -191,9 +217,15 @@ export async function processBlandWebhook(input: {
     if (postCall) {
       const callLength = Number(body.call_length);
       const outcome = blandOutcome(body);
+      const providerStatus = blandProviderStatus(body, true);
+      if (providerStatus && providerStatusCanAdvance(call.providerStatus, providerStatus)) {
+        const lifecycle = blandLifecycleEvent(providerStatus);
+        if (lifecycle) await appendPhoneCallEvent(identity.userId, identity.callId, lifecycle);
+      }
       const patch = {
         providerCallId: callId,
         ...(blandCallStatus(body, true) ? { status: blandCallStatus(body, true)! } : {}),
+        ...(providerStatus ? { providerStatus, terminalReason: providerStatus } : {}),
         ...(normalizeBlandInboundNumber(body.from) ? { phoneNumber: normalizeBlandInboundNumber(body.from)! } : {}),
         ...(safeError(body) ? { error: safeError(body)! } : {}),
         ...(typeof body.summary === "string" ? { summary: body.summary.replace(/[\u0000-\u001F]/g, " ").trim().slice(0, 2000) } : {}),
@@ -220,10 +252,15 @@ export async function processBlandWebhook(input: {
     }
 
     const status = blandCallStatus(body, false);
+    const providerStatus = blandProviderStatus(body, false);
+    if (providerStatus && providerStatusCanAdvance(call.providerStatus, providerStatus)) {
+      const lifecycle = blandLifecycleEvent(providerStatus);
+      if (lifecycle) await appendPhoneCallEvent(identity.userId, identity.callId, lifecycle);
+    }
     if (!status && !call.providerCallId) {
-      await updatePhoneCall(identity.userId, identity.callId, { providerCallId: callId });
+      await updatePhoneCall(identity.userId, identity.callId, { providerCallId: callId, ...(providerStatus ? { providerStatus } : {}) });
     } else {
-      await updatePhoneCall(identity.userId, identity.callId, { providerCallId: callId, ...(status ? { status } : {}) });
+      await updatePhoneCall(identity.userId, identity.callId, { providerCallId: callId, ...(status ? { status } : {}), ...(providerStatus ? { providerStatus } : {}) });
     }
     if (!(await completeDeliveryLease(deliveryKey, leaseToken, DELIVERY_TTL_SECONDS))) return fail(503, "Bland callback lease expired before completion");
     return { status: 200, body: { ok: true } };

@@ -14,7 +14,7 @@ import { listAttentionRecords } from "./store.js";
 import { updateAttentionRecord } from "./store.js";
 import type { AttentionCandidateRecord, AutonomyProfileRecord, DeliveryPreferenceRecord, ObservationRecord, AutonomyWatchRecord, TriggerEventRecord } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
-import { initStore, getTelegramChatId, createTriggerEventIfAbsent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkRunById, listSdkRunsForUser, saveSdkRun, saveSdkThread, deleteSdkThread, saveSession, appendMessages, appendPhoneCallTranscriptTurn, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, withScopedKeyLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, listTasksSince, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, appendPhoneCallEvent, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, saveRecallMeetingMissionState, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
+import { initStore, getTelegramChatId, createTriggerEventIfAbsent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkRunById, listSdkRunsForUser, saveSdkRun, saveSdkThread, deleteSdkThread, saveSession, appendMessages, appendPhoneCallTranscriptTurn, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, withScopedKeyLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, listTasksSince, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, getVoiceInboundRoute, hasVoiceInboundRoutes, updatePhoneCall, appendPhoneCallEvent, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, saveRecallMeetingMissionState, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, OpenRouterTimeoutError, invalidateSession, transcriptionFormatForMimeType, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
 import type { AgentResult } from "./agent.js";
 import { listOpenTasks, listTasksForMission } from "./store.js";
@@ -61,12 +61,14 @@ import { hasExternalRecallParticipants, resolveRecallMeetingSpeaker } from "./me
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import { createSignedWebBotAuthDirectory, WEB_BOT_AUTH_DIRECTORY_CONTENT_TYPE, WEB_BOT_AUTH_DIRECTORY_PATH, webBotAuthConfigurationIssue, webBotAuthConfigurationStatus, webBotAuthSigningEnabled } from "./webBotAuth.js";
 import twilio from "twilio";
-import { inboundTwilioOwnerForNumber, parseTwilioCallerAllowlist, registerTwilioInboundCall } from "./calls/twilioInbound.js";
+import { inboundTwilioOwnerForNumber, parseTwilioCallerAllowlist, parseTwilioInboundVoiceProfile, registerTwilioInboundCall, twilioInboundCallerAllowed } from "./calls/twilioInbound.js";
+import { blandRouteFromRecord, normalizeInboundPhone, twilioRouteCallerAllowed } from "./calls/inboundRoutes.js";
 import { twilioUnavailableTwiML, twilioVoicemailTwiML } from "./calls/twilio.js";
 import { answerBlandQuestion } from "./calls/blandBrain.js";
 import { processBlandConsult, processBlandWebhook } from "./calls/blandWebhooks.js";
 import { isBlandVoiceConfigured } from "./calls/bland.js";
-import { isBlandInboundConfigured, parseBlandInboundAllowedCallers, parseBlandInboundRoutes, resolveBlandInboundRoute } from "./calls/blandInbound.js";
+import { isBlandInboundConfigured, normalizeBlandInboundNumber, parseBlandInboundAllowedCallers, parseBlandInboundRoutes, resolveBlandInboundRoute, type BlandInboundRoute } from "./calls/blandInbound.js";
+import { parseVoiceCallProfileJson } from "./calls/voiceProfile.js";
 import { listBlandCuratedVoices } from "./calls/blandVoices.js";
 import { FLUX_TTS_VOICES } from "./voiceSettings.js";
 import { nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow, syncDefaultProactiveWatchesForConnectedAccounts } from "./nativeTools.js";
@@ -111,6 +113,7 @@ import { reconcileAllUserSchedules } from "./scheduler.js";
 import { buildPhoneCallOutcomePrompt, fallbackPhoneCallOutcome, parsePhoneCallOutcome } from "./calls/outcome.js";
 import { schedulePhoneCallFollowUps } from "./calls/followUp.js";
 import { scorePhoneCallTrace } from "./calls/voiceEvaluation.js";
+import { providerStatusCanAdvance } from "./calls/voiceEvents.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -901,12 +904,13 @@ async function main(): Promise<void> {
       const answeredBy = String(form.AnsweredBy ?? "").trim().toLowerCase();
       if ((call.voiceProfile?.controls?.allowVoicemail ?? config.twilioVoicemailEnabled) && answeredBy.startsWith("machine_")) {
         await appendPhoneCallEvent(userId, callId, { type: "voicemail_detected", summary: "The recipient's voicemail system answered." });
-        await updatePhoneCall(userId, callId, { status: "ended", runtimeState: "ended", summary: "A voicemail message was delivered." });
+        await appendPhoneCallEvent(userId, callId, { type: "voicemail_left", summary: "The configured voicemail message was delivered." });
+        await updatePhoneCall(userId, callId, { status: "ended", runtimeState: "ended", providerStatus: "machine", summary: "A voicemail message was delivered.", terminalReason: "voicemail" });
         return c.body(twilioVoicemailTwiML(config.twilioVoicemailMessage), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
       }
       if (answeredBy.startsWith("machine_")) {
         await appendPhoneCallEvent(userId, callId, { type: "voicemail_detected", summary: "The recipient's voicemail system answered; voicemail delivery is disabled." });
-        await updatePhoneCall(userId, callId, { status: "ended", runtimeState: "ended", summary: "Voicemail delivery was disabled by call controls." });
+        await updatePhoneCall(userId, callId, { status: "ended", runtimeState: "ended", providerStatus: "machine", summary: "Voicemail delivery was disabled by call controls.", terminalReason: "voicemail_disabled" });
         return c.body("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Hangup/></Response>", 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
       }
       await updatePhoneCall(userId, callId, { status: "bridging", providerCallId: callSid || call.providerCallId });
@@ -943,15 +947,21 @@ async function main(): Promise<void> {
       const base = config.twilioWebhookBaseUrl.replace(/\/+$/, "");
       if (!base || !trustedTwilioRequest(c.req.header("X-Twilio-Signature"), `${base}/twilio/inbound`, form)) return c.text("Forbidden", 403);
       try {
-        const allowedCallers = parseTwilioCallerAllowlist(config.twilioInboundAllowedCallers);
-        const from = String(form.From ?? "").trim();
-        const to = String(form.To ?? "").trim();
+        const from = normalizeInboundPhone(String(form.From ?? "").trim()) ?? String(form.From ?? "").trim();
+        const to = normalizeInboundPhone(String(form.To ?? "").trim()) ?? String(form.To ?? "").trim();
         const callSid = String(form.CallSid ?? "").trim();
-        const ownerUserId = inboundTwilioOwnerForNumber(to, config.twilioInboundOwnerUserId, config.twilioInboundRoutes);
-        if (!allowedCallers.includes(from)) return c.body("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Reject reason=\"rejected\"/></Response>", 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
-        const callProfile = config.twilioInboundCallProfile === "business" ? "business" : "personal";
-        const verifiedCallers = parseTwilioCallerAllowlist(config.twilioInboundVerifiedCallers);
-        const call = await registerTwilioInboundCall({ userId: ownerUserId, from, to, callSid, callProfile, verification: callProfile === "business" && verifiedCallers.includes(from) ? "verified" : "identified" });
+        const durableRoute = normalizeInboundPhone(to) ? await getVoiceInboundRoute("twilio", to) : undefined;
+        const ownerUserId = durableRoute?.userId ?? inboundTwilioOwnerForNumber(to, config.twilioInboundOwnerUserId, config.twilioInboundRoutes);
+        const callProfile = durableRoute?.callProfile ?? (config.twilioInboundCallProfile === "business" ? "business" : "personal");
+        // Personal inbound lines remain explicit allowlists. Business lines
+        // may accept any caller, but those callers stay identified/public and
+        // can use only the server-owned business profile and its call-scoped
+        // connected-app policy.
+        const allowedCallers = durableRoute?.allowedCallers ?? parseTwilioCallerAllowlist(config.twilioInboundAllowedCallers);
+        if (durableRoute ? !twilioRouteCallerAllowed(durableRoute, from) : !twilioInboundCallerAllowed(callProfile, allowedCallers, from)) return c.body("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Reject reason=\"rejected\"/></Response>", 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
+        const verifiedCallers = durableRoute?.verifiedCallers ?? parseTwilioCallerAllowlist(config.twilioInboundVerifiedCallers);
+        const voiceProfile = durableRoute?.voiceProfile ?? parseTwilioInboundVoiceProfile(config.twilioInboundVoiceProfile, callProfile);
+        const call = await registerTwilioInboundCall({ userId: ownerUserId, from, to, callSid, callProfile, voiceProfile, verification: callProfile === "business" && verifiedCallers.includes(from) ? "verified" : "identified" });
         return c.body(await twilioStreamTwiML(call.id, ownerUserId), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
       } catch (error) {
         logger.warn({ err: error }, "Rejected Twilio inbound call configuration or payload");
@@ -968,11 +978,23 @@ async function main(): Promise<void> {
       const call = await readTwilioCallForCallback(userId, callId);
       if (!call || call.provider !== "twilio") return c.body(null, 204);
       const providerStatus = String(form.CallStatus ?? "").toLowerCase();
-      if (providerStatus === "in-progress" || providerStatus === "answered") await appendPhoneCallEvent(userId, callId, { type: "call_answered", summary: "The call was answered." });
-      const status = ["completed", "canceled"].includes(providerStatus) ? "ended" : ["busy", "failed", "no-answer"].includes(providerStatus) ? "failed" : undefined;
-      if (status) {
-        await appendPhoneCallEvent(userId, callId, { type: status === "failed" ? "call_failed" : "call_ended", summary: status === "failed" ? `The call ended because Twilio reported ${providerStatus}.` : "The call ended." });
-        await updatePhoneCall(userId, callId, { status, providerCallId: String(form.CallSid ?? call.providerCallId ?? "").slice(0, 100), ...(status === "failed" ? { error: `Twilio call ${providerStatus}` } : {}) });
+      const durationValue = Number(form.CallDuration);
+      const duration = Number.isFinite(durationValue) && durationValue >= 0 ? Math.min(Math.floor(durationValue), 86_400) : undefined;
+      const providerCallId = String(form.CallSid ?? call.providerCallId ?? "").slice(0, 100);
+      const status = providerStatus === "initiated" || providerStatus === "ringing" ? "bridging" : providerStatus === "in-progress" || providerStatus === "answered" ? "active" : ["completed", "canceled"].includes(providerStatus) ? "ended" : ["busy", "failed", "no-answer"].includes(providerStatus) ? "failed" : undefined;
+      const nextEvent = providerStatus === "initiated" ? { type: "call_initiated" as const, summary: "Twilio accepted the call and began dialing." }
+        : providerStatus === "ringing" ? { type: "call_ringing" as const, summary: "The destination is ringing." }
+        : providerStatus === "in-progress" || providerStatus === "answered" ? { type: "call_answered" as const, summary: "The call was answered and the voice bridge is active." }
+        : providerStatus === "busy" ? { type: "call_busy" as const, summary: "The destination was busy." }
+        : providerStatus === "no-answer" ? { type: "call_no_answer" as const, summary: "The destination did not answer." }
+        : providerStatus === "completed" ? { type: "call_ended" as const, summary: "The call ended normally." }
+        : providerStatus === "canceled" ? { type: "call_cancelled" as const, summary: "The call was cancelled before completion." }
+        : providerStatus === "failed" ? { type: "call_failed" as const, summary: "Twilio reported that the call failed." }
+        : providerStatus ? { type: "call_unknown" as const, summary: `Twilio returned an unrecognized call status: ${providerStatus}.` }
+        : undefined;
+      if (nextEvent && providerStatusCanAdvance(call.providerStatus, providerStatus as NonNullable<typeof call.providerStatus>)) await appendPhoneCallEvent(userId, callId, nextEvent);
+      if (providerStatus) {
+        await updatePhoneCall(userId, callId, { ...(status ? { status } : {}), providerStatus: (status ? providerStatus : "unknown") as "queued" | "initiated" | "ringing" | "in-progress" | "answered" | "completed" | "busy" | "no-answer" | "failed" | "canceled" | "machine" | "unknown", providerCallId, ...(duration !== undefined ? { callLengthSeconds: duration } : {}), ...(status === "failed" ? { error: `Twilio call ${providerStatus}`, terminalReason: providerStatus } : status === "ended" ? { terminalReason: providerStatus } : {}) });
       }
       return c.body(null, 204);
     });
@@ -986,11 +1008,25 @@ async function main(): Promise<void> {
       const call = await readTwilioCallForCallback(userId, callId);
       if (!call || call.provider !== "twilio") return c.body(null, 204);
       const event = String(form.StreamEvent ?? "").toLowerCase();
+      if (event === "stream-started" && !["ended", "failed"].includes(call.status)) {
+        // Inbound calls do not have the outbound status-callback contract. The
+        // first authenticated media stream is therefore the provider-backed
+        // proof that the call was answered and the bridge is live.
+        if (!(call.timeline ?? []).some((item) => item.type === "call_answered")) {
+          await appendPhoneCallEvent(userId, callId, { type: "call_answered", summary: "The caller connected and the voice bridge is active." });
+        }
+        await updatePhoneCall(userId, callId, { status: "active", runtimeState: "healthy", providerStatus: "in-progress" });
+      }
       // A media stream can fail while the provider call is still alive. The
       // bridge owns bounded Deepgram reconnects, so do not turn a recoverable
       // stream interruption into a terminal call failure here.
       if (event === "stream-error") await updatePhoneCall(userId, callId, { runtimeState: "reconnecting" });
-      if (event === "stream-stopped" && call.status !== "failed") await updatePhoneCall(userId, callId, { status: "ended", runtimeState: "ended" });
+      if (event === "stream-stopped" && !["failed", "ended"].includes(call.status)) {
+        if (!(call.timeline ?? []).some((item) => item.type === "call_ended")) {
+          await appendPhoneCallEvent(userId, callId, { type: "call_ended", summary: "The voice bridge ended the call." });
+        }
+        await updatePhoneCall(userId, callId, { status: "ended", runtimeState: "ended", terminalReason: "stream_stopped" });
+      }
       return c.body(null, 204);
     });
 
@@ -1017,13 +1053,20 @@ async function main(): Promise<void> {
           // second serial store read on every turn; status callbacks remain the
           // authoritative guard for the next turn.
           const liveCall = call;
+          const privateVoiceAccess = liveCall.direction !== "inbound"
+            || (liveCall.callProfile === "personal" && liveCall.callVerification === "verified");
+          const scopedVoiceAccess = liveCall.direction === "inbound"
+            && liveCall.callProfile === "business"
+            && liveCall.voiceProfile?.toolPolicy?.enabled === true;
           const result = await runAgent(userId, twilioVoiceTranscript(liveCall, transcript, body.interruptedAssistantSpeech), twilioVoiceHistory(liveCall), config.voiceModel, undefined, c.req.raw.signal, undefined, undefined,
             { accountId: `account_${userId}`, provider: "voice", conversationId: callId, scope: "private" }, {
             instructions: twilioVoiceInstructions(liveCall),
-            ...(speculative ? { toolAllow: [] } : { ownerPrivateRun: true }),
+            ...(speculative ? { toolAllow: [], ephemeral: true } : privateVoiceAccess ? { ownerPrivateRun: true } : scopedVoiceAccess ? { ephemeral: true, voiceScopedAccess: true } : { toolAllow: [], ephemeral: true }),
             voiceTurn: true,
             voiceSessionId: `twilio:${callId}`,
             voiceRoutingHint: liveCall.purpose,
+            voiceToolPolicy: liveCall.voiceProfile?.toolPolicy,
+            voiceAllowHumanHandoff: liveCall.voiceProfile?.controls?.allowHumanHandoff,
           });
           if (!speculative) {
             // The call transcript is already persisted in the owner-scoped
@@ -1085,20 +1128,31 @@ async function main(): Promise<void> {
       if (!config.blandVoiceEnabled || !config.blandInboundEnabled || config.blandWebhookSecret.trim().length < 32) return c.text("Not found", 404);
       const contentLength = Number(c.req.header("content-length") ?? 0);
       if (contentLength > 2 * 1024 * 1024) return c.json({ ok: false, error: "payload too large" }, 413);
-      let routes: ReturnType<typeof parseBlandInboundRoutes>;
-      try {
-        routes = parseBlandInboundRoutes(config.blandInboundRoutes, {
-          callProfile: config.blandInboundCallProfile === "business" ? "business" : "personal",
-          purpose: config.blandInboundPurpose,
-          allowedCallers: parseBlandInboundAllowedCallers(config.blandInboundAllowedCallers),
-        });
-      } catch {
-        return c.json({ ok: false, error: "Bland inbound routing is misconfigured" }, 503);
-      }
       try {
         const rawBody = await c.req.text();
         const pathNumber = c.req.param("phoneNumber");
-        const route = resolveBlandInboundRoute(rawBody, routes, pathNumber);
+        let bodyNumber: string | undefined;
+        try {
+          const parsed = JSON.parse(rawBody) as Record<string, unknown>;
+          const variables = parsed.variables && typeof parsed.variables === "object" && !Array.isArray(parsed.variables) ? parsed.variables as Record<string, unknown> : {};
+          bodyNumber = normalizeBlandInboundNumber(parsed.to ?? variables.to ?? variables.phone_number);
+        } catch { /* Signature validation remains authoritative; this only selects a durable route. */ }
+        const normalizedPathNumber = normalizeBlandInboundNumber(pathNumber);
+        if (normalizedPathNumber && bodyNumber && normalizedPathNumber !== bodyNumber) return c.json({ ok: false, error: "Bland inbound number mismatch" }, 400);
+        const durableNumber = normalizedPathNumber ?? bodyNumber;
+        const durableRoute = durableNumber ? await getVoiceInboundRoute("bland", durableNumber) : undefined;
+        let route: BlandInboundRoute | undefined;
+        if (durableRoute) {
+          route = blandRouteFromRecord(durableRoute);
+        } else {
+          const routes = parseBlandInboundRoutes(config.blandInboundRoutes, {
+            callProfile: config.blandInboundCallProfile === "business" ? "business" : "personal",
+            voiceProfile: parseVoiceCallProfileJson(config.blandInboundVoiceProfile, config.blandInboundCallProfile === "business" ? "support" : "general"),
+            purpose: config.blandInboundPurpose,
+            allowedCallers: parseBlandInboundAllowedCallers(config.blandInboundAllowedCallers),
+          });
+          route = resolveBlandInboundRoute(rawBody, routes, pathNumber);
+        }
         if (!route) return c.json({ ok: false, error: "unknown Bland inbound number" }, 404);
         const result = await processBlandWebhook({
           rawBody,
@@ -1175,13 +1229,20 @@ async function main(): Promise<void> {
             if (!speculative) void appendPhoneCallEvent(userId, callId, { type: "turn_started", summary: "The agent started processing a caller turn." }).catch(() => undefined);
             const result = await withVoiceCallLock(userId, callId, c.req.raw.signal, async () => {
               const liveCall = call;
+              const privateVoiceAccess = liveCall.direction !== "inbound"
+                || (liveCall.callProfile === "personal" && liveCall.callVerification === "verified");
+              const scopedVoiceAccess = liveCall.direction === "inbound"
+                && liveCall.callProfile === "business"
+                && liveCall.voiceProfile?.toolPolicy?.enabled === true;
               return runAgent(userId, twilioVoiceTranscript(liveCall, transcript, body.interruptedAssistantSpeech), twilioVoiceHistory(liveCall), config.voiceModel, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined,
                 { accountId: `account_${userId}`, provider: "voice", conversationId: callId, scope: "private" }, {
                 instructions: twilioVoiceInstructions(liveCall),
-                ...(speculative ? { toolAllow: [] } : { ownerPrivateRun: true }),
+                ...(speculative ? { toolAllow: [], ephemeral: true } : privateVoiceAccess ? { ownerPrivateRun: true } : scopedVoiceAccess ? { ephemeral: true, voiceScopedAccess: true } : { toolAllow: [], ephemeral: true }),
                 voiceTurn: true,
                 voiceSessionId: `twilio:${callId}`,
                 voiceRoutingHint: liveCall.purpose,
+                voiceToolPolicy: liveCall.voiceProfile?.toolPolicy,
+                voiceAllowHumanHandoff: liveCall.voiceProfile?.controls?.allowHumanHandoff,
                 onVoiceActivity: (activity) => send({ type: activity.type, toolSlug: activity.toolSlug, text: normalizeVoiceText(activity.message).slice(0, 4000) }),
                 onToolActivity: async (activity) => {
                   if (speculative) return;
@@ -1260,7 +1321,6 @@ async function main(): Promise<void> {
         const response = typeof item.response === "string" ? item.response.trim().slice(0, 900) : "";
         return transcript && response ? [{ transcript, response }] : [];
       });
-      if (!turns.length) return c.json({ ok: true, skipped: true });
       const call = await getPhoneCall(userId, callId);
       // Outcome delivery runs during shutdown. Twilio may report failed before
       // the bridge can submit the bounded turns, but the call is still an
@@ -1278,15 +1338,29 @@ async function main(): Promise<void> {
           if (!(await completeDeliveryLease(key, leaseToken, 90 * 24 * 60 * 60))) throw new Error("voice outcome lease expired");
           return c.json({ ok: true, duplicate: true, followUpsScheduled: followUp.scheduled });
         }
-        await updatePhoneCall(userId, callId, { outcomeStatus: "pending", outcomeErrorCode: undefined });
         const outcomeCall = await getPhoneCall(userId, callId) ?? call;
+        // A bridge can finish after the final turn commit, or it can lose its
+        // in-memory turn buffer during a provider disconnect. Prefer the
+        // submitted bounded turns, then recover the already durable transcript
+        // before deciding that there is no conversation to summarize.
+        const effectiveTurns = turns.length
+          ? turns
+          : (outcomeCall.transcript?.turns ?? []).map((turn) => ({ transcript: turn.caller, response: turn.assistant })).slice(-12);
+        if (!effectiveTurns.length) {
+          const outcome = fallbackPhoneCallOutcome();
+          const qa = scorePhoneCallTrace({ direction: outcomeCall.direction, provider: outcomeCall.provider, purpose: outcomeCall.purpose, outcome, timeline: outcomeCall.timeline });
+          await updatePhoneCall(userId, callId, { outcome, outcomeStatus: "completed", postCallProcessedAt: Date.now(), qa, followUpStatus: "scheduled", followUpErrorCode: undefined });
+          if (!(await completeDeliveryLease(key, leaseToken, 90 * 24 * 60 * 60))) throw new Error("voice outcome lease expired");
+          return c.json({ ok: true, noConversationTurns: true });
+        }
+        await updatePhoneCall(userId, callId, { outcomeStatus: "pending", outcomeErrorCode: undefined });
         const session = await getSession(userId);
         const verifiedActions = (outcomeCall.timeline ?? []).flatMap((event) => event.type === "tool_completed" && event.toolSlug && event.receiptId
           ? [{ toolSlug: event.toolSlug, receiptId: event.receiptId, summary: event.summary }]
           : []);
         const result = await withCliLock(userId, c.req.raw.signal, () => runAgent(
           userId,
-          buildPhoneCallOutcomePrompt({ phoneNumber: outcomeCall.phoneNumber, purpose: outcomeCall.purpose, turns, verifiedActions }),
+          buildPhoneCallOutcomePrompt({ phoneNumber: outcomeCall.phoneNumber, purpose: outcomeCall.purpose, turns: effectiveTurns, verifiedActions }),
           [],
           session.model || config.defaultModel,
           undefined,
@@ -1352,6 +1426,16 @@ async function main(): Promise<void> {
       const userId = Number(body.userId);
       const status = String(body.status ?? "");
       if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !["active", "ended", "failed"].includes(status) || (body.runtimeState !== undefined && !["healthy", "degraded", "reconnecting", "ended"].includes(body.runtimeState)) || (body.sessionId !== undefined && !/^[A-Za-z0-9:_-]{1,160}$/.test(body.sessionId))) return c.json({ ok: false, error: "invalid Twilio call status" }, 400);
+      const prior = await getPhoneCall(userId, callId);
+      if (prior && status === "active" && !(prior.timeline ?? []).some((item) => item.type === "call_answered")) {
+        await appendPhoneCallEvent(userId, callId, { type: "call_answered", summary: "The voice bridge connected the call." });
+      }
+      if (prior && status === "ended" && !(prior.timeline ?? []).some((item) => item.type === "call_ended")) {
+        await appendPhoneCallEvent(userId, callId, { type: "call_ended", summary: "The voice bridge ended the call." });
+      }
+      if (prior && status === "failed" && !(prior.timeline ?? []).some((item) => item.type === "call_failed")) {
+        await appendPhoneCallEvent(userId, callId, { type: "call_failed", summary: "The voice bridge could not continue the call." });
+      }
       const call = await updatePhoneCall(userId, callId, { status: status as "active" | "ended" | "failed", ...(body.runtimeState ? { runtimeState: body.runtimeState as "healthy" | "degraded" | "reconnecting" | "ended" } : {}), ...(body.sessionId ? { bridgeSessionId: body.sessionId } : {}), ...(status === "failed" && body.error ? { error: String(body.error).slice(0, 500) } : {}) });
       if (!call) return c.json({ ok: false, error: "unknown call" }, 404);
       return c.json({ ok: true });
@@ -3706,7 +3790,10 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
         const photonCheck = !config.photonEnabled ? "disabled" : photonBridge ? "configured" : "misconfigured";
         const composioTriggersCheck = !composioTriggerSetup ? "disabled" : composioTriggerSetup.status === "ready" ? "configured" : "misconfigured";
         const durableState = await durableStateStatus();
-    const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", neonDurableState: !config.durableStateEnabled ? "disabled" : durableState.reachable && durableState.schemaReady ? "ok" : "failed", qstash: config.qstashToken ? "configured" : "disabled", composioTriggers: composioTriggersCheck, sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", twilio: config.twilioVoiceEnabled ? (config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilioInbound: config.twilioInboundEnabled ? (config.twilioVoiceEnabled && (config.twilioInboundOwnerUserId || config.twilioInboundRoutes) && config.twilioInboundAllowedCallers && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", bland: config.blandVoiceEnabled ? (isBlandVoiceConfigured() ? "configured" : "misconfigured") : "disabled", blandInbound: config.blandInboundEnabled ? (config.blandVoiceEnabled && isBlandInboundConfigured({ enabled: config.blandInboundEnabled, apiKey: config.blandApiKey, inboundWebhookUrl: config.blandInboundWebhookUrl, routes: config.blandInboundRoutes, allowedCallers: config.blandInboundAllowedCallers, webhookSecret: config.blandWebhookSecret, consultToolId: config.blandConsultToolId, consultToolSecret: config.blandConsultToolSecret }) ? "configured" : "misconfigured") : "disabled", recallMeetings: config.recallMeetingsEnabled ? (recallConfigurationReady() ? "configured" : "misconfigured") : "disabled", recallChat: recallChatConfigurationStatus(), mcp: config.mcpEnabled ? (mcpClient.configurationErrors().length ? "misconfigured" : "configured") : "disabled", treg: config.tregEnabled ? (config.tregToken || Object.keys(config.tregOrganizationTokens).length ? "configured" : "misconfigured") : "disabled", e2b: config.e2bEnabled ? (config.e2bApiKey && config.e2bBrowserTemplate ? "configured" : "misconfigured") : "disabled", webBotAuth: webBotAuthConfigurationStatus(), webBotAuthSigning: config.webBotAuthSignRequests ? (webBotAuthSigningEnabled() ? "configured" : "misconfigured") : "disabled", twilioSms: config.twilioSmsEnabled ? (config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid) ? "configured" : "misconfigured") : "disabled", x: xCheck, xchat: xchatCheck, photon: photonCheck } as const;
+    const twilioInboundAllowlistReady = config.twilioInboundCallProfile === "business" || config.twilioInboundAllowedCallers.trim().length > 0;
+    const durableTwilioRoutes = await hasVoiceInboundRoutes("twilio");
+    const durableBlandRoutes = await hasVoiceInboundRoutes("bland");
+    const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", neonDurableState: !config.durableStateEnabled ? "disabled" : durableState.reachable && durableState.schemaReady ? "ok" : "failed", qstash: config.qstashToken ? "configured" : "disabled", composioTriggers: composioTriggersCheck, sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", twilio: config.twilioVoiceEnabled ? (config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilioInbound: config.twilioInboundEnabled ? (config.twilioVoiceEnabled && (config.twilioInboundOwnerUserId || config.twilioInboundRoutes || durableTwilioRoutes) && (twilioInboundAllowlistReady || durableTwilioRoutes) && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", bland: config.blandVoiceEnabled ? (isBlandVoiceConfigured() ? "configured" : "misconfigured") : "disabled", blandInbound: config.blandInboundEnabled ? (config.blandVoiceEnabled && isBlandInboundConfigured({ enabled: config.blandInboundEnabled, apiKey: config.blandApiKey, inboundWebhookUrl: config.blandInboundWebhookUrl, routes: config.blandInboundRoutes, hasDurableRoutes: durableBlandRoutes, allowedCallers: config.blandInboundAllowedCallers, webhookSecret: config.blandWebhookSecret, consultToolId: config.blandConsultToolId, consultToolSecret: config.blandConsultToolSecret }) ? "configured" : "misconfigured") : "disabled", recallMeetings: config.recallMeetingsEnabled ? (recallConfigurationReady() ? "configured" : "misconfigured") : "disabled", recallChat: recallChatConfigurationStatus(), mcp: config.mcpEnabled ? (mcpClient.configurationErrors().length ? "misconfigured" : "configured") : "disabled", treg: config.tregEnabled ? (config.tregToken || Object.keys(config.tregOrganizationTokens).length ? "configured" : "misconfigured") : "disabled", e2b: config.e2bEnabled ? (config.e2bApiKey && config.e2bBrowserTemplate ? "configured" : "misconfigured") : "disabled", webBotAuth: webBotAuthConfigurationStatus(), webBotAuthSigning: config.webBotAuthSignRequests ? (webBotAuthSigningEnabled() ? "configured" : "misconfigured") : "disabled", twilioSms: config.twilioSmsEnabled ? (config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid) ? "configured" : "misconfigured") : "disabled", x: xCheck, xchat: xchatCheck, photon: photonCheck } as const;
         const recallChatIssue = recallChatConfigurationIssue();
         const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.neonDurableState !== "failed" && checks.composioTriggers !== "misconfigured" && checks.sendblue !== "misconfigured" && checks.twilio !== "misconfigured" && checks.twilioInbound !== "misconfigured" && checks.bland !== "misconfigured" && checks.blandInbound !== "misconfigured" && checks.recallMeetings !== "misconfigured" && checks.recallChat !== "misconfigured" && checks.mcp !== "misconfigured" && checks.treg !== "misconfigured" && checks.e2b !== "misconfigured" && checks.webBotAuth !== "misconfigured" && checks.webBotAuthSigning !== "misconfigured" && checks.twilioSms !== "misconfigured" && checks.x !== "misconfigured" && checks.xchat !== "misconfigured" && checks.photon !== "misconfigured";
         return c.json({ ok, status: ok ? "operational" : "degraded", bot: me.username, agent: "Chusky", persistence: redis ? "redis" : "memory", checks, durableState: { enabled: durableState.enabled, reachable: durableState.reachable, schemaReady: durableState.schemaReady }, configurationIssues: { recallChat: recallChatIssue, webBotAuth: webBotAuthConfigurationIssue() }, x: config.xEnabled ? xSetup : undefined, xchat: config.xchatEnabled ? { ...xchatSetup, cryptoStatus: xchatAdapter?.cryptoStatus ?? "uninitialized" } : undefined, composioTriggers: composioTriggerSetup, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, photon: config.photonEnabled, sms: config.twilioSmsEnabled, x: config.xEnabled, xchat: config.xchatEnabled }, monitoring: monitoringSnapshot() }, ok ? 200 : 503);

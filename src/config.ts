@@ -425,6 +425,10 @@ export const config = {
   // the company brief and still requires caller verification before sensitive
   // account details are disclosed.
   twilioInboundCallProfile: optional("TWILIO_INBOUND_CALL_PROFILE", "personal"),
+  // Optional JSON profile applied to Twilio inbound calls. This is intentionally
+  // server-side configuration so a caller cannot choose the represented
+  // business, connected-app grant, or disclosure policy.
+  twilioInboundVoiceProfile: optional("TWILIO_INBOUND_VOICE_PROFILE", ""),
   // Bland is an optional parallel phone provider. Twilio remains available
   // independently and is selected when BLAND_VOICE_ENABLED=false.
   blandVoiceEnabled: optional("BLAND_VOICE_ENABLED", "false") === "true",
@@ -436,6 +440,7 @@ export const config = {
   blandInboundRoutes: optional("BLAND_INBOUND_ROUTES", ""),
   blandInboundAllowedCallers: optional("BLAND_INBOUND_ALLOWED_CALLERS", ""),
   blandInboundCallProfile: optional("BLAND_INBOUND_CALL_PROFILE", "personal"),
+  blandInboundVoiceProfile: optional("BLAND_INBOUND_VOICE_PROFILE", ""),
   blandInboundPurpose: optional("BLAND_INBOUND_PURPOSE", "Handle an inbound caller request"),
   blandConsultToolId: optional("BLAND_CONSULT_TOOL_ID", ""),
   blandConsultToolSecret: optional("BLAND_CONSULT_TOOL_SECRET", ""),

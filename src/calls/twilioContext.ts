@@ -1,7 +1,8 @@
 import type { Message, PhoneCallRecord } from "../store.js";
 import { voiceContinuityInstructions } from "./continuity.js";
-import { voiceProfileInstructions } from "./voiceProfile.js";
+import { safeVoiceIdentity, voiceProfileInstructions } from "./voiceProfile.js";
 import { buildVoiceCallPlan, voiceCallPlanInstructions } from "./voicePlan.js";
+import { voicePolicyInstructions } from "./voiceToolPolicy.js";
 
 function spoken(value: unknown, maximum: number): string {
   return String(value ?? "")
@@ -39,7 +40,7 @@ export function callerFacingCallTopic(purpose: unknown): string {
  * call role from a generic greeting. */
 export function twilioVoiceOpening(call: PhoneCallRecord): string {
   const profile = call.voiceProfile;
-  const identity = spoken(profile?.identity || "Chusky", 180);
+  const identity = spoken(safeVoiceIdentity(profile?.identity), 180);
   const organization = spoken(profile?.organization, 180);
   const contactName = spoken(profile?.contactName, 180);
   const explicitAi = profile?.disclosure === "explicit_ai";
@@ -110,5 +111,5 @@ export function twilioVoiceInstructions(call: PhoneCallRecord): string {
   const verification = call.callVerification ?? (profile === "business" ? "identified" : "verified");
   const continuity = voiceContinuityInstructions(call.continuity);
   const contactName = spoken(call.voiceProfile?.contactName, 180);
-  return `${voiceProfileInstructions(call.voiceProfile, call.direction, purpose)} ${voiceCallPlanInstructions(plan)} Caller-facing topic after identity confirmation: ${callerTopic}. ${contactName ? `Expected contact name: ${contactName}. Use it only to confirm identity; do not treat it as proof.` : "No contact name was supplied; do not invent one."} Call profile: ${profile}. Inbound verification tier: ${verification} (public → identified → verified). Use only this call's transcript and the approved call context as working context; do not consult unrelated chat messages, files, images, or prior conversations. In a business call, do not volunteer unrelated personal information; in a personal call, do not reveal unrelated confidential business information. Never disclose sensitive account information before the configured verification tier is satisfied.${continuity}`;
+  return `${voiceProfileInstructions(call.voiceProfile, call.direction, purpose)} ${voiceCallPlanInstructions(plan)} ${voicePolicyInstructions(call.voiceProfile?.toolPolicy)} Caller-facing topic after identity confirmation: ${callerTopic}. ${contactName ? `Expected contact name: ${contactName}. Use it only to confirm identity; do not treat it as proof.` : "No contact name was supplied; do not invent one."} Call profile: ${profile}. Inbound verification tier: ${verification} (public → identified → verified). Use only this call's transcript and the approved call context as working context; do not consult unrelated chat messages, files, images, or prior conversations. In a business call, do not volunteer unrelated personal information; in a personal call, do not reveal unrelated confidential business information. Never disclose sensitive account information before the configured verification tier is satisfied.${continuity}`;
 }

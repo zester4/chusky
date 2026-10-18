@@ -1214,7 +1214,7 @@ class TwilioVoiceCall:
 
     async def _commit_call_outcome(self) -> None:
         """Persist one bounded structured outcome after the media session ends."""
-        if self.outcome_committed or not self.outcome_turns:
+        if self.outcome_committed:
             return
         marker = "/commit-outcome"
         base = self.settings.chusky_turn_url[:-len("/turn")] if self.settings.chusky_turn_url.endswith("/turn") else self.settings.chusky_turn_url.rstrip("/")

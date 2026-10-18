@@ -64,6 +64,30 @@ test("concurrent phone-call writes retain records for Twilio callbacks", async (
   assert.ok(saved.every((call) => call.status === "active" && call.providerCallId?.startsWith("CA_concurrent_")));
 });
 
+test("phone lifecycle callbacks cannot resurrect a terminal call", async () => {
+  const userId = 810205;
+  const id = "twc_terminal_order";
+  await addPhoneCall(userId, {
+    id,
+    userId,
+    provider: "twilio",
+    direction: "outbound",
+    callProfile: "personal",
+    phoneNumber: "+15550001",
+    purpose: "Lifecycle ordering",
+    status: "starting",
+    providerStatus: "queued",
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  await updatePhoneCall(userId, id, { status: "active", providerStatus: "in-progress" });
+  await updatePhoneCall(userId, id, { status: "ended", providerStatus: "completed", terminalReason: "completed" });
+  await updatePhoneCall(userId, id, { status: "active", providerStatus: "ringing" });
+  const saved = await getSession(userId).then((session) => session.phoneCalls?.find((call) => call.id === id));
+  assert.equal(saved?.status, "ended");
+  assert.equal(saved?.providerStatus, "completed");
+});
+
 test("trigger handling instructions persist only for triggers owned by the session", async () => {
   const userId = 810202;
   const session = await getSession(userId);

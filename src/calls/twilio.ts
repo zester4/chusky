@@ -137,7 +137,7 @@ export async function startTwilioCallForUser(userId: number, input: TwilioCallIn
   if (dialBlockReason) throw new Error(dialBlockReason);
   const base = httpsUrl(options.webhookBaseUrl, "TWILIO_WEBHOOK_BASE_URL");
   const requestKey = normalizePhoneCallRequestKey(input.requestKey);
-  const call: PhoneCallRecord = { id: `twc_${randomUUID()}`, userId, ...(requestKey ? { requestKey } : {}), provider: "twilio", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, ...(continuity ? { continuity } : {}), status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
+  const call: PhoneCallRecord = { id: `twc_${randomUUID()}`, userId, ...(requestKey ? { requestKey } : {}), provider: "twilio", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, ...(continuity ? { continuity } : {}), status: "starting", providerStatus: "queued", createdAt: Date.now(), updatedAt: Date.now() };
   const claim = await claimPhoneCallStart(userId, call);
   if (!claim.created) return claim.call;
   const claimedCall = claim.call;
@@ -163,6 +163,21 @@ export async function startTwilioCallForUser(userId: number, input: TwilioCallIn
     return persisted;
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 500) : "Twilio call setup failed";
+    if (providerCallId) {
+      // Twilio has already accepted the side effect. A persistence failure is
+      // not evidence that the call failed, and marking it failed would make a
+      // retry capable of dialing the same person twice. Keep the record in an
+      // uncertain, non-retryable state until the provider callback reconciles
+      // its lifecycle and tell the caller exactly what happened.
+      await updatePhoneCall(userId, claimedCall.id, {
+        status: "bridging",
+        providerStatus: "unknown",
+        providerCallId,
+        error: "Twilio accepted the call, but Chusky is still reconciling its durable call record. Do not retry this request.",
+        terminalReason: "provider_accepted_reconciliation_pending",
+      }).catch(() => undefined);
+      throw new Error("Twilio accepted the call, but Chusky could not confirm its durable call record. Do not retry this request.");
+    }
     await updatePhoneCall(userId, claimedCall.id, { status: "failed", error: message });
     throw new Error(`Phone call could not be started: ${message}`);
   }

@@ -1,10 +1,18 @@
 import { randomUUID } from "node:crypto";
+import type { PhoneCallRecord } from "../store.js";
 
 /** Provider-neutral, owner-safe lifecycle events for a phone call. */
 export type VoiceCallEventType =
   | "call_started"
+  | "call_initiated"
+  | "call_ringing"
   | "call_answered"
   | "voicemail_detected"
+  | "voicemail_left"
+  | "call_busy"
+  | "call_no_answer"
+  | "call_cancelled"
+  | "call_unknown"
   | "handoff_requested"
   | "handoff_started"
   | "handoff_failed"
@@ -38,9 +46,21 @@ export interface VoiceCallEventInput {
 }
 
 const EVENT_TYPES = new Set<VoiceCallEventType>([
-  "call_started", "call_answered", "voicemail_detected", "handoff_requested", "handoff_started", "handoff_failed",
+  "call_started", "call_initiated", "call_ringing", "call_answered", "voicemail_detected", "voicemail_left", "call_busy", "call_no_answer", "call_cancelled", "call_unknown", "handoff_requested", "handoff_started", "handoff_failed",
   "tool_started", "tool_completed", "tool_failed", "turn_started", "turn_completed", "turn_interrupted", "call_ended", "call_failed",
 ]);
+
+/** Provider callbacks are at-least-once and may arrive out of order. Timeline
+ * events must obey the same monotonic rule as the durable call projection, or
+ * the Calls page can show a ringing event after an answered/ended event. */
+export function providerStatusCanAdvance(current: PhoneCallRecord["providerStatus"], next: PhoneCallRecord["providerStatus"]): boolean {
+  if (!next || next === "unknown") return false;
+  if (!current || current === "unknown") return true;
+  const terminal = new Set<NonNullable<PhoneCallRecord["providerStatus"]>>(["machine", "busy", "no-answer", "failed", "canceled", "completed"]);
+  if (terminal.has(current)) return false;
+  const rank: Record<NonNullable<PhoneCallRecord["providerStatus"]>, number> = { queued: 0, initiated: 1, ringing: 2, "in-progress": 3, answered: 3, machine: 4, busy: 4, "no-answer": 4, failed: 4, canceled: 4, completed: 5, unknown: -1 };
+  return rank[next] >= rank[current];
+}
 
 function boundedText(value: unknown, maximum: number): string {
   return typeof value === "string"

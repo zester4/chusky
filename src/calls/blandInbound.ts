@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { addPhoneCall, getBlandPhoneCallByProviderId, getPhoneCall, updatePhoneCall, type PhoneCallRecord } from "../store.js";
 import { isValidBlandToolSecret } from "./blandSecurity.js";
-import type { CallProfile } from "./voiceProfile.js";
+import type { CallProfile, VoiceCallProfile } from "./voiceProfile.js";
 
 const E164 = /^\+[1-9]\d{7,14}$/;
 
@@ -9,6 +9,7 @@ export interface BlandInboundRoute {
   phoneNumber: string;
   userId: number;
   callProfile: CallProfile;
+  voiceProfile?: VoiceCallProfile;
   purpose: string;
   allowedCallers: string[];
 }
@@ -18,6 +19,7 @@ export function isBlandInboundConfigured(options: {
   apiKey: string;
   inboundWebhookUrl: string;
   routes: string;
+  hasDurableRoutes?: boolean;
   allowedCallers?: string;
   webhookSecret: string;
   consultToolId: string;
@@ -29,7 +31,7 @@ export function isBlandInboundConfigured(options: {
     const url = new URL(options.inboundWebhookUrl);
     if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) return false;
     parseBlandInboundAllowedCallers(options.allowedCallers ?? "");
-    return parseBlandInboundRoutes(options.routes).size > 0;
+    return Boolean(options.hasDurableRoutes) || parseBlandInboundRoutes(options.routes).size > 0;
   } catch {
     return false;
   }
@@ -47,7 +49,7 @@ export function parseBlandInboundAllowedCallers(value: string): string[] {
   return [...new Set(callers)];
 }
 
-export function parseBlandInboundRoutes(value: string, options: { callProfile?: CallProfile; purpose?: string; allowedCallers?: string[] } = {}): Map<string, BlandInboundRoute> {
+export function parseBlandInboundRoutes(value: string, options: { callProfile?: CallProfile; voiceProfile?: VoiceCallProfile; purpose?: string; allowedCallers?: string[] } = {}): Map<string, BlandInboundRoute> {
   const routes = new Map<string, BlandInboundRoute>();
   const callProfile = options.callProfile === "business" ? "business" : "personal";
   const purpose = (options.purpose ?? "Handle an inbound caller request").replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 2_000) || "Handle an inbound caller request";
@@ -57,7 +59,7 @@ export function parseBlandInboundRoutes(value: string, options: { callProfile?: 
     if (!E164.test(phoneNumber)) throw new Error("BLAND_INBOUND_ROUTES must map E.164 numbers to positive owner IDs");
     const userId = Number(owner);
     if (!Number.isSafeInteger(userId) || userId <= 0) throw new Error("BLAND_INBOUND_ROUTES must map E.164 numbers to positive owner IDs");
-    routes.set(phoneNumber, { phoneNumber, userId, callProfile, purpose, allowedCallers });
+    routes.set(phoneNumber, { phoneNumber, userId, callProfile, ...(options.voiceProfile ? { voiceProfile: options.voiceProfile } : {}), purpose, allowedCallers });
   }
   return routes;
 }
@@ -119,6 +121,7 @@ export async function registerBlandInboundCall(input: {
     provider: "bland",
     direction: "inbound",
     callProfile: input.route.callProfile,
+    ...(input.route.voiceProfile ? { voiceProfile: input.route.voiceProfile } : {}),
     callVerification: verified ? "verified" : input.route.callProfile === "business" ? "identified" : "public",
     // Bland's live event payload may omit `from`; retain the configured line
     // until the post-call payload provides the caller number.

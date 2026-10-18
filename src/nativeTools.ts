@@ -172,6 +172,14 @@ export interface NativeToolRuntime {
   sharedConversation?: boolean;
   /** Authenticated owner-private interactive run; broadens context/tools while preserving high-impact approval checks. */
   ownerPrivateRun?: boolean;
+  /** The exact live call this voice turn is serving. Native call controls are
+   * fenced to this ID so a caller/model cannot control another call. */
+  voiceCallId?: string;
+  /** Provider for the current live call; transfer/hangup controls are
+   * provider-specific and must not be cross-routed. */
+  voiceProvider?: "twilio" | "bland";
+  /** Profile-controlled human handoff permission for this live call. */
+  voiceAllowHumanHandoff?: boolean;
   /** Current owner request, used for explicit-opt-in checks at native boundaries. */
   userRequest?: string;
   /** The durable task currently executing; absent for interactive turns. */
@@ -2355,6 +2363,9 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
       const action = args.action === "send_dtmf" || args.action === "transfer" || args.action === "hangup" ? args.action : undefined;
       if (!action) throw new Error("action must be hangup, send_dtmf, or transfer");
       const callId = text(args.callId);
+      if (runtime.voiceCallId && callId !== runtime.voiceCallId) throw new Error("A live voice turn may control only its current call");
+      if (runtime.voiceProvider && runtime.voiceProvider !== "twilio") throw new Error("The current voice provider does not support this call-control action");
+      if (action === "transfer" && runtime.voiceAllowHumanHandoff === false) throw new Error("Human handoff is disabled for this call profile");
       if (action === "send_dtmf") return controlTwilioCallForUser(userId, callId, { action, digits: text(args.digits) });
       if (action === "transfer") return controlTwilioCallForUser(userId, callId, { action, phoneNumber: text(args.phoneNumber) });
       return controlTwilioCallForUser(userId, callId, { action });

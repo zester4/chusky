@@ -43,6 +43,12 @@ test("profile normalization strips control characters, bounds facts, and ignores
   assert.deepEqual(profile.capabilities, ["memory_lookup"]);
 });
 
+test("voice identity cannot turn a configured assistant into a regulated professional", () => {
+  const profile = normalizeVoiceCallProfile({ identity: "Dr. Amina, licensed nurse" });
+  assert.equal(profile.identity, "Chusky");
+  assert.match(voiceProfileInstructions(profile, "outbound", "Check in"), /Never claim to be human, a nurse, doctor, lawyer, accountant/i);
+});
+
 test("explicit AI disclosure is opt-in and remains a one-time introduction", () => {
   const profile = normalizeVoiceCallProfile({ identity: "Maya", organization: "MedVault", disclosure: "explicit_ai" });
   const prompt = voiceProfileInstructions(profile, "outbound", "Check in with the patient");

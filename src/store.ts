@@ -506,6 +506,10 @@ export interface PhoneCallRecord {
   lastCommittedTurnId?: string;
   continuity?: { sourceCallId: string; summary: string; decisions: string[]; actionItems: string[] };
   providerCallId?: string;
+  /** Last provider lifecycle state, kept separate from Chusky's internal bridge state. */
+  providerStatus?: "queued" | "initiated" | "ringing" | "in-progress" | "answered" | "completed" | "busy" | "no-answer" | "failed" | "canceled" | "machine" | "unknown";
+  /** Provider terminal reason, bounded and safe for the dashboard. */
+  terminalReason?: string;
   error?: string;
   /** Bland's post-call analysis, safely bounded and scoped to this owner. */
   summary?: string;
@@ -526,6 +530,22 @@ export interface PhoneCallRecord {
   callLengthSeconds?: number;
   postCallProcessedAt?: number;
   createdAt: number;
+  updatedAt: number;
+}
+
+/** Durable destination-to-workspace mapping for public business lines. This
+ * lives outside an owner session so an inbound webhook can resolve a number
+ * in one bounded lookup without scanning every account. It contains only the
+ * server-approved call profile; provider credentials are never stored here. */
+export interface VoiceInboundRouteRecord {
+  provider: "twilio" | "bland";
+  phoneNumber: string;
+  userId: number;
+  callProfile: "personal" | "business";
+  purpose: string;
+  voiceProfile: VoiceCallProfile;
+  allowedCallers: string[];
+  verifiedCallers: string[];
   updatedAt: number;
 }
 
@@ -2077,6 +2097,11 @@ interface Backend {
   releaseDeliveryLease(key: string, token: string): Promise<boolean>;
   linkBlandProviderCall(providerCallId: string, userId: number, callId: string): Promise<boolean>;
   getBlandProviderCall(providerCallId: string): Promise<{ userId: number; callId: string } | undefined>;
+  getVoiceInboundRoute(provider: VoiceInboundRouteRecord["provider"], phoneNumber: string): Promise<VoiceInboundRouteRecord | undefined>;
+  saveVoiceInboundRoute(record: VoiceInboundRouteRecord): Promise<boolean>;
+  deleteVoiceInboundRoute(provider: VoiceInboundRouteRecord["provider"], phoneNumber: string, userId: number): Promise<boolean>;
+  listVoiceInboundRoutes(userId: number): Promise<VoiceInboundRouteRecord[]>;
+  hasVoiceInboundRoutes(provider: VoiceInboundRouteRecord["provider"]): Promise<boolean>;
   claimRecallMeetingCreation(userId: number, instanceHash: string, token: string, leaseMs: number): Promise<boolean>;
   releaseRecallMeetingCreation(userId: number, instanceHash: string, token: string): Promise<boolean>;
   putRecallVisualFrame(userId: number, meetingId: string, encryptedFrame: string, ttlSeconds: number, minIntervalSeconds: number): Promise<boolean>;
@@ -2506,6 +2531,10 @@ class RedisBackend implements Backend {
   private companyUsageKey = (projectId: string, month: string) => `${this.companyPrefix(projectId)}:usage:${month}`;
   private brandingKey = (organizationId: string) => `chuck:organization:branding:${createHash("sha256").update(organizationId).digest("hex")}`;
   private brandingDomainKey = (hostname: string) => `chuck:organization:branding-domain:${createHash("sha256").update(hostname).digest("hex")}`;
+  private voiceInboundRouteDigest = (provider: VoiceInboundRouteRecord["provider"], phoneNumber: string) => createHash("sha256").update(`${provider}:${phoneNumber}`).digest("hex");
+  private voiceInboundRouteKey = (provider: VoiceInboundRouteRecord["provider"], phoneNumber: string) => `chuck:voice:inbound-route:${this.voiceInboundRouteDigest(provider, phoneNumber)}`;
+  private voiceInboundRouteIndexKey = (userId: number) => `chuck:user:${userId}:voice-inbound-routes`;
+  private voiceInboundProviderIndexKey = (provider: VoiceInboundRouteRecord["provider"]) => `chuck:voice:inbound-routes:${provider}`;
   private runKey = (id: string) => `chuck:run:${id}`;
   // Bind cancellation markers to the owner so the hot-path check does not
   // need to re-read the full agent-run checkpoint for authorization.
@@ -3542,6 +3571,50 @@ class RedisBackend implements Backend {
       return Number.isSafeInteger(value.userId) && Number(value.userId) > 0 && typeof value.callId === "string"
         ? { userId: Number(value.userId), callId: value.callId } : undefined;
     } catch { return undefined; }
+  }
+  async getVoiceInboundRoute(provider: VoiceInboundRouteRecord["provider"], phoneNumber: string): Promise<VoiceInboundRouteRecord | undefined> {
+    const raw = await this.r.get(this.voiceInboundRouteKey(provider, phoneNumber));
+    if (!raw) return undefined;
+    try {
+      const value = JSON.parse(raw) as VoiceInboundRouteRecord;
+      return value.provider === provider && value.phoneNumber === phoneNumber && Number.isSafeInteger(value.userId) && value.userId > 0 ? value : undefined;
+    } catch { return undefined; }
+  }
+  async saveVoiceInboundRoute(record: VoiceInboundRouteRecord): Promise<boolean> {
+    const routeKey = this.voiceInboundRouteKey(record.provider, record.phoneNumber);
+    const indexKey = this.voiceInboundRouteIndexKey(record.userId);
+    const providerIndexKey = this.voiceInboundProviderIndexKey(record.provider);
+    const result = await this.r.eval(
+      "local prior=redis.call('GET',KEYS[1]); if prior then local decoded=cjson.decode(prior); if tonumber(decoded.userId)~=tonumber(ARGV[2]) then return 0 end end; redis.call('SET',KEYS[1],ARGV[1]); redis.call('ZADD',KEYS[2],ARGV[3],ARGV[4]); redis.call('ZADD',KEYS[3],ARGV[3],ARGV[4]); return 1",
+      3, routeKey, indexKey, providerIndexKey, JSON.stringify(record), String(record.userId), String(record.updatedAt), `${record.provider}:${record.phoneNumber}`,
+    );
+    return Number(result) === 1;
+  }
+  async deleteVoiceInboundRoute(provider: VoiceInboundRouteRecord["provider"], phoneNumber: string, userId: number): Promise<boolean> {
+    const routeKey = this.voiceInboundRouteKey(provider, phoneNumber);
+    const indexKey = this.voiceInboundRouteIndexKey(userId);
+    const providerIndexKey = this.voiceInboundProviderIndexKey(provider);
+    const result = await this.r.eval(
+      "local prior=redis.call('GET',KEYS[1]); if not prior then return 0 end; local decoded=cjson.decode(prior); if tonumber(decoded.userId)~=tonumber(ARGV[1]) then return 0 end; redis.call('DEL',KEYS[1]); redis.call('ZREM',KEYS[2],ARGV[2]); redis.call('ZREM',KEYS[3],ARGV[2]); return 1",
+      3, routeKey, indexKey, providerIndexKey, String(userId), `${provider}:${phoneNumber}`,
+    );
+    return Number(result) === 1;
+  }
+  async listVoiceInboundRoutes(userId: number): Promise<VoiceInboundRouteRecord[]> {
+    const entries = await this.r.zrevrange(this.voiceInboundRouteIndexKey(userId), 0, 99);
+    const records = await Promise.all(entries.map(async (entry) => {
+      const separator = entry.indexOf(":");
+      if (separator <= 0) return undefined;
+      const provider = entry.slice(0, separator);
+      const phoneNumber = entry.slice(separator + 1);
+      if (provider !== "twilio" && provider !== "bland") return undefined;
+      const route = await this.getVoiceInboundRoute(provider, phoneNumber);
+      return route?.userId === userId ? route : undefined;
+    }));
+    return records.filter((record): record is VoiceInboundRouteRecord => Boolean(record));
+  }
+  async hasVoiceInboundRoutes(provider: VoiceInboundRouteRecord["provider"]): Promise<boolean> {
+    return (await this.r.zcard(this.voiceInboundProviderIndexKey(provider))) > 0;
   }
   async getApproval(userId: number, id: string): Promise<ApprovalRecord | undefined> {
     const raw = await this.r.get(this.approvalKey(id));
@@ -5042,6 +5115,7 @@ class MemoryBackend implements Backend {
   private jobs = new Map<number, JobRecord[]>();
   private approvals = new Map<string, ApprovalRecord>();
   private blandProviderCalls = new Map<string, { userId: number; callId: string; expiresAt: number }>();
+  private voiceInboundRoutes = new Map<string, VoiceInboundRouteRecord>();
 
   async close(): Promise<void> {}
 
@@ -5249,6 +5323,34 @@ class MemoryBackend implements Backend {
     const value = this.blandProviderCalls.get(providerCallId);
     if (!value || value.expiresAt <= Date.now()) { this.blandProviderCalls.delete(providerCallId); return undefined; }
     return { userId: value.userId, callId: value.callId };
+  }
+  async getVoiceInboundRoute(provider: VoiceInboundRouteRecord["provider"], phoneNumber: string) {
+    const route = this.voiceInboundRoutes.get(`${provider}:${phoneNumber}`);
+    return route ? structuredClone(route) : undefined;
+  }
+  async saveVoiceInboundRoute(record: VoiceInboundRouteRecord) {
+    const key = `${record.provider}:${record.phoneNumber}`;
+    const previous = this.voiceInboundRoutes.get(key);
+    if (previous && previous.userId !== record.userId) return false;
+    this.voiceInboundRoutes.set(key, structuredClone(record));
+    return true;
+  }
+  async deleteVoiceInboundRoute(provider: VoiceInboundRouteRecord["provider"], phoneNumber: string, userId: number) {
+    const key = `${provider}:${phoneNumber}`;
+    const route = this.voiceInboundRoutes.get(key);
+    if (!route || route.userId !== userId) return false;
+    this.voiceInboundRoutes.delete(key);
+    return true;
+  }
+  async listVoiceInboundRoutes(userId: number) {
+    return [...this.voiceInboundRoutes.values()]
+      .filter((route) => route.userId === userId)
+      .sort((left, right) => right.updatedAt - left.updatedAt)
+      .slice(0, 100)
+      .map((route) => structuredClone(route));
+  }
+  async hasVoiceInboundRoutes(provider: VoiceInboundRouteRecord["provider"]) {
+    return [...this.voiceInboundRoutes.values()].some((route) => route.provider === provider);
   }
   async getApproval(userId: number, id: string) { const approval = this.approvals.get(id); return approval?.userId === userId ? approval : undefined; }
   async saveApproval(record: ApprovalRecord) { this.approvals.set(record.id, record); const session = this.sessions.get(record.userId) ?? fresh(); session.approvals = [...session.approvals.filter((item) => item.id !== record.id), record].slice(-20); this.sessions.set(record.userId, session); return record; }
@@ -6604,6 +6706,7 @@ export async function getSession(uid: number, includeSdkTables = false, options?
     const item = value as Record<string, unknown>;
     if (typeof item.id !== "string" || !item.id || item.userId !== uid || typeof item.phoneNumber !== "string" || typeof item.purpose !== "string") return [];
     const status = ["starting", "bridging", "active", "ended", "failed"].includes(String(item.status)) ? item.status as PhoneCallRecord["status"] : "failed";
+    const providerStatuses = ["queued", "initiated", "ringing", "in-progress", "answered", "completed", "busy", "no-answer", "failed", "canceled", "machine", "unknown"] as const;
     return [{
       id: item.id.slice(0, 128), userId: uid,
       ...(typeof item.requestKey === "string" && /^pc_[a-f0-9]{64}$/.test(item.requestKey) ? { requestKey: item.requestKey } : {}),
@@ -6625,6 +6728,8 @@ export async function getSession(uid: number, includeSdkTables = false, options?
       } : {}),
       ...(item.voiceProfile && typeof item.voiceProfile === "object" && !Array.isArray(item.voiceProfile) ? { voiceProfile: normalizeVoiceCallProfile(item.voiceProfile) } : {}),
       ...(typeof item.providerCallId === "string" ? { providerCallId: item.providerCallId.slice(0, 100) } : {}),
+      ...(typeof item.providerStatus === "string" && providerStatuses.includes(item.providerStatus as typeof providerStatuses[number]) ? { providerStatus: item.providerStatus as typeof providerStatuses[number] } : {}),
+      ...(typeof item.terminalReason === "string" ? { terminalReason: item.terminalReason.slice(0, 240) } : {}),
       ...(typeof item.error === "string" ? { error: item.error.slice(0, 500) } : {}),
       ...(typeof item.summary === "string" ? { summary: item.summary.slice(0, 2000) } : {}),
       ...(normalizePhoneCallTranscript(item.transcript) ? { transcript: normalizePhoneCallTranscript(item.transcript) } : {}),
@@ -7366,22 +7471,49 @@ export async function addPhoneCall(uid: number, record: PhoneCallRecord): Promis
   return (await claimPhoneCallStart(uid, record)).call;
 }
 
-type PhoneCallPatch = Partial<Pick<PhoneCallRecord, "status" | "runtimeState" | "bridgeSessionId" | "lastCommittedTurnId" | "continuity" | "providerCallId" | "phoneNumber" | "error" | "summary" | "callLengthSeconds" | "postCallProcessedAt" | "outcome" | "outcomeStatus" | "outcomeErrorCode" | "timeline" | "qa" | "followUpTaskIds" | "followUpStatus" | "followUpErrorCode">>;
+type PhoneCallPatch = Partial<Pick<PhoneCallRecord, "status" | "runtimeState" | "bridgeSessionId" | "lastCommittedTurnId" | "continuity" | "providerCallId" | "providerStatus" | "terminalReason" | "phoneNumber" | "error" | "summary" | "callLengthSeconds" | "postCallProcessedAt" | "outcome" | "outcomeStatus" | "outcomeErrorCode" | "timeline" | "qa" | "followUpTaskIds" | "followUpStatus" | "followUpErrorCode">>;
 
-function nextPhoneCallStatus(current: PhoneCallRecord["status"], next: PhoneCallRecord["status"], provider?: PhoneCallRecord["provider"]): PhoneCallRecord["status"] {
-  if (provider !== "bland") return next;
-  if (current === "failed") return current;
-  if (current === "ended") return next === "failed" ? next : current;
+function nextPhoneCallStatus(current: PhoneCallRecord["status"], next: PhoneCallRecord["status"], _provider?: PhoneCallRecord["provider"]): PhoneCallRecord["status"] {
+  // Twilio and Bland callbacks are at-least-once and can arrive out of order
+  // across replicas. A late ringing/active callback must never resurrect a
+  // call that the provider already reported as terminal.
+  if (current === "ended" || current === "failed") return current;
   const rank: Record<PhoneCallRecord["status"], number> = { starting: 0, bridging: 1, active: 2, ended: 3, failed: 3 };
   return rank[next] >= rank[current] ? next : current;
 }
 
+type PhoneProviderStatus = NonNullable<PhoneCallRecord["providerStatus"]>;
+const providerStatusRank: Record<PhoneProviderStatus, number> = {
+  queued: 0,
+  initiated: 1,
+  ringing: 2,
+  "in-progress": 3,
+  answered: 3,
+  machine: 4,
+  busy: 4,
+  "no-answer": 4,
+  failed: 4,
+  canceled: 4,
+  completed: 5,
+  unknown: -1,
+};
+
+function nextPhoneProviderStatus(current: PhoneProviderStatus | undefined, next: PhoneProviderStatus): PhoneProviderStatus {
+  if (!current || current === "unknown") return next;
+  if (next === "unknown") return current;
+  const terminal = new Set<PhoneProviderStatus>(["machine", "busy", "no-answer", "failed", "canceled", "completed"]);
+  if (terminal.has(current)) return current;
+  return providerStatusRank[next] >= providerStatusRank[current] ? next : current;
+}
+
 function applyPhoneCallPatch(current: PhoneCallRecord, patch: PhoneCallPatch): void {
   if (patch.providerCallId && current.providerCallId && patch.providerCallId !== current.providerCallId) {
-    throw new Error("Bland provider call ID does not match the saved call");
+    throw new Error("Provider call ID does not match the saved call");
   }
-  Object.assign(current, patch, {
-    ...(patch.status ? { status: nextPhoneCallStatus(current.status, patch.status, current.provider) } : {}),
+  const { providerStatus, status, ...rest } = patch;
+  Object.assign(current, rest, {
+    ...(status ? { status: nextPhoneCallStatus(current.status, status, current.provider) } : {}),
+    ...(providerStatus ? { providerStatus: nextPhoneProviderStatus(current.providerStatus, providerStatus) } : {}),
     updatedAt: Date.now(),
   });
 }
@@ -8054,6 +8186,26 @@ export async function getBlandPhoneCallByProviderId(providerCallId: string): Pro
   if (!identity) return undefined;
   const call = await getPhoneCall(identity.userId, identity.callId);
   return call?.provider === "bland" && call.providerCallId === providerCallId ? call : undefined;
+}
+
+export function getVoiceInboundRoute(provider: VoiceInboundRouteRecord["provider"], phoneNumber: string): Promise<VoiceInboundRouteRecord | undefined> {
+  return backend.getVoiceInboundRoute(provider, phoneNumber);
+}
+
+export function saveVoiceInboundRoute(record: VoiceInboundRouteRecord): Promise<boolean> {
+  return backend.saveVoiceInboundRoute(record);
+}
+
+export function deleteVoiceInboundRoute(provider: VoiceInboundRouteRecord["provider"], phoneNumber: string, userId: number): Promise<boolean> {
+  return backend.deleteVoiceInboundRoute(provider, phoneNumber, userId);
+}
+
+export function listVoiceInboundRoutes(userId: number): Promise<VoiceInboundRouteRecord[]> {
+  return backend.listVoiceInboundRoutes(userId);
+}
+
+export function hasVoiceInboundRoutes(provider: VoiceInboundRouteRecord["provider"]): Promise<boolean> {
+  return backend.hasVoiceInboundRoutes(provider);
 }
 
 const ACTIVE_RECALL_MEETING_STATUSES = new Set<RecallMeetingStatus>(["creating", "scheduled", "joining", "waiting_room", "in_call", "leaving"]);

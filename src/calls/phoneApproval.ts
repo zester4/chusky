@@ -11,10 +11,13 @@ export async function requestPhoneCallApproval(
 ): Promise<ApprovalRecord> {
   const call = validateTwilioCallInput(input);
   const session = await getSession(userId);
+  // Keep the legacy approval payload stable: the natural assistant disclosure
+  // is a runtime profile default, not a user-supplied approval argument.
+  const { disclosure: _disclosure, ...approvalProfile } = call.profile;
   return createApproval({
     userId,
     toolSlug: "CHUCK_START_PHONE_CALL",
-    args: { phoneNumber: call.phoneNumber, purpose: call.purpose, profile: call.profile, ...(input.callProfile ? { callProfile: call.callProfile } : {}) },
+    args: { phoneNumber: call.phoneNumber, purpose: call.purpose, profile: approvalProfile, ...(input.callProfile ? { callProfile: call.callProfile } : {}) },
     request: request.trim().slice(0, 1200) || `/call ${call.phoneNumber} ${call.purpose}`,
     history: session.history,
     model: session.model,

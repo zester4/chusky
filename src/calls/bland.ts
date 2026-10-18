@@ -70,10 +70,11 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
   if (dialBlockReason) throw new Error(dialBlockReason);
   const continuity = await resolveVoiceContinuity(userId, input.continuityFromCallId);
   const requestKey = normalizePhoneCallRequestKey(input.requestKey);
-  const call: PhoneCallRecord = { id: `blc_${crypto.randomUUID()}`, userId, ...(requestKey ? { requestKey } : {}), provider: "bland", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, ...(continuity ? { continuity } : {}), status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
+  const call: PhoneCallRecord = { id: `blc_${crypto.randomUUID()}`, userId, ...(requestKey ? { requestKey } : {}), provider: "bland", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, ...(continuity ? { continuity } : {}), status: "starting", providerStatus: "queued", createdAt: Date.now(), updatedAt: Date.now() };
   const claim = await claimPhoneCallStart(userId, call);
   if (!claim.created) return claim.call;
   const claimedCall = claim.call;
+  let providerCallId: string | undefined;
   try {
     const callbackToken = createBlandCallToken({ userId, callId: claimedCall.id }, options.webhookSecret);
     const callbackUrl = new URL(options.webhookUrl);
@@ -94,12 +95,25 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
     });
     const payload = await response.json().catch(() => ({})) as { call_id?: string; message?: string; error?: string };
     if (!response.ok || !payload.call_id) throw new Error(`Bland call failed: ${String(payload.message ?? payload.error ?? response.statusText).slice(0, 300)}`);
-    const providerCallId = payload.call_id.slice(0, 100);
+    providerCallId = payload.call_id.slice(0, 100);
     const persisted = await persistPhoneCallProviderResult(userId, claimedCall, { status: "bridging", providerCallId });
     if (!persisted) throw new Error("Bland accepted the call, but Chusky could not confirm its durable call record. Do not retry this request.");
     return persisted;
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 500) : "Bland call setup failed";
+    if (providerCallId) {
+      // The provider side effect is real once Bland returns a call ID. Keep it
+      // non-retryable while durable reconciliation catches up; a normal
+      // failed state would invite a second outbound call.
+      await updatePhoneCall(userId, claimedCall.id, {
+        status: "bridging",
+        providerStatus: "unknown",
+        providerCallId,
+        error: "Bland accepted the call, but Chusky is still reconciling its durable call record. Do not retry this request.",
+        terminalReason: "provider_accepted_reconciliation_pending",
+      }).catch(() => undefined);
+      throw new Error("Bland accepted the call, but Chusky could not confirm its durable call record. Do not retry this request.");
+    }
     await updatePhoneCall(userId, claimedCall.id, { status: "failed", error: message });
     throw new Error(`Bland call could not be started: ${message}`);
   }
