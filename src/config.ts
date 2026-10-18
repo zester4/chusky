@@ -111,9 +111,23 @@ function oneOf<T extends string>(key: string, fallback: T, values: readonly T[])
   return raw as T;
 }
 
+function csvOneOf<T extends string>(key: string, fallback: string, values: readonly T[]): T[] {
+  const raw = optional(key, fallback).split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
+  const allowed = new Set(values as readonly string[]);
+  const result = [...new Set(raw)] as T[];
+  if (result.some((item) => !allowed.has(item))) throw new Error(`${key} must contain only ${values.join(", ")}`);
+  return result;
+}
+
 function boundedOption(key: string, fallback: string, max: number): string {
   const value = optional(key, fallback).trim();
   if (!value || value.length > max || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value)) throw new Error(`${key} must be a bounded identifier`);
+  return value;
+}
+
+function webhookPath(key: string, fallback: string): string {
+  const value = optional(key, fallback).trim();
+  if (!/^\/[A-Za-z0-9][A-Za-z0-9/_-]{0,119}$/.test(value) || value.includes("//")) throw new Error(`${key} must be a single absolute webhook path`);
   return value;
 }
 
@@ -332,6 +346,17 @@ export const config = {
   jevComposioCatalogLimit: boundedInt("JEV_COMPOSIO_CATALOG_LIMIT", 500, 20, 2_000),
 
   // ── Channel adapters ──────────────────────────────────────────────
+  // Photon 2.0 is an optional project transport. It does not replace the
+  // existing Slack, Twilio, Sendblue, WhatsApp, or X adapters.
+  photonEnabled: optional("PHOTON_ENABLED", "false") === "true",
+  photonProjectId: optional("PHOTON_PROJECT_ID", "").trim(),
+  photonApiKey: optional("PHOTON_API_KEY", "").trim(),
+  photonApiOrigin: optional("PHOTON_API_ORIGIN", "https://api.photon.codes").replace(/\/$/, ""),
+  photonApiVersion: optional("PHOTON_API_VERSION", "").trim(),
+  photonEventConsumer: optional("PHOTON_EVENT_CONSUMER", "chusky-channel-gateway").trim(),
+  photonMaxPendingEvents: boundedInt("PHOTON_MAX_PENDING_EVENTS", 128, 8, 512),
+  photonProviders: csvOneOf("PHOTON_PROVIDERS", "imessage,whatsapp,telegram", ["imessage", "whatsapp", "telegram", "sms", "email"] as const),
+  photonDefaultScope: oneOf("PHOTON_DEFAULT_SCOPE", "shared", ["private", "shared"] as const),
   slackEnabled: optional("SLACK_ENABLED", "false") === "true",
   slackSigningSecret: optional("SLACK_SIGNING_SECRET", ""),
   slackBotToken: optional("SLACK_BOT_TOKEN", ""),

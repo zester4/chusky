@@ -612,6 +612,11 @@ function channelLinkKeyboard(userId: number): InlineKeyboard {
     .text("💼 Slack", `chlink:p:slack:${userId}`)
     .text("🟢 WhatsApp", `chlink:p:whatsapp:${userId}`).row()
     .text("📱 iMessage", `chlink:p:sendblue:${userId}`)
+    .text("📱 iMessage · Photon", `chlink:p:photon_imessage:${userId}`).row()
+    .text("🟢 WhatsApp · Photon", `chlink:p:photon_whatsapp:${userId}`)
+    .text("✈️ Telegram · Photon", `chlink:p:photon_telegram:${userId}`).row()
+    .text("💬 SMS · Photon", `chlink:p:photon_sms:${userId}`)
+    .text("✉️ Email · Photon", `chlink:p:photon_email:${userId}`).row()
     .text("✉️ Telegram", `chlink:t:${userId}`).row()
     .text("⌨️ CLI", `chlink:cli:${userId}`).row()
     .text("💬 SMS", `chlink:p:sms:${userId}`)
@@ -627,7 +632,7 @@ async function sendCliLink(ctx: Context): Promise<void> {
   await ctx.reply(`🔐 <b>Terminal pairing code</b>\n\n<code>${code}</code>\n\nThis code expires in 10 minutes and can be used once. In your terminal run:\n\n<code>chusky auth link${serverHint}</code>`, { parse_mode: "HTML" });
 }
 
-async function sendPrivateChannelLink(ctx: Context, provider: "slack" | "whatsapp" | "sendblue" | "sms" | "x" | "xchat"): Promise<void> {
+async function sendPrivateChannelLink(ctx: Context, provider: "slack" | "whatsapp" | "sendblue" | "sms" | "x" | "xchat" | "photon_imessage" | "photon_whatsapp" | "photon_telegram" | "photon_sms" | "photon_email"): Promise<void> {
   const code = await createLinkCode(ctx.from!.id, provider);
   if (provider === "slack" && config.webhookUrl && config.slackClientId && config.slackRedirectUri) {
     const install = `${config.webhookUrl.replace(/\/$/, "")}/slack/install?code=${encodeURIComponent(code)}`;
@@ -637,7 +642,7 @@ async function sendPrivateChannelLink(ctx: Context, provider: "slack" | "whatsap
     });
     return;
   }
-  const label = provider === "sendblue" ? "iMessage/Sendblue" : provider === "sms" ? "SMS/Twilio" : provider === "x" ? "X direct messages" : provider === "xchat" ? "encrypted XChat" : provider;
+  const label = provider === "sendblue" ? "iMessage/Sendblue" : provider === "photon_imessage" ? "Photon iMessage" : provider === "photon_whatsapp" ? "Photon WhatsApp" : provider === "photon_telegram" ? "Photon Telegram" : provider === "photon_sms" ? "Photon SMS" : provider === "photon_email" ? "Photon email" : provider === "sms" ? "SMS/Twilio" : provider === "x" ? "X direct messages" : provider === "xchat" ? "encrypted XChat" : provider;
   await replyHtml(ctx, `<b>Link ${label}</b>\n\nOne-time code: <code>${code}</code>\n\nSend <code>/link ${code}</code> from the ${label} account you want to link. It expires in 10 minutes.`);
 }
 
@@ -1445,7 +1450,7 @@ export function registerHandlers(bot: Bot): void {
       await sendGroupChannelLink(ctx);
       return;
     }
-    if (action === "link" && (provider === "slack" || provider === "whatsapp" || provider === "sendblue" || provider === "sms" || provider === "x" || provider === "xchat")) {
+    if (action === "link" && (provider === "slack" || provider === "whatsapp" || provider === "sendblue" || provider === "sms" || provider === "x" || provider === "xchat" || provider === "photon_imessage" || provider === "photon_whatsapp" || provider === "photon_telegram" || provider === "photon_sms" || provider === "photon_email")) {
       await sendPrivateChannelLink(ctx, provider);
       return;
     }
@@ -1454,7 +1459,7 @@ export function registerHandlers(bot: Bot): void {
       await replyHtml(ctx, linked.length ? `<b>Linked channels</b>\n\n${linked.map((item) => `• ${item.provider} — <code>${item.externalUserId}</code>${item.workspaceId ? ` (${item.workspaceId})` : ""}`).join("\n")}` : "No external channels are linked yet.");
       return;
     }
-    if (action === "notify" && (provider === "slack" || provider === "whatsapp" || provider === "sendblue" || provider === "x")) {
+    if (action === "notify" && (provider === "slack" || provider === "whatsapp" || provider === "sendblue" || provider === "x" || provider === "photon_imessage" || provider === "photon_whatsapp" || provider === "photon_telegram" || provider === "photon_sms" || provider === "photon_email")) {
       const enabled = String((ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean)[2] ?? "").toLowerCase() === "on";
       const count = await setProactivePreference(ctx.from!.id, provider, enabled);
       await ctx.reply(count ? `✅ Proactive ${provider} notifications are ${enabled ? "on" : "off"}.` : `No linked ${provider} channel was found. Link it first with /channel link ${provider}.`);
@@ -2201,7 +2206,7 @@ export function registerHandlers(bot: Bot): void {
         await sendCliLink(ctx);
         return;
       }
-      if (kind === "p" && (target === "slack" || target === "whatsapp" || target === "sendblue" || target === "sms" || target === "x" || target === "xchat")) {
+      if (kind === "p" && (target === "slack" || target === "whatsapp" || target === "sendblue" || target === "sms" || target === "x" || target === "xchat" || target === "photon_imessage" || target === "photon_whatsapp" || target === "photon_telegram" || target === "photon_sms" || target === "photon_email")) {
         await sendPrivateChannelLink(ctx, target);
         return;
       }

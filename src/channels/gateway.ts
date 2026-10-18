@@ -17,7 +17,7 @@ export interface ChannelProcessResult {
 }
 
 function linkedConfirmation(provider: InboundMessage["provider"]): string {
-  const label = provider === "sendblue" ? "iMessage" : provider === "whatsapp" ? "WhatsApp" : provider === "slack" ? "Slack" : provider;
+  const label = provider === "sendblue" || provider === "photon_imessage" ? "iMessage" : provider === "whatsapp" || provider === "photon_whatsapp" ? "WhatsApp" : provider === "photon_telegram" ? "Telegram" : provider === "photon_sms" ? "SMS" : provider === "photon_email" ? "email" : provider === "slack" ? "Slack" : provider;
   return `✅ Your ${label} account is now connected to Chusky. You can send messages here and Chusky will use your linked workspace.`;
 }
 

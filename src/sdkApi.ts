@@ -3798,7 +3798,7 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/channels/link-code", async (c) => {
     const body = await c.req.json().catch(() => ({})) as { provider?: unknown };
     const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
-    if (provider !== "slack" && provider !== "whatsapp" && provider !== "sendblue" && provider !== "x") return apiError(c, 400, "invalid_channel_provider", "Channel linking is available for Slack, WhatsApp, Sendblue, and X direct messages.");
+    if (provider !== "slack" && provider !== "whatsapp" && provider !== "sendblue" && provider !== "x" && provider !== "photon_imessage" && provider !== "photon_whatsapp" && provider !== "photon_telegram" && provider !== "photon_sms" && provider !== "photon_email") return apiError(c, 400, "invalid_channel_provider", "Channel linking is available for Slack, WhatsApp, Sendblue, X direct messages, and configured Photon providers.");
     const code = await createLinkCode(sdkUser(c)!.userId, provider);
     if (provider === "slack") {
       let installUrl: string | undefined;

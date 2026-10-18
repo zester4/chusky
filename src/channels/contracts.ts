@@ -6,7 +6,7 @@
  * Slack/WhatsApp/Telegram payload directly.
  */
 
-export type ChannelProvider = "telegram" | "slack" | "whatsapp" | "sendblue" | "sms" | "x" | "xchat" | "voice" | "cli" | "webhook";
+export type ChannelProvider = "telegram" | "slack" | "whatsapp" | "sendblue" | "sms" | "x" | "xchat" | "voice" | "cli" | "webhook" | "photon_imessage" | "photon_whatsapp" | "photon_telegram" | "photon_sms" | "photon_email";
 
 export type AttachmentKind = "image" | "audio" | "video" | "document";
 
@@ -48,6 +48,8 @@ export interface InboundMessage {
   providerEventId: string;
   providerUserId: string;
   providerWorkspaceId?: string;
+  /** Provider-selected sender identity to use for an outbound reply. */
+  providerAgentId?: string;
   providerConversationId: string;
   /** Provider-verified participants for shared conversations, when supplied. */
   providerParticipantIds?: string[];

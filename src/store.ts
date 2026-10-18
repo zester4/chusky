@@ -1970,6 +1970,20 @@ export interface ChannelInboundEventRecord {
   updatedAt: number;
 }
 
+/** Durable replay checkpoint for a Photon 2.0 project event consumer. */
+export interface PhotonEventCursorRecord {
+  projectId: string;
+  consumer: string;
+  cursor: number;
+  apiVersion?: string;
+  updatedAt: number;
+}
+
+export interface PhotonEventConsumerLease {
+  renew(): Promise<boolean>;
+  release(): Promise<void>;
+}
+
 interface Backend {
   close(): Promise<void>;
   flushStorageMetrics?(): Promise<void>;
@@ -2161,6 +2175,8 @@ interface Backend {
   getChannelInboundEvent(eventId: string): Promise<ChannelInboundEventRecord | undefined>;
   claimChannelInboundEvent(eventId: string): Promise<boolean>;
   updateChannelInboundEvent(eventId: string, patch: Partial<ChannelInboundEventRecord>): Promise<ChannelInboundEventRecord | undefined>;
+  getPhotonEventCursor(projectId: string, consumer: string): Promise<PhotonEventCursorRecord | undefined>;
+  savePhotonEventCursor(record: PhotonEventCursorRecord): Promise<void>;
   createOutbox(record: OutboxRecord): Promise<OutboxRecord>;
   getOutbox(id: string): Promise<OutboxRecord | undefined>;
   claimOutbox(id: string, leaseMs: number): Promise<OutboxRecord | undefined>;
@@ -2558,6 +2574,7 @@ class RedisBackend implements Backend {
   private channelEventKey = (provider: ChannelProvider, eventId: string) => `chuck:channel:event:${provider}:${createHash("sha256").update(eventId).digest("hex")}`;
   private channelEventDoneKey = (provider: ChannelProvider, eventId: string) => `chuck:channel:event:done:${provider}:${createHash("sha256").update(eventId).digest("hex")}`;
   private channelInboundEventKey = (eventId: string) => `chuck:channel:inbound:${createHash("sha256").update(eventId).digest("hex")}`;
+  private photonEventCursorKey = (projectId: string, consumer: string) => `chuck:photon:cursor:${createHash("sha256").update(`${projectId}:${consumer}`).digest("hex")}`;
   private outboxKey = (id: string) => `chuck:outbox:${id}`;
   private outboxIdempotencyKey = (key: string) => `chuck:outbox:idempotency:${createHash("sha256").update(key).digest("hex")}`;
   private outboxProviderKey = (provider: ChannelProvider, providerMessageId: string) => `chuck:outbox:provider:${provider}:${createHash("sha256").update(providerMessageId).digest("hex")}`;
@@ -4716,6 +4733,20 @@ class RedisBackend implements Backend {
     await this.r.set(this.channelInboundEventKey(eventId), JSON.stringify(next), "EX", 24 * 60 * 60);
     return next;
   }
+  async getPhotonEventCursor(projectId: string, consumer: string): Promise<PhotonEventCursorRecord | undefined> {
+    const raw = await this.r.get(this.photonEventCursorKey(projectId, consumer));
+    if (!raw) return undefined;
+    try {
+      const value = JSON.parse(raw) as PhotonEventCursorRecord;
+      return value.projectId === projectId && value.consumer === consumer && Number.isSafeInteger(value.cursor) && value.cursor >= 0 ? value : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  async savePhotonEventCursor(record: PhotonEventCursorRecord): Promise<void> {
+    if (!Number.isSafeInteger(record.cursor) || record.cursor < 0) throw new Error("Photon event cursor must be a non-negative safe integer");
+    await this.r.set(this.photonEventCursorKey(record.projectId, record.consumer), JSON.stringify({ ...record, updatedAt: Date.now() }));
+  }
   async createOutbox(record: OutboxRecord): Promise<OutboxRecord> {
     const idempotencyKey = this.outboxIdempotencyKey(record.idempotencyKey);
     const existingId = await this.r.get(idempotencyKey);
@@ -4986,6 +5017,7 @@ class MemoryBackend implements Backend {
   private channelEvents = new Map<string, number>();
   private completedChannelEvents = new Map<string, number>();
   private channelInboundEvents = new Map<string, ChannelInboundEventRecord>();
+  private photonEventCursors = new Map<string, PhotonEventCursorRecord>();
   private outbox = new Map<string, OutboxRecord>();
   private triggerEvents = new Map<string, TriggerEventRecord>();
   private outboxByIdempotency = new Map<string, string>();
@@ -5867,6 +5899,14 @@ class MemoryBackend implements Backend {
     const next = { ...current, ...patch, eventId: current.eventId, updatedAt: Date.now() };
     this.channelInboundEvents.set(eventId, next);
     return next;
+  }
+  async getPhotonEventCursor(projectId: string, consumer: string) {
+    const value = this.photonEventCursors.get(`${projectId}:${consumer}`);
+    return value ? { ...value } : undefined;
+  }
+  async savePhotonEventCursor(record: PhotonEventCursorRecord) {
+    if (!Number.isSafeInteger(record.cursor) || record.cursor < 0) throw new Error("Photon event cursor must be a non-negative safe integer");
+    this.photonEventCursors.set(`${record.projectId}:${record.consumer}`, { ...record, updatedAt: Date.now() });
   }
   async createOutbox(record: OutboxRecord) {
     const existingId = this.outboxByIdempotency.get(record.idempotencyKey);
@@ -11506,7 +11546,7 @@ const attentionPrefixes: Record<AttentionEntityKind, string> = {
   autonomy_watch: "watch", autonomy_profile: "profile", delivery_preference: "pref", relationship: "rel", project_state: "proj", tinyfish_research_run: "tf_run", tinyfish_monitor: "tf_monitor",
   lead_campaign: "lc", lead_candidate: "lcand",
 };
-const channelProviders: ChannelProvider[] = ["telegram", "slack", "whatsapp", "sendblue", "sms", "x", "xchat", "voice", "cli", "webhook"];
+const channelProviders: ChannelProvider[] = ["telegram", "slack", "whatsapp", "sendblue", "sms", "x", "xchat", "voice", "cli", "webhook", "photon_imessage", "photon_whatsapp", "photon_telegram", "photon_sms", "photon_email"];
 
 function attentionText(value: unknown, field: string, max = 4000, required = false): string | undefined {
   if (value === undefined || value === null || value === "") {
@@ -12216,6 +12256,43 @@ export async function claimChannelInboundEvent(eventId: string): Promise<boolean
 
 export async function updateChannelInboundEvent(eventId: string, patch: Partial<ChannelInboundEventRecord>): Promise<ChannelInboundEventRecord | undefined> {
   return backend.updateChannelInboundEvent(eventId, patch);
+}
+
+export async function getPhotonEventCursor(projectId: string, consumer = "chusky-channel-gateway"): Promise<PhotonEventCursorRecord | undefined> {
+  const project = projectId.trim();
+  const name = consumer.trim();
+  return project && name ? backend.getPhotonEventCursor(project, name) : undefined;
+}
+
+export async function savePhotonEventCursor(record: PhotonEventCursorRecord): Promise<void> {
+  const projectId = record.projectId.trim();
+  const consumer = record.consumer.trim();
+  if (!projectId || !consumer) throw new Error("Photon event cursor requires a project and consumer");
+  await backend.savePhotonEventCursor({ ...record, projectId, consumer });
+}
+
+/**
+ * Only one process may consume a project's live event cursor at a time. This
+ * prevents two replicas from committing a later sequence while an earlier
+ * delivery is still being handled on another replica.
+ */
+export async function acquirePhotonEventConsumerLease(projectId: string, consumer: string, leaseSeconds = 60): Promise<PhotonEventConsumerLease | undefined> {
+  const project = projectId.trim();
+  const name = consumer.trim();
+  if (!project || !name) throw new Error("Photon event consumer lease requires a project and consumer");
+  const ttl = Math.max(15, Math.min(300, Math.floor(leaseSeconds)));
+  const key = `photon:event-consumer:${createHash("sha256").update(`${project}:${name}`).digest("hex")}`;
+  const token = randomUUID();
+  if (!await backend.acquireKeyLock(key, token, ttl)) return undefined;
+  let released = false;
+  return {
+    renew: async () => !released && backend.renewKeyLock(key, token, ttl),
+    release: async () => {
+      if (released) return;
+      released = true;
+      await backend.releaseKeyLock(key, token);
+    },
+  };
 }
 
 export async function enqueueOutbox(record: Omit<OutboxRecord, "id" | "status" | "attempts" | "createdAt" | "updatedAt">): Promise<OutboxRecord> {

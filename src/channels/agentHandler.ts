@@ -15,7 +15,7 @@ import type { ChannelMessageHandler } from "./gateway.js";
 import type { ChannelMediaError, ChuskyConversation, InboundMessage, OutboundMessage } from "./contracts.js";
 import type { ContentPart } from "../types.js";
 import { notifyTriggerApproval } from "../triggerWorkflow.js";
-import { persistSendblueMedia, persistSlackMedia, persistWhatsAppMedia, persistXMedia } from "./sendblueMedia.js";
+import { persistPhotonMedia, persistSendblueMedia, persistSlackMedia, persistWhatsAppMedia, persistXMedia } from "./sendblueMedia.js";
 import { transcodeSendblueCafToOgg } from "./sendblueAudio.js";
 import { putR2Object, r2Configured } from "../lib/storage/r2.js";
 import { sharedGroupInstructions } from "./groupInstructions.js";
@@ -53,6 +53,21 @@ function withPrivateLinks(text: string, links: Awaited<ReturnType<typeof runAgen
 function agentInstructions(conversation: ChuskyConversation): string | undefined {
   if (conversation.scope !== "shared") return undefined;
   return sharedGroupInstructions(conversation.provider);
+}
+
+type GeneratedMedia = { data: Buffer; mediaType?: string; contentType?: string; name?: string; type?: string };
+
+async function persistOutboundMedia(conversation: ChuskyConversation, images: GeneratedMedia[], files: GeneratedMedia[]): Promise<Awaited<ReturnType<typeof persistSendblueMedia>>> {
+  if (conversation.provider === "sendblue") return persistSendblueMedia(conversation.userId, images, files);
+  if (conversation.provider === "whatsapp") return persistWhatsAppMedia(conversation.userId, images, files);
+  if (conversation.provider === "slack") return persistSlackMedia(conversation.userId, images, files);
+  if (conversation.provider === "x") return persistXMedia(conversation.userId, images);
+  if (conversation.provider === "photon_imessage") return persistPhotonMedia(conversation.userId, "imessage", images, files);
+  if (conversation.provider === "photon_whatsapp") return persistPhotonMedia(conversation.userId, "whatsapp", images, files);
+  if (conversation.provider === "photon_telegram") return persistPhotonMedia(conversation.userId, "telegram", images, files);
+  if (conversation.provider === "photon_sms") return persistPhotonMedia(conversation.userId, "sms", images, files);
+  if (conversation.provider === "photon_email") return persistPhotonMedia(conversation.userId, "email", images, files);
+  return [];
 }
 
 /** Build the same privacy boundary for a normal turn and an approval resume. */
@@ -208,7 +223,7 @@ async function handleApproval(message: InboundMessage, conversation: ChuskyConve
     await saveConversation(approvalConversation, message, approval.request, result.text);
     if (result.cost) await addUsage(conversation.userId, result.cost);
     const outboundImages = [...(result.generatedImages ?? []), ...(result.retrievedImages ?? [])];
-    const attachments = conversation.provider === "sendblue" ? await persistSendblueMedia(conversation.userId, outboundImages, result.generatedFiles) : conversation.provider === "whatsapp" ? await persistWhatsAppMedia(conversation.userId, outboundImages, result.generatedFiles) : conversation.provider === "slack" ? await persistSlackMedia(conversation.userId, outboundImages, result.generatedFiles) : conversation.provider === "x" ? await persistXMedia(conversation.userId, outboundImages) : [];
+    const attachments = await persistOutboundMedia(conversation, outboundImages, result.generatedFiles ?? []);
     if (conversation.provider === "x" && (result.generatedFiles?.length || (outboundImages.length && attachments.length !== outboundImages.length))) return reply(conversation, "I prepared media that I couldn't attach to this X DM, so I didn't send that response.", message.providerEventId, { kind: "approval", correlationId: approvalId });
     return reply(conversation, result.text, message.providerEventId, { kind: "approval", correlationId: approvalId, ...(attachments.length ? { attachments } : {}) });
   } catch (error) {
@@ -241,7 +256,7 @@ export function createAgentChannelHandler(): ChannelMessageHandler {
       await saveConversation(conversation, normalizedMessage, prepared.historyLabel, result.text);
       if (result.cost) await addUsage(conversation.userId, result.cost);
       const outboundImages = [...(result.generatedImages ?? []), ...(result.retrievedImages ?? [])];
-      const attachments = conversation.provider === "sendblue" ? await persistSendblueMedia(conversation.userId, outboundImages, result.generatedFiles) : conversation.provider === "whatsapp" ? await persistWhatsAppMedia(conversation.userId, outboundImages, result.generatedFiles) : conversation.provider === "slack" ? await persistSlackMedia(conversation.userId, outboundImages, result.generatedFiles) : conversation.provider === "x" ? await persistXMedia(conversation.userId, outboundImages) : [];
+      const attachments = await persistOutboundMedia(conversation, outboundImages, result.generatedFiles ?? []);
       if (conversation.provider === "x" && (result.generatedFiles?.length || (outboundImages.length && attachments.length !== outboundImages.length))) return reply(conversation, "I prepared media that I couldn't attach to this X DM, so I didn't send that response.", message.providerEventId);
       return reply(conversation, withPrivateLinks(result.text, result.privateLinks), message.providerEventId, { kind: "message", ...(attachments.length ? { attachments } : {}) });
     } catch (error) {

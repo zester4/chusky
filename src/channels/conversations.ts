@@ -11,6 +11,20 @@ export function sharedPermissions(): PermissionSet {
 }
 
 export function buildReplyTarget(message: InboundMessage): ReplyTarget {
+  const photonTarget = message.provider.startsWith("photon_") ? {
+    photonProjectId: message.providerWorkspaceId,
+    photonAgentId: message.providerAgentId,
+    photonPlatform: message.provider === "photon_imessage"
+      ? "imessage"
+      : message.provider === "photon_whatsapp"
+        ? "whatsapp_business"
+        : message.provider === "photon_telegram"
+          ? "telegram"
+          : message.provider === "photon_sms"
+            ? "sms"
+            : "email",
+    photonParentMessageId: message.providerEventId,
+  } : undefined;
   return {
     provider: message.provider,
     conversationId: message.providerConversationId,
@@ -27,6 +41,8 @@ export function buildReplyTarget(message: InboundMessage): ReplyTarget {
         messageHandle: message.providerEventId,
         ...(message.providerReplyToId ? { replyToHandle: message.providerReplyToId } : {}),
       },
+    } : photonTarget ? {
+      metadata: Object.fromEntries(Object.entries(photonTarget).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0)),
     } : {}),
   };
 }
@@ -40,7 +56,18 @@ export function sharedSenderLabel(message: Pick<InboundMessage, "provider" | "pr
   const name = message.displayName?.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
   if (name) return name;
   const digest = createHash("sha256").update(`${message.provider}:${message.providerUserId}`).digest("hex").slice(0, 8).toUpperCase();
-  return `${message.provider === "sendblue" ? "iMessage" : message.provider} participant ${digest}`;
+  const label = message.provider === "sendblue" || message.provider === "photon_imessage"
+    ? "iMessage"
+    : message.provider === "photon_whatsapp"
+      ? "WhatsApp"
+      : message.provider === "photon_telegram"
+        ? "Telegram"
+        : message.provider === "photon_sms"
+          ? "SMS"
+          : message.provider === "photon_email"
+            ? "email"
+        : message.provider;
+  return `${label} participant ${digest}`;
 }
 
 /** Prefix shared turns so the agent can attribute each message correctly. */

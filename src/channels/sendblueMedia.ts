@@ -71,3 +71,8 @@ export async function persistXMedia(userId: number, images: GeneratedMedia[] = [
   if (!allSupported) return [];
   return persistGeneratedMedia(userId, images, [], "x", false);
 }
+
+/** Photon reads generated media server-side from the owner-scoped R2 key. */
+export async function persistPhotonMedia(userId: number, provider: "imessage" | "whatsapp" | "telegram" | "sms" | "email", images: GeneratedMedia[] = [], files: GeneratedMedia[] = []): Promise<ChannelAttachment[]> {
+  return persistGeneratedMedia(userId, images, files, `photon-${provider}`, false);
+}
