@@ -1,5 +1,6 @@
 import { voiceFirstConversationGuidance } from "../voicePromptGuidance.js";
 import { normalizeVoiceToolPolicy, type VoiceToolPolicy, type VoiceToolPolicyInput } from "./voiceToolPolicy.js";
+import { getVoicePersona, isVoicePersonaId, type VoicePersonaId } from "./personas.js";
 
 /** Owner-configured call presentation and optional capability hints. */
 export type VoiceCallCapability = "memory_lookup" | "scratchpad_lookup" | "schedule_lookup" | "task_lookup" | "call_history";
@@ -29,6 +30,9 @@ export interface VoiceCallControls {
 }
 
 export interface VoiceCallProfile {
+  /** The preset this profile started from; manual edits are still allowed. */
+  personaId?: VoicePersonaId;
+  personaVersion?: number;
   identity: string;
   organization?: string;
   /** Optional verified display name of the person the call is for. */
@@ -47,7 +51,7 @@ export interface VoiceCallProfile {
 }
 
 export interface VoiceCallProfileInput {
-  identity?: unknown; organization?: unknown; contactName?: unknown; mode?: unknown; tone?: unknown; opening?: unknown;
+  personaId?: unknown; personaVersion?: unknown; identity?: unknown; organization?: unknown; contactName?: unknown; mode?: unknown; tone?: unknown; opening?: unknown;
   facts?: unknown; guardrails?: unknown; capabilities?: unknown; disclosure?: unknown; controls?: unknown; toolPolicy?: VoiceToolPolicyInput;
 }
 
@@ -133,6 +137,7 @@ export function normalizeVoiceCallProfile(value: unknown): VoiceCallProfile {
   const opening = clean(input.opening, 500);
   const controls = normalizeVoiceCallControls(input.controls);
   return {
+    ...(isVoicePersonaId(input.personaId) ? { personaId: input.personaId, personaVersion: getVoicePersona(input.personaId)?.version ?? (Number.isSafeInteger(input.personaVersion) ? Number(input.personaVersion) : 1) } : {}),
     identity: safeVoiceIdentity(input.identity),
     ...(organization ? { organization } : {}),
     ...(contactName ? { contactName } : {}),

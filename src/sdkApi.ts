@@ -26,6 +26,7 @@ import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
 import { getSdkRunUsage } from "./store.js";
 import { getVoiceCallProfile, setVoiceCallProfile } from "./store.js";
+import { applyVoicePersonaToProfile, listVoicePersonas } from "./calls/personas.js";
 import { getSessionProfile, getSessionWebhooks } from "./store.js";
 import { listOpenTaskSummaries } from "./store.js";
 import { listMissionsPage } from "./store.js";
@@ -49,7 +50,7 @@ import { listBlandCuratedVoices } from "./calls/blandVoices.js";
 import { createLinkCode, identityFingerprint, unlinkChannelIdentity, updateLinkedChannelIdentity } from "./channels/identity.js";
 import type { ChannelProvider } from "./channels/contracts.js";
 import { normalizeVoiceInboundRouteInput, normalizeInboundPhone } from "./calls/inboundRoutes.js";
-import type { VoiceCallProfileInput } from "./calls/voiceProfile.js";
+import { normalizeVoiceCallProfile, type VoiceCallProfileInput } from "./calls/voiceProfile.js";
 import { normalizePhoneCallOutcome } from "./calls/outcome.js";
 import { isBlandVoiceConfigured } from "./calls/bland.js";
 import { isTwilioVoiceConfigured } from "./calls/twilio.js";
@@ -2722,6 +2723,36 @@ export function registerSdkApi(app: Hono): void {
     const owner = await callOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before configuring the voice representative.");
     return c.json({ data: await getVoiceCallProfile(owner.userId) });
+  });
+
+  app.get("/v1/account/calls/personas", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before loading voice personas.");
+    return c.json({ version: 1, data: listVoicePersonas() });
+  });
+
+  app.post("/v1/account/calls/profile/persona", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before configuring the voice representative.");
+    const body = await c.req.json().catch(() => ({})) as { personaId?: unknown };
+    try {
+      const current = await getVoiceCallProfile(owner.userId);
+      const profile = await setVoiceCallProfile(owner.userId, applyVoicePersonaToProfile((current ?? {}) as Record<string, unknown>, body.personaId));
+      const routes = await listVoiceInboundRoutes(owner.userId);
+      // A route may intentionally have its own caller-facing identity or
+      // verified facts. Apply the persona-managed behavior to that route
+      // instead of replacing its owner-configured context with the global
+      // profile (or the default "Chusky" identity when no global profile
+      // existed yet).
+      await Promise.all(routes.map((route) => saveVoiceInboundRoute({
+        ...route,
+        voiceProfile: normalizeVoiceCallProfile(applyVoicePersonaToProfile(route.voiceProfile as unknown as Record<string, unknown>, body.personaId)),
+        updatedAt: Date.now(),
+      })));
+      return c.json({ data: profile });
+    } catch (error) {
+      return apiError(c, 400, "invalid_voice_persona", error instanceof Error ? error.message : "The voice persona is invalid.");
+    }
   });
 
   app.patch("/v1/account/calls/profile", async (c) => {

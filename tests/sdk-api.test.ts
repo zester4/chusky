@@ -2046,6 +2046,74 @@ test("linked verified dashboard users can request and list phone calls without e
   assert.deepEqual(body.data, []);
 });
 
+test("verified web accounts can use the persona library without linking Telegram", async () => {
+  const previousBetterAuth = config.betterAuthEnabled;
+  try {
+    (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
+    setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
+    const api = app();
+    const headers = { "X-Test-Web-User": "web-only-persona-owner", "Content-Type": "application/json" };
+    const listed = await api.fetch(new Request("http://local/v1/account/calls/personas", { headers }));
+    assert.equal(listed.status, 200);
+    const catalogue = await listed.json() as { data: Array<{ id: string }> };
+    assert.ok(catalogue.data.some((persona) => persona.id === "customer_service"));
+
+    const applied = await api.fetch(new Request("http://local/v1/account/calls/profile/persona", {
+      method: "POST", headers, body: JSON.stringify({ personaId: "appointment_coordinator" }),
+    }));
+    assert.equal(applied.status, 200);
+    const profile = await applied.json() as { data: { personaId?: string; mode?: string } };
+    assert.equal(profile.data.personaId, "appointment_coordinator");
+    assert.equal(profile.data.mode, "scheduling");
+
+    const readBack = await api.fetch(new Request("http://local/v1/account/calls/profile", { headers }));
+    assert.equal(readBack.status, 200);
+    assert.equal((await readBack.json() as { data: { personaId?: string } }).data.personaId, "appointment_coordinator");
+  } finally {
+    (config as { betterAuthEnabled: boolean }).betterAuthEnabled = previousBetterAuth;
+    setWebAuthSessionResolverForTests();
+  }
+});
+
+test("applying a persona propagates to the owner's managed inbound routes", async () => {
+  const previousBetterAuth = config.betterAuthEnabled;
+  try {
+    (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
+    setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
+    const api = app();
+    const headers = { "X-Test-Web-User": "web-only-inbound-persona-owner", "Content-Type": "application/json" };
+    const created = await api.fetch(new Request("http://local/v1/account/calls/inbound-routes", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "persona-inbound-route" },
+      body: JSON.stringify({
+        provider: "twilio",
+        phoneNumber: "+15550100125",
+        callProfile: "business",
+        purpose: "Coordinate customer appointments",
+        voiceProfile: { identity: "Maya", organization: "Example Co", mode: "support" },
+      }),
+    }));
+    assert.equal(created.status, 201);
+
+    const applied = await api.fetch(new Request("http://local/v1/account/calls/profile/persona", {
+      method: "POST", headers, body: JSON.stringify({ personaId: "appointment_coordinator" }),
+    }));
+    assert.equal(applied.status, 200);
+
+    const routes = await api.fetch(new Request("http://local/v1/account/calls/inbound-routes", { headers }));
+    assert.equal(routes.status, 200);
+    const routeBody = await routes.json() as { data: Array<{ voiceProfile: { personaId?: string; mode?: string; identity?: string; organization?: string } }> };
+    assert.equal(routeBody.data.length, 1);
+    assert.equal(routeBody.data[0]?.voiceProfile.personaId, "appointment_coordinator");
+    assert.equal(routeBody.data[0]?.voiceProfile.mode, "scheduling");
+    assert.equal(routeBody.data[0]?.voiceProfile.identity, "Maya");
+    assert.equal(routeBody.data[0]?.voiceProfile.organization, "Example Co");
+  } finally {
+    (config as { betterAuthEnabled: boolean }).betterAuthEnabled = previousBetterAuth;
+    setWebAuthSessionResolverForTests();
+  }
+});
+
 test("Bland readiness controls dashboard call availability and the selected provider", async () => {
   const keys = ["betterAuthEnabled", "blandVoiceEnabled", "blandApiKey", "blandWebhookSecret", "blandWebhookUrl", "blandConsultToolId", "blandConsultToolSecret", "twilioVoiceEnabled"] as const;
   const original = Object.fromEntries(keys.map((key) => [key, config[key]]));
