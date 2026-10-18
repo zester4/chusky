@@ -487,7 +487,7 @@ export interface PhoneCallRecord {
   id: string;
   userId: number;
   /** Explicit provider keeps shared safe call storage transport-aware. */
-  provider?: "legacy" | "twilio" | "bland" | "livekit";
+  provider?: "legacy" | "twilio" | "bland";
   direction?: "inbound" | "outbound";
   /** Separates a private personal call brief from a company/business brief. */
   callProfile?: "personal" | "business";
@@ -6604,7 +6604,7 @@ export async function getSession(uid: number, includeSdkTables = false, options?
     const status = ["starting", "bridging", "active", "ended", "failed"].includes(String(item.status)) ? item.status as PhoneCallRecord["status"] : "failed";
     return [{
       id: item.id.slice(0, 128), userId: uid,
-      provider: item.provider === "twilio" || item.provider === "bland" || item.provider === "livekit" ? item.provider : "legacy",
+      provider: item.provider === "twilio" || item.provider === "bland" ? item.provider : "legacy",
       direction: item.direction === "inbound" ? "inbound" : "outbound",
       ...(item.callProfile === "business" || item.callProfile === "personal" ? { callProfile: item.callProfile } : {}),
       ...(item.callVerification === "public" || item.callVerification === "identified" || item.callVerification === "verified" ? { callVerification: item.callVerification } : {}),

@@ -9,9 +9,9 @@ and product work can evolve without another monolithic `app.py`.
 The strongest current voice stacks converge on the same primitives:
 
 1. A semantic turn detector, not silence-only VAD. Flux exposes
-   `StartOfTurn`, `EagerEndOfTurn`, `TurnResumed`, and `EndOfTurn`; LiveKit's
-   turn detector adds semantic and acoustic signals and supports adaptive
-   endpointing.
+   `StartOfTurn`, `EagerEndOfTurn`, `TurnResumed`, and `EndOfTurn`; a
+   provider-neutral turn detector can combine semantic and acoustic signals
+   and support adaptive endpointing.
 2. A real playback clock. Audio is sent in paced frames, and interruption
    clears provider buffers immediately. Twilio explicitly documents marks for
    playback tracking and `clear` for removing buffered audio.
@@ -41,10 +41,10 @@ are converging on these patterns:
   requests, support bounded retry, and expect idempotent side effects. Its
   simulation and call-analysis features turn conversations into regression
   tests rather than relying on subjective listening.
-- LiveKit puts endpointing, adaptive interruption, preemptive generation,
-  false-interruption recovery, tool-step limits, handoffs, and observability in
-  the session runtime. It also recommends keeping the active tool list focused;
-  exposing a giant catalogue hurts latency and tool selection.
+- Realtime runtimes put endpointing, adaptive interruption, preemptive
+  generation, false-interruption recovery, tool-step limits, handoffs, and
+  observability in the session runtime. The active tool list should stay
+  focused; exposing a giant catalogue hurts latency and tool selection.
 - ElevenLabs makes interruption behavior a per-tool policy and provides system
   tools for transfer, voicemail detection, DTMF, state updates, skipping a
   turn, and ending a call. That is a useful distinction: a read-only lookup

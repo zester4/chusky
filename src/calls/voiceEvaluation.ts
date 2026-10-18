@@ -77,7 +77,7 @@ export function scoreVoiceTrace(trace: VoiceEvaluationTrace, scenario: VoiceEval
  */
 export function scorePhoneCallTrace(input: {
   direction?: "inbound" | "outbound";
-  provider?: "legacy" | "twilio" | "bland" | "livekit";
+  provider?: "legacy" | "twilio" | "bland";
   purpose?: string;
   outcome?: { summary?: string; openQuestions?: string[] };
   timeline?: Array<{ type: string; at: number; toolSlug?: string; durationMs?: number }>;
