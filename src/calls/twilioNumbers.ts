@@ -15,9 +15,39 @@ export type TwilioNumberSummary = {
 export type TwilioNumberSearch = {
   countryCode: string;
   areaCode?: string;
+  region?: string;
+  locality?: string;
+  postalCode?: string;
   contains?: string;
   limit?: number;
 };
+
+export type TwilioNumberCountry = {
+  code: string;
+  callingCode: string;
+  name: string;
+  flag: string;
+  regionLabel: string;
+  regionPlaceholder: string;
+};
+
+/** Initial customer-facing inventory. Keep this allowlist deliberately small
+ * until regulatory requirements and number availability have been verified for
+ * each additional market. */
+export const TWILIO_SUPPORTED_NUMBER_COUNTRIES: readonly TwilioNumberCountry[] = [
+  { code: "US", callingCode: "+1", name: "United States", flag: "🇺🇸", regionLabel: "State", regionPlaceholder: "CA or New York" },
+  { code: "CA", callingCode: "+1", name: "Canada", flag: "🇨🇦", regionLabel: "Province", regionPlaceholder: "ON or Toronto" },
+  { code: "GB", callingCode: "+44", name: "United Kingdom", flag: "🇬🇧", regionLabel: "Region", regionPlaceholder: "London" },
+  { code: "DE", callingCode: "+49", name: "Germany", flag: "🇩🇪", regionLabel: "Region", regionPlaceholder: "Berlin" },
+  { code: "FR", callingCode: "+33", name: "France", flag: "🇫🇷", regionLabel: "Region", regionPlaceholder: "Paris" },
+  { code: "IE", callingCode: "+353", name: "Ireland", flag: "🇮🇪", regionLabel: "Region", regionPlaceholder: "Dublin" },
+  { code: "NL", callingCode: "+31", name: "Netherlands", flag: "🇳🇱", regionLabel: "Region", regionPlaceholder: "Amsterdam" },
+  { code: "ES", callingCode: "+34", name: "Spain", flag: "🇪🇸", regionLabel: "Region", regionPlaceholder: "Madrid" },
+  { code: "IT", callingCode: "+39", name: "Italy", flag: "🇮🇹", regionLabel: "Region", regionPlaceholder: "Rome" },
+  { code: "SE", callingCode: "+46", name: "Sweden", flag: "🇸🇪", regionLabel: "Region", regionPlaceholder: "Stockholm" },
+  { code: "NO", callingCode: "+47", name: "Norway", flag: "🇳🇴", regionLabel: "Region", regionPlaceholder: "Oslo" },
+  { code: "DK", callingCode: "+45", name: "Denmark", flag: "🇩🇰", regionLabel: "Region", regionPlaceholder: "Copenhagen" },
+];
 
 export type TwilioNumberDependencies = {
   enabled: boolean;
@@ -42,6 +72,7 @@ function validate(options: TwilioNumberDependencies): void {
 function countryCode(value: unknown): string {
   const result = String(value ?? "").trim().toUpperCase();
   if (!/^[A-Z]{2}$/.test(result)) throw new Error("countryCode must be a two-letter country code.");
+  if (!TWILIO_SUPPORTED_NUMBER_COUNTRIES.some((country) => country.code === result)) throw new Error("That country is not available for number purchasing yet.");
   return result;
 }
 
@@ -73,12 +104,18 @@ export async function searchTwilioNumbers(input: TwilioNumberSearch, options: Tw
   const areaCode = input.areaCode?.trim();
   if (areaCode && !/^\d{1,6}$/.test(areaCode)) throw new Error("areaCode must contain only digits.");
   const areaCodeNumber = areaCode ? Number(areaCode) : undefined;
+  const region = input.region?.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
+  const locality = input.locality?.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
+  const postalCode = input.postalCode?.replace(/[^A-Za-z0-9 -]/g, "").trim().slice(0, 20);
   const contains = input.contains?.trim();
   if (contains && contains.length > 20) throw new Error("contains is too long.");
   const client = twilio(options.accountSid, options.authToken);
   const results = await client.availablePhoneNumbers(country).local.list({
     voiceEnabled: true,
     ...(areaCodeNumber === undefined ? {} : { areaCode: areaCodeNumber }),
+    ...(region ? { inRegion: region } : {}),
+    ...(locality ? { inLocality: locality } : {}),
+    ...(postalCode ? { inPostalCode: postalCode } : {}),
     ...(contains ? { contains } : {}),
     limit: boundedLimit(input.limit),
   });
@@ -86,9 +123,14 @@ export async function searchTwilioNumbers(input: TwilioNumberSearch, options: Tw
 }
 
 /** Purchase one number and point its inbound voice webhook at Chusky. */
-export async function purchaseTwilioNumber(input: { phoneNumber: string; friendlyName?: string }, options: TwilioNumberDependencies = defaults()): Promise<TwilioNumberSummary> {
+export async function purchaseTwilioNumber(input: { phoneNumber: string; countryCode?: string; friendlyName?: string }, options: TwilioNumberDependencies = defaults()): Promise<TwilioNumberSummary> {
   validate(options);
   if (!/^\+[1-9]\d{7,14}$/.test(input.phoneNumber)) throw new Error("phoneNumber must be a valid E.164 number.");
+  if (input.countryCode) {
+    const country = TWILIO_SUPPORTED_NUMBER_COUNTRIES.find((item) => item.code === String(input.countryCode).trim().toUpperCase());
+    if (!country) throw new Error("That country is not available for number purchasing yet.");
+    if (!input.phoneNumber.startsWith(country.callingCode)) throw new Error("The selected country does not match the phone number.");
+  }
   const friendlyName = input.friendlyName?.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
   const base = options.webhookBaseUrl.replace(/\/+$/, "");
   const client = twilio(options.accountSid, options.authToken);
@@ -111,4 +153,12 @@ export async function releaseTwilioNumber(sid: string, options: TwilioNumberDepe
 
 export function isTwilioNumberManagementConfigured(options: TwilioNumberDependencies = defaults()): boolean {
   try { validate(options); return true; } catch { return false; }
+}
+
+export function twilioNumberCatalog(): TwilioNumberCountry[] {
+  return TWILIO_SUPPORTED_NUMBER_COUNTRIES.map((country) => ({ ...country }));
+}
+
+export function platformTwilioNumberDependencies(): TwilioNumberDependencies {
+  return defaults();
 }

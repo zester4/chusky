@@ -17,7 +17,7 @@ import {
   type TwilioSubaccountRecord,
 } from "../store.js";
 import type { PhoneCallRecord, VoiceInboundRouteRecord } from "../store.js";
-import type { TwilioNumberDependencies } from "./twilioNumbers.js";
+import { isTwilioNumberManagementConfigured, platformTwilioNumberDependencies, type TwilioNumberDependencies } from "./twilioNumbers.js";
 
 type TwilioCredentials = { accountSid: string; authToken: string };
 
@@ -91,6 +91,28 @@ export async function tenantNumberDependencies(userId: number): Promise<TwilioNu
   const record = await getTwilioSubaccountByUserId(userId);
   if (!record) return undefined;
   try { return dependenciesFor(record, controls.numberManagementEnabled); } catch { return undefined; }
+}
+
+/** Search is read-only and may use the parent inventory before a workspace has
+ * purchased its first number. The customer must never need to know that a
+ * child account exists. */
+export async function customerNumberSearchDependencies(): Promise<TwilioNumberDependencies | undefined> {
+  const controls = await getBuilderVoiceControls();
+  if (!controls.subaccountManagementEnabled || !controls.numberManagementEnabled) return undefined;
+  // The persisted Builder switch is the runtime gate once the control plane
+  // is enabled. The environment flag remains the safe default when no saved
+  // Builder state exists; it must not override an audited administrator
+  // enablement after that state has been saved.
+  const dependencies = { ...platformTwilioNumberDependencies(), enabled: true };
+  return isTwilioNumberManagementConfigured(dependencies) ? dependencies : undefined;
+}
+
+/** Provisioning is lazy: the first purchase creates the isolated Twilio
+ * subaccount automatically, while Twilio still bills the platform parent. */
+export async function ensureTenantNumberDependencies(userId: number, friendlyName?: unknown): Promise<{ dependencies: TwilioNumberDependencies; subaccount: TwilioSubaccountView }> {
+  const subaccount = await provisionTwilioSubaccount(userId, friendlyName);
+  const dependencies = await subaccountNumberDependencies(subaccount.id);
+  return { dependencies, subaccount };
 }
 
 /** Existing legacy parent-account routes remain readable and releasable by
