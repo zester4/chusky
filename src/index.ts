@@ -261,7 +261,7 @@ async function sdkTaskMessage(task: Awaited<ReturnType<typeof getTask>>, mission
   const continuationGuidance = "\n\nDurable task control: if an external service is still processing, use CHUCK_TASK_WAIT with the verified checkpoint and exact next action. This pauses the same task without notifying the user and wakes it once; do not use a user reminder for internal polling. Do not perform risky external actions without the normal approval flow.";
   const baseInput = missionInput ?? task?.sdkInput ?? task?.objective ?? "Continue the durable task.";
   if (!task?.sdkAttachments?.length) return `${baseInput}${continuationGuidance}`;
-  const session = await getSession(task.userId);
+  const session = await getSession(task.userId, false, { domains: ["assets"] });
   const files = task.sdkAttachments.map((reference) => session.sdkFiles?.find((candidate) => candidate.id === reference.id && candidate.status === "available")).filter((file): file is NonNullable<typeof file> => Boolean(file));
   const defaultKind = files.length === 1
     ? files[0].contentType.startsWith("image/") ? "image" : files[0].contentType.startsWith("video/") ? "video" : files[0].contentType.startsWith("audio/") ? "attachment" : "document"
@@ -1002,7 +1002,10 @@ async function main(): Promise<void> {
             voiceRoutingHint: liveCall.purpose,
           });
           if (!speculative) {
-            await appendMessages(userId, [{ role: "user", content: `[Voice call ${callId}] ${transcript}` }, { role: "assistant", content: result.text }]);
+            // The call transcript is already persisted in the owner-scoped
+            // phone-call record. Do not copy raw voice turns into the
+            // account-wide chat history, where a later channel could mistake
+            // an old call's context for the current request.
             if (result.cost) await addUsage(userId, result.cost);
           }
           return result;
@@ -1205,7 +1208,6 @@ async function main(): Promise<void> {
       // a short Redis or replica delay without generating another answer.
       if (lease === "busy") return c.json({ ok: false, error: "voice turn commit is in progress", retryable: true }, 409);
       try {
-        await appendMessages(userId, [{ role: "user", content: `[Voice call ${callId}] ${transcript}` }, { role: "assistant", content: normalizeVoiceText(text) }]);
         await appendPhoneCallTranscriptTurn(userId, callId, { turnId, caller: transcript, assistant: normalizeVoiceText(text) });
         await updatePhoneCall(userId, callId, { ...(body.sessionId ? { bridgeSessionId: body.sessionId } : {}), lastCommittedTurnId: turnId, runtimeState: "healthy" });
         if (cost) await addUsage(userId, cost);

@@ -15,13 +15,13 @@ import { formatSendblueText } from "../src/channels/sendblueFormatting.js";
 import { formatWhatsAppText } from "../src/channels/whatsappFormatting.js";
 import { formatInboundMessageForAgent, sharedSenderLabel } from "../src/channels/conversations.js";
 import { normalizeInboundImages } from "../src/channels/imageMedia.js";
-import { channelAgentRunOptions, createAgentChannelHandler } from "../src/channels/agentHandler.js";
+import { channelAgentRunOptions, createAgentChannelHandler, privateOrSharedHistory } from "../src/channels/agentHandler.js";
 import { SHARED_CHANNEL_TOOL_DENY } from "../src/sharedChannelPolicy.js";
 import { nativeTool } from "../src/nativeTools.js";
 import { registerChannelRoutes, SLACK_BOT_SCOPES } from "../src/channels/routes.js";
 import { Hono } from "hono";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "../src/telegramWebhook.js";
-import { acquireUserLock, appendChannelConversationMessages, claimChannelInboundEvent, createChannelInboundEvent, createChannelLinkCode, createSendblueGroupLinkCode, getChannelConversation, getOutbox, getSendblueGroupAuthorization, initStore, listOutbox, releaseUserLock, renewUserLock, setChannelConversationModel, updateChannelInboundEvent } from "../src/store.js";
+import { acquireUserLock, appendChannelConversationMessages, appendMessages, claimChannelInboundEvent, createChannelInboundEvent, createChannelLinkCode, createSendblueGroupLinkCode, getChannelConversation, getOutbox, getSendblueGroupAuthorization, initStore, listOutbox, releaseUserLock, renewUserLock, setChannelConversationModel, updateChannelInboundEvent } from "../src/store.js";
 import type { ChannelAdapter, DeliveryReceipt, InboundMessage, OutboundMessage } from "../src/channels/contracts.js";
 
 test("channel approval resumes preserve shared privacy boundaries", () => {
@@ -44,6 +44,21 @@ test("channel approval resumes preserve shared privacy boundaries", () => {
   assert.equal(privateOptions.instructions, undefined);
   assert.equal(privateOptions.toolDeny, undefined);
   assert.equal(privateOptions.ownerPrivateRun, true);
+});
+
+test("private channel history cannot inherit the owner-wide chat history", async () => {
+  await appendMessages(42, [{ role: "user", content: "unrelated browser screenshot task" }, { role: "assistant", content: "unrelated browser result" }]);
+  await appendChannelConversationMessages({
+    id: "slack:T1:D1:-", accountId: "account_42", userId: 42, provider: "slack", scope: "private",
+    messages: [{ role: "user", content: "continue the sales follow-up" }, { role: "assistant", content: "I will review the follow-up" }],
+  });
+  const history = await privateOrSharedHistory({
+    accountId: "account_42", userId: 42, provider: "slack", scope: "private", conversationId: "slack:T1:D1:-",
+    permissions: { canUseAgent: true, canApprove: true, canUseSharedContext: false, canReceiveProactive: true },
+    replyTarget: { provider: "slack", conversationId: "D1", workspaceId: "T1" },
+  });
+  assert.deepEqual(history.history.map((message) => message.content), ["continue the sales follow-up", "I will review the follow-up"]);
+  assert.equal(history.history.some((message) => message.content.includes("browser")), false);
 });
 
 test("native execution enforces the full shared-channel private-tool boundary", async () => {

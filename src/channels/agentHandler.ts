@@ -3,11 +3,10 @@ import { config } from "../config.js";
 import {
   addUsage,
   appendChannelConversationMessages,
-  appendMessages,
   claimApproval,
   getApproval,
   getChannelConversation,
-  getSession,
+  getSessionProfile,
   setApprovalStatus,
   registerImageAsset,
 } from "../store.js";
@@ -65,20 +64,26 @@ export function channelAgentRunOptions(conversation: ChuskyConversation, receive
   };
 }
 
-async function privateOrSharedHistory(conversation: ChuskyConversation) {
-  if (conversation.scope === "private") {
-    const session = await getSession(conversation.userId);
-    return { history: session.history, model: session.model };
+export async function privateOrSharedHistory(conversation: ChuskyConversation) {
+  // Every transport conversation is its own context boundary. The old
+  // private path loaded the owner-wide session history, which meant a
+  // Telegram/Slack/WhatsApp turn could inherit an unrelated web task, phone
+  // call, image request, or connected-app result. Private memory remains
+  // available through explicit memory/context tools; raw cross-surface history
+  // is not silently injected here.
+  const [stored, profile] = await Promise.all([
+    getChannelConversation(conversation.conversationId),
+    getSessionProfile(conversation.userId),
+  ]);
+  if (stored && stored.userId === conversation.userId && stored.provider === conversation.provider && stored.scope === conversation.scope) {
+    return { history: stored.history, model: stored.model ?? profile.model };
   }
-  const stored = await getChannelConversation(conversation.conversationId);
-  const session = await getSession(conversation.userId);
-  return { history: stored?.history ?? [], model: stored?.model ?? config.groupDefaultModel };
+  return { history: [], model: conversation.scope === "shared" ? config.groupDefaultModel : profile.model };
 }
 
 async function saveConversation(conversation: ChuskyConversation, message: InboundMessage, text: string, response: string): Promise<void> {
   const messages = [{ role: "user" as const, content: text, createdAt: message.receivedAt }, { role: "assistant" as const, content: response, createdAt: message.receivedAt }];
-  if (conversation.scope === "private") await appendMessages(conversation.userId, messages);
-  else await appendChannelConversationMessages({ id: conversation.conversationId, accountId: conversation.accountId, userId: conversation.userId, provider: conversation.provider, scope: conversation.scope, messages });
+  await appendChannelConversationMessages({ id: conversation.conversationId, accountId: conversation.accountId, userId: conversation.userId, provider: conversation.provider, scope: conversation.scope, messages });
 }
 
 function dataUrlBytes(url: string): { mimeType: string; bytes: Buffer; dataUrl: string } | undefined {

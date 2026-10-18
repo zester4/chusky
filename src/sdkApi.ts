@@ -1508,7 +1508,11 @@ async function loadSdkExecutionContext(userId: number, threadId: string): Promis
   thread: SdkThreadRecord;
   legacyProjection: boolean;
 }> {
-  const [session, directThread] = await Promise.all([getSession(userId), getSdkThread(userId, threadId)]);
+  // SDK tables own thread/run history. Only hydrate the profile and verified
+  // upload catalog for the execution context; loading the account-wide
+  // conversation and every memory/image domain here multiplies Redis reads
+  // before the actual thread-scoped run begins.
+  const [session, directThread] = await Promise.all([getSession(userId, false, { domains: ["profile", "assets"] }), getSdkThread(userId, threadId)]);
   if (directThread && isDurableStore() && config.durableStateSdkTablesEnabled) return { session, thread: directThread, legacyProjection: false };
   const legacySession = await getSessionWithSdkRuns(userId, threadId);
   const legacyThread = legacySession.sdkThreads?.find((item) => item.id === threadId);
@@ -3631,8 +3635,8 @@ export function registerSdkApi(app: Hono): void {
         thread.updatedAt = run.updatedAt;
         try {
           await persistSdkRunSnapshot(owner.userId, thread.id, run, [], costIncrement);
-          const latestSession = await getSession(owner.userId);
-          await notifyWebhooks(owner.userId, latestSession.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status });
+          const webhooks = await getSessionWebhooks(owner.userId);
+          await notifyWebhooks(owner.userId, webhooks ?? [], `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status });
         } catch (error) {
           logger.error({ err: error, runId: run.id }, "Could not persist or notify the final SDK run state");
         } finally {

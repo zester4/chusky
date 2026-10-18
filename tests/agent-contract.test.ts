@@ -341,6 +341,23 @@ test("ordinary Composio turns expose JEV's exact action even when its slug start
   }
 });
 
+test("generic Composio gateways cannot execute an action outside the current route grant", async () => {
+  const userId = 831241;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const executed: string[] = [];
+  await withAgentMocks([
+    toolResponse("COMPOSIO_MULTI_EXECUTE_TOOL", JSON.stringify({
+      tools: [{ tool_slug: "GMAIL_FETCH_EMAILS", arguments: { query: "in:inbox" } }],
+    })),
+    chatResponse({ role: "assistant", content: "I did not execute an unrelated connected-app action." }),
+  ], async (slug) => { executed.push(slug); }, async () => {
+    const result = await runAgent(userId, "Say hello and do not access any connected app.", [], "test/model", undefined, undefined, undefined, undefined, undefined, { ephemeral: true });
+    assert.match(result.text, /did not execute an unrelated/i);
+    assert.deepEqual(executed, []);
+  }, true);
+});
+
 test("mission provider allowlists resolve an exact schema when the session exposes only meta-tools", async () => {
   const userId = 831237;
   await initStore({ memoryOnly: true });

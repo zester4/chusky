@@ -11,7 +11,7 @@ import { withDistributedLease } from "./distributedLease.js";
 import { createNeonDurableState, durableSdkRunHash, DURABLE_SESSION_DOMAINS, type DurableConversationMessage, type DurableMissionEvent, type DurableMissionRecord, type DurableObjectMetadata, type DurableSessionDocument, type DurableSessionDomain, type DurableStateStatus, type DurableSdkTableChanges, type DurableSdkTableState, type NeonDurableState } from "./neonDurableState.js";
 import { archiveRecallTranscriptSegment, deleteRecallTranscriptArchive, getArchivedRecallTranscriptSegment, listArchivedRecallTranscriptSegments, recallTranscriptMeetingHash, updateRecallTranscriptArchiveExpiry as updateArchivedRecallExpiry, type RecallTranscriptArchiveDependencies } from "./recallTranscriptArchive.js";
 import { backfillMissionSnapshotToNeon } from "./missionBackfill.js";
-import { HOT_CONVERSATION_MESSAGES, joinSessionDomains, mergeDurableSessionDomain, sessionUsesNeonDomains, splitSessionDomains, splitSessionDomainsForSave } from "./sessionDomains.js";
+import { DURABLE_SESSION_FORMAT, HOT_CONVERSATION_MESSAGES, joinSessionDomains, mergeDurableSessionDomain, sessionUsesNeonDomains, splitSessionDomains, splitSessionDomainsForSave } from "./sessionDomains.js";
 import { repairIncompleteDurableSession } from "./durableSessionBackfill.js";
 import { normalizeVoiceCallProfile, type VoiceCallProfile } from "./calls/voiceProfile.js";
 import { createVoiceCallEvent, normalizeVoiceCallEvents, type VoiceCallEvent, type VoiceCallEventInput } from "./calls/voiceEvents.js";
@@ -2327,8 +2327,13 @@ function boundedAgentRun(record: AgentRunRecord): AgentRunRecord {
         return {
         ...rest,
         ...(boundedMessages ? { messages: boundedMessages } : {}),
+        // A supervisor only needs the recent provider results for safe
+        // recovery. Keeping 120 x 20k strings made every WATCH/GET/MULTI
+        // checkpoint capable of becoming a multi-megabyte Redis transfer.
+        // Worker messages and explicit task checkpoints remain the durable
+        // source of truth for older progress.
         toolResults: record.state.toolResults
-          ? Object.fromEntries(Object.entries(record.state.toolResults).slice(-120).map(([key, value]) => [key, compactCheckpointText(String(value))]))
+          ? Object.fromEntries(Object.entries(record.state.toolResults).slice(-48).map(([key, value]) => [key, compactCheckpointText(String(value), 8_000)]))
           : undefined,
         output: record.state.output ? compactCheckpointText(record.state.output) : undefined,
         checkpoint: record.state.checkpoint ? compactCheckpointText(record.state.checkpoint, 4_000) : undefined,
@@ -2484,7 +2489,9 @@ class RedisBackend implements Backend {
   private brandingKey = (organizationId: string) => `chuck:organization:branding:${createHash("sha256").update(organizationId).digest("hex")}`;
   private brandingDomainKey = (hostname: string) => `chuck:organization:branding-domain:${createHash("sha256").update(hostname).digest("hex")}`;
   private runKey = (id: string) => `chuck:run:${id}`;
-  private runCancellationKey = (id: string) => `chuck:run-cancel:${id}`;
+  // Bind cancellation markers to the owner so the hot-path check does not
+  // need to re-read the full agent-run checkpoint for authorization.
+  private runCancellationKey = (userId: number, id: string) => `chuck:run-cancel:${userId}:${id}`;
   private runIndexKey = (id: number) => `chuck:user:${id}:runs`;
   private handoffKey = (id: string) => `chuck:handoff:${id}`;
   private handoffIndexKey = (id: number) => `chuck:user:${id}:handoffs`;
@@ -2737,6 +2744,18 @@ class RedisBackend implements Backend {
   private async loadSession(userId: number, includeSdkTables = false, requestedDomains?: readonly DurableSessionDomain[]): Promise<UserSession> {
     const domains = this.sessionDomainsForRead(includeSdkTables, requestedDomains);
     const partialRead = domains.length < DURABLE_SESSION_DOMAINS.filter((domain) => includeSdkTables || domain !== "sdk").length;
+
+    // Domain caches are the canonical hot path. The old aggregate session key
+    // could contain conversation history, image metadata, SDK state, and
+    // other growing fields even though the requested call needed only a small
+    // projection. Read split domains first and inspect the aggregate key only
+    // for rolling-deployment/migration recovery when domains are absent.
+    if (this.durableState && userId !== 0) {
+      const domainDocuments = await this.readSessionDomains(userId, includeSdkTables, domains);
+      const hydrated = await this.hydrateDurableSessionFromDomains(userId, domainDocuments, domains, includeSdkTables, partialRead, fresh());
+      if (hydrated) return hydrated;
+    }
+
     this.durableStorageMetrics.redisSessionCommands += 1;
     const raw = await this.r.get(this.sk(userId));
     if (raw) this.durableStorageMetrics.redisSessionBytesRead += Buffer.byteLength(raw, "utf8");
@@ -2746,6 +2765,11 @@ class RedisBackend implements Backend {
         const migrated = sessionUsesNeonDomains(session);
         if (migrated) {
           if (!this.durableState) throw new Error("This session has migrated to Neon durable state, but DURABLE_STATE_ENABLED is not configured.");
+          // New deployments keep only this marker in the aggregate key. The
+          // actual session is reconstructed from the requested split domains.
+          // Start from a valid empty session so marker-only records cannot
+          // trigger undefined history/profile reads during a rolling deploy.
+          session = { ...fresh(), ...session, history: Array.isArray(session.history) ? session.history : [] };
           let documents = await this.readSessionDomains(userId, includeSdkTables, domains);
           const requiredDomainCount = domains.length;
           if (documents.size < requiredDomainCount) {
@@ -3000,7 +3024,10 @@ class RedisBackend implements Backend {
     // Approval records live in their own short-lived keyspace. Keep an empty
     // legacy field for old readers without copying approval payloads into the
     // hot session blob on every unrelated write.
-    const encoded = JSON.stringify({ ...persisted, approvals: [] });
+    // Split durable domains are canonical. Keep only a tiny migration marker
+    // in the legacy aggregate key; persisting the full session here recreated
+    // multi-megabyte Redis reads on every SDK/channel request.
+    const encoded = JSON.stringify({ durableSessionFormat: DURABLE_SESSION_FORMAT });
     this.durableStorageMetrics.redisSessionCommands += 1;
     this.durableStorageMetrics.redisSessionBytesWritten += Buffer.byteLength(encoded, "utf8");
     this.durableStorageMetrics.redisSessionCoreBytes = Buffer.byteLength(encoded, "utf8");
@@ -3048,6 +3075,46 @@ class RedisBackend implements Backend {
     }
     if (documents.size) await this.writeSessionDomainCache(userId, new Map([...documents].map(([domain, document]) => [domain, document.payload] as const)), Object.fromEntries([...documents].map(([domain, document]) => [domain, document.version])), documents.keys());
     return documents;
+  }
+
+  /** Rehydrate a durable session from split domains without the legacy aggregate blob. */
+  private async hydrateDurableSessionFromDomains(
+    userId: number,
+    documents: Map<DurableSessionDomain, DurableSessionDocument>,
+    requiredDomains: readonly DurableSessionDomain[],
+    includeSdkTables: boolean,
+    partialRead: boolean,
+    base: UserSession,
+  ): Promise<UserSession | undefined> {
+    if (!this.durableState || !documents.size) return undefined;
+    if (documents.size < requiredDomains.length) return undefined;
+    const hadProfileDomain = documents.has("profile");
+    if (!hadProfileDomain) documents.set("profile", { domain: "profile", payload: durableProfilePayload(base), version: 0, updatedAt: Date.now() });
+    const payloads = new Map([...documents].map(([domain, document]) => [domain, document.payload] as const));
+    const conversation = payloads.get("conversation") as { history?: Message[] } | undefined;
+    if (Array.isArray(conversation?.history) && conversation.history.length) {
+      const migrated = conversation.history.map((message, index) => ({
+        ...message,
+        id: message.id ?? `legacy_${createHash("sha256").update(`${userId}:${index}:${message.role}:${message.createdAt ?? index}:${message.sourceId ?? ""}:${message.content}`).digest("hex").slice(0, 48)}`,
+      }));
+      await this.durableState.appendConversationMessages(userId, migrated.flatMap((message, index) => {
+        const compacted = compactPersistedMessage(message);
+        return compacted ? [{ id: compacted.id!, role: compacted.role, content: compacted.content, createdAt: compacted.createdAt ?? Date.now() + index, ...(compacted.sourceId ? { sourceId: compacted.sourceId } : {}) }] : [];
+      }));
+      base.history = migrated.slice(-HOT_CONVERSATION_MESSAGES);
+      payloads.set("conversation", { ...conversation, history: undefined });
+    } else if (requiredDomains.includes("conversation")) {
+      base.history = (await this.durableState.readRecentConversation(userId, HOT_CONVERSATION_MESSAGES)).map((message) => ({ ...message }));
+    }
+    const session = joinSessionDomains(base, payloads, includeSdkTables, partialRead) as UserSession & DurableSessionMetadata;
+    session.durableDomainVersions = Object.fromEntries([...documents].flatMap(([domain, document]) => document.version > 0 ? [[domain, document.version]] : [])) as DurableSessionMetadata["durableDomainVersions"];
+    session.durableDomainHashes = Object.fromEntries([...documents].map(([domain, document]) => [domain, durableDomainHash(payloads.get(domain))])) as DurableSessionMetadata["durableDomainHashes"];
+    session.durableDomainSnapshots = Object.fromEntries([...payloads].map(([domain, payload]) => [domain, structuredClone(payload)])) as DurableSessionMetadata["durableDomainSnapshots"];
+    if (!hadProfileDomain) session.durableDomainHashes = { ...session.durableDomainHashes, profile: "profile-needs-backfill" };
+    if (Array.isArray(conversation?.history) && conversation.history.length) session.durableDomainHashes = { ...session.durableDomainHashes, conversation: "legacy-history-needs-compaction" };
+    const attached = includeSdkTables ? await this.attachSdkTables(userId, session) : session;
+    attached.approvals = await this.listApprovals(userId, 20);
+    return attached;
   }
 
   private async repairIncompleteSessionDomains(userId: number, session: UserSession): Promise<Map<DurableSessionDomain, DurableSessionDocument>> {
@@ -3511,13 +3578,14 @@ class RedisBackend implements Backend {
   async requestAgentRunCancellation(userId: number, id: string): Promise<boolean> {
     const record = await this.getAgentRun(userId, id);
     if (!record || ["completed", "cancelled", "failed"].includes(record.status)) return false;
-    await this.r.setex(this.runCancellationKey(id), Math.max(60, agentRunTtlSeconds(record)), "1");
+    await this.r.setex(this.runCancellationKey(userId, id), Math.max(60, agentRunTtlSeconds(record)), "1");
     return true;
   }
   async isAgentRunCancellationRequested(userId: number, id: string): Promise<boolean> {
-    const record = await this.getAgentRun(userId, id);
-    if (!record || record.userId !== userId) return false;
-    return (await this.r.get(this.runCancellationKey(id))) === "1";
+    // The run ID is already bound to this owner by the execution context;
+    // checking the owner-scoped marker avoids one Redis GET of the growing run
+    // checkpoint on every model round.
+    return (await this.r.get(this.runCancellationKey(userId, id))) === "1";
   }
   async getHandoffRecord(userId: number, id: string): Promise<HandoffRecord | undefined> {
     const raw = await this.r.get(this.handoffKey(id));
@@ -5170,12 +5238,11 @@ class MemoryBackend implements Backend {
   async requestAgentRunCancellation(userId: number, id: string) {
     const record = await this.getAgentRun(userId, id);
     if (!record || ["completed", "cancelled", "failed"].includes(record.status)) return false;
-    this.agentRunCancellation.add(id);
+    this.agentRunCancellation.add(`${userId}:${id}`);
     return true;
   }
   async isAgentRunCancellationRequested(userId: number, id: string) {
-    const record = await this.getAgentRun(userId, id);
-    return Boolean(record && record.userId === userId && this.agentRunCancellation.has(id));
+    return this.agentRunCancellation.has(`${userId}:${id}`);
   }
   async getHandoffRecord(userId: number, id: string) {
     const record = this.handoffs.get(id);
@@ -7063,6 +7130,8 @@ type SessionMutationOptions = {
   allSdkRuns?: boolean;
   /** Load the durable SDK domain without materializing its run rows. */
   includeSdkTables?: boolean;
+  /** Limit a small mutation to the durable domains it can actually change. */
+  domains?: readonly DurableSessionDomain[];
   /** Return immediately when another worker owns the session lease. */
   skipIfBusy?: boolean;
 };
@@ -7083,7 +7152,7 @@ export async function mutateSession<T>(uid: number, mutator: (session: UserSessi
       renew: async () => backend.renewKeyLock(key, token, 60),
       release: async () => backend.releaseKeyLock(key, token),
     }, async () => {
-      const session = options.allSdkRuns ? await getSessionWithSdkRuns(uid) : options.sdkThreadId ? await getSessionWithSdkRuns(uid, options.sdkThreadId) : options.includeSdkTables ? await getSessionWithSdkTables(uid) : await getSession(uid);
+      const session = options.allSdkRuns ? await getSessionWithSdkRuns(uid) : options.sdkThreadId ? await getSessionWithSdkRuns(uid, options.sdkThreadId) : options.includeSdkTables ? await getSessionWithSdkTables(uid) : await getSession(uid, false, options.domains ? { domains: options.domains } : undefined);
       const result = await mutator(session);
       await backend.saveSessionWithoutLease(uid, session);
       return result;
@@ -8742,7 +8811,7 @@ export async function setComposioSessionId(uid: number, id: string): Promise<voi
   // Composio session initialization can happen while an SDK/web run is being
   // settled. Mutate only this field under the owner lease so a stale read
   // cannot overwrite the run status, history, approvals, or Pulse state.
-  await mutateSession(uid, (session) => { session.composioSessionId = id; });
+  await mutateSession(uid, (session) => { session.composioSessionId = id; }, { domains: ["profile"] });
 }
 
 export async function setDaytonaWorkspaceId(uid: number, id: string): Promise<void> {

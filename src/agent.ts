@@ -62,6 +62,7 @@ import { routeTregForTurn, tregTurnContext } from "./decisions/tregRouter.js";
 import { createRoutingDeadline, jevEnabled } from "./decisions/jev.js";
 import { augmentNativeToolRoute, enforceDirectMeetingJoinRoute, isDirectMeetingJoinRequest, nativeToolManifest, routeNativeToolsForTurn } from "./decisions/nativeToolRouter.js";
 import { computeTurnRoutingPlan } from "./decisions/turnRouter.js";
+import { capabilityScopeLabel, resolveExplicitCapabilityScope, toolBelongsToCapabilityScope, type ExclusiveCapabilityScope } from "./decisions/capabilityScope.js";
 import { claimUpgradeNotice, formatAgentReleaseContext, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
 import { abortable, safeToolAudit, throwIfAborted } from "./cancellation.js";
 import { reconcileComposioTriggerSubscription, type ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
@@ -999,6 +1000,86 @@ function toolSchemaName(tool: any): string {
   return canonicalNativeToolSlug(String(tool?.function?.name ?? tool?.name ?? ""));
 }
 
+function nestedComposioActionSlugs(args: Record<string, unknown>): string[] {
+  const items = Array.isArray(args.tools) ? args.tools : Array.isArray(args.items) ? args.items : [];
+  return items.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const row = item as Record<string, unknown>;
+    const value = row.tool_slug ?? row.toolSlug ?? row.slug;
+    return typeof value === "string" && value.trim() ? [value.trim().toUpperCase()] : [];
+  });
+}
+
+function directComposioActionSlug(args: Record<string, unknown>): string | undefined {
+  const value = args.tool_slug ?? args.toolSlug ?? args.slug;
+  return typeof value === "string" && value.trim() ? value.trim().toUpperCase() : undefined;
+}
+
+function isProviderActionSlug(slug: string): boolean {
+  return /^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(slug)
+    && !slug.startsWith("CHUCK_")
+    && !slug.startsWith("COMPOSIO_")
+    && !slug.startsWith("MCP_");
+}
+
+function assertComposioActionIsGranted(
+  args: Record<string, unknown>,
+  grantedActions: ReadonlySet<string> | undefined,
+  allowMediaDestinationActions = false,
+  scope?: ExclusiveCapabilityScope,
+): void {
+  const child = directComposioActionSlug(args);
+  if (!child || !isProviderActionSlug(child)) throw new Error("A generic Composio execution requires one exact provider action slug.");
+  if (scope && !toolBelongsToCapabilityScope(child, scope)) {
+    throw new Error(`Composio action ${child} is outside this run's ${capabilityScopeLabel(scope)} scope.`);
+  }
+  // An explicit Composio-only request is already fenced to the provider and
+  // may discover its exact action through the provider's catalogue. Ordinary
+  // runs require a route/allowlist grant, so a gateway cannot turn into an
+  // arbitrary Gmail, browser, or CRM escape hatch after routing selected a
+  // different capability.
+  if (!scope || scope.surface !== "composio") {
+    if (!grantedActions?.has(child) && !(allowMediaDestinationActions && isPotentialImageDestinationAction(child))) {
+      throw new Error(`Composio action ${child} was not granted by this turn's route.`);
+    }
+  }
+}
+
+function assertComposioBatchActionsAreScoped(
+  args: Record<string, unknown>,
+  availableTools: any[],
+  fullComposioTools: any[],
+  presentations: ReadonlyMap<string, ComposioToolPresentation>,
+  allow: Set<string> | undefined,
+  deny: Set<string>,
+  grantedActions: ReadonlySet<string> | undefined,
+  allowMediaDestinationActions = false,
+  scope?: ExclusiveCapabilityScope,
+): void {
+  const nested = nestedComposioActionSlugs(args);
+  if (!nested.length) throw new Error("COMPOSIO_MULTI_EXECUTE_TOOL requires at least one exact connected-app action.");
+  const known = new Set([
+    ...availableTools.map(toolSchemaName),
+    ...fullComposioTools.map(toolSchemaName),
+    ...presentations.keys(),
+  ]);
+  for (const child of nested) {
+    if (!/^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(child) || child.startsWith("CHUCK_") || child.startsWith("COMPOSIO_") || child.startsWith("MCP_")) {
+      throw new Error(`Nested Composio action ${child || "(missing)"} is not a provider action.`);
+    }
+    if (scope && !toolBelongsToCapabilityScope(child, scope)) {
+      throw new Error(`Nested Composio action ${child} is outside this run's ${capabilityScopeLabel(scope)} scope.`);
+    }
+    if ((!scope || scope.surface !== "composio") && !grantedActions?.has(child)
+      && !(allowMediaDestinationActions && isPotentialImageDestinationAction(child))) {
+      throw new Error(`Nested Composio action ${child} was not granted by this turn's route.`);
+    }
+    if (allow && !allow.has(child)) throw new Error(`Nested Composio action ${child} is not granted to this run.`);
+    if (deny.has(child)) throw new Error(`Nested Composio action ${child} is denied for this run.`);
+    if (!known.has(child)) throw new Error(`Nested Composio action ${child} was not discovered or verified for this run.`);
+  }
+}
+
 async function resolveMediaBridgeSchema(sessionObj: any, availableTools: any[], toolSlug: string, signal?: AbortSignal): Promise<unknown> {
   const directTool = availableTools.find((tool) => toolSchemaName(tool) === toolSlug);
   const directSchema = directTool?.function?.parameters ?? directTool?.inputSchema;
@@ -1927,7 +2008,11 @@ async function getOrCreateComposioSession(userId: number, storedSessionPromise?:
   }
 
   // Check persistent store for an existing session ID
-  const stored = await (storedSessionPromise ?? getSession(userId));
+  // Composio session attachment only needs the owner profile projection
+  // (primarily composioSessionId). Loading the full account session here
+  // pulled conversation, assets, memories, SDK state, and other unrelated
+  // domains into every first action-bearing turn.
+  const stored = await (storedSessionPromise ?? getSession(userId, false, { domains: ["profile"] }));
   const userId_str = `user_${userId}`;
 
   logger.debug({ userId, existingSessionId: stored.composioSessionId }, "Getting Composio session");
@@ -2254,6 +2339,8 @@ export interface AgentRunOptions {
   voiceSessionId?: string;
   /** Trusted call objective used only to route connected-app tools before the first voice model turn. */
   voiceRoutingHint?: string;
+  /** Trusted runtime fence for an explicit provider/tool-surface instruction. */
+  executionScope?: ExclusiveCapabilityScope;
   /** Tools in this list always create an approval request, even if normally low-risk. */
   toolRequireApproval?: string[];
   /** Persisted per-step routing result used to avoid repeating Jev on mission slices. */
@@ -2537,6 +2624,11 @@ async function executeAgent(
   const voiceTurn = options?.voiceTurn === true;
   const voicePreparationKey = voiceTurn ? `${userId}:${options?.voiceSessionId ?? durableRunId}` : undefined;
   const voiceRoutingText = userRequestText(userMessage);
+  // An explicit "Treg only"/"Monid only" instruction is a hard execution
+  // boundary. It is derived from the current request only; prior history can
+  // never broaden the current turn's provider scope.
+  const executionScope = options?.executionScope
+    ?? resolveExplicitCapabilityScope(voiceRoutingText);
   const sharedScope = channelContext?.scope === "shared";
   const ownerPrivateRun = options?.ownerPrivateRun === true && !sharedScope;
   // Start the small profile read before Composio session preparation. The same
@@ -2582,7 +2674,8 @@ async function executeAgent(
   // Shared volatile turns without exact grants stay disconnected from owner
   // apps. Authenticated owner-private calls and meetings use the same app
   // session as private chat, while speculative audio drafts remain tool-free.
-  const sessionObj = toolsDisabled || voiceFastLane || (voiceTurn && !ownerPrivateRun) ? undefined : (await getOrCreateComposioSession(userId, voiceProfileSessionPromise)).sessionObj;
+  const composioScope = !executionScope || executionScope.surface === "composio";
+  const sessionObj = toolsDisabled || !composioScope || voiceFastLane || (voiceTurn && !ownerPrivateRun) ? undefined : (await getOrCreateComposioSession(userId, voiceProfileSessionPromise)).sessionObj;
 
   let discoveredMeetingTools: any[] = [];
   if (options?.meetingAppAccess && sessionObj && (allow || ownerPrivateRun)) {
@@ -2666,7 +2759,7 @@ async function executeAgent(
       || (sharedMeetingRoomAccess && !toolName(tool).startsWith("COMPOSIO_") && Boolean(allow?.has(toolName(tool)))))
     .map(addAccountSelector).map((tool) => meetingComposioAccountAliases ? hideMeetingAccountSelector(tool) : tool);
   composioTools.push(...LOCAL_TOOLS);
-  const mcpDiscovery = (!toolsDisabled && !voiceFastLane && (!voiceTurn || Boolean(options?.meetingId && ownerPrivateRun)) && !sharedScope && (!options?.meetingId || ownerPrivateRun))
+  const mcpDiscovery = (!toolsDisabled && !executionScope && !voiceFastLane && (!voiceTurn || Boolean(options?.meetingId && ownerPrivateRun)) && !sharedScope && (!options?.meetingId || ownerPrivateRun))
     ? await mcpClient.discoverToolsForUser(userId, signal)
     : { tools: [], failures: [] };
   const mcpTools = mcpDiscovery.tools;
@@ -2674,6 +2767,7 @@ async function executeAgent(
   let availableTools = [...composioTools, ...mcpTools].filter((tool) => {
     const name = toolName(tool);
     if (sharedScope && isSharedChannelToolDenied(name)) return false;
+    if (executionScope && !toolBelongsToCapabilityScope(name, executionScope)) return false;
     return (!allow || allow.has(name) || ownerPrivateRun && voiceCapabilityNames.has(composioActionSlug(name))) && voiceModelAllowed(name) && !deny.has(name);
   });
   // A bounded voice preload may resolve an exact action through Composio's
@@ -2800,12 +2894,26 @@ async function executeAgent(
   logger.debug({ toolCount: composioTools.length, mcpToolCount: mcpTools.length, fullToolCount: fullComposioTools.length, discoveryOnly: fullComposioTools.length > 80 }, "Agent tools loaded");
 
   // Build message array for OpenRouter
+  const currentImagesForMediaAction = currentImageRuntime(userMessage).currentImages ?? [];
+  const currentRequestText = userRequestText(userMessage);
+  const recentMediaContext = history.slice(-8).some((message) => {
+    const content = typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "");
+    return /\b(?:image|images|photo|picture|screenshot|logo|banner|visual|attachment|upload|generated)\b/i.test(content);
+  });
+  const shouldLoadAssetDomain = !voiceTurn && !channelContext
+    && (currentImagesForMediaAction.length > 0
+      || /\b(?:image|images|photo|picture|screenshot|logo|banner|visual|attachment|upload|post|publish)\b/i.test(currentRequestText)
+      || recentMediaContext);
+  const requestedSessionDomains: Array<"profile" | "conversation" | "assets"> = ["profile", "conversation"];
+  if (shouldLoadAssetDomain) requestedSessionDomains.push("assets");
   const durable = options?.ephemeral && !ownerPrivateRun
     ? { summaries: [], imageAssets: [], history: [] as Message[], approvals: [] as Awaited<ReturnType<typeof getSession>>["approvals"] }
     // A phone turn already supplies its bounded call transcript. Avoid loading
     // unrelated conversation/assets here: it reduces turn latency and keeps
     // saved image metadata out of spoken context.
-    : await (voiceProfileSessionPromise ?? getSession(userId, false, { domains: voiceTurn ? ["profile"] : ["profile", "conversation", "assets"] }));
+    : await (voiceProfileSessionPromise ?? getSession(userId, false, {
+      domains: voiceTurn ? ["profile"] : channelContext ? ["profile"] : requestedSessionDomains,
+    }));
   const forcedApproval = options?.forceApprovedAction && approvedApprovalId
     ? await getApproval(userId, approvedApprovalId).then((approval) => approval?.status === "approved" && approval.expiresAt > Date.now() ? approval : undefined)
     : undefined;
@@ -2817,8 +2925,6 @@ async function executeAgent(
     }).join("\n").slice(-4_000)
     : "";
   const retrievedImageAssetIds = new Set<string>();
-  const currentImagesForMediaAction = currentImageRuntime(userMessage).currentImages ?? [];
-  const currentRequestText = userRequestText(userMessage);
   const imageRetryRequest = channelContext?.scope === "shared" || options?.meetingId
     ? undefined
     : findPendingImageRetryRequest(history, currentRequestText, currentImagesForMediaAction.length);
@@ -3056,11 +3162,34 @@ async function executeAgent(
   let composioRoutePromise: Promise<Awaited<ReturnType<typeof routeComposioForTurn>> | undefined>;
   let nativeToolRoutePromise: Promise<Awaited<ReturnType<typeof routeNativeToolsForTurn>>>;
 
+  if (executionScope) {
+    // Do not ask Jev to compare unrelated capability surfaces after the user
+    // has explicitly selected one. Route only inside the already filtered
+    // catalog; this prevents an advisory Composio/Treg/Monid answer from
+    // widening the run later.
+    turnActionDecision = { noActionNeeded: false, reason: `explicit_${executionScope.surface}_scope`, actionProbability: 1 };
+    actionRoutingLikely = true;
+    skillRoutePromise = Promise.resolve(undefined);
+    tregRoutePromise = Promise.resolve(undefined);
+    accountsPromise = Promise.resolve(undefined);
+    composioRoutePromise = Promise.resolve(undefined);
+    nativeToolRoutePromise = routeNativeToolsForTurn(availableTools, routingQuery, {
+      signal,
+      deadline: routingDeadline,
+      recentContext: routingRecentContext,
+      sessionId: durableRunId,
+      preserveAll: true,
+    }).then((route) => route.tools.length ? route : {
+      ...route,
+      tools: availableTools,
+      selected: availableTools.map((tool) => toolName(tool)),
+      fallbackReason: "explicit_scope_catalog_fallback",
+    });
   // The normal private text path uses one explicit Jev request for all
   // independent routing judgments. In the batch path, connected-account
   // metadata is prefetched in parallel so Composio's stage-one decision can
   // share that same Jev request; the result is discarded for ordinary turns.
-  if (batchRoutingEligible) {
+  } else if (batchRoutingEligible) {
     try {
       // Prefetch the connected-account snapshot alongside the skill catalogue.
       // The batch planner needs it to include Composio's stage-one decision in
@@ -3227,6 +3356,22 @@ async function executeAgent(
     composioRoutePromise,
     nativeToolRoutePromise,
   ]);
+  // Generic Composio gateways are transport mechanisms, not capability
+  // grants. Only exact actions selected by this turn's route, an explicit
+  // worker allowlist, or a persisted mission-step route may pass through
+  // them. This prevents a model from switching from Treg/native work to an
+  // unrelated provider action simply because the gateway schema is visible.
+  const grantedComposioActions = new Set<string>();
+  const addGrantedComposioAction = (value: unknown): void => {
+    const slug = typeof value === "string" ? value.trim().toUpperCase() : "";
+    if (isProviderActionSlug(slug)) grantedComposioActions.add(slug);
+  };
+  for (const value of allow ?? []) addGrantedComposioAction(value);
+  for (const tool of composioDecision?.directTools ?? []) addGrantedComposioAction(toolName(tool));
+  for (const action of composioDecision?.actions ?? []) addGrantedComposioAction(composioActionSlug(String(action.id ?? "")));
+  for (const tool of nativeToolRoute.tools) addGrantedComposioAction(toolName(tool));
+  for (const tool of meetingPreloadedTools) addGrantedComposioAction(toolName(tool));
+  for (const value of persistedMissionRouting?.composioActions ?? []) addGrantedComposioAction(composioActionSlug(value));
   if (missionRoutingKey && !persistedMissionRouting && !reusableMissionRouting) {
     missionRoutingCache.set(missionRoutingKey, { at: Date.now(), skillRoute, tregRoute, routedAccounts, composioDecision });
     while (missionRoutingCache.size > 128) missionRoutingCache.delete(missionRoutingCache.keys().next().value as string);
@@ -3384,6 +3529,7 @@ async function executeAgent(
   const triggerAutonomy = triggerAutonomyInstructions(channelContext?.triggerEventId);
   const shoppingPromptRelevant = /\b(?:shop|shopping|retailer|cart|checkout|order|purchase|buy|restock|delivery)\b/i.test(routingQuery);
   const meetingPromptRelevant = Boolean(options?.meetingId) || /\b(?:meeting|zoom|teams|webex|call|interview|participant|transcript)\b/i.test(routingQuery);
+  const currentTurnContract = "Current-turn execution boundary: treat the newest user request as the only active objective. Use earlier messages only to resolve an explicit reference such as 'it' or 'that' and to preserve confirmed facts. Do not resume, retry, or complete an older request merely because it appears in history or because an old tool result is visible. Every tool call must directly advance the newest request; if it does not, do not call it. Runtime route and approval fences are authoritative.";
   const staticSystemPrompt = composeSystemPrompt({
     customizablePrompt: noToolTurn
       ? compactConversationalCustomization(config.chuckSystemPrompt)
@@ -3404,7 +3550,7 @@ async function executeAgent(
   // block, not only the static system prompt. Memory, route cards, upgrade
   // notes, and prior assistant messages can all contain old implementation
   // vocabulary from before the provider-neutral boundary was introduced.
-  const dynamicSystemContext = sanitizeModelFacingText(`${temporalContext}${accountContext ? `\n\n${accountContext}` : ""}${composioRouteContext ? `\n\n${composioRouteContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\n${mediaRequest ? "Media skill preflight" : "Relevant project skill guidance"} (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}${imageRetryContext}`);
+  const dynamicSystemContext = sanitizeModelFacingText(`${currentTurnContract}\n\n${temporalContext}${accountContext ? `\n\n${accountContext}` : ""}${composioRouteContext ? `\n\n${composioRouteContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\n${mediaRequest ? "Media skill preflight" : "Relevant project skill guidance"} (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}${imageRetryContext}`);
   const promptHistory = (voiceTurn ? boundedVoiceHistory(history) : history).map((message) => ({
     ...message,
     // Preserve the user's exact wording while preventing prior assistant
@@ -3485,6 +3631,12 @@ async function executeAgent(
 
   const persistRun = async (status: AgentRunRecord["status"], eventType: string, output?: string, eventData?: Record<string, unknown>): Promise<void> => {
     if (options?.ephemeral || voiceTurn) return;
+    // Model-request/completion and round-start events are useful logs but do
+    // not change the resumable checkpoint. Persisting each of them caused a
+    // WATCH/GET/MULTI cycle on Redis for every model round. Tool boundaries,
+    // approvals, waits, failures, and terminal states still checkpoint
+    // durably, so a crash can replay only the current safe unit of work.
+    if (["run.round_started", "run.model_requested", "run.model_completed"].includes(eventType) && durableRunRecord) return;
     const record: AgentRunRecord = {
       ...(durableRunRecord ?? {
         id: durableRunId,
@@ -3835,6 +3987,9 @@ async function executeAgent(
         // supplied (an empty allowlist means no tools at all).
         const toolIsAllowed = modelAvailableTools.some((tool) => toolSchemaName(tool) === slug)
           && (!allow || allow.has(slug));
+        if (executionScope && !toolBelongsToCapabilityScope(slug, executionScope)) {
+          throw new Error(`Tool ${slug} is outside this run's ${capabilityScopeLabel(executionScope)} scope.`);
+        }
         if (!toolIsAllowed) {
           if (slug === "CHUCK_MISSION_START" && auditArgs && Object.hasOwn(auditArgs, "id")
             && modelAvailableTools.some((tool) => toolSchemaName(tool) === "CHUCK_MISSION_RESUME")) {
@@ -3891,7 +4046,11 @@ async function executeAgent(
           await enrichComposioToolPresentations(composio, composioToolPresentations, signal);
           activityPresentation = composioToolPresentations.get(slug);
         }
+        if (slug === "COMPOSIO_EXECUTE_TOOL") {
+          assertComposioActionIsGranted(args, grantedComposioActions, Boolean(imageRetryRequest || savedImageRetry || currentImagesForMediaAction.length), executionScope);
+        }
         if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") {
+          assertComposioBatchActionsAreScoped(args, availableTools, fullComposioTools, composioToolPresentations, allow, deny, grantedComposioActions, Boolean(imageRetryRequest || savedImageRetry || currentImagesForMediaAction.length), executionScope);
           await enrichComposioToolPresentations(composio, composioToolPresentations, signal);
           batchActivityActions = buildComposioBatchActions(args, call.id, composioToolPresentations);
           if (batchActivityActions.length) {
@@ -4435,11 +4594,11 @@ async function executeAgent(
             };
           }
         }
-        if (slug === "COMPOSIO_SEARCH_TOOLS") {
+        if (slug === "COMPOSIO_SEARCH_TOOLS" || slug === "COMPOSIO_GET_TOOL_SCHEMAS") {
           for (const [toolSlug, presentation] of collectComposioToolPresentations(execResult)) {
             composioToolPresentations.set(toolSlug, { ...composioToolPresentations.get(toolSlug), ...presentation });
           }
-          await enrichComposioToolPresentations(composio, composioToolPresentations, signal);
+          if (slug === "COMPOSIO_SEARCH_TOOLS") await enrichComposioToolPresentations(composio, composioToolPresentations, signal);
         }
         if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL" && batchActivityActions.length) {
           batchActivityActions = settleComposioBatchActions(batchActivityActions, execResult);
