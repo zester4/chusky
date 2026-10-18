@@ -25,6 +25,18 @@ test("phone outcome prompt treats bounded turns as conversation data", () => {
   assert.ok(prompt.length < 26_000);
 });
 
+test("phone outcome prompt preserves reported facts without inventing routine follow-up", () => {
+  const prompt = buildPhoneCallOutcomePrompt({
+    phoneNumber: "+233550472834",
+    purpose: "Confirm whether the patient took the medication around 10:45 AM",
+    turns: [{ transcript: "Yes, I took it at ten fifty AM.", response: "Thank you, I have noted that." }],
+  });
+  assert.match(prompt, /reported facts/i);
+  assert.match(prompt, /not evidence that the caller lied/i);
+  assert.match(prompt, /phone-call record itself is the durable record/i);
+  assert.match(prompt, /Do not invent a recurring follow-up/i);
+});
+
 test("phone outcome prompt requires a provider receipt before claiming completion", () => {
   const prompt = buildPhoneCallOutcomePrompt({
     phoneNumber: "+15550100000",

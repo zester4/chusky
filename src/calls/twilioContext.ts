@@ -42,17 +42,19 @@ export function twilioVoiceOpening(call: PhoneCallRecord): string {
   const identity = spoken(profile?.identity || "Chusky", 180);
   const organization = spoken(profile?.organization, 180);
   const contactName = spoken(profile?.contactName, 180);
+  const explicitAi = profile?.disclosure === "explicit_ai";
+  const role = explicitAi ? "an AI assistant" : "an assistant";
   if (call.direction === "outbound") {
-    const representation = organization
-      ? `on behalf of ${organization}`
+    const introduction = organization
+      ? `this is ${identity}, ${role} from ${organization}`
       : call.callProfile === "business"
-        ? "on behalf of the business I represent"
-        : "on behalf of the person who asked me to reach you";
-    return `Hello, this is ${identity}, an AI assistant calling ${representation}. ${contactName ? `May I speak with ${contactName}?` : "May I confirm I’m speaking with the intended person?"}`;
+        ? `this is ${identity}, ${role} for the business I represent`
+        : `this is ${identity}, ${role} calling on behalf of the person who asked me to reach you`;
+    return `Hello, ${introduction}. ${contactName ? `May I speak with ${contactName}?` : "May I confirm I’m speaking with the intended person?"}`;
   }
   return organization
-    ? `Hello, this is ${identity}, an AI assistant with ${organization}. How may I help you today?`
-    : `Hello, this is ${identity}, an AI assistant. How may I help you today?`;
+    ? `Hello, this is ${identity}, ${role} from ${organization}. How may I help you today?`
+    : `Hello, this is ${identity}, ${role}. How may I help you today?`;
 }
 
 /** Return approved, bounded vocabulary for Flux recognition on this call. */

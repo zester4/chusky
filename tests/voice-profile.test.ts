@@ -18,7 +18,8 @@ test("voice profiles keep spoken output while private owner calls use full conte
   assert.match(prompt, /Good voice example/i);
   assert.match(prompt, /Bad voice example/i);
   assert.match(prompt, /OUTBOUND OPENING/i);
-  assert.match(prompt, /disclose that you are an AI voice assistant/i);
+  assert.match(prompt, /configured disclosure policy/i);
+  assert.match(prompt, /Never claim to be human, a nurse, doctor, lawyer, accountant/i);
   assert.match(prompt, /Ask one question at a time/i);
   assert.match(prompt, /OUTBOUND FLOW/i);
   assert.match(prompt, /Amina, speaking on behalf of Chusky Labs/);
@@ -36,9 +37,18 @@ test("profile normalization strips control characters, bounds facts, and ignores
     identity: "Chusky\u0000", facts: ["One", "One", 42, "Two"], capabilities: ["memory_lookup", "delete_everything"],
   });
   assert.equal(profile.identity, "Chusky");
+  assert.equal(profile.disclosure, "assistant");
   assert.equal(profile.mode, "general");
   assert.deepEqual(profile.facts, ["One", "Two"]);
   assert.deepEqual(profile.capabilities, ["memory_lookup"]);
+});
+
+test("explicit AI disclosure is opt-in and remains a one-time introduction", () => {
+  const profile = normalizeVoiceCallProfile({ identity: "Maya", organization: "MedVault", disclosure: "explicit_ai" });
+  const prompt = voiceProfileInstructions(profile, "outbound", "Check in with the patient");
+  assert.equal(profile.disclosure, "explicit_ai");
+  assert.match(prompt, /briefly identify yourself as an AI assistant once/i);
+  assert.match(prompt, /Do not repeat that label/i);
 });
 
 test("Twilio persists the approved normalized profile with the call", async () => {
@@ -52,7 +62,7 @@ test("Twilio persists the approved normalized profile with the call", async () =
     createCall: async () => ({ sid: "CAprofile" }),
   });
   assert.deepEqual((await getPhoneCall(502, call.id))?.voiceProfile, {
-    identity: "Maya", mode: "general", tone: "warm", facts: [], guardrails: [], capabilities: ["scratchpad_lookup"],
+    identity: "Maya", mode: "general", tone: "warm", facts: [], guardrails: [], capabilities: ["scratchpad_lookup"], disclosure: "assistant",
   });
 });
 

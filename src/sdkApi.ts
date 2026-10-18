@@ -771,7 +771,7 @@ function phoneCallingProvider(): "bland" | "twilio" | undefined {
   return isTwilioVoiceConfigured() ? "twilio" : undefined;
 }
 
-function callView(call: { id: string; provider?: string; direction?: string; phoneNumber: string; purpose: string; status: string; runtimeState?: string; error?: string; summary?: string; outcome?: unknown; outcomeStatus?: string; transcript?: unknown; timeline?: unknown; qa?: unknown; createdAt: number; updatedAt: number }) {
+function callView(call: { id: string; provider?: string; direction?: string; phoneNumber: string; purpose: string; status: string; runtimeState?: string; error?: string; summary?: string; outcome?: unknown; outcomeStatus?: string; transcript?: unknown; timeline?: unknown; qa?: unknown; followUpTaskIds?: string[]; followUpStatus?: string; followUpErrorCode?: string; createdAt: number; updatedAt: number }) {
   const digits = call.phoneNumber.replace(/\D/g, "");
   const phoneNumber = digits.length > 4 ? `${call.phoneNumber.slice(0, Math.max(2, call.phoneNumber.length - 4)).replace(/\d/g, "•")}${digits.slice(-4)}` : "••••";
   const outcome = normalizePhoneCallOutcome(call.outcome);
@@ -796,7 +796,7 @@ function callView(call: { id: string; provider?: string; direction?: string; pho
     })()
     : undefined;
   const qa = call.qa && typeof call.qa === "object" && !Array.isArray(call.qa) ? call.qa : undefined;
-  return { id: call.id, provider: call.provider ?? "twilio", direction: call.direction ?? "outbound", phoneNumber, purpose: call.purpose, status: call.status, ...(call.runtimeState ? { runtimeState: call.runtimeState } : {}), summary: call.summary, ...(outcome ? { outcome } : {}), ...(call.outcomeStatus ? { outcomeStatus: call.outcomeStatus } : {}), ...(transcript ? { transcript } : {}), ...(timeline.length ? { timeline } : {}), ...(qa ? { qa } : {}), error: call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
+  return { id: call.id, provider: call.provider ?? "twilio", direction: call.direction ?? "outbound", phoneNumber, purpose: call.purpose, status: call.status, ...(call.runtimeState ? { runtimeState: call.runtimeState } : {}), summary: call.summary, ...(outcome ? { outcome } : {}), ...(call.outcomeStatus ? { outcomeStatus: call.outcomeStatus } : {}), ...(transcript ? { transcript } : {}), ...(timeline.length ? { timeline } : {}), ...(qa ? { qa } : {}), ...(Array.isArray(call.followUpTaskIds) && call.followUpTaskIds.length ? { followUpTaskIds: call.followUpTaskIds.slice(0, 10) } : {}), ...(call.followUpStatus ? { followUpStatus: call.followUpStatus } : {}), ...(call.followUpErrorCode ? { followUpErrorCode: call.followUpErrorCode } : {}), error: call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
 }
 
 function meetingRoomView(room: MeetingRoomRecord) {

@@ -27,7 +27,7 @@ test("Twilio opening reflects outbound caller role and objective", () => {
     direction: "outbound",
     voiceProfile: { identity: "Amina", organization: "Chusky Labs", mode: "scheduling", tone: "professional", facts: [], guardrails: [], capabilities: [] },
   });
-  assert.equal(opening, "Hello, this is Amina, an AI assistant calling on behalf of Chusky Labs. May I confirm I’m speaking with the intended person?");
+  assert.equal(opening, "Hello, this is Amina, an assistant from Chusky Labs. May I confirm I’m speaking with the intended person?");
   assert.doesNotMatch(opening, /How may I help/i);
 });
 
@@ -37,7 +37,7 @@ test("outbound opening names the supplied contact without inventing identity", (
     direction: "outbound",
     voiceProfile: { identity: "Amina", organization: "Chusky Labs", contactName: "Collins", mode: "support", tone: "professional", facts: [], guardrails: [], capabilities: [] },
   });
-  assert.equal(opening, "Hello, this is Amina, an AI assistant calling on behalf of Chusky Labs. May I speak with Collins?");
+  assert.equal(opening, "Hello, this is Amina, an assistant from Chusky Labs. May I speak with Collins?");
 });
 
 test("outbound opening never speaks private follow-up instructions", () => {
@@ -56,14 +56,23 @@ test("voice instructions explicitly keep the outbound objective private", () => 
 
 test("business outbound opening remains business-oriented without an organization name", () => {
   const opening = twilioVoiceOpening({ ...base, direction: "outbound", callProfile: "business", purpose: "Follow up on your service request" });
-  assert.match(opening, /calling on behalf of the business I represent/i);
+  assert.match(opening, /assistant for the business I represent/i);
   assert.match(opening, /confirm I’m speaking with the intended person/i);
   assert.doesNotMatch(opening, /service request/i);
 });
 
 test("Twilio opening reflects inbound support role", () => {
   const opening = twilioVoiceOpening({ ...base, direction: "inbound", purpose: "Inbound phone call" });
-  assert.equal(opening, "Hello, this is Chusky, an AI assistant. How may I help you today?");
+  assert.equal(opening, "Hello, this is Chusky, an assistant. How may I help you today?");
+});
+
+test("explicit AI disclosure is opt-in for a caller-facing opening", () => {
+  const opening = twilioVoiceOpening({
+    ...base,
+    direction: "outbound",
+    voiceProfile: { identity: "Maya", organization: "MedVault", disclosure: "explicit_ai", mode: "support", tone: "warm", facts: [], guardrails: [], capabilities: [] },
+  });
+  assert.equal(opening, "Hello, this is Maya, an AI assistant from MedVault. May I confirm I’m speaking with the intended person?");
 });
 
 test("Twilio transcript identifies the external speaker separately from owner history", () => {
