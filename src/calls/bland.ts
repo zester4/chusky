@@ -1,12 +1,13 @@
 import { config } from "../config.js";
-import { addPhoneCall, getSession, updatePhoneCall, type PhoneCallRecord } from "../store.js";
+import { claimPhoneCallStart, getSession, persistPhoneCallProviderResult, updatePhoneCall, type PhoneCallRecord } from "../store.js";
 import { createBlandCallToken, isValidBlandToolSecret } from "./blandSecurity.js";
 import { resolveVoiceContinuity, voiceContinuityInstructions } from "./continuity.js";
+import { normalizePhoneCallRequestKey } from "./requestKey.js";
 import { normalizeVoiceCallProfile, voiceCallDialBlockReason, voiceProfileInstructions, type CallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
-export interface BlandCallInput { phoneNumber: string; purpose: string; profile?: VoiceCallProfileInput; callProfile?: CallProfile; continuityFromCallId?: string; }
+export interface BlandCallInput { phoneNumber: string; purpose: string; profile?: VoiceCallProfileInput; callProfile?: CallProfile; continuityFromCallId?: string; requestKey?: string; }
 export interface BlandCallDependencies {
   enabled: boolean;
   apiKey: string;
@@ -68,10 +69,13 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
   const dialBlockReason = voiceCallDialBlockReason(profile);
   if (dialBlockReason) throw new Error(dialBlockReason);
   const continuity = await resolveVoiceContinuity(userId, input.continuityFromCallId);
-  const call: PhoneCallRecord = { id: `blc_${crypto.randomUUID()}`, userId, provider: "bland", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, ...(continuity ? { continuity } : {}), status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
-  await addPhoneCall(userId, call);
+  const requestKey = normalizePhoneCallRequestKey(input.requestKey);
+  const call: PhoneCallRecord = { id: `blc_${crypto.randomUUID()}`, userId, ...(requestKey ? { requestKey } : {}), provider: "bland", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, ...(continuity ? { continuity } : {}), status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
+  const claim = await claimPhoneCallStart(userId, call);
+  if (!claim.created) return claim.call;
+  const claimedCall = claim.call;
   try {
-    const callbackToken = createBlandCallToken({ userId, callId: call.id }, options.webhookSecret);
+    const callbackToken = createBlandCallToken({ userId, callId: claimedCall.id }, options.webhookSecret);
     const callbackUrl = new URL(options.webhookUrl);
     callbackUrl.pathname = `${callbackUrl.pathname.replace(/\/+$/, "")}/${callbackToken}`;
     const response = await (options.fetchImpl ?? fetch)("https://api.bland.ai/v1/calls", {
@@ -84,16 +88,19 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
         voice: selectedVoice,
         webhook: callbackUrl.toString(),
         webhook_events: ["queue", "call", "latency", "tool"],
-        metadata: { chusky_call_id: call.id, chusky_user_id: String(userId) },
+        metadata: { chusky_call_id: claimedCall.id, chusky_user_id: String(userId) },
         tools: [options.consultToolId],
       }),
     });
     const payload = await response.json().catch(() => ({})) as { call_id?: string; message?: string; error?: string };
     if (!response.ok || !payload.call_id) throw new Error(`Bland call failed: ${String(payload.message ?? payload.error ?? response.statusText).slice(0, 300)}`);
-    return (await updatePhoneCall(userId, call.id, { status: "bridging", providerCallId: payload.call_id.slice(0, 100) }))!;
+    const providerCallId = payload.call_id.slice(0, 100);
+    const persisted = await persistPhoneCallProviderResult(userId, claimedCall, { status: "bridging", providerCallId });
+    if (!persisted) throw new Error("Bland accepted the call, but Chusky could not confirm its durable call record. Do not retry this request.");
+    return persisted;
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 500) : "Bland call setup failed";
-    await updatePhoneCall(userId, call.id, { status: "failed", error: message });
+    await updatePhoneCall(userId, claimedCall.id, { status: "failed", error: message });
     throw new Error(`Bland call could not be started: ${message}`);
   }
 }

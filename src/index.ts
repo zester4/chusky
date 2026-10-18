@@ -62,7 +62,7 @@ import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import { createSignedWebBotAuthDirectory, WEB_BOT_AUTH_DIRECTORY_CONTENT_TYPE, WEB_BOT_AUTH_DIRECTORY_PATH, webBotAuthConfigurationIssue, webBotAuthConfigurationStatus, webBotAuthSigningEnabled } from "./webBotAuth.js";
 import twilio from "twilio";
 import { inboundTwilioOwnerForNumber, parseTwilioCallerAllowlist, registerTwilioInboundCall } from "./calls/twilioInbound.js";
-import { twilioVoicemailTwiML } from "./calls/twilio.js";
+import { twilioUnavailableTwiML, twilioVoicemailTwiML } from "./calls/twilio.js";
 import { answerBlandQuestion } from "./calls/blandBrain.js";
 import { processBlandConsult, processBlandWebhook } from "./calls/blandWebhooks.js";
 import { isBlandVoiceConfigured } from "./calls/bland.js";
@@ -871,17 +871,33 @@ async function main(): Promise<void> {
       return `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${xmlEscape(streamUrl)}" statusCallback="${xmlEscape(statusCallback)}" statusCallbackMethod="POST"><Parameter name="callId" value="${xmlEscape(callId)}"/><Parameter name="userId" value="${userId}"/><Parameter name="ticket" value="${ticket}"/>${voiceParameter}</Stream></Connect></Response>`;
     };
 
+    // Provider callbacks can arrive on a different replica immediately after
+    // the dispatch write. A short bounded read retry handles that propagation
+    // window without allowing Twilio to interpret a transient miss as an app
+    // failure and retry the callback.
+    const readTwilioCallForCallback = async (userId: number, callId: string) => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const call = await getPhoneCall(userId, callId);
+        if (call) return call;
+        if (attempt < 2) await new Promise<void>((resolve) => setTimeout(resolve, 75 * (attempt + 1)));
+      }
+      logger.warn({ userId, callId }, "Twilio callback referenced a missing call record");
+      return undefined;
+    };
+
     // Twilio signs the initial TwiML request. Do not derive the signed URL
     // from Host/X-Forwarded headers: the configured public URL is authoritative.
     app.post("/twilio/twiml", async (c) => {
-      if (!config.twilioVoiceEnabled || !config.twilioAuthToken || !config.twilioMediaStreamUrl || !config.twilioMediaBridgeSecret) return c.text("Not found", 404);
+      if (!config.twilioVoiceEnabled || !config.twilioAuthToken || !config.twilioMediaStreamUrl || !config.twilioMediaBridgeSecret) {
+        return c.body(twilioUnavailableTwiML(), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
+      }
       const callId = String(c.req.query("callId") ?? "").trim();
       const userId = Number(c.req.query("userId"));
       const form = await c.req.parseBody();
       if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !trustedTwilioRequest(c.req.header("X-Twilio-Signature"), twilioCallbackUrl("/twilio/twiml", callId, userId), form)) return c.text("Forbidden", 403);
       const callSid = String(form.CallSid ?? "").trim();
-      const call = await getPhoneCall(userId, callId);
-      if (!call || call.provider !== "twilio") return c.text("Not found", 404);
+      const call = await readTwilioCallForCallback(userId, callId);
+      if (!call || call.provider !== "twilio") return c.body(twilioUnavailableTwiML(), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
       const answeredBy = String(form.AnsweredBy ?? "").trim().toLowerCase();
       if ((call.voiceProfile?.controls?.allowVoicemail ?? config.twilioVoicemailEnabled) && answeredBy.startsWith("machine_")) {
         await appendPhoneCallEvent(userId, callId, { type: "voicemail_detected", summary: "The recipient's voicemail system answered." });
@@ -905,7 +921,7 @@ async function main(): Promise<void> {
       const callId = String(c.req.query("callId") ?? "").trim();
       const userId = Number(c.req.query("userId"));
       if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0) return c.json({ ok: false, error: "invalid Twilio call context" }, 400);
-      const call = await getPhoneCall(userId, callId);
+      const call = await readTwilioCallForCallback(userId, callId);
       if (!call || call.provider !== "twilio" || call.status === "failed") return c.json({ ok: false, error: "unknown or inactive call" }, 404);
       return c.json({
         ok: true,
@@ -944,13 +960,13 @@ async function main(): Promise<void> {
     });
 
     app.post("/twilio/status", async (c) => {
-      if (!config.twilioVoiceEnabled || !config.twilioAuthToken) return c.text("Not found", 404);
+      if (!config.twilioVoiceEnabled || !config.twilioAuthToken) return c.body(null, 204);
       const callId = String(c.req.query("callId") ?? "").trim();
       const userId = Number(c.req.query("userId"));
       const form = await c.req.parseBody();
       if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !trustedTwilioRequest(c.req.header("X-Twilio-Signature"), twilioCallbackUrl("/twilio/status", callId, userId), form)) return c.text("Forbidden", 403);
-      const call = await getPhoneCall(userId, callId);
-      if (!call || call.provider !== "twilio") return c.text("Not found", 404);
+      const call = await readTwilioCallForCallback(userId, callId);
+      if (!call || call.provider !== "twilio") return c.body(null, 204);
       const providerStatus = String(form.CallStatus ?? "").toLowerCase();
       if (providerStatus === "in-progress" || providerStatus === "answered") await appendPhoneCallEvent(userId, callId, { type: "call_answered", summary: "The call was answered." });
       const status = ["completed", "canceled"].includes(providerStatus) ? "ended" : ["busy", "failed", "no-answer"].includes(providerStatus) ? "failed" : undefined;
@@ -962,13 +978,13 @@ async function main(): Promise<void> {
     });
 
     app.post("/twilio/stream-status", async (c) => {
-      if (!config.twilioVoiceEnabled || !config.twilioAuthToken) return c.text("Not found", 404);
+      if (!config.twilioVoiceEnabled || !config.twilioAuthToken) return c.body(null, 204);
       const callId = String(c.req.query("callId") ?? "").trim();
       const userId = Number(c.req.query("userId"));
       const form = await c.req.parseBody();
       if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !trustedTwilioRequest(c.req.header("X-Twilio-Signature"), twilioCallbackUrl("/twilio/stream-status", callId, userId), form)) return c.text("Forbidden", 403);
-      const call = await getPhoneCall(userId, callId);
-      if (!call || call.provider !== "twilio") return c.text("Not found", 404);
+      const call = await readTwilioCallForCallback(userId, callId);
+      if (!call || call.provider !== "twilio") return c.body(null, 204);
       const event = String(form.StreamEvent ?? "").toLowerCase();
       // A media stream can fail while the provider call is still alive. The
       // bridge owns bounded Deepgram reconnects, so do not turn a recoverable

@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import twilio from "twilio";
 import { config } from "../config.js";
-import { addPhoneCall, appendPhoneCallEvent, getPhoneCall, updatePhoneCall, type PhoneCallRecord } from "../store.js";
+import { appendPhoneCallEvent, claimPhoneCallStart, getPhoneCall, persistPhoneCallProviderResult, updatePhoneCall, type PhoneCallRecord } from "../store.js";
 import { resolveVoiceContinuity } from "./continuity.js";
+import { normalizePhoneCallRequestKey } from "./requestKey.js";
 import { normalizeVoiceCallProfile, voiceCallDialBlockReason, type CallProfile, type VoiceCallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
 
-export interface TwilioCallInput { phoneNumber: string; purpose: string; profile?: VoiceCallProfileInput; callProfile?: CallProfile; continuityFromCallId?: string; }
+export interface TwilioCallInput { phoneNumber: string; purpose: string; profile?: VoiceCallProfileInput; callProfile?: CallProfile; continuityFromCallId?: string; requestKey?: string; }
 export interface TwilioCallDependencies {
   enabled: boolean; accountSid: string; authToken: string; callerId: string; webhookBaseUrl: string; mediaStreamUrl: string;
   /** Required for outbound calls because the public TwiML route signs the bridge ticket with it. */
@@ -48,6 +49,11 @@ export function twilioControlTwiML(input: Extract<TwilioCallControlInput, { acti
 export function twilioVoicemailTwiML(message: string): string {
   const text = message.replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 500);
   if (!text) throw new Error("Voicemail message must not be empty");
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say>${xmlEscape(text)}</Say><Hangup/></Response>`;
+}
+
+export function twilioUnavailableTwiML(message = "Sorry, this call could not be connected."): string {
+  const text = message.replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 240) || "Sorry, this call could not be connected.";
   return `<?xml version="1.0" encoding="UTF-8"?><Response><Say>${xmlEscape(text)}</Say><Hangup/></Response>`;
 }
 
@@ -129,12 +135,16 @@ export async function startTwilioCallForUser(userId: number, input: TwilioCallIn
   const continuity = await resolveVoiceContinuity(userId, input.continuityFromCallId);
   const dialBlockReason = voiceCallDialBlockReason(profile);
   if (dialBlockReason) throw new Error(dialBlockReason);
-  const call: PhoneCallRecord = { id: `twc_${randomUUID()}`, userId, provider: "twilio", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, ...(continuity ? { continuity } : {}), status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
-  await addPhoneCall(userId, call);
   const base = httpsUrl(options.webhookBaseUrl, "TWILIO_WEBHOOK_BASE_URL");
-  const query = `callId=${encodeURIComponent(call.id)}&userId=${encodeURIComponent(String(userId))}`;
+  const requestKey = normalizePhoneCallRequestKey(input.requestKey);
+  const call: PhoneCallRecord = { id: `twc_${randomUUID()}`, userId, ...(requestKey ? { requestKey } : {}), provider: "twilio", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, ...(continuity ? { continuity } : {}), status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
+  const claim = await claimPhoneCallStart(userId, call);
+  if (!claim.created) return claim.call;
+  const claimedCall = claim.call;
+  const query = `callId=${encodeURIComponent(claimedCall.id)}&userId=${encodeURIComponent(String(userId))}`;
   const url = `${base}/twilio/twiml?${query}`;
   const statusCallback = `${base}/twilio/status?${query}`;
+  let providerCallId: string | undefined;
   try {
     const create = options.createCall ?? (async (request) => {
       const result = await twilio(options.accountSid, options.authToken).calls.create({
@@ -146,10 +156,14 @@ export async function startTwilioCallForUser(userId: number, input: TwilioCallIn
       return { sid: result.sid };
     });
     const provider = await create({ to: phoneNumber, from: options.callerId, url, statusCallback, ...(options.machineDetection ? { machineDetection: options.machineDetection } : {}) });
-    return (await updatePhoneCall(userId, call.id, { status: "bridging", providerCallId: String(provider.sid).slice(0, 100) }))!;
+    providerCallId = String(provider?.sid ?? "").trim().slice(0, 100);
+    if (!providerCallId) throw new Error("Twilio returned no call receipt");
+    const persisted = await persistPhoneCallProviderResult(userId, claimedCall, { status: "bridging", providerCallId });
+    if (!persisted) throw new Error("Twilio accepted the call, but Chusky could not confirm its durable call record. Do not retry this request.");
+    return persisted;
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 500) : "Twilio call setup failed";
-    await updatePhoneCall(userId, call.id, { status: "failed", error: message });
+    await updatePhoneCall(userId, claimedCall.id, { status: "failed", error: message });
     throw new Error(`Phone call could not be started: ${message}`);
   }
 }

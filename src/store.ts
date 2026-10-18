@@ -486,6 +486,8 @@ export interface VideoJobRecord {
 export interface PhoneCallRecord {
   id: string;
   userId: number;
+  /** Stable server-generated intent key used to prevent one logical request from dialing twice. */
+  requestKey?: string;
   /** Explicit provider keeps shared safe call storage transport-aware. */
   provider?: "legacy" | "twilio" | "bland";
   direction?: "inbound" | "outbound";
@@ -6604,6 +6606,7 @@ export async function getSession(uid: number, includeSdkTables = false, options?
     const status = ["starting", "bridging", "active", "ended", "failed"].includes(String(item.status)) ? item.status as PhoneCallRecord["status"] : "failed";
     return [{
       id: item.id.slice(0, 128), userId: uid,
+      ...(typeof item.requestKey === "string" && /^pc_[a-f0-9]{64}$/.test(item.requestKey) ? { requestKey: item.requestKey } : {}),
       provider: item.provider === "twilio" || item.provider === "bland" ? item.provider : "legacy",
       direction: item.direction === "inbound" ? "inbound" : "outbound",
       ...(item.callProfile === "business" || item.callProfile === "personal" ? { callProfile: item.callProfile } : {}),
@@ -7336,16 +7339,31 @@ function publishPhoneCallNotification(call: PhoneCallRecord): void {
   publishWebNotification({ userId: call.userId, eventId: `phone-call:${call.id}:${call.updatedAt}:${randomUUID()}`, kind: "call", callId: call.id });
 }
 
-export async function addPhoneCall(uid: number, record: PhoneCallRecord): Promise<PhoneCallRecord> {
+export interface PhoneCallStartClaim {
+  call: PhoneCallRecord;
+  created: boolean;
+}
+
+/**
+ * Atomically reserve an outbound call intent before contacting a provider.
+ * Model/tool retries may have different tool-call IDs, so the request key is
+ * the durable boundary that makes the provider side effect single-shot.
+ */
+export async function claimPhoneCallStart(uid: number, record: PhoneCallRecord): Promise<PhoneCallStartClaim> {
   const initial = record.timeline?.length ? record : { ...record, timeline: [createVoiceCallEvent({ type: "call_started", summary: `${record.direction === "inbound" ? "Inbound" : "Outbound"} call created.` })] };
-  const added = await mutateSession(uid, (session) => {
-    const existing = (session.phoneCalls ?? []).find((call) => call.id === initial.id && call.userId === uid);
-    if (existing) return existing;
+  const claimed = await mutateSession(uid, (session): PhoneCallStartClaim => {
+    const existing = (session.phoneCalls ?? []).find((call) =>
+      call.userId === uid && (call.id === initial.id || (initial.requestKey && call.requestKey === initial.requestKey)));
+    if (existing) return { call: existing, created: false };
     session.phoneCalls = [initial, ...(session.phoneCalls ?? [])].slice(0, 50);
-    return initial;
+    return { call: initial, created: true };
   });
-  publishPhoneCallNotification(added);
-  return added;
+  if (claimed.created) publishPhoneCallNotification(claimed.call);
+  return claimed;
+}
+
+export async function addPhoneCall(uid: number, record: PhoneCallRecord): Promise<PhoneCallRecord> {
+  return (await claimPhoneCallStart(uid, record)).call;
 }
 
 type PhoneCallPatch = Partial<Pick<PhoneCallRecord, "status" | "runtimeState" | "bridgeSessionId" | "lastCommittedTurnId" | "continuity" | "providerCallId" | "phoneNumber" | "error" | "summary" | "callLengthSeconds" | "postCallProcessedAt" | "outcome" | "outcomeStatus" | "outcomeErrorCode" | "timeline" | "qa" | "followUpTaskIds" | "followUpStatus" | "followUpErrorCode">>;
@@ -7906,6 +7924,25 @@ export async function updatePhoneCall(uid: number, id: string, patch: PhoneCallP
   });
   if (updated) publishPhoneCallNotification(updated);
   return updated;
+}
+
+/**
+ * Persist the provider receipt after dialing. If a concurrent session write
+ * caused the first update to miss the record, reinsert/reconcile the exact
+ * call instead of returning an empty result that invites a second dial.
+ */
+export async function persistPhoneCallProviderResult(
+  uid: number,
+  call: PhoneCallRecord,
+  patch: Pick<PhoneCallRecord, "status" | "providerCallId">,
+): Promise<PhoneCallRecord | undefined> {
+  let updated = await updatePhoneCall(uid, call.id, patch);
+  if (updated) return updated;
+
+  logger.warn({ userId: uid, callId: call.id, provider: call.provider }, "Phone call receipt update missed its durable record; reconciling");
+  await addPhoneCall(uid, { ...call, ...patch, updatedAt: Date.now() });
+  updated = await updatePhoneCall(uid, call.id, patch);
+  return updated ?? await getPhoneCall(uid, call.id);
 }
 
 /** Append one bounded lifecycle fact atomically, without exposing provider payloads. */

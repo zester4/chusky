@@ -35,6 +35,24 @@ test("Twilio call uses signed-callback URLs and retains no credentials", async (
   assert.equal(JSON.stringify(stored).includes("AC123"), false);
 });
 
+test("Twilio retries claim the existing logical call instead of dialing twice", async () => {
+  let providerCalls = 0;
+  const requestKey = `pc_${"a".repeat(64)}`;
+  const createCall = async () => {
+    providerCalls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return { sid: "CA_IDEMPOTENT" };
+  };
+  const [first, second] = await Promise.all([
+    startTwilioCallForUser(69, { phoneNumber: "+15550009", purpose: "Confirm medication timing", requestKey }, { ...options, createCall }),
+    startTwilioCallForUser(69, { phoneNumber: "+15550009", purpose: "Confirm medication timing", requestKey }, { ...options, createCall }),
+  ]);
+  assert.equal(providerCalls, 1);
+  assert.equal(first.id, second.id);
+  assert.equal(first.providerCallId, "CA_IDEMPOTENT");
+  assert.equal((await listPhoneCalls(69)).length, 1);
+});
+
 test("Twilio refuses provider work before required config is present", async () => {
   let called = false;
   await assert.rejects(() => startTwilioCallForUser(62, { phoneNumber: "+15550001", purpose: "Test" }, {
