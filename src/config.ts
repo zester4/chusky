@@ -357,6 +357,16 @@ export const config = {
   photonMaxPendingEvents: boundedInt("PHOTON_MAX_PENDING_EVENTS", 128, 8, 512),
   photonProviders: csvOneOf("PHOTON_PROVIDERS", "imessage,whatsapp,telegram", ["imessage", "whatsapp", "telegram", "sms", "email"] as const),
   photonDefaultScope: oneOf("PHOTON_DEFAULT_SCOPE", "shared", ["private", "shared"] as const),
+  // LiveKit is an opt-in realtime voice transport. The worker lives in the
+  // separate livekit/ package; this secret authenticates its brain requests.
+  // Twilio and Bland remain independent transports.
+  livekitEnabled: optional("LIVEKIT_ENABLED", "false") === "true",
+  livekitBrainSecret: optional("LIVEKIT_BRAIN_SECRET", ""),
+  // Optional LiveKit Agent Builder bridge. This is a separate bearer secret;
+  // Builder cannot calculate the worker's per-request HMAC signature.
+  livekitBuilderSecret: optional("LIVEKIT_BUILDER_SECRET", ""),
+  livekitAgentName: optional("LIVEKIT_AGENT_NAME", "chusky-voice"),
+  livekitDeployment: optional("LIVEKIT_DEPLOYMENT", "production"),
   slackEnabled: optional("SLACK_ENABLED", "false") === "true",
   slackSigningSecret: optional("SLACK_SIGNING_SECRET", ""),
   slackBotToken: optional("SLACK_BOT_TOKEN", ""),

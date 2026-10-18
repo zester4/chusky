@@ -65,6 +65,7 @@ import { inboundTwilioOwnerForNumber, parseTwilioCallerAllowlist, registerTwilio
 import { twilioVoicemailTwiML } from "./calls/twilio.js";
 import { answerBlandQuestion } from "./calls/blandBrain.js";
 import { processBlandConsult, processBlandWebhook } from "./calls/blandWebhooks.js";
+import { answerLiveKitQuestion, processLiveKitBuilderConsult, processLiveKitConsult } from "./calls/livekitBridge.js";
 import { isBlandVoiceConfigured } from "./calls/bland.js";
 import { isBlandInboundConfigured, parseBlandInboundAllowedCallers, parseBlandInboundRoutes, resolveBlandInboundRoute } from "./calls/blandInbound.js";
 import { listBlandCuratedVoices } from "./calls/blandVoices.js";
@@ -1123,6 +1124,58 @@ async function main(): Promise<void> {
         return new Response(JSON.stringify(result.body), { status: result.status, headers: { "Content-Type": "application/json" } });
       } catch (error) {
         logger.warn({ err: error }, "Bland live Chusky consultation failed");
+        return c.json({ ok: false, error: "Chusky could not answer right now" }, 503);
+      }
+    });
+
+    // LiveKit is a separate realtime worker. It can only consult Chusky through
+    // this signed, call-scoped bridge; it never receives the native or
+    // Composio catalogue directly. The route is disabled until both sides are
+    // explicitly configured with LIVEKIT_ENABLED=true and the same secret.
+    app.post("/internal/livekit/brain", async (c) => {
+      if (!config.livekitEnabled || config.livekitBrainSecret.trim().length < 32) return c.text("Not found", 404);
+      const contentLength = Number(c.req.header("content-length") ?? 0);
+      if (contentLength > 48 * 1024) return c.json({ ok: false, error: "request too large" }, 413);
+      try {
+        const result = await processLiveKitConsult({
+          rawBody: await c.req.text(),
+          timestamp: c.req.header("X-Chusky-LiveKit-Timestamp"),
+          nonce: c.req.header("X-Chusky-LiveKit-Nonce"),
+          signature: c.req.header("X-Chusky-LiveKit-Signature"),
+          secret: config.livekitBrainSecret,
+          authorizeQuestion: async (userId) => !(await checkRateLimit(userId))
+            ? "rate_limited"
+            : !(await canSpend(userId)) ? "usage_limit" : "allowed",
+          answerQuestion: async (request) => answerLiveKitQuestion({ request, signal: c.req.raw.signal }),
+        });
+        return new Response(JSON.stringify(result.body), { status: result.status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+      } catch (error) {
+        logger.warn({ err: error }, "LiveKit brain consultation failed");
+        return c.json({ ok: false, error: "Chusky could not answer right now" }, 503);
+      }
+    });
+
+    // LiveKit Agent Builder cannot calculate the worker's per-request HMAC.
+    // This separately-secreted adapter accepts only the Builder contract and
+    // rehydrates all call policy from the durable lvc_* record before entering
+    // the same Chusky brain path. It never exposes the tool catalogue.
+    app.post("/internal/livekit/builder/brain", async (c) => {
+      if (!config.livekitEnabled || config.livekitBuilderSecret.trim().length < 32) return c.text("Not found", 404);
+      const contentLength = Number(c.req.header("content-length") ?? 0);
+      if (contentLength > 48 * 1024) return c.json({ ok: false, error: "request too large" }, 413);
+      try {
+        const result = await processLiveKitBuilderConsult({
+          rawBody: await c.req.text(),
+          authorization: c.req.header("Authorization"),
+          secret: config.livekitBuilderSecret,
+          authorizeQuestion: async (userId) => !(await checkRateLimit(userId))
+            ? "rate_limited"
+            : !(await canSpend(userId)) ? "usage_limit" : "allowed",
+          answerQuestion: async (request) => answerLiveKitQuestion({ request, signal: c.req.raw.signal }),
+        });
+        return new Response(JSON.stringify(result.body), { status: result.status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+      } catch (error) {
+        logger.warn({ err: error }, "LiveKit Builder brain consultation failed");
         return c.json({ ok: false, error: "Chusky could not answer right now" }, 503);
       }
     });
