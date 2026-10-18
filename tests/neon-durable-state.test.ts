@@ -101,7 +101,7 @@ function session(): UserSession {
   return {
     model: "test/model", history: [{ role: "user", content: "hello" }], totalMessages: 1, totalCost: 0,
     triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [{ id: "mem_1", category: "fact", key: "k", value: "v", confidence: 1, source: "test", sensitivity: "sensitive", status: "active", createdAt: now, updatedAt: now }],
-    imageAssets: [{ id: "img_1", name: "image", r2Key: "owner/image", contentType: "image/png", sizeBytes: 1, createdAt: now, updatedAt: now }], summaries: ["summary"], approvals: [], sdkThreads: [{ id: "thr_1", externalId: "external", metadata: {}, history: [], runs: [{ id: "run_1", status: "completed", input: "private", output: "result", events: [], createdAt: now, updatedAt: now }], createdAt: now, updatedAt: now }], createdAt: now, updatedAt: now,
+    imageAssets: [{ id: "img_1", name: "image", r2Key: "owner/image", contentType: "image/png", sizeBytes: 1, createdAt: now, updatedAt: now }], summaries: ["summary"], approvals: [], phoneCalls: [{ id: "twc_test", userId: 42, provider: "twilio", direction: "outbound", phoneNumber: "+15550001", purpose: "Test call", status: "bridging", createdAt: now, updatedAt: now }], sdkThreads: [{ id: "thr_1", externalId: "external", metadata: {}, history: [], runs: [{ id: "run_1", status: "completed", input: "private", output: "result", events: [], createdAt: now, updatedAt: now }], createdAt: now, updatedAt: now }], createdAt: now, updatedAt: now,
   };
 }
 
@@ -124,7 +124,7 @@ test("Neon durable session domains write atomically and permit versioned partial
   assert.equal(pool.client.calls[0]?.text, "BEGIN");
   assert.equal(pool.client.calls[1]?.text, "SELECT pg_advisory_xact_lock($1::bigint)");
   assert.deepEqual(pool.client.calls[1]?.values, [42]);
-  assert.equal(pool.client.calls.filter((call) => call.text.includes("INSERT INTO chusky_session_domain")).length, 5);
+  assert.equal(pool.client.calls.filter((call) => call.text.includes("INSERT INTO chusky_session_domain")).length, 6);
   assert.equal(pool.client.calls.filter((call) => call.text.includes("pg_advisory_xact_lock")).length, 1);
   assert.equal(pool.client.calls.at(-1)?.text, "COMMIT");
   assert.equal(pool.client.released, true);
@@ -220,7 +220,7 @@ test("Neon session writes extract SDK runs into rows in the same transaction", a
 
 test("Neon health verifies reachability and the core session schema", async () => {
   const pool = new FakePool();
-  pool.schemaDefinition = "CHECK (domain IN ('profile', 'conversation', 'memories', 'assets', 'sdk'))";
+  pool.schemaDefinition = "CHECK (domain IN ('profile', 'conversation', 'memories', 'assets', 'calls', 'sdk'))";
   const state = new NeonDurableState(pool as never);
   const health = await state.healthStatus();
   assert.deepEqual(pool.reads, []);
@@ -402,7 +402,7 @@ test("durable session startup rejects a schema without the profile domain migrat
 
 test("durable session startup accepts the current domain constraint", async () => {
   const pool = new FakePool();
-  pool.schemaDefinition = "CHECK ((domain = ANY (ARRAY['profile'::text, 'conversation'::text, 'memories'::text, 'assets'::text, 'sdk'::text])))";
+  pool.schemaDefinition = "CHECK ((domain = ANY (ARRAY['profile'::text, 'conversation'::text, 'memories'::text, 'assets'::text, 'calls'::text, 'sdk'::text])))";
   const state = new NeonDurableState(pool as never);
   await state.assertSessionSchema();
   assert.equal(pool.calls.length, 3);
@@ -531,7 +531,9 @@ test("session split leaves runs out of the SDK document and emits owner-thread r
   assert.deepEqual(core.sdkThreads, []);
   assert.deepEqual(joinSessionDomains(core, domains).history, original.history.slice(-20));
   assert.deepEqual(domains.get("conversation"), { summaries: original.summaries });
+  assert.deepEqual(domains.get("calls"), { phoneCalls: original.phoneCalls });
   assert.deepEqual(joinSessionDomains(core, domains).memories, original.memories);
+  assert.deepEqual(joinSessionDomains(core, domains).phoneCalls, original.phoneCalls);
   assert.deepEqual((domains.get("sdk") as { sdkThreads: Array<{ runs: unknown[] }> }).sdkThreads[0]?.runs, []);
   assert.deepEqual(sdkRuns, [{ threadId: "thr_1", run: original.sdkThreads![0]!.runs[0] }]);
   assert.deepEqual(joinSessionDomains(core, domains).sdkThreads?.[0]?.runs, []);

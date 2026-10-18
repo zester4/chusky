@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { REDIS_METRIC_FAMILIES, type RedisCommandFamilyMetrics, type RedisMetricFamily, type RedisRouteMetricSample } from "./redisMetrics.js";
 
-export const DURABLE_SESSION_DOMAINS = ["profile", "conversation", "memories", "assets", "sdk"] as const;
+export const DURABLE_SESSION_DOMAINS = ["profile", "conversation", "memories", "assets", "calls", "sdk"] as const;
 export type DurableSessionDomain = typeof DURABLE_SESSION_DOMAINS[number];
 
 export interface DurableSessionDocument {
@@ -1076,7 +1076,7 @@ export class NeonDurableState {
     const constraint = await this.measuredQuery<{ definition: string }>(this.database,
       "SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid = 'chusky_session_domain'::regclass AND conname = 'chusky_session_domain_domain_check'");
     const definition = constraint.rows[0]?.definition ?? "";
-    if (!definition.includes("profile") || !definition.includes("sdk")) throw new Error("Neon durable session-domain constraint is missing required domains; apply the latest durable-state migrations.");
+    if (!definition.includes("profile") || !definition.includes("calls") || !definition.includes("sdk")) throw new Error("Neon durable session-domain constraint is missing required domains; apply the latest durable-state migrations.");
   }
 
   /** Fail startup before enabling run cutover if migrations 0002 and 0005 are absent. */

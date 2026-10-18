@@ -126,11 +126,15 @@ export function splitSessionDomains(session: UserSession, separateSdkRuns = fals
     ["conversation", { summaries: session.summaries }],
     ["memories", { memories: session.memories }],
     ["assets", { imageAssets: session.imageAssets, sdkFiles: session.sdkFiles ?? [], artifacts: session.artifacts ?? [], artifactRegistrationIntents: session.artifactRegistrationIntents ?? [] }],
+    // Phone calls have provider receipts, lifecycle state, and bounded
+    // transcripts. Keep them separate from profile/preferences so call
+    // persistence is durable without inflating unrelated account reads.
+    ["calls", { phoneCalls: session.phoneCalls ?? [] }],
     ["sdk", sdkTablePayload],
   ]);
   const core = {
     ...sessionCore,
-    history: (session.history ?? []).slice(-HOT_CONVERSATION_MESSAGES), summaries: [], memories: [], imageAssets: [], sdkFiles: [], artifacts: [], artifactRegistrationIntents: [], sdkThreads: [], sdkIdempotency: {}, sdkAudit: [], sdkWebhooks: [], sdkProjects: [],
+    history: (session.history ?? []).slice(-HOT_CONVERSATION_MESSAGES), summaries: [], memories: [], imageAssets: [], sdkFiles: [], artifacts: [], artifactRegistrationIntents: [], phoneCalls: [], sdkThreads: [], sdkIdempotency: {}, sdkAudit: [], sdkWebhooks: [], sdkProjects: [],
     durableSessionFormat: DURABLE_SESSION_FORMAT,
   } as SessionWithDurableMarker;
   return { core, domains, sdkRuns };
@@ -161,6 +165,7 @@ export function joinSessionDomains(core: UserSession, documents: ReadonlyMap<Dur
   const profile = object(documents.get("profile"));
   const memories = object(documents.get("memories"));
   const assets = object(documents.get("assets"));
+  const calls = object(documents.get("calls"));
   const sdk = includeSdkTables ? object(documents.get("sdk")) : {};
   const { durableSessionFormat: _marker, ...session } = core as SessionWithDurableMarker;
   return {
@@ -183,6 +188,7 @@ export function joinSessionDomains(core: UserSession, documents: ReadonlyMap<Dur
     sdkFiles: Array.isArray(assets.sdkFiles) ? assets.sdkFiles as SdkFileRecord[] : [],
     artifacts: Array.isArray(assets.artifacts) ? assets.artifacts as ArtifactRecord[] : [],
     artifactRegistrationIntents: Array.isArray(assets.artifactRegistrationIntents) ? assets.artifactRegistrationIntents as UserSession["artifactRegistrationIntents"] : [],
+    phoneCalls: Array.isArray(calls.phoneCalls) ? calls.phoneCalls as UserSession["phoneCalls"] : [],
     ...(includeSdkTables ? {
       sdkThreads: Array.isArray(sdk.sdkThreads) ? sdk.sdkThreads as SdkThreadRecord[] : [],
       sdkIdempotency: object(sdk.sdkIdempotency) as UserSession["sdkIdempotency"],
