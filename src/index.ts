@@ -970,8 +970,11 @@ async function main(): Promise<void> {
       const call = await getPhoneCall(userId, callId);
       if (!call || call.provider !== "twilio") return c.text("Not found", 404);
       const event = String(form.StreamEvent ?? "").toLowerCase();
-      if (event === "stream-error") await updatePhoneCall(userId, callId, { status: "failed", error: "Twilio media stream error" });
-      if (event === "stream-stopped" && call.status !== "failed") await updatePhoneCall(userId, callId, { status: "ended" });
+      // A media stream can fail while the provider call is still alive. The
+      // bridge owns bounded Deepgram reconnects, so do not turn a recoverable
+      // stream interruption into a terminal call failure here.
+      if (event === "stream-error") await updatePhoneCall(userId, callId, { runtimeState: "reconnecting" });
+      if (event === "stream-stopped" && call.status !== "failed") await updatePhoneCall(userId, callId, { status: "ended", runtimeState: "ended" });
       return c.body(null, 204);
     });
 

@@ -246,6 +246,8 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(settings.elevenlabs_enabled)
         self.assertEqual(settings.turn_start_budget_ms, 2500)
         self.assertEqual(settings.tts_expressivity, 0)
+        self.assertEqual(settings.tts_speed, 1.05)
+        self.assertEqual(settings.deepgram_tts_api_host, "api.deepgram.com")
         self.assertEqual(settings.stt_keyterms, [])
         self.assertFalse(settings.stt_adaptive_endpointing)
 
@@ -265,13 +267,17 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
             "CHUSKY_VOICE_TURN_URL": "https://chusky.example/internal/twilio/turn",
             "CHUSKY_VOICE_STATUS_URL": "https://chusky.example/internal/twilio/status",
             "VOICE_TTS_EXPRESSIVITY": "+1",
+            "VOICE_TTS_SPEED": "1.10",
             "VOICE_STT_KEYTERMS": "United Cars, Treffley, United Cars",
             "VOICE_STT_ADAPTIVE_ENDPOINTING": "true",
+            "DEEPGRAM_TTS_API_HOST": "api.eu.deepgram.com",
         }, clear=True):
             expressive_settings = voice_app.Settings.from_env()
         self.assertEqual(expressive_settings.tts_expressivity, 1)
+        self.assertEqual(expressive_settings.tts_speed, 1.1)
         self.assertEqual(expressive_settings.stt_keyterms, ["United Cars", "Treffley"])
         self.assertTrue(expressive_settings.stt_adaptive_endpointing)
+        self.assertEqual(expressive_settings.deepgram_tts_api_host, "api.eu.deepgram.com")
 
     def test_elevenlabs_requires_credentials_only_when_enabled(self):
         base = {
@@ -383,8 +389,12 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
             return DeepgramConnectionContext(EmptyDeepgramSocket())
 
         with patch.object(voice_app, "connect", fake_connect):
-            await self.call._run()
+            with self.assertRaises(voice_app.ProviderStreamEnded):
+                await self.call._run()
 
+        # The fake provider closes immediately; the bridge should make its
+        # bounded reconnect attempts rather than silently ending the call.
+        self.assertEqual(len(opened_urls), 3)
         query = parse_qs(urlparse(opened_urls[0]).query)
         self.assertEqual(query["encoding"], ["mulaw"])
         self.assertEqual(query["sample_rate"], ["8000"])
@@ -431,6 +441,7 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         self.call.tts_socket = tts_socket
         self.call.stream_sid = "MZ_test"
         self.call.tts_playback_offset_ms = 640
+        self.call.tts_first_audio_recorded = True
         self.call.response_task = asyncio.create_task(asyncio.sleep(10))
 
         await self.call._barge_in()
@@ -611,6 +622,23 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         await self.call._commit_turn("Please send the details.", result, 7)
 
         self.assertEqual(retrying_http.attempts, 3)
+
+    async def test_call_outcome_stays_retryable_until_the_server_accepts_it(self):
+        retrying_http = CommitRetryHttp(failures=5)
+        self.call.http = retrying_http
+        self.call.outcome_turns.append({"transcript": "What time works?", "response": "Tomorrow afternoon."})
+
+        with patch.object(voice_app.asyncio, "sleep", new=AsyncMock()):
+            await self.call._commit_call_outcome()
+
+        self.assertEqual(retrying_http.attempts, 5)
+        self.assertFalse(self.call.outcome_committed)
+
+        retrying_http.failures = 0
+        with patch.object(voice_app.asyncio, "sleep", new=AsyncMock()):
+            await self.call._commit_call_outcome()
+        self.assertTrue(self.call.outcome_committed)
+        self.assertEqual(retrying_http.attempts, 6)
 
     async def test_slow_final_turn_uses_recovery_line_without_committing_it(self):
         class HangingAgentHttp(FakeAgentHttp):

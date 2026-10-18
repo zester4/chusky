@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from math import ceil, isfinite
+import re
 from typing import Iterator, TypeVar
 
 T = TypeVar("T")
@@ -147,10 +148,23 @@ def take_tts_chunk(
     *,
     soft_limit: int = 24,
     hard_limit: int = 80,
+    prefer_clauses: bool = False,
 ) -> tuple[str, str] | None:
-    """Split buffered model text on a word boundary without losing content."""
+    """Split buffered model text without losing content or mid-word speech.
+
+    The default preserves the existing low-latency policy. ``prefer_clauses``
+    is used by live voice streams to favor punctuation boundaries before
+    falling back to a word boundary, improving TTS prosody.
+    """
     if len(buffer) < soft_limit:
         return None
+
+    if prefer_clauses:
+        boundary_pattern = re.compile(r"[,;:]\s+|[.!?]\s+")
+        boundaries = [match.end() for match in boundary_pattern.finditer(buffer[: hard_limit + 1])]
+        for boundary in reversed(boundaries):
+            if boundary >= soft_limit:
+                return buffer[:boundary], buffer[boundary:]
 
     soft_boundary = buffer.rfind(" ", 0, soft_limit + 1)
     if soft_boundary >= soft_limit // 2:

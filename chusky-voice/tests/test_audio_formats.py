@@ -11,6 +11,8 @@ from audio_formats import (
     deepgram_flux_speak_url,
     deepgram_nova_listen_url,
     normalize_flux_tts_expressivity,
+    normalize_flux_tts_speed,
+    normalize_deepgram_tts_host,
     twilio_deepgram_listen_url,
     twilio_deepgram_speak_url,
     twilio_mulaw_to_deepgram_linear16,
@@ -98,10 +100,28 @@ class TwilioAudioFormatTests(unittest.TestCase):
         self.assertEqual(query["encoding"], ["mulaw"])
         self.assertEqual(query["sample_rate"], ["8000"])
         self.assertEqual(query["expressivity"], ["1"])
+        self.assertEqual(query["speed"], ["1.05"])
         recall_query = parse_qs(urlparse(deepgram_flux_speak_url("flux-haley-en", expressivity=-1)).query)
         self.assertEqual(recall_query["encoding"], ["linear16"])
         self.assertEqual(recall_query["sample_rate"], ["24000"])
         self.assertEqual(recall_query["expressivity"], ["-1"])
+
+    def test_tts_can_use_a_documented_regional_endpoint(self):
+        url = deepgram_flux_speak_url("flux-haley-en", api_host="api.eu.deepgram.com")
+        self.assertTrue(url.startswith("wss://api.eu.deepgram.com/v2/speak?"))
+        self.assertEqual(normalize_deepgram_tts_host("api.deepgram.com"), "api.deepgram.com")
+        with self.assertRaises(ValueError):
+            normalize_deepgram_tts_host("https://attacker.example")
+        with self.assertRaises(ValueError):
+            normalize_deepgram_tts_host("api.us.deepgram.com")
+
+    def test_flux_tts_speed_is_strictly_bounded_and_quantized(self):
+        self.assertEqual(normalize_flux_tts_speed("1.05"), 1.05)
+        self.assertEqual(normalize_flux_tts_speed(0.5), 0.5)
+        self.assertEqual(normalize_flux_tts_speed(1.5), 1.5)
+        for value in (0.49, 1.51, 1.01, "fast", True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize_flux_tts_speed(value)
 
     def test_flux_tts_expressivity_is_strictly_bounded(self):
         self.assertEqual(normalize_flux_tts_expressivity("+1"), 1)
@@ -120,9 +140,17 @@ class TwilioAudioFormatTests(unittest.TestCase):
         self.assertEqual(query["sample_rate"], ["48000"])
         self.assertEqual(query["channels"], ["1"])
         self.assertEqual(query["interim_results"], ["true"])
+        self.assertEqual(query["smart_format"], ["true"])
+        self.assertNotIn("punctuate", query)
         self.assertEqual(query["vad_events"], ["true"])
         self.assertEqual(query["endpointing"], ["500"])
         self.assertEqual(query["utterance_end_ms"], ["1000"])
+
+    def test_nova_no_delay_is_explicit_and_smart_format_can_be_disabled(self):
+        url = deepgram_nova_listen_url("nova-3", 500, 1000, smart_format=False, no_delay=True)
+        query = parse_qs(urlparse(url).query)
+        self.assertNotIn("smart_format", query)
+        self.assertEqual(query["no_delay"], ["true"])
 
 
 if __name__ == "__main__":

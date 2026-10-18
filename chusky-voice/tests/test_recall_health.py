@@ -112,6 +112,10 @@ class RecallHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved.stt_eot_threshold, 0.55)
         self.assertEqual(resolved.stt_eot_timeout_ms, 500)
         self.assertEqual(resolved.turn_start_budget_ms, 6000)
+        self.assertEqual(resolved.tts_speed, 1.05)
+        self.assertTrue(resolved.nova_smart_format)
+        self.assertFalse(resolved.nova_no_delay)
+        self.assertEqual(resolved.deepgram_tts_api_host, "api.deepgram.com")
 
     def test_meeting_latency_settings_are_explicitly_overridable(self):
         env = {
@@ -124,6 +128,9 @@ class RecallHealthTests(unittest.IsolatedAsyncioTestCase):
             "RECALL_STT_EOT_THRESHOLD": "0.8",
             "RECALL_STT_EOT_TIMEOUT_MS": "1200",
             "RECALL_TURN_START_BUDGET_MS": "9000",
+            "RECALL_NOVA_SMART_FORMAT": "false",
+            "RECALL_NOVA_NO_DELAY": "true",
+            "DEEPGRAM_TTS_API_HOST": "api.in.deepgram.com",
         }
         with patch.dict(os.environ, env, clear=True):
             resolved = voice_app.RecallSettings.from_env()
@@ -131,6 +138,9 @@ class RecallHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved.stt_eot_threshold, 0.8)
         self.assertEqual(resolved.stt_eot_timeout_ms, 1200)
         self.assertEqual(resolved.turn_start_budget_ms, 9000)
+        self.assertFalse(resolved.nova_smart_format)
+        self.assertTrue(resolved.nova_no_delay)
+        self.assertEqual(resolved.deepgram_tts_api_host, "api.in.deepgram.com")
 
     def test_flux_tts_expressivity_is_shared_by_meetings(self):
         env = {
@@ -141,10 +151,12 @@ class RecallHealthTests(unittest.IsolatedAsyncioTestCase):
             "CHUSKY_RECALL_COMMIT_TURN_URL": "https://chusky.test/commit",
             "CHUSKY_RECALL_MEDIA_AUTHORIZE_URL": "https://chusky.test/authorize",
             "VOICE_TTS_EXPRESSIVITY": "+1",
+            "VOICE_TTS_SPEED": "1.10",
         }
         with patch.dict(os.environ, env, clear=True):
             resolved = voice_app.RecallSettings.from_env()
         self.assertEqual(resolved.tts_expressivity, 1)
+        self.assertEqual(resolved.tts_speed, 1.1)
 
 
 if __name__ == "__main__":

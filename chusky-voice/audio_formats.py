@@ -1,6 +1,8 @@
 """Codec and sample-rate conversions at the Twilio/Deepgram boundary."""
 from __future__ import annotations
 
+import re
+
 try:
     import audioop
 except ModuleNotFoundError:  # Python 3.13+; native μ-law needs no codec module.
@@ -15,6 +17,28 @@ CHANNELS = 1
 SAMPLE_WIDTH_BYTES = 2
 AUDIOOP_AVAILABLE = audioop is not None
 
+_DEFAULT_DEEPGRAM_TTS_HOST = "api.deepgram.com"
+_SUPPORTED_DEEPGRAM_TTS_HOSTS = frozenset(
+    {
+        "api.deepgram.com",
+        "api.eu.deepgram.com",
+        "api.au.deepgram.com",
+        "api.in.deepgram.com",
+    }
+)
+
+
+def normalize_deepgram_tts_host(value: object) -> str:
+    """Allow only documented Deepgram TTS hosts."""
+    host = str(value or "").strip().lower().rstrip(".")
+    if not host:
+        return _DEFAULT_DEEPGRAM_TTS_HOST
+    if "://" in host or "/" in host or not re.fullmatch(r"[a-z0-9.-]+", host):
+        raise ValueError("Deepgram TTS host must be a hostname without a scheme or path")
+    if host not in _SUPPORTED_DEEPGRAM_TTS_HOSTS:
+        raise ValueError("Deepgram TTS host must be a documented Deepgram endpoint")
+    return host
+
 
 def normalize_flux_tts_expressivity(value: object) -> int:
     """Validate Deepgram Flux TTS expressivity without widening its beta range."""
@@ -27,6 +51,22 @@ def normalize_flux_tts_expressivity(value: object) -> int:
     if expressivity < -2 or expressivity > 2:
         raise ValueError("Flux TTS expressivity must be an integer from -2 to 2")
     return expressivity
+
+
+def normalize_flux_tts_speed(value: object) -> float:
+    """Validate Flux streaming speed using the documented 0.05 increments."""
+    if isinstance(value, bool):
+        raise ValueError("Flux TTS speed must be between 0.5 and 1.5 in 0.05 increments")
+    try:
+        speed = float(str(value).strip())
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("Flux TTS speed must be between 0.5 and 1.5 in 0.05 increments") from error
+    if not 0.5 <= speed <= 1.5:
+        raise ValueError("Flux TTS speed must be between 0.5 and 1.5 in 0.05 increments")
+    steps = round((speed - 0.5) / 0.05)
+    if abs((0.5 + steps * 0.05) - speed) > 1e-6:
+        raise ValueError("Flux TTS speed must be between 0.5 and 1.5 in 0.05 increments")
+    return round(speed, 2)
 
 
 def normalize_flux_keyterms(value: object) -> list[str]:
@@ -140,35 +180,48 @@ def deepgram_nova_listen_url(
     model: str,
     endpointing_ms: int,
     utterance_end_ms: int,
+    *,
+    smart_format: bool = True,
+    no_delay: bool = False,
 ) -> str:
     """Build the documented Nova live-STT contract for Recall meetings."""
-    query = urlencode(
-        {
-            "model": model,
-            "encoding": "linear16",
-            "sample_rate": DEEPGRAM_INPUT_SAMPLE_RATE,
-            "channels": CHANNELS,
-            "interim_results": "true",
-            "smart_format": "true",
-            "punctuate": "true",
-            "vad_events": "true",
-            "endpointing": endpointing_ms,
-            "utterance_end_ms": utterance_end_ms,
-        }
-    )
+    query_values: dict[str, object] = {
+        "model": model,
+        "encoding": "linear16",
+        "sample_rate": DEEPGRAM_INPUT_SAMPLE_RATE,
+        "channels": CHANNELS,
+        "interim_results": "true",
+        "vad_events": "true",
+        "endpointing": endpointing_ms,
+        "utterance_end_ms": utterance_end_ms,
+    }
+    if smart_format:
+        # Smart Format already includes punctuation.
+        query_values["smart_format"] = "true"
+    if no_delay:
+        # This trades some entity formatting for lower transcript latency.
+        query_values["no_delay"] = "true"
+    query = urlencode(query_values)
     return f"wss://api.deepgram.com/v1/listen?{query}"
 
 
-def deepgram_flux_speak_url(model: str, *, expressivity: int = 0) -> str:
+def deepgram_flux_speak_url(
+    model: str,
+    *,
+    expressivity: int = 0,
+    speed: float = 1.0,
+    api_host: str = _DEFAULT_DEEPGRAM_TTS_HOST,
+) -> str:
     query = urlencode(
         {
             "model": model,
             "encoding": "linear16",
             "sample_rate": DEEPGRAM_OUTPUT_SAMPLE_RATE,
             "expressivity": normalize_flux_tts_expressivity(expressivity),
+            "speed": normalize_flux_tts_speed(speed),
         }
     )
-    return f"wss://api.deepgram.com/v2/speak?{query}"
+    return f"wss://{normalize_deepgram_tts_host(api_host)}/v2/speak?{query}"
 
 
 def twilio_deepgram_listen_url(
@@ -210,16 +263,19 @@ def twilio_deepgram_speak_url(
     *,
     native_mulaw: bool = True,
     expressivity: int = 0,
+    speed: float = 1.05,
+    api_host: str = _DEFAULT_DEEPGRAM_TTS_HOST,
 ) -> str:
     """Build the Flux TTS URL for Twilio's raw 8 kHz μ-law output contract."""
     if not native_mulaw:
-        return deepgram_flux_speak_url(model, expressivity=expressivity)
+        return deepgram_flux_speak_url(model, expressivity=expressivity, speed=speed, api_host=api_host)
     query = urlencode(
         {
             "model": model,
             "encoding": "mulaw",
             "sample_rate": TWILIO_SAMPLE_RATE,
             "expressivity": normalize_flux_tts_expressivity(expressivity),
+            "speed": normalize_flux_tts_speed(speed),
         }
     )
-    return f"wss://api.deepgram.com/v2/speak?{query}"
+    return f"wss://{normalize_deepgram_tts_host(api_host)}/v2/speak?{query}"

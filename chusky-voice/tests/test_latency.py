@@ -99,6 +99,13 @@ class TakeTtsChunkTests(unittest.TestCase):
 
         self.assertEqual(chunk, ("x" * 80, "x" * 10))
 
+    def test_clause_preference_keeps_a_complete_clause_together(self):
+        text = "I found the customer record, and the next available appointment is tomorrow."
+
+        chunk = take_tts_chunk(text, prefer_clauses=True, hard_limit=180)
+
+        self.assertEqual(chunk, ("I found the customer record, ", "and the next available appointment is tomorrow."))
+
 
 class TwilioPlaybackFrameTests(unittest.TestCase):
     def test_provider_audio_is_resliced_into_twenty_millisecond_frames(self):

@@ -36,8 +36,10 @@ from audio_formats import (
     deepgram_flux_listen_url,
     deepgram_flux_speak_url,
     deepgram_nova_listen_url,
+    normalize_deepgram_tts_host,
     normalize_flux_keyterms,
     normalize_flux_tts_expressivity,
+    normalize_flux_tts_speed,
     twilio_deepgram_listen_url,
     twilio_deepgram_speak_url,
     twilio_mulaw_to_deepgram_linear16,
@@ -91,6 +93,7 @@ class Settings:
     stt_adaptive_endpointing: bool
     tts_model: str
     tts_expressivity: int
+    tts_speed: float
     elevenlabs_enabled: bool
     elevenlabs_api_key: str
     elevenlabs_voice_id: str
@@ -101,6 +104,7 @@ class Settings:
     turn_fallback_enabled: bool
     tool_progress_delay_ms: int
     tool_progress_message: str
+    deepgram_tts_api_host: str = "api.deepgram.com"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -138,6 +142,7 @@ class Settings:
             os.getenv("VOICE_STT_ADAPTIVE_ENDPOINTING", "false").strip().lower() == "true",
             os.getenv("VOICE_TTS_MODEL", "flux-haley-en").strip(),
             normalize_flux_tts_expressivity(os.getenv("VOICE_TTS_EXPRESSIVITY", "0")),
+            normalize_flux_tts_speed(os.getenv("VOICE_TTS_SPEED", "1.05")),
             elevenlabs_enabled,
             elevenlabs_api_key,
             elevenlabs_voice_id,
@@ -153,6 +158,7 @@ class Settings:
             os.getenv("VOICE_TURN_FALLBACK_ENABLED", "true").strip().lower() != "false",
             max(500, min(int(os.getenv("VOICE_TOOL_PROGRESS_DELAY_MS", "2500")), 10_000)),
             os.getenv("VOICE_TOOL_PROGRESS_MESSAGE", "I’m still working on that, thanks for your patience.").strip()[:500],
+            normalize_deepgram_tts_host(os.getenv("DEEPGRAM_TTS_API_HOST", "api.deepgram.com")),
         )
 
 
@@ -178,6 +184,10 @@ class RecallSettings:
     turn_fallback_enabled: bool
     stt_eager_eot_threshold: float = 0.45
     tts_expressivity: int = 0
+    tts_speed: float = 1.05
+    nova_smart_format: bool = True
+    nova_no_delay: bool = False
+    deepgram_tts_api_host: str = "api.deepgram.com"
 
     @classmethod
     def from_env(cls) -> "RecallSettings":
@@ -226,6 +236,10 @@ class RecallSettings:
             os.getenv("RECALL_TURN_FALLBACK_ENABLED", "true").strip().lower() != "false",
             max(0.3, min(float(os.getenv("RECALL_STT_EAGER_EOT_THRESHOLD", "0.45")), 0.9)),
             normalize_flux_tts_expressivity(os.getenv("VOICE_TTS_EXPRESSIVITY", "0")),
+            normalize_flux_tts_speed(os.getenv("VOICE_TTS_SPEED", "1.05")),
+            os.getenv("RECALL_NOVA_SMART_FORMAT", "true").strip().lower() != "false",
+            os.getenv("RECALL_NOVA_NO_DELAY", "false").strip().lower() == "true",
+            normalize_deepgram_tts_host(os.getenv("DEEPGRAM_TTS_API_HOST", "api.deepgram.com")),
         )
 
 
@@ -253,6 +267,10 @@ class VoiceTurnResult:
     text: str
     cost: float
     first_audio_ms: int | None = None
+
+
+class ProviderStreamEnded(RuntimeError):
+    """A transient provider socket ended before the call ended."""
 
 
 class TwilioVoiceCall:
@@ -310,6 +328,7 @@ class TwilioVoiceCall:
         self.tts_first_audio_recorded = False
         self.turn_first_audio_event: asyncio.Event | None = None
         self.turn_first_audio_at: float | None = None
+        self.tts_speak_started_at: float | None = None
         self.tool_progress_task: asyncio.Task[None] | None = None
         self.stt_resample_state: object | None = None
         self.tts_resample_state: object | None = None
@@ -325,6 +344,9 @@ class TwilioVoiceCall:
         self.pending_interrupted_speech = ""
         self.tts_interrupt_event = asyncio.Event()
         self.awaiting_tts_interrupt_context = False
+        self.tts_interrupt_in_flight = False
+        self.tts_last_interrupt_offset_ms = 0
+        self.pending_interrupted_remaining = ""
 
     @property
     def _uses_elevenlabs_tts(self) -> bool:
@@ -334,16 +356,7 @@ class TwilioVoiceCall:
     async def run(self) -> None:
         try:
             await self._notify_status("active")
-            for attempt in range(2):
-                try:
-                    await asyncio.wait_for(self._run(), timeout=self.settings.max_call_seconds)
-                    break
-                except ConnectionClosed:
-                    if attempt == 1 or self.stop.is_set():
-                        raise
-                    await self._notify_status("active", runtime_state="reconnecting")
-                    await asyncio.sleep(0.25)
-                    await self._notify_status("active", runtime_state="healthy")
+            await asyncio.wait_for(self._run(), timeout=self.settings.max_call_seconds)
             await self._notify_status("ended")
             self.metrics.twilio_completed += 1
         except asyncio.TimeoutError:
@@ -374,8 +387,32 @@ class TwilioVoiceCall:
                 pass
 
     async def _run(self) -> None:
+        inbound = asyncio.create_task(self._receive_twilio(), name=f"twilio-in-{self.call_id}")
+        try:
+            for attempt in range(3):
+                try:
+                    await self._run_stt_attempt(inbound)
+                    return
+                except (ConnectionClosed, ProviderStreamEnded):
+                    if self.stop.is_set() or inbound.done():
+                        raise
+                    if attempt >= 2:
+                        raise
+                    await self._notify_status("active", runtime_state="reconnecting")
+                    await asyncio.sleep(0.25 * (2 ** attempt))
+                    await self._notify_status("active", runtime_state="healthy")
+        finally:
+            if not inbound.done():
+                inbound.cancel()
+            await asyncio.gather(inbound, return_exceptions=True)
+
+    async def _run_stt_attempt(self, inbound: asyncio.Task[None]) -> None:
         if not self.settings.stt_model.startswith("flux-"):
             raise RuntimeError("VOICE_STT_MODEL must be a Deepgram Flux conversational model, for example flux-general-en")
+        # Flux turn indexes are scoped to a WebSocket session. Never let the
+        # new connection inherit the old connection's dedupe window.
+        self.finalized_turn_indexes.clear()
+        self.eager_end_times.clear()
         url = twilio_deepgram_listen_url(
             self.settings.stt_model,
             self.settings.stt_eager_eot_threshold,
@@ -389,7 +426,6 @@ class TwilioVoiceCall:
                 self.call_greeting = await self._load_call_greeting()
             if self.stt_keyterms:
                 await socket.send(json.dumps({"type": "Configure", "keyterms": self.stt_keyterms}))
-            inbound = asyncio.create_task(self._receive_twilio(), name=f"twilio-in-{self.call_id}")
             sender = asyncio.create_task(self._send_audio(socket), name=f"twilio-stt-{self.call_id}")
             transcripts = asyncio.create_task(self._receive_transcripts(socket), name=f"twilio-out-{self.call_id}")
             if self.call_greeting and not self.greeting_sent:
@@ -402,20 +438,17 @@ class TwilioVoiceCall:
                 self.response_task.add_done_callback(self._observe_response_task)
             try:
                 done, pending = await asyncio.wait({inbound, sender, transcripts}, return_when=asyncio.FIRST_COMPLETED)
-                for task in pending:
-                    task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
+                if inbound in done:
+                    await inbound
+                    return
                 for task in done:
                     task.result()
+                raise ProviderStreamEnded("Deepgram STT stream ended before the Twilio call")
             finally:
-                # A provider disconnect can trigger the bounded reconnect loop
-                # in run(). Drain the media workers before leaving this attempt
-                # so the retry cannot duplicate audio send/receive tasks.
-                workers = (inbound, sender, transcripts)
-                for task in workers:
+                for task in (sender, transcripts):
                     if not task.done():
                         task.cancel()
-                await asyncio.gather(*workers, return_exceptions=True)
+                await asyncio.gather(sender, transcripts, return_exceptions=True)
 
     async def _load_call_greeting(self) -> str:
         """Fetch the owner-scoped direction and objective before speaking.
@@ -596,15 +629,24 @@ class TwilioVoiceCall:
                         self.elevenlabs_context_id = f"twilio-{self.call_id}-{secrets.token_hex(8)}"
                     else:
                         self.pending_interrupted_speech = ""
+                        self.pending_interrupted_remaining = ""
                         self.tts_interrupt_event.clear()
-                        self.awaiting_tts_interrupt_context = True
-                        interrupt: dict[str, Any] = {"type": "Interrupt"}
-                        if self.tts_playback_offset_ms > 0:
-                            interrupt["playback_offset"] = {"type": "time_ms", "value": self.tts_playback_offset_ms}
-                        await self.tts_socket.send(json.dumps(interrupt))
+                        if not self.tts_interrupt_in_flight:
+                            self.awaiting_tts_interrupt_context = True
+                            self.tts_interrupt_in_flight = True
+                            interrupt: dict[str, Any] = {"type": "Interrupt"}
+                            # Flux requires a session-wide, monotonically
+                            # advancing offset. If no new audio was sent since
+                            # the previous interrupt, omit it rather than
+                            # sending an invalid duplicate offset.
+                            if self.tts_first_audio_recorded and self.tts_playback_offset_ms > self.tts_last_interrupt_offset_ms:
+                                interrupt["playback_offset"] = {"type": "time_ms", "value": self.tts_playback_offset_ms}
+                                self.tts_last_interrupt_offset_ms = self.tts_playback_offset_ms
+                            await self.tts_socket.send(json.dumps(interrupt))
             except Exception:
                 # The task cancellation below still closes a stalled TTS socket.
                 self.awaiting_tts_interrupt_context = False
+                self.tts_interrupt_in_flight = False
                 self.tts_interrupt_event.set()
                 pass
         try:
@@ -631,17 +673,20 @@ class TwilioVoiceCall:
         if event.get("type") != "SpeechInterrupted":
             return
         self.pending_interrupted_speech = normalize_voice_text(str(event.get("text_spoken") or "")).strip()[:2_000]
+        self.pending_interrupted_remaining = normalize_voice_text(str(event.get("text_remaining") or "")).strip()[:2_000]
         self.awaiting_tts_interrupt_context = False
+        self.tts_interrupt_in_flight = False
         self.tts_interrupt_event.set()
 
     async def _take_interrupted_speech_context(self) -> str:
         if self.awaiting_tts_interrupt_context:
             try:
-                await asyncio.wait_for(self.tts_interrupt_event.wait(), timeout=0.15)
+                await asyncio.wait_for(self.tts_interrupt_event.wait(), timeout=0.35)
             except asyncio.TimeoutError:
                 self.awaiting_tts_interrupt_context = False
         spoken = self.pending_interrupted_speech
         self.pending_interrupted_speech = ""
+        self.pending_interrupted_remaining = ""
         return spoken
 
     async def _send_twilio(self, event: dict[str, Any]) -> None:
@@ -706,8 +751,12 @@ class TwilioVoiceCall:
             self.tts_model,
             native_mulaw=getattr(self.settings, "twilio_native_mulaw", True),
             expressivity=getattr(self.settings, "tts_expressivity", 0),
+            speed=getattr(self.settings, "tts_speed", 1.05),
+            api_host=getattr(self.settings, "deepgram_tts_api_host", "api.deepgram.com"),
         )
+        connection_started = time.monotonic()
         self.tts_socket = await connect(url, additional_headers={"Authorization": f"Token {self.settings.deepgram_api_key}"}, max_size=1_000_000)
+        self.metrics.tts_connection_samples.append(max(0, int((time.monotonic() - connection_started) * 1000)))
         self.tts_resample_state = None
         self.tts_reader_task = asyncio.create_task(self._receive_persistent_tts(), name=f"twilio-tts-{self.call_id}")
 
@@ -771,6 +820,11 @@ class TwilioVoiceCall:
             self.turn_first_audio_at = audio_started_at
             self.metrics.tts_first_audio_ms_total += first_audio_ms
             self.metrics.tts_first_audio_count += 1
+            if self.tts_speak_started_at is not None:
+                self.metrics.tts_speak_to_first_audio_samples.append(
+                    max(0, int((audio_started_at - self.tts_speak_started_at) * 1000))
+                )
+                self.tts_speak_started_at = None
             if self.eager_response_started_at:
                 self.metrics.eager_to_first_audio_samples.append(first_audio_ms)
                 if self.response_started_at:
@@ -849,6 +903,10 @@ class TwilioVoiceCall:
                     await self.tts_socket.send(json.dumps(elevenlabs_flush(self.elevenlabs_context_id)))
             else:
                 if text.strip():
+                    if self.tts_speak_started_at is None:
+                        self.tts_speak_started_at = time.monotonic()
+                    self.metrics.tts_speak_chunks += 1
+                    self.metrics.tts_speak_chars += len(text)
                     await self.tts_socket.send(json.dumps({"type": "Speak", "text": text}))
                 if flush:
                     await self.tts_socket.send(json.dumps({"type": "Flush"}))
@@ -969,7 +1027,7 @@ class TwilioVoiceCall:
                             await self._send_persistent_tts(normalize_voice_text(buffer))
                             buffer = ""
                         else:
-                            chunk = take_tts_chunk(buffer)
+                            chunk = take_tts_chunk(buffer, hard_limit=180, prefer_clauses=True)
                             if chunk:
                                 spoken, buffer = chunk
                                 await self._send_persistent_tts(normalize_voice_text(spoken))
@@ -1038,6 +1096,9 @@ class TwilioVoiceCall:
         self.tts_audio_pending = b""
         self.tts_playback_next_at = None
         self.tts_playback_offset_ms = 0
+        self.tts_last_interrupt_offset_ms = 0
+        self.tts_speak_started_at = None
+        self.tts_interrupt_in_flight = False
         self.awaiting_tts_interrupt_context = False
         self.tts_interrupt_event.set()
         if socket is not None:
@@ -1155,12 +1216,11 @@ class TwilioVoiceCall:
         """Persist one bounded structured outcome after the media session ends."""
         if self.outcome_committed or not self.outcome_turns:
             return
-        self.outcome_committed = True
         marker = "/commit-outcome"
         base = self.settings.chusky_turn_url[:-len("/turn")] if self.settings.chusky_turn_url.endswith("/turn") else self.settings.chusky_turn_url.rstrip("/")
         payload = {"callId": self.call_id, "userId": self.user_id, "turns": list(self.outcome_turns), **({"firstResponseMs": self.first_response_ms} if self.first_response_ms is not None else {})}
         last_error: Exception | None = None
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 response = await self.http.post(
                     f"{base}{marker}",
@@ -1169,13 +1229,14 @@ class TwilioVoiceCall:
                     timeout=httpx.Timeout(30.0, connect=5.0),
                 )
                 response.raise_for_status()
+                self.outcome_committed = True
                 return
             except asyncio.CancelledError:
                 raise
             except Exception as error:
                 last_error = error
-                if attempt < 2:
-                    await asyncio.sleep(0.2 * (attempt + 1))
+                if attempt < 4:
+                    await asyncio.sleep(0.25 * (2 ** attempt))
         LOG.warning("Could not commit bounded Twilio call outcome", extra={"call_id": self.call_id, "error": type(last_error).__name__ if last_error else "unknown"})
 
     async def _speak(self, text: str) -> None:
@@ -1192,6 +1253,8 @@ class TwilioVoiceCall:
             self.tts_model,
             native_mulaw=getattr(self.settings, "twilio_native_mulaw", True),
             expressivity=getattr(self.settings, "tts_expressivity", 0),
+            speed=getattr(self.settings, "tts_speed", 1.05),
+            api_host=getattr(self.settings, "deepgram_tts_api_host", "api.deepgram.com"),
         )
         async with connect(url, additional_headers={"Authorization": f"Token {self.settings.deepgram_api_key}"}, max_size=1_000_000) as socket:
             self.tts_socket = socket
@@ -1336,6 +1399,8 @@ class RecallVoiceSession:
                 self.stt_model,
                 self.settings.nova_endpointing_ms,
                 self.settings.nova_utterance_end_ms,
+                smart_format=getattr(self.settings, "nova_smart_format", True),
+                no_delay=getattr(self.settings, "nova_no_delay", False),
             )
         else:
             stt_url = deepgram_flux_listen_url(
@@ -1348,6 +1413,8 @@ class RecallVoiceSession:
         tts_url = deepgram_flux_speak_url(
             self.tts_model,
             expressivity=getattr(self.settings, "tts_expressivity", 0),
+            speed=getattr(self.settings, "tts_speed", 1.05),
+            api_host=getattr(self.settings, "deepgram_tts_api_host", "api.deepgram.com"),
         )
         tasks: set[asyncio.Task[Any]] = set()
         async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as self.http:
@@ -2052,12 +2119,12 @@ class RecallVoiceSession:
                                 await self._send_tts(buffer)
                                 buffer = ""
                             else:
-                                chunk = take_tts_chunk(buffer)
+                                chunk = take_tts_chunk(buffer, hard_limit=180, prefer_clauses=True)
                                 while chunk is not None:
                                     spoken, buffer = chunk
                                     self.echo_guard.remember_output(spoken)
                                     await self._send_tts(spoken)
-                                    chunk = take_tts_chunk(buffer)
+                                    chunk = take_tts_chunk(buffer, hard_limit=180, prefer_clauses=True)
                         elif event.get("type") == "silent":
                             self.metrics.agent_silent += 1
                             speaking = False
@@ -2268,11 +2335,15 @@ class BridgeMetrics:
     playback_mark_evictions: int = 0
     adaptive_endpointing_updates: int = 0
     playback_clears: int = 0
+    tts_speak_chunks: int = 0
+    tts_speak_chars: int = 0
     flux_eager_to_final_samples: deque[int] = field(default_factory=lambda: deque(maxlen=256))
     agent_first_delta_samples: deque[int] = field(default_factory=lambda: deque(maxlen=256))
     eager_to_first_audio_samples: deque[int] = field(default_factory=lambda: deque(maxlen=256))
     end_of_turn_to_first_audio_samples: deque[int] = field(default_factory=lambda: deque(maxlen=256))
     playback_mark_latency_samples: deque[int] = field(default_factory=lambda: deque(maxlen=256))
+    tts_connection_samples: deque[int] = field(default_factory=lambda: deque(maxlen=256))
+    tts_speak_to_first_audio_samples: deque[int] = field(default_factory=lambda: deque(maxlen=256))
 
     def snapshot(self, active_twilio: int) -> dict[str, Any]:
         return {
@@ -2295,6 +2366,8 @@ class BridgeMetrics:
                 "playbackMarkEvictions": self.playback_mark_evictions,
                 "adaptiveEndpointingUpdates": self.adaptive_endpointing_updates,
                 "playbackClears": self.playback_clears,
+                "ttsSpeakChunks": self.tts_speak_chunks,
+                "ttsSpeakChars": self.tts_speak_chars,
                 "averageAgentTurnMs": round(self.agent_turn_ms_total / self.agent_turns) if self.agent_turns else None,
                 "averageTtsFirstAudioMs": round(self.tts_first_audio_ms_total / self.tts_first_audio_count) if self.tts_first_audio_count else None,
                 "latencyMs": {
@@ -2303,6 +2376,8 @@ class BridgeMetrics:
                     "eagerToFirstAudio": latency_summary(list(self.eager_to_first_audio_samples)),
                     "endOfTurnToFirstAudio": latency_summary(list(self.end_of_turn_to_first_audio_samples)),
                     "playbackMark": latency_summary(list(self.playback_mark_latency_samples)),
+                    "ttsConnection": latency_summary(list(self.tts_connection_samples)),
+                    "ttsSpeakToFirstAudio": latency_summary(list(self.tts_speak_to_first_audio_samples)),
                 },
             },
         }

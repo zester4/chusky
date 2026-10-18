@@ -41,6 +41,7 @@ the only agent brain and supplies its existing history, memory, and tools.
 ```ini
 TWILIO_MEDIA_BRIDGE_SECRET=<same random secret configured in Chusky>
 DEEPGRAM_API_KEY=<Deepgram server API key>
+DEEPGRAM_TTS_API_HOST=api.deepgram.com
 CHUSKY_VOICE_TURN_URL=http://127.0.0.1:3003/internal/twilio/turn
 CHUSKY_VOICE_STATUS_URL=http://127.0.0.1:3003/internal/twilio/status
 VOICE_BRIDGE_HOST=127.0.0.1
@@ -66,6 +67,7 @@ Add these variables to the bridge service:
 ```ini
 TWILIO_MEDIA_BRIDGE_SECRET=<same random secret configured in Chusky>
 DEEPGRAM_API_KEY=<Deepgram server API key>
+DEEPGRAM_TTS_API_HOST=api.deepgram.com
 CHUSKY_VOICE_TURN_URL=https://chusky.up.railway.app/internal/twilio/turn
 CHUSKY_VOICE_CONTEXT_URL=https://chusky.up.railway.app/internal/twilio/context
 CHUSKY_VOICE_STATUS_URL=https://chusky.up.railway.app/internal/twilio/status
@@ -182,6 +184,10 @@ VOICE_STT_ADAPTIVE_ENDPOINTING=false
 VOICE_TTS_MODEL=flux-haley-en
 # Deepgram Flux TTS beta expressivity: -2 calm, 0 neutral, +2 animated.
 VOICE_TTS_EXPRESSIVITY=0
+# Flux streaming speed: 0.5–1.5 in 0.05 increments.
+VOICE_TTS_SPEED=1.05
+# Flux streaming uses Speak plus Flush for turn boundaries. Pause markers are
+# intentionally not emitted because Flux streaming does not support them.
 VOICE_ELEVENLABS_ENABLED=false
 # Required only when VOICE_ELEVENLABS_ENABLED=true.
 # ELEVENLABS_API_KEY=<server-only ElevenLabs key>
@@ -209,6 +215,17 @@ the model's normal dialogue and is never committed to voice history.
 
 The bridge uses Deepgram Flux conversational STT (`/v2/listen`) and streaming
 Flux TTS (`/v2/speak`) in Twilio's native raw 8 kHz μ-law format by default.
+Model output uses one persistent TTS WebSocket. The bridge speaks the first
+complete phrase immediately, then prefers clause boundaries before falling
+back to bounded word boundaries. Aggregate health metrics include model-first
+delta, TTS connection, TTS first-byte, first-audio, and Twilio playback-mark
+latency percentiles.
+
+`DEEPGRAM_TTS_API_HOST` is restricted to Deepgram's documented TTS hosts and
+defaults to `api.deepgram.com`. A regional host can reduce network time for a
+geographically distant caller and should be enabled as a measured canary. It
+is applied to TTS only; the live Flux STT path remains on the default endpoint
+until an equivalent regional STT contract is verified.
 Set `VOICE_ELEVENLABS_ENABLED=true` to replace only the direct Twilio TTS
 backend with ElevenLabs streaming TTS. When it is `false` (the default), the
 Deepgram Flux TTS path remains active and the ElevenLabs settings are ignored.
@@ -350,9 +367,12 @@ RECALL_MEETINGS_ENABLED=true
 RECALL_MEDIA_BRIDGE_SECRET=<same value as Chusky root>
 DEEPGRAM_API_KEY=<Deepgram server API key>
 RECALL_STT_MODEL=flux-general-en
+RECALL_NOVA_SMART_FORMAT=true
+RECALL_NOVA_NO_DELAY=false
 VOICE_STT_MODEL=flux-general-en
 VOICE_TTS_MODEL=flux-haley-en
 VOICE_TTS_EXPRESSIVITY=0
+VOICE_TTS_SPEED=1.05
 CHUSKY_RECALL_TURN_STREAM_URL=https://<chusky-host>/internal/recall/turn-stream
 CHUSKY_RECALL_COMMIT_TURN_URL=https://<chusky-host>/internal/recall/commit-turn
 CHUSKY_RECALL_MEDIA_AUTHORIZE_URL=https://<chusky-host>/internal/recall/media-authorize
