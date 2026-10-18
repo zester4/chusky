@@ -383,6 +383,12 @@ export const config = {
   // Number search/purchase/release is a separate opt-in because it creates
   // billable Twilio resources. Provider details stay behind the API.
   twilioNumberManagementEnabled: optional("TWILIO_NUMBER_MANAGEMENT_ENABLED", "false") === "true",
+  // Tenant subaccounts are a second explicit opt-in. Keep both flags false
+  // until the parent account, encryption key, billing policy, and webhook
+  // routing have been verified in a controlled canary.
+  twilioSubaccountManagementEnabled: optional("TWILIO_SUBACCOUNT_MANAGEMENT_ENABLED", "false") === "true",
+  twilioSubaccountEncryptionKey: optional("TWILIO_SUBACCOUNT_ENCRYPTION_KEY", "").trim(),
+  twilioManagedNumberPriceCents: boundedInt("TWILIO_MANAGED_NUMBER_PRICE_CENTS", 200, 0, 100_000),
   twilioPhoneNumber: optional("TWILIO_PHONE_NUMBER", ""),
   twilioMessagingServiceSid: optional("TWILIO_MESSAGING_SERVICE_SID", ""),
   twilioSmsWebhookUrl: optional("TWILIO_SMS_WEBHOOK_URL", ""),

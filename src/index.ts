@@ -71,6 +71,7 @@ import { isBlandInboundConfigured, normalizeBlandInboundNumber, parseBlandInboun
 import { parseVoiceCallProfileJson } from "./calls/voiceProfile.js";
 import { listBlandCuratedVoices } from "./calls/blandVoices.js";
 import { FLUX_TTS_VOICES } from "./voiceSettings.js";
+import { twilioWebhookCredentialsForCall, twilioWebhookCredentialsForRoute } from "./calls/twilioSubaccounts.js";
 import { nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow, syncDefaultProactiveWatchesForConnectedAccounts } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { executeClaimedDelegation, executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
@@ -862,8 +863,10 @@ async function main(): Promise<void> {
     const twilioForm = (body: Record<string, unknown>): Record<string, string> => Object.fromEntries(
       Object.entries(body).filter(([, value]) => typeof value === "string").map(([key, value]) => [key, value as string]),
     );
-    const trustedTwilioRequest = (signature: string | undefined, url: string, body: Record<string, unknown>) => Boolean(
-      config.twilioAuthToken && signature && twilio.validateRequest(config.twilioAuthToken, signature, url, twilioForm(body)),
+    const trustedTwilioRequest = (credentials: { accountSid: string; authToken: string } | undefined, signature: string | undefined, url: string, body: Record<string, unknown>) => Boolean(
+      credentials?.authToken && signature
+      && (!body.AccountSid || body.AccountSid === credentials.accountSid)
+      && twilio.validateRequest(credentials.authToken, signature, url, twilioForm(body)),
     );
     const twilioStreamTwiML = async (callId: string, userId: number) => {
       const ttsModel = (await getSession(userId)).voicePreferences?.twilio;
@@ -897,10 +900,11 @@ async function main(): Promise<void> {
       const callId = String(c.req.query("callId") ?? "").trim();
       const userId = Number(c.req.query("userId"));
       const form = await c.req.parseBody();
-      if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !trustedTwilioRequest(c.req.header("X-Twilio-Signature"), twilioCallbackUrl("/twilio/twiml", callId, userId), form)) return c.text("Forbidden", 403);
-      const callSid = String(form.CallSid ?? "").trim();
+      if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0) return c.text("Forbidden", 403);
       const call = await readTwilioCallForCallback(userId, callId);
-      if (!call || call.provider !== "twilio") return c.body(twilioUnavailableTwiML(), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
+      const credentials = await twilioWebhookCredentialsForCall(call);
+      if (!call || call.provider !== "twilio" || !trustedTwilioRequest(credentials, c.req.header("X-Twilio-Signature"), twilioCallbackUrl("/twilio/twiml", callId, userId), form)) return c.text("Forbidden", 403);
+      const callSid = String(form.CallSid ?? "").trim();
       const answeredBy = String(form.AnsweredBy ?? "").trim().toLowerCase();
       if ((call.voiceProfile?.controls?.allowVoicemail ?? config.twilioVoicemailEnabled) && answeredBy.startsWith("machine_")) {
         await appendPhoneCallEvent(userId, callId, { type: "voicemail_detected", summary: "The recipient's voicemail system answered." });
@@ -938,19 +942,20 @@ async function main(): Promise<void> {
     });
 
     // Configure this URL as the incoming Voice webhook on the Twilio number.
-    // Signature verification happens before the caller's number is considered;
-    // then an explicit E.164 allowlist prevents unknown callers from entering
+    // Signature verification happens before the caller is allowed into a
+    // workspace; then an explicit E.164 allowlist prevents unknown callers from entering
     // an owner's private Chusky history, memory, or tool context.
     app.post("/twilio/inbound", async (c) => {
       if (!config.twilioVoiceEnabled || !config.twilioInboundEnabled || !config.twilioAuthToken || !config.twilioMediaStreamUrl || !config.twilioMediaBridgeSecret) return c.text("Not found", 404);
       const form = await c.req.parseBody();
       const base = config.twilioWebhookBaseUrl.replace(/\/+$/, "");
-      if (!base || !trustedTwilioRequest(c.req.header("X-Twilio-Signature"), `${base}/twilio/inbound`, form)) return c.text("Forbidden", 403);
       try {
         const from = normalizeInboundPhone(String(form.From ?? "").trim()) ?? String(form.From ?? "").trim();
         const to = normalizeInboundPhone(String(form.To ?? "").trim()) ?? String(form.To ?? "").trim();
         const callSid = String(form.CallSid ?? "").trim();
         const durableRoute = normalizeInboundPhone(to) ? await getVoiceInboundRoute("twilio", to) : undefined;
+        const credentials = await twilioWebhookCredentialsForRoute(durableRoute);
+        if (!base || !trustedTwilioRequest(credentials, c.req.header("X-Twilio-Signature"), `${base}/twilio/inbound`, form)) return c.text("Forbidden", 403);
         const ownerUserId = durableRoute?.userId ?? inboundTwilioOwnerForNumber(to, config.twilioInboundOwnerUserId, config.twilioInboundRoutes);
         const callProfile = durableRoute?.callProfile ?? (config.twilioInboundCallProfile === "business" ? "business" : "personal");
         // Personal inbound lines remain explicit allowlists. Business lines
@@ -961,7 +966,7 @@ async function main(): Promise<void> {
         if (durableRoute ? !twilioRouteCallerAllowed(durableRoute, from) : !twilioInboundCallerAllowed(callProfile, allowedCallers, from)) return c.body("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Reject reason=\"rejected\"/></Response>", 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
         const verifiedCallers = durableRoute?.verifiedCallers ?? parseTwilioCallerAllowlist(config.twilioInboundVerifiedCallers);
         const voiceProfile = durableRoute?.voiceProfile ?? parseTwilioInboundVoiceProfile(config.twilioInboundVoiceProfile, callProfile);
-        const call = await registerTwilioInboundCall({ userId: ownerUserId, from, to, callSid, callProfile, voiceProfile, verification: callProfile === "business" && verifiedCallers.includes(from) ? "verified" : "identified" });
+        const call = await registerTwilioInboundCall({ userId: ownerUserId, from, to, callSid, callProfile, voiceProfile, verification: callProfile === "business" && verifiedCallers.includes(from) ? "verified" : "identified", ...(durableRoute?.twilioSubaccountId ? { twilioSubaccountId: durableRoute.twilioSubaccountId } : {}) });
         return c.body(await twilioStreamTwiML(call.id, ownerUserId), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
       } catch (error) {
         logger.warn({ err: error }, "Rejected Twilio inbound call configuration or payload");
@@ -974,9 +979,10 @@ async function main(): Promise<void> {
       const callId = String(c.req.query("callId") ?? "").trim();
       const userId = Number(c.req.query("userId"));
       const form = await c.req.parseBody();
-      if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !trustedTwilioRequest(c.req.header("X-Twilio-Signature"), twilioCallbackUrl("/twilio/status", callId, userId), form)) return c.text("Forbidden", 403);
+      if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0) return c.text("Forbidden", 403);
       const call = await readTwilioCallForCallback(userId, callId);
-      if (!call || call.provider !== "twilio") return c.body(null, 204);
+      const credentials = await twilioWebhookCredentialsForCall(call);
+      if (!call || call.provider !== "twilio" || !trustedTwilioRequest(credentials, c.req.header("X-Twilio-Signature"), twilioCallbackUrl("/twilio/status", callId, userId), form)) return c.text("Forbidden", 403);
       const providerStatus = String(form.CallStatus ?? "").toLowerCase();
       const durationValue = Number(form.CallDuration);
       const duration = Number.isFinite(durationValue) && durationValue >= 0 ? Math.min(Math.floor(durationValue), 86_400) : undefined;
@@ -1004,9 +1010,10 @@ async function main(): Promise<void> {
       const callId = String(c.req.query("callId") ?? "").trim();
       const userId = Number(c.req.query("userId"));
       const form = await c.req.parseBody();
-      if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !trustedTwilioRequest(c.req.header("X-Twilio-Signature"), twilioCallbackUrl("/twilio/stream-status", callId, userId), form)) return c.text("Forbidden", 403);
+      if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0) return c.text("Forbidden", 403);
       const call = await readTwilioCallForCallback(userId, callId);
-      if (!call || call.provider !== "twilio") return c.body(null, 204);
+      const credentials = await twilioWebhookCredentialsForCall(call);
+      if (!call || call.provider !== "twilio" || !trustedTwilioRequest(credentials, c.req.header("X-Twilio-Signature"), twilioCallbackUrl("/twilio/stream-status", callId, userId), form)) return c.text("Forbidden", 403);
       const event = String(form.StreamEvent ?? "").toLowerCase();
       if (event === "stream-started" && !["ended", "failed"].includes(call.status)) {
         // Inbound calls do not have the outbound status-callback contract. The

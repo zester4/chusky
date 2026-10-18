@@ -20,7 +20,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, appendSdkAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createCliDevice, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, deleteSdkThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkIdempotency, getSdkRun, getSdkThread, listSdkAuditEvents, listSdkRuns, listSdkThreads, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, getVoiceInboundRoute, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, deleteVoiceInboundRoute, listVoiceInboundRoutes, saveVoiceInboundRoute, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listTasksSince, listOpenTasks, listTasksForMission, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, saveSdkIdempotency, saveSdkRun, saveSdkThread, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type TriggerEventRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, appendSdkAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createCliDevice, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, deleteSdkThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkIdempotency, getSdkRun, getSdkThread, listSdkAuditEvents, listSdkRuns, listSdkThreads, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, getVoiceInboundRoute, getTwilioSubaccountByUserId, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, deleteVoiceInboundRoute, listVoiceInboundRoutes, saveVoiceInboundRoute, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listTasksSince, listOpenTasks, listTasksForMission, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, saveSdkIdempotency, saveSdkRun, saveSdkThread, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type TriggerEventRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
@@ -53,7 +53,8 @@ import type { VoiceCallProfileInput } from "./calls/voiceProfile.js";
 import { normalizePhoneCallOutcome } from "./calls/outcome.js";
 import { isBlandVoiceConfigured } from "./calls/bland.js";
 import { isTwilioVoiceConfigured } from "./calls/twilio.js";
-import { isTwilioNumberManagementConfigured, purchaseTwilioNumber, releaseTwilioNumber, searchTwilioNumbers } from "./calls/twilioNumbers.js";
+import { purchaseTwilioNumber, releaseTwilioNumber, searchTwilioNumbers } from "./calls/twilioNumbers.js";
+import { markNumberOwnershipReleased, ownershipRecord, savePurchasedNumberOwnership, subaccountNumberDependencies, tenantNumberDependencies } from "./calls/twilioSubaccounts.js";
 import { cancelJob, cancelReminder, nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow, scheduleJob, setReminder, syncAttentionPulseProactiveState } from "./nativeTools.js";
 import { confirmRecallMeetingParticipant } from "./meetings/service.js";
 import { defaultMediaInstruction } from "./mediaInput.js";
@@ -2821,7 +2822,7 @@ export function registerSdkApi(app: Hono): void {
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before managing phone numbers.");
     const routes = await listVoiceInboundRoutes(owner.userId);
     return c.json({
-      available: isTwilioNumberManagementConfigured(),
+      available: Boolean(await tenantNumberDependencies(owner.userId)),
       data: routes.map((route) => ({
         phoneNumber: route.phoneNumber,
         displayName: route.displayName ?? "",
@@ -2829,6 +2830,7 @@ export function registerSdkApi(app: Hono): void {
         callProfile: route.callProfile,
         provider: route.provider,
         purpose: route.purpose,
+        ...(route.twilioSubaccountId ? { managedAccount: true } : {}),
         updatedAt: route.updatedAt,
       })),
     });
@@ -2837,23 +2839,27 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/account/calls/numbers/search", async (c) => {
     const owner = await callOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before searching phone numbers.");
+    const dependencies = await tenantNumberDependencies(owner.userId);
+    if (!dependencies) return apiError(c, 503, "phone_number_search_unavailable", "Phone number search is temporarily unavailable.");
     try {
       const data = await searchTwilioNumbers({
         countryCode: c.req.query("countryCode") ?? "",
         areaCode: c.req.query("areaCode") ?? undefined,
         contains: c.req.query("contains"),
         limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
-      });
+      }, dependencies);
       return c.json({ data });
     } catch (error) {
-      return apiError(c, 503, "phone_number_search_unavailable", error instanceof Error ? error.message : "Phone number search is temporarily unavailable.");
+      logger.warn({ errorType: error instanceof Error ? error.name : "TwilioNumberSearchError" }, "Tenant phone-number search failed");
+      return apiError(c, 503, "phone_number_search_unavailable", "Phone number search is temporarily unavailable.");
     }
   });
 
   app.post("/v1/account/calls/numbers/purchase", async (c) => {
     const owner = await callOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before purchasing a phone number.");
-    if (!isTwilioNumberManagementConfigured()) return apiError(c, 503, "phone_number_management_unavailable", "Phone number purchasing is not enabled on this deployment.");
+    const dependencies = await tenantNumberDependencies(owner.userId);
+    if (!dependencies) return apiError(c, 503, "phone_number_management_unavailable", "Number purchasing is temporarily unavailable for this workspace.");
     const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; displayName?: unknown };
     const phoneNumber = normalizeInboundPhone(body.phoneNumber);
     if (!phoneNumber) return apiError(c, 400, "invalid_phone_number", "phoneNumber must be a valid E.164 number.");
@@ -2868,7 +2874,11 @@ export function registerSdkApi(app: Hono): void {
       const purchased = await purchaseTwilioNumber({
         phoneNumber,
         friendlyName: typeof body.displayName === "string" ? body.displayName : undefined,
-      });
+      }, dependencies);
+      if (!purchased.sid) throw new Error("The provider did not return a phone-number resource.");
+      const subaccount = await getTwilioSubaccountByUserId(owner.userId);
+      if (!subaccount) throw new Error("The workspace phone account is no longer available.");
+      const owned = ownershipRecord({ userId: owner.userId, subaccountId: subaccount.id, phoneNumber: purchased.phoneNumber, providerNumberId: purchased.sid });
       const route = normalizeVoiceInboundRouteInput({
         provider: "twilio",
         phoneNumber: purchased.phoneNumber,
@@ -2878,13 +2888,26 @@ export function registerSdkApi(app: Hono): void {
         purpose: "Handle inbound caller requests",
         voiceProfile: (await getVoiceCallProfile(owner.userId)) ?? { identity: "Chusky", mode: "support", tone: "professional", disclosure: "assistant" },
       }, owner.userId);
+      route.twilioSubaccountId = subaccount.id;
+      route.twilioOwnershipId = owned.id;
+      try {
+        await savePurchasedNumberOwnership(owned);
+      } catch (ownershipError) {
+        try { await releaseTwilioNumber(purchased.sid, dependencies); } catch { /* best-effort compensation */ }
+        throw ownershipError;
+      }
       const saved = await saveVoiceInboundRoute(route);
-      if (!saved) return apiError(c, 409, "phone_number_already_claimed", "That phone number was claimed by another workspace.");
+      if (!saved) {
+        try { await releaseTwilioNumber(purchased.sid, dependencies); } catch { /* best-effort compensation */ }
+        await markNumberOwnershipReleased(purchased.sid, owner.userId);
+        return apiError(c, 409, "phone_number_already_claimed", "That phone number was claimed by another workspace.");
+      }
       const response = { data: { phoneNumber: route.phoneNumber, displayName: route.displayName ?? "", source: "managed" as const, callProfile: route.callProfile, provider: route.provider, purpose: route.purpose, updatedAt: route.updatedAt } };
       if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, response);
       return c.json(response, 201);
     } catch (error) {
-      return apiError(c, 502, "phone_number_purchase_failed", error instanceof Error ? error.message : "The phone number could not be purchased.");
+      logger.warn({ errorType: error instanceof Error ? error.name : "TwilioNumberPurchaseError" }, "Tenant phone-number purchase failed");
+      return apiError(c, 502, "phone_number_purchase_failed", "The phone number could not be purchased.");
     }
   });
 
@@ -2901,13 +2924,16 @@ export function registerSdkApi(app: Hono): void {
     if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
     if (prior.replay) return c.json(prior.replay);
     try {
-      await releaseTwilioNumber(route.providerNumberId);
+      const dependencies = route.twilioSubaccountId ? await subaccountNumberDependencies(route.twilioSubaccountId) : undefined;
+      await releaseTwilioNumber(route.providerNumberId, dependencies ?? undefined);
+      if (route.twilioSubaccountId) await markNumberOwnershipReleased(route.providerNumberId, owner.userId);
       const deleted = await deleteVoiceInboundRoute("twilio", phoneNumber, owner.userId);
       const response = { released: deleted };
       if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, response);
       return c.json(response);
     } catch (error) {
-      return apiError(c, 502, "phone_number_release_failed", error instanceof Error ? error.message : "The phone number could not be released.");
+      logger.warn({ errorType: error instanceof Error ? error.name : "TwilioNumberReleaseError" }, "Tenant phone-number release failed");
+      return apiError(c, 502, "phone_number_release_failed", "The phone number could not be released.");
     }
   });
 

@@ -509,6 +509,10 @@ export interface PhoneCallRecord {
   lastCommittedTurnId?: string;
   continuity?: { sourceCallId: string; summary: string; decisions: string[]; actionItems: string[] };
   providerCallId?: string;
+  /** Managed Twilio calls retain the tenant account identity so subsequent
+   * status, TwiML, and stream callbacks can be verified with that account's
+   * credential rather than the platform parent credential. */
+  twilioSubaccountId?: string;
   /** Last provider lifecycle state, kept separate from Chusky's internal bridge state. */
   providerStatus?: "queued" | "initiated" | "ringing" | "in-progress" | "answered" | "completed" | "busy" | "no-answer" | "failed" | "canceled" | "machine" | "unknown";
   /** Provider terminal reason, bounded and safe for the dashboard. */
@@ -555,7 +559,63 @@ export interface VoiceInboundRouteRecord {
   voiceProfile: VoiceCallProfile;
   allowedCallers: string[];
   verifiedCallers: string[];
+  /** Managed Twilio numbers are tied to the encrypted tenant subaccount. */
+  twilioSubaccountId?: string;
+  /** Durable ownership record for billing and safe release. */
+  twilioOwnershipId?: string;
   updatedAt: number;
+}
+
+export type TwilioSubaccountStatus = "provisioning" | "active" | "suspended" | "failed" | "closed";
+
+/** Server-only tenant Twilio account record. The encrypted credential payload
+ * must never cross an API boundary; callers should project this record first. */
+export interface TwilioSubaccountRecord {
+  id: string;
+  userId: number;
+  twilioAccountSid: string;
+  encryptedCredentials: EncryptedCredential;
+  status: TwilioSubaccountStatus;
+  friendlyName: string;
+  providerStatus?: "active" | "suspended" | "closed";
+  createdAt: number;
+  updatedAt: number;
+  suspendedAt?: number;
+  closedAt?: number;
+  lastHealthCheckAt?: number;
+  lastHealthStatus?: "healthy" | "unhealthy" | "unknown";
+  lastHealthErrorCode?: string;
+  lastHealthError?: string;
+}
+
+export type TwilioNumberOwnershipStatus = "active" | "released";
+
+export interface TwilioNumberOwnershipRecord {
+  id: string;
+  userId: number;
+  subaccountId: string;
+  phoneNumber: string;
+  providerNumberId: string;
+  status: TwilioNumberOwnershipStatus;
+  currency: "USD";
+  providerCostCents?: number;
+  customerPriceCents?: number;
+  purchasedAt: number;
+  releasedAt?: number;
+  updatedAt: number;
+}
+
+export interface TwilioBillingLedgerEntry {
+  id: string;
+  userId: number;
+  subaccountId: string;
+  ownershipId?: string;
+  kind: "number_purchase" | "number_release" | "number_monthly" | "subaccount_provisioning";
+  amountCents: number;
+  currency: "USD";
+  status: "recorded" | "voided";
+  createdAt: number;
+  metadata?: Record<string, string>;
 }
 
 export interface PhoneCallTranscriptTurn {
@@ -2111,6 +2171,15 @@ interface Backend {
   deleteVoiceInboundRoute(provider: VoiceInboundRouteRecord["provider"], phoneNumber: string, userId: number): Promise<boolean>;
   listVoiceInboundRoutes(userId: number): Promise<VoiceInboundRouteRecord[]>;
   hasVoiceInboundRoutes(provider: VoiceInboundRouteRecord["provider"]): Promise<boolean>;
+  getTwilioSubaccount(id: string): Promise<TwilioSubaccountRecord | undefined>;
+  getTwilioSubaccountByUserId(userId: number): Promise<TwilioSubaccountRecord | undefined>;
+  saveTwilioSubaccount(record: TwilioSubaccountRecord): Promise<boolean>;
+  listTwilioSubaccounts(limit: number): Promise<TwilioSubaccountRecord[]>;
+  getTwilioNumberOwnership(providerNumberId: string): Promise<TwilioNumberOwnershipRecord | undefined>;
+  saveTwilioNumberOwnership(record: TwilioNumberOwnershipRecord): Promise<boolean>;
+  listTwilioNumberOwnership(userId: number, limit: number): Promise<TwilioNumberOwnershipRecord[]>;
+  appendTwilioBillingEntry(entry: TwilioBillingLedgerEntry): Promise<void>;
+  listTwilioBillingEntries(userId: number, limit: number): Promise<TwilioBillingLedgerEntry[]>;
   claimRecallMeetingCreation(userId: number, instanceHash: string, token: string, leaseMs: number): Promise<boolean>;
   releaseRecallMeetingCreation(userId: number, instanceHash: string, token: string): Promise<boolean>;
   putRecallVisualFrame(userId: number, meetingId: string, encryptedFrame: string, ttlSeconds: number, minIntervalSeconds: number): Promise<boolean>;
@@ -2544,6 +2613,15 @@ class RedisBackend implements Backend {
   private voiceInboundRouteKey = (provider: VoiceInboundRouteRecord["provider"], phoneNumber: string) => `chuck:voice:inbound-route:${this.voiceInboundRouteDigest(provider, phoneNumber)}`;
   private voiceInboundRouteIndexKey = (userId: number) => `chuck:user:${userId}:voice-inbound-routes`;
   private voiceInboundProviderIndexKey = (provider: VoiceInboundRouteRecord["provider"]) => `chuck:voice:inbound-routes:${provider}`;
+  private twilioSubaccountKey = (id: string) => `chuck:voice:twilio-subaccount:${createHash("sha256").update(id).digest("hex")}`;
+  private twilioSubaccountUserKey = (userId: number) => `chuck:user:${userId}:twilio-subaccount`;
+  private twilioSubaccountIndexKey = () => "chuck:voice:twilio-subaccounts";
+  private twilioOwnershipKey = (providerNumberId: string) => `chuck:voice:twilio-number:${createHash("sha256").update(providerNumberId).digest("hex")}`;
+  private twilioOwnershipIdKey = (id: string) => `chuck:voice:twilio-number-record:${createHash("sha256").update(id).digest("hex")}`;
+  private twilioOwnershipUserIndexKey = (userId: number) => `chuck:user:${userId}:twilio-numbers`;
+  private twilioOwnershipSubaccountIndexKey = (subaccountId: string) => `chuck:voice:twilio-subaccount-numbers:${createHash("sha256").update(subaccountId).digest("hex")}`;
+  private twilioBillingKey = (id: string) => `chuck:voice:twilio-billing:${createHash("sha256").update(id).digest("hex")}`;
+  private twilioBillingIndexKey = (userId: number) => `chuck:user:${userId}:twilio-billing`;
   private runKey = (id: string) => `chuck:run:${id}`;
   // Bind cancellation markers to the owner so the hot-path check does not
   // need to re-read the full agent-run checkpoint for authorization.
@@ -3625,6 +3703,76 @@ class RedisBackend implements Backend {
   }
   async hasVoiceInboundRoutes(provider: VoiceInboundRouteRecord["provider"]): Promise<boolean> {
     return (await this.r.zcard(this.voiceInboundProviderIndexKey(provider))) > 0;
+  }
+  async getTwilioSubaccount(id: string): Promise<TwilioSubaccountRecord | undefined> {
+    const raw = await this.r.get(this.twilioSubaccountKey(id));
+    if (!raw) return undefined;
+    try {
+      const value = JSON.parse(raw) as TwilioSubaccountRecord;
+      return value.id === id && Number.isSafeInteger(value.userId) && value.userId > 0 && typeof value.twilioAccountSid === "string" ? value : undefined;
+    } catch { return undefined; }
+  }
+  async getTwilioSubaccountByUserId(userId: number): Promise<TwilioSubaccountRecord | undefined> {
+    const id = await this.r.get(this.twilioSubaccountUserKey(userId));
+    return id ? this.getTwilioSubaccount(id) : undefined;
+  }
+  async saveTwilioSubaccount(record: TwilioSubaccountRecord): Promise<boolean> {
+    const recordKey = this.twilioSubaccountKey(record.id);
+    const userKey = this.twilioSubaccountUserKey(record.userId);
+    const result = await this.r.eval(
+      "local prior=redis.call('GET',KEYS[1]); if prior then local decoded=cjson.decode(prior); if tonumber(decoded.userId)~=tonumber(ARGV[2]) then return 0 end end; local owner=redis.call('GET',KEYS[2]); if owner and owner~=ARGV[3] then return 0 end; redis.call('SET',KEYS[1],ARGV[1]); redis.call('SET',KEYS[2],ARGV[3]); redis.call('ZADD',KEYS[3],ARGV[4],ARGV[3]); return 1",
+      3, recordKey, userKey, this.twilioSubaccountIndexKey(), JSON.stringify(record), String(record.userId), record.id, String(record.updatedAt),
+    );
+    return Number(result) === 1;
+  }
+  async listTwilioSubaccounts(limit: number): Promise<TwilioSubaccountRecord[]> {
+    const ids = await this.r.zrevrange(this.twilioSubaccountIndexKey(), 0, Math.max(0, Math.min(500, Math.floor(limit)) - 1));
+    const records = await Promise.all(ids.map((id) => this.getTwilioSubaccount(id)));
+    return records.filter((record): record is TwilioSubaccountRecord => Boolean(record));
+  }
+  async getTwilioNumberOwnership(providerNumberId: string): Promise<TwilioNumberOwnershipRecord | undefined> {
+    const raw = await this.r.get(this.twilioOwnershipKey(providerNumberId));
+    if (!raw) return undefined;
+    try {
+      const value = JSON.parse(raw) as TwilioNumberOwnershipRecord;
+      return value.providerNumberId === providerNumberId && Number.isSafeInteger(value.userId) && value.userId > 0 ? value : undefined;
+    } catch { return undefined; }
+  }
+  async saveTwilioNumberOwnership(record: TwilioNumberOwnershipRecord): Promise<boolean> {
+    const ownershipKey = this.twilioOwnershipKey(record.providerNumberId);
+    const ownershipIdKey = this.twilioOwnershipIdKey(record.id);
+    const userIndex = this.twilioOwnershipUserIndexKey(record.userId);
+    const subaccountIndex = this.twilioOwnershipSubaccountIndexKey(record.subaccountId);
+    const result = await this.r.eval(
+      "local prior=redis.call('GET',KEYS[1]); if prior then local decoded=cjson.decode(prior); if tonumber(decoded.userId)~=tonumber(ARGV[2]) or decoded.id~=ARGV[3] then return 0 end end; local priorId=redis.call('GET',KEYS[4]); if priorId then local decodedId=cjson.decode(priorId); if decodedId.providerNumberId~=ARGV[5] or tonumber(decodedId.userId)~=tonumber(ARGV[2]) then return 0 end end; redis.call('SET',KEYS[1],ARGV[1]); redis.call('SET',KEYS[4],ARGV[1]); redis.call('ZADD',KEYS[2],ARGV[4],ARGV[3]); redis.call('ZADD',KEYS[3],ARGV[4],ARGV[3]); return 1",
+      4, ownershipKey, userIndex, subaccountIndex, ownershipIdKey, JSON.stringify(record), String(record.userId), record.id, String(record.updatedAt), record.providerNumberId,
+    );
+    return Number(result) === 1;
+  }
+  async listTwilioNumberOwnership(userId: number, limit: number): Promise<TwilioNumberOwnershipRecord[]> {
+    const ids = await this.r.zrevrange(this.twilioOwnershipUserIndexKey(userId), 0, Math.max(0, Math.min(500, Math.floor(limit)) - 1));
+    const records = await Promise.all(ids.map(async (id) => {
+      const raw = await this.r.get(this.twilioOwnershipIdKey(id));
+      if (!raw) return undefined;
+      try { return JSON.parse(raw) as TwilioNumberOwnershipRecord; } catch { return undefined; }
+    }));
+    return records.filter((record): record is TwilioNumberOwnershipRecord => record !== undefined && record.userId === userId);
+  }
+  async appendTwilioBillingEntry(entry: TwilioBillingLedgerEntry): Promise<void> {
+    await this.r.multi()
+      .set(this.twilioBillingKey(entry.id), JSON.stringify(entry))
+      .zadd(this.twilioBillingIndexKey(entry.userId), entry.createdAt, entry.id)
+      .zremrangebyrank(this.twilioBillingIndexKey(entry.userId), 0, -501)
+      .exec();
+  }
+  async listTwilioBillingEntries(userId: number, limit: number): Promise<TwilioBillingLedgerEntry[]> {
+    const ids = await this.r.zrevrange(this.twilioBillingIndexKey(userId), 0, Math.max(0, Math.min(500, Math.floor(limit)) - 1));
+    const records = await Promise.all(ids.map(async (id) => {
+      const raw = await this.r.get(this.twilioBillingKey(id));
+      if (!raw) return undefined;
+      try { return JSON.parse(raw) as TwilioBillingLedgerEntry; } catch { return undefined; }
+    }));
+    return records.filter((record): record is TwilioBillingLedgerEntry => record !== undefined && record.userId === userId);
   }
   async getApproval(userId: number, id: string): Promise<ApprovalRecord | undefined> {
     const raw = await this.r.get(this.approvalKey(id));
@@ -5078,6 +5226,10 @@ class MemoryBackend implements Backend {
   private companyUsage = new Map<string, CompanyUsagePeriod>();
   private companyBranding = new Map<string, CompanyBranding>();
   private companyBrandingDomains = new Map<string, string>();
+  private twilioSubaccounts = new Map<string, TwilioSubaccountRecord>();
+  private twilioSubaccountByUser = new Map<number, string>();
+  private twilioNumberOwnership = new Map<string, TwilioNumberOwnershipRecord>();
+  private twilioBillingEntries = new Map<number, TwilioBillingLedgerEntry[]>();
   private agentRuns = new Map<string, AgentRunRecord>();
   private handoffs = new Map<string, HandoffRecord & { userId: number }>();
   private rates = new Map<number, { n: number; exp: number }>();
@@ -5362,6 +5514,47 @@ class MemoryBackend implements Backend {
   }
   async hasVoiceInboundRoutes(provider: VoiceInboundRouteRecord["provider"]) {
     return [...this.voiceInboundRoutes.values()].some((route) => route.provider === provider);
+  }
+  async getTwilioSubaccount(id: string) {
+    const record = this.twilioSubaccounts.get(id);
+    return record ? structuredClone(record) : undefined;
+  }
+  async getTwilioSubaccountByUserId(userId: number) {
+    const id = this.twilioSubaccountByUser.get(userId);
+    return id ? this.getTwilioSubaccount(id) : undefined;
+  }
+  async saveTwilioSubaccount(record: TwilioSubaccountRecord) {
+    const prior = this.twilioSubaccounts.get(record.id);
+    const existingId = this.twilioSubaccountByUser.get(record.userId);
+    if ((prior && prior.userId !== record.userId) || (existingId && existingId !== record.id)) return false;
+    this.twilioSubaccounts.set(record.id, structuredClone(record));
+    this.twilioSubaccountByUser.set(record.userId, record.id);
+    return true;
+  }
+  async listTwilioSubaccounts(limit: number) {
+    return [...this.twilioSubaccounts.values()].sort((left, right) => right.updatedAt - left.updatedAt).slice(0, Math.max(1, Math.min(500, Math.floor(limit)))).map((record) => structuredClone(record));
+  }
+  async getTwilioNumberOwnership(providerNumberId: string) {
+    const record = this.twilioNumberOwnership.get(providerNumberId);
+    return record ? structuredClone(record) : undefined;
+  }
+  async saveTwilioNumberOwnership(record: TwilioNumberOwnershipRecord) {
+    const prior = this.twilioNumberOwnership.get(record.providerNumberId);
+    const priorId = [...this.twilioNumberOwnership.values()].find((item) => item.id === record.id);
+    if ((prior && (prior.userId !== record.userId || prior.id !== record.id)) || (priorId && (priorId.userId !== record.userId || priorId.providerNumberId !== record.providerNumberId))) return false;
+    this.twilioNumberOwnership.set(record.providerNumberId, structuredClone(record));
+    return true;
+  }
+  async listTwilioNumberOwnership(userId: number, limit: number) {
+    return [...this.twilioNumberOwnership.values()].filter((record) => record.userId === userId).sort((left, right) => right.updatedAt - left.updatedAt).slice(0, Math.max(1, Math.min(500, Math.floor(limit)))).map((record) => structuredClone(record));
+  }
+  async appendTwilioBillingEntry(entry: TwilioBillingLedgerEntry) {
+    const entries = this.twilioBillingEntries.get(entry.userId) ?? [];
+    if (entries.some((item) => item.id === entry.id)) return;
+    this.twilioBillingEntries.set(entry.userId, [structuredClone(entry), ...entries].slice(0, 500));
+  }
+  async listTwilioBillingEntries(userId: number, limit: number) {
+    return (this.twilioBillingEntries.get(userId) ?? []).slice(0, Math.max(1, Math.min(500, Math.floor(limit)))).map((entry) => structuredClone(entry));
   }
   async getApproval(userId: number, id: string) { const approval = this.approvals.get(id); return approval?.userId === userId ? approval : undefined; }
   async saveApproval(record: ApprovalRecord) { this.approvals.set(record.id, record); const session = this.sessions.get(record.userId) ?? fresh(); session.approvals = [...session.approvals.filter((item) => item.id !== record.id), record].slice(-20); this.sessions.set(record.userId, session); return record; }
@@ -8217,6 +8410,42 @@ export function listVoiceInboundRoutes(userId: number): Promise<VoiceInboundRout
 
 export function hasVoiceInboundRoutes(provider: VoiceInboundRouteRecord["provider"]): Promise<boolean> {
   return backend.hasVoiceInboundRoutes(provider);
+}
+
+export function getTwilioSubaccount(id: string): Promise<TwilioSubaccountRecord | undefined> {
+  return backend.getTwilioSubaccount(id);
+}
+
+export function getTwilioSubaccountByUserId(userId: number): Promise<TwilioSubaccountRecord | undefined> {
+  return backend.getTwilioSubaccountByUserId(userId);
+}
+
+export function saveTwilioSubaccount(record: TwilioSubaccountRecord): Promise<boolean> {
+  return backend.saveTwilioSubaccount(record);
+}
+
+export function listTwilioSubaccounts(limit = 100): Promise<TwilioSubaccountRecord[]> {
+  return backend.listTwilioSubaccounts(Math.max(1, Math.min(500, Math.floor(limit))));
+}
+
+export function getTwilioNumberOwnership(providerNumberId: string): Promise<TwilioNumberOwnershipRecord | undefined> {
+  return backend.getTwilioNumberOwnership(providerNumberId);
+}
+
+export function saveTwilioNumberOwnership(record: TwilioNumberOwnershipRecord): Promise<boolean> {
+  return backend.saveTwilioNumberOwnership(record);
+}
+
+export function listTwilioNumberOwnership(userId: number, limit = 100): Promise<TwilioNumberOwnershipRecord[]> {
+  return backend.listTwilioNumberOwnership(userId, Math.max(1, Math.min(500, Math.floor(limit))));
+}
+
+export function appendTwilioBillingEntry(entry: TwilioBillingLedgerEntry): Promise<void> {
+  return backend.appendTwilioBillingEntry(entry);
+}
+
+export function listTwilioBillingEntries(userId: number, limit = 100): Promise<TwilioBillingLedgerEntry[]> {
+  return backend.listTwilioBillingEntries(userId, Math.max(1, Math.min(500, Math.floor(limit))));
 }
 
 const ACTIVE_RECALL_MEETING_STATUSES = new Set<RecallMeetingStatus>(["creating", "scheduled", "joining", "waiting_room", "in_call", "leaving"]);

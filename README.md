@@ -1436,6 +1436,29 @@ actions retain exact approval checks. Verification tiers still
 govern disclosure of sensitive information. Outbound calls likewise receive
 relevant owner context and connected tools, not just a short call brief.
 
+Tenant phone-number inventory is deliberately separate from the legacy parent
+Twilio account. Keep `TWILIO_SUBACCOUNT_MANAGEMENT_ENABLED=false` and
+`TWILIO_NUMBER_MANAGEMENT_ENABLED=false` until the canary is approved. When
+enabled by an administrator, the private Builder → Voice view provisions one
+Twilio subaccount per numeric workspace owner, stores the returned auth token
+only as envelope-encrypted data in Redis, and records the subaccount lifecycle
+in the audit trail. `TWILIO_SUBACCOUNT_ENCRYPTION_KEY` must be a stable,
+base64url-encoded 32-byte key; losing it makes stored tenant credentials
+unreadable.
+
+After a subaccount is active, the customer Calls page can search, purchase, and
+release numbers without choosing Twilio or another provider. Each purchase is
+stored as a tenant-owned number record and a billing-ledger entry, and its
+Twilio Voice URL points to the existing `/twilio/inbound` route. Inbound
+routing resolves the called number to that tenant's durable route, so the
+provider account is not exposed to callers. Managed callbacks are verified with
+the encrypted tenant subaccount credential and the expected Twilio account SID;
+legacy parent-account routes continue to use the parent credential. Suspending
+a subaccount stops its provider activity while retaining number ownership and
+billing history; it does not silently release or delete numbers. The private
+Builder Voice panel exposes only safe account status, number counts, and health
+state—never auth tokens or raw provider errors.
+
 The private bridge routes are `/internal/twilio/turn`,
 `/internal/twilio/turn-stream`, `/internal/twilio/commit-turn`,
 `/internal/twilio/commit-outcome`, and `/internal/twilio/status`. Completed

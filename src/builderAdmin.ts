@@ -7,6 +7,7 @@ import { durableStorageMetrics, durableStateStatus, isDurableStore } from "./sto
 import { monitoringSnapshot } from "./monitoring.js";
 import { logger } from "./logger.js";
 import { builderEnabled, builderRepository, invalidateBuilderControl, newBuilderEvent, type BuilderRepository } from "./builderControl.js";
+import { checkTwilioSubaccountHealth, listTwilioSubaccountViews, provisionTwilioSubaccount, updateTwilioSubaccountStatus, type TwilioSubaccountView } from "./calls/twilioSubaccounts.js";
 
 export interface BuilderSession {
   user: { id: string; name?: string; emailVerified?: boolean; twoFactorEnabled?: boolean };
@@ -54,6 +55,8 @@ async function systemSnapshot() {
       { name: "QStash", configured: Boolean(config.qstashToken) },
       { name: "E2B browser", configured: Boolean(config.e2bEnabled && config.e2bApiKey) },
       { name: "Daytona", configured: Boolean(config.daytonaApiKey) },
+      { name: "Twilio voice", configured: Boolean(config.twilioVoiceEnabled && config.twilioAccountSid && config.twilioAuthToken) },
+      { name: "Twilio tenant numbers", configured: Boolean(config.twilioSubaccountManagementEnabled && config.twilioNumberManagementEnabled && config.twilioSubaccountEncryptionKey && config.twilioWebhookBaseUrl) },
     ],
   };
 }
@@ -96,7 +99,7 @@ export function registerBuilderAdmin(app: Hono, dependencies: BuilderDependencie
   });
   builder.get("/access", async (c) => {
     const { session, role } = c.get("principal");
-    return c.json({ name: session.user.name || "Builder", role, permissions: role === "builder_admin" ? ["view_metrics", "view_users", "manage_users", "manage_flags"] : ["view_metrics"], mfaEnabled: session.user.twoFactorEnabled === true, verified: session.user.twoFactorEnabled === true && await repository().verified(session.session.token), fresh: freshBuilderSession(session) });
+    return c.json({ name: session.user.name || "Builder", role, permissions: role === "builder_admin" ? ["view_metrics", "view_users", "manage_users", "manage_flags", "view_voice", "manage_voice"] : ["view_metrics", "view_voice"], mfaEnabled: session.user.twoFactorEnabled === true, verified: session.user.twoFactorEnabled === true && await repository().verified(session.session.token), fresh: freshBuilderSession(session) });
   });
   builder.post("/verify", async (c) => {
     const { session } = c.get("principal");
@@ -161,6 +164,56 @@ export function registerBuilderAdmin(app: Hono, dependencies: BuilderDependencie
     const auditAction = action === "suspend" ? "user_suspended" : action === "restore" ? "user_restored" : action === "remove" ? "user_removed" : "user_sessions_revoked";
     await repository().record({ ...newBuilderEvent(session.user.id, auditAction), targetUserId: userId });
     return c.json({ ok: true, action });
+  });
+  builder.get("/voice/subaccounts", async (c) => {
+    if (!(["builder_admin", "builder_viewer"] as BuilderRole[]).includes(c.get("principal").role)) return c.json(error("permission_denied", "Voice administration is restricted to builder personnel."), 403);
+    try {
+      return c.json({ enabled: config.twilioSubaccountManagementEnabled, numberManagementEnabled: config.twilioNumberManagementEnabled, data: await listTwilioSubaccountViews(200) });
+    } catch {
+      return c.json(error("voice_unavailable", "Tenant voice administration is temporarily unavailable."), 503);
+    }
+  });
+  builder.post("/voice/subaccounts", async (c) => {
+    const { session, role } = c.get("principal");
+    if (role !== "builder_admin") return c.json(error("permission_denied", "Only builder administrators can provision tenant phone accounts."), 403);
+    const body = await c.req.json().catch(() => null) as Record<string, unknown> | null;
+    const userId = body && Number.isSafeInteger(body.userId) ? Number(body.userId) : Number(body?.userId);
+    if (!Number.isSafeInteger(userId) || userId <= 0) return c.json(error("invalid_user", "Provide the numeric workspace owner ID."), 400);
+    try {
+      const record = await provisionTwilioSubaccount(userId, body?.friendlyName);
+      await repository().record({ ...newBuilderEvent(session.user.id, "twilio_subaccount_provisioned"), targetUserId: String(userId), subaccountId: record.id });
+      return c.json({ data: record }, 201);
+    } catch {
+      return c.json(error("voice_provisioning_failed", "The tenant phone account could not be provisioned. Check Twilio configuration and the management flags."), 502);
+    }
+  });
+  builder.patch("/voice/subaccounts/:id", async (c) => {
+    const { session, role } = c.get("principal");
+    if (role !== "builder_admin") return c.json(error("permission_denied", "Only builder administrators can change tenant phone-account status."), 403);
+    const id = c.req.param("id");
+    if (!/^twa_[A-Za-z0-9]{20,80}$/.test(id)) return c.json(error("invalid_subaccount", "The tenant phone account ID is invalid."), 400);
+    const body = await c.req.json().catch(() => null) as Record<string, unknown> | null;
+    if (body?.action !== "suspend" && body?.action !== "resume") return c.json(error("invalid_action", "Use suspend or resume."), 400);
+    try {
+      const record = await updateTwilioSubaccountStatus(id, body.action === "suspend" ? "suspended" : "active");
+      await repository().record({ ...newBuilderEvent(session.user.id, body.action === "suspend" ? "twilio_subaccount_suspended" : "twilio_subaccount_resumed"), targetUserId: String(record.userId), subaccountId: record.id });
+      return c.json({ data: record });
+    } catch {
+      return c.json(error("voice_status_update_failed", "The tenant phone account status could not be updated."), 502);
+    }
+  });
+  builder.post("/voice/subaccounts/:id/health", async (c) => {
+    const { session, role } = c.get("principal");
+    if (role !== "builder_admin") return c.json(error("permission_denied", "Only builder administrators can run tenant phone-account health checks."), 403);
+    const id = c.req.param("id");
+    if (!/^twa_[A-Za-z0-9]{20,80}$/.test(id)) return c.json(error("invalid_subaccount", "The tenant phone account ID is invalid."), 400);
+    try {
+      const record = await checkTwilioSubaccountHealth(id);
+      await repository().record({ ...newBuilderEvent(session.user.id, "twilio_subaccount_health_checked"), targetUserId: String(record.userId), subaccountId: record.id });
+      return c.json({ data: record });
+    } catch {
+      return c.json(error("voice_health_check_failed", "The tenant phone account health check could not be completed."), 502);
+    }
   });
   builder.get("/controls", async (c) => c.json(await repository().read()));
   builder.get("/audit", async (c) => c.json({ data: await repository().events(), retention: "Most recent 1,000 events; returns latest 100." }));

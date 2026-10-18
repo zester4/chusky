@@ -50,7 +50,7 @@ export function parseTwilioInboundVoiceProfile(value: string, callProfile: CallP
 
 /** Persist a safe inbound call record once. The Twilio Call SID is used only
  * for idempotency and lifecycle correlation; no call audio is retained. */
-export async function registerTwilioInboundCall(input: { userId: number; from: string; to: string; callSid: string; callProfile?: CallProfile; voiceProfile?: VoiceCallProfile; verification?: "public" | "identified" | "verified" }): Promise<PhoneCallRecord> {
+export async function registerTwilioInboundCall(input: { userId: number; from: string; to: string; callSid: string; callProfile?: CallProfile; voiceProfile?: VoiceCallProfile; verification?: "public" | "identified" | "verified"; twilioSubaccountId?: string }): Promise<PhoneCallRecord> {
   if (!E164.test(input.from) || !E164.test(input.to) || !/^CA[a-zA-Z0-9]{10,64}$/.test(input.callSid)) throw new Error("Invalid Twilio inbound call data");
   const existing = (await listPhoneCalls(input.userId)).find((call) => call.provider === "twilio" && call.direction === "inbound" && call.providerCallId === input.callSid);
   if (existing) return existing;
@@ -68,6 +68,7 @@ export async function registerTwilioInboundCall(input: { userId: number; from: s
     status: "bridging",
     providerStatus: "initiated",
     providerCallId: input.callSid,
+    ...(input.twilioSubaccountId ? { twilioSubaccountId: input.twilioSubaccountId } : {}),
     createdAt: now,
     updatedAt: now,
   };
