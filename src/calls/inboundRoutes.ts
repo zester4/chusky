@@ -37,10 +37,19 @@ export function normalizeVoiceInboundRouteInput(input: Record<string, unknown>, 
   const rawProfile = input.voiceProfile ?? existing?.voiceProfile ?? {};
   if (!rawProfile || typeof rawProfile !== "object" || Array.isArray(rawProfile)) throw new Error("voiceProfile must be an object");
   const voiceProfile = normalizeVoiceCallProfile({ ...(rawProfile as VoiceCallProfileInput), mode: (rawProfile as VoiceCallProfileInput).mode ?? (callProfile === "business" ? "support" : "general") });
+  const providerNumberId = typeof input.providerNumberId === "string" && /^[A-Za-z0-9]{6,80}$/.test(input.providerNumberId.trim())
+    ? input.providerNumberId.trim()
+    : existing?.providerNumberId;
+  const displayName = typeof input.displayName === "string"
+    ? input.displayName.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120) || undefined
+    : existing?.displayName;
   return {
     provider,
     phoneNumber,
     userId,
+    ...(providerNumberId ? { providerNumberId } : {}),
+    ...(displayName ? { displayName } : {}),
+    source: providerNumberId ? "managed" : existing?.source ?? "external",
     callProfile,
     purpose: boundedText(input.purpose ?? existing?.purpose, "purpose", 2_000, "Handle an inbound caller request"),
     voiceProfile,

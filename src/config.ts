@@ -380,6 +380,9 @@ export const config = {
   twilioSmsEnabled: optional("TWILIO_SMS_ENABLED", "false") === "true",
   twilioAccountSid: optional("TWILIO_ACCOUNT_SID", ""),
   twilioAuthToken: optional("TWILIO_AUTH_TOKEN", ""),
+  // Number search/purchase/release is a separate opt-in because it creates
+  // billable Twilio resources. Provider details stay behind the API.
+  twilioNumberManagementEnabled: optional("TWILIO_NUMBER_MANAGEMENT_ENABLED", "false") === "true",
   twilioPhoneNumber: optional("TWILIO_PHONE_NUMBER", ""),
   twilioMessagingServiceSid: optional("TWILIO_MESSAGING_SERVICE_SID", ""),
   twilioSmsWebhookUrl: optional("TWILIO_SMS_WEBHOOK_URL", ""),

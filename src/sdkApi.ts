@@ -25,6 +25,7 @@ import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
 import { getSdkRunUsage } from "./store.js";
+import { getVoiceCallProfile, setVoiceCallProfile } from "./store.js";
 import { getSessionProfile, getSessionWebhooks } from "./store.js";
 import { listOpenTaskSummaries } from "./store.js";
 import { listMissionsPage } from "./store.js";
@@ -52,6 +53,7 @@ import type { VoiceCallProfileInput } from "./calls/voiceProfile.js";
 import { normalizePhoneCallOutcome } from "./calls/outcome.js";
 import { isBlandVoiceConfigured } from "./calls/bland.js";
 import { isTwilioVoiceConfigured } from "./calls/twilio.js";
+import { isTwilioNumberManagementConfigured, purchaseTwilioNumber, releaseTwilioNumber, searchTwilioNumbers } from "./calls/twilioNumbers.js";
 import { cancelJob, cancelReminder, nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow, scheduleJob, setReminder, syncAttentionPulseProactiveState } from "./nativeTools.js";
 import { confirmRecallMeetingParticipant } from "./meetings/service.js";
 import { defaultMediaInstruction } from "./mediaInput.js";
@@ -2715,6 +2717,30 @@ export function registerSdkApi(app: Hono): void {
     return c.json({ available: Boolean(provider), provider: provider ?? null, data: (await listPhoneCalls(owner.userId)).map(callView) });
   });
 
+  app.get("/v1/account/calls/profile", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before configuring the voice representative.");
+    return c.json({ data: await getVoiceCallProfile(owner.userId) });
+  });
+
+  app.patch("/v1/account/calls/profile", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before configuring the voice representative.");
+    const body = await c.req.json().catch(() => ({})) as { profile?: unknown };
+    try {
+      const profile = await setVoiceCallProfile(owner.userId, body.profile ?? body);
+      // Keep public numbers in sync with the saved representative. New
+      // inbound calls must use the same profile the owner sees in the
+      // dashboard; otherwise a profile edit would silently affect outbound
+      // calls only.
+      const routes = await listVoiceInboundRoutes(owner.userId);
+      await Promise.all(routes.map((route) => saveVoiceInboundRoute({ ...route, voiceProfile: profile, updatedAt: Date.now() })));
+      return c.json({ data: profile });
+    } catch (error) {
+      return apiError(c, 400, "invalid_voice_profile", error instanceof Error ? error.message : "The voice representative profile is invalid.");
+    }
+  });
+
   /**
    * Small call-tool catalogue for the dashboard. It intentionally returns
    * connected account metadata only; action schemas stay lazy and are loaded
@@ -2783,6 +2809,106 @@ export function registerSdkApi(app: Hono): void {
     const response = { deleted };
     if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, response);
     return c.json(response);
+  });
+
+  /**
+   * Customer-facing phone-number inventory. The provider is intentionally not
+   * part of this API: the deployment owns routing and may change providers
+   * without forcing every customer to understand the transport.
+   */
+  app.get("/v1/account/calls/numbers", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before managing phone numbers.");
+    const routes = await listVoiceInboundRoutes(owner.userId);
+    return c.json({
+      available: isTwilioNumberManagementConfigured(),
+      data: routes.map((route) => ({
+        phoneNumber: route.phoneNumber,
+        displayName: route.displayName ?? "",
+        source: route.source ?? (route.providerNumberId ? "managed" : "external"),
+        callProfile: route.callProfile,
+        provider: route.provider,
+        purpose: route.purpose,
+        updatedAt: route.updatedAt,
+      })),
+    });
+  });
+
+  app.get("/v1/account/calls/numbers/search", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before searching phone numbers.");
+    try {
+      const data = await searchTwilioNumbers({
+        countryCode: c.req.query("countryCode") ?? "",
+        areaCode: c.req.query("areaCode") ?? undefined,
+        contains: c.req.query("contains"),
+        limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
+      });
+      return c.json({ data });
+    } catch (error) {
+      return apiError(c, 503, "phone_number_search_unavailable", error instanceof Error ? error.message : "Phone number search is temporarily unavailable.");
+    }
+  });
+
+  app.post("/v1/account/calls/numbers/purchase", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before purchasing a phone number.");
+    if (!isTwilioNumberManagementConfigured()) return apiError(c, 503, "phone_number_management_unavailable", "Phone number purchasing is not enabled on this deployment.");
+    const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; displayName?: unknown };
+    const phoneNumber = normalizeInboundPhone(body.phoneNumber);
+    if (!phoneNumber) return apiError(c, 400, "invalid_phone_number", "phoneNumber must be a valid E.164 number.");
+    const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
+    const prior = await sdkIdempotency(c, owner.userId, fingerprint);
+    if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
+    if (prior.replay) return c.json(prior.replay, 201);
+    const existing = await getVoiceInboundRoute("twilio", phoneNumber);
+    if (existing && existing.userId !== owner.userId) return apiError(c, 409, "phone_number_already_claimed", "That phone number is already assigned to another workspace.");
+    if (existing?.providerNumberId) return apiError(c, 409, "phone_number_already_owned", "That phone number is already in your workspace.");
+    try {
+      const purchased = await purchaseTwilioNumber({
+        phoneNumber,
+        friendlyName: typeof body.displayName === "string" ? body.displayName : undefined,
+      });
+      const route = normalizeVoiceInboundRouteInput({
+        provider: "twilio",
+        phoneNumber: purchased.phoneNumber,
+        providerNumberId: purchased.sid,
+        displayName: typeof body.displayName === "string" ? body.displayName : purchased.friendlyName,
+        callProfile: "business",
+        purpose: "Handle inbound caller requests",
+        voiceProfile: (await getVoiceCallProfile(owner.userId)) ?? { identity: "Chusky", mode: "support", tone: "professional", disclosure: "assistant" },
+      }, owner.userId);
+      const saved = await saveVoiceInboundRoute(route);
+      if (!saved) return apiError(c, 409, "phone_number_already_claimed", "That phone number was claimed by another workspace.");
+      const response = { data: { phoneNumber: route.phoneNumber, displayName: route.displayName ?? "", source: "managed" as const, callProfile: route.callProfile, provider: route.provider, purpose: route.purpose, updatedAt: route.updatedAt } };
+      if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, response);
+      return c.json(response, 201);
+    } catch (error) {
+      return apiError(c, 502, "phone_number_purchase_failed", error instanceof Error ? error.message : "The phone number could not be purchased.");
+    }
+  });
+
+  app.delete("/v1/account/calls/numbers/:phoneNumber", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before releasing a phone number.");
+    const phoneNumber = normalizeInboundPhone(decodeURIComponent(c.req.param("phoneNumber")));
+    if (!phoneNumber) return apiError(c, 400, "invalid_phone_number", "The phone number is invalid.");
+    const route = await getVoiceInboundRoute("twilio", phoneNumber);
+    if (!route || route.userId !== owner.userId) return apiError(c, 404, "phone_number_not_found", "That phone number is not in your workspace.");
+    if (route.source !== "managed" || !route.providerNumberId) return apiError(c, 409, "external_phone_number", "This number was connected outside Chusky and cannot be released here.");
+    const fingerprint = createHash("sha256").update(`DELETE:${c.req.path}`).digest("hex");
+    const prior = await sdkIdempotency(c, owner.userId, fingerprint);
+    if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
+    if (prior.replay) return c.json(prior.replay);
+    try {
+      await releaseTwilioNumber(route.providerNumberId);
+      const deleted = await deleteVoiceInboundRoute("twilio", phoneNumber, owner.userId);
+      const response = { released: deleted };
+      if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, response);
+      return c.json(response);
+    } catch (error) {
+      return apiError(c, 502, "phone_number_release_failed", error instanceof Error ? error.message : "The phone number could not be released.");
+    }
   });
 
   app.post("/v1/account/calls", async (c) => {

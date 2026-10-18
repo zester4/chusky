@@ -240,6 +240,8 @@ export interface UserSession {
   voiceReplies?: boolean;
   /** Per-account voices for the three live call transports, independent of Telegram audio replies. */
   voicePreferences?: LiveVoicePreferences;
+  /** Reusable owner-configured voice representative profile. */
+  voiceCallProfile?: VoiceCallProfile;
   triggerIds: string[];
   /** Private owner-authored operating instructions, keyed only by owned trigger ID. */
   triggerInstructions?: Record<string, string>;
@@ -333,6 +335,7 @@ export interface SessionProfileProjection {
   telegramChatId?: number;
   voiceReplies?: boolean;
   voicePreferences?: LiveVoicePreferences;
+  voiceCallProfile?: VoiceCallProfile;
   scratchpad: Record<string, ScratchpadEntry>;
   triggerIds: string[];
   triggerInstructions: Record<string, string>;
@@ -541,6 +544,12 @@ export interface VoiceInboundRouteRecord {
   provider: "twilio" | "bland";
   phoneNumber: string;
   userId: number;
+  /** Provider resource ID for numbers provisioned through Chusky. */
+  providerNumberId?: string;
+  /** Customer-facing label for a managed number. */
+  displayName?: string;
+  /** Managed numbers can be released; manually connected legacy routes cannot. */
+  source?: "managed" | "external";
   callProfile: "personal" | "business";
   purpose: string;
   voiceProfile: VoiceCallProfile;
@@ -2732,6 +2741,7 @@ class RedisBackend implements Backend {
         ...(Number.isSafeInteger(item.telegramChatId) ? { telegramChatId: Number(item.telegramChatId) } : {}),
         ...(typeof item.voiceReplies === "boolean" ? { voiceReplies: item.voiceReplies } : {}),
         ...(item.voicePreferences && typeof item.voicePreferences === "object" && !Array.isArray(item.voicePreferences) ? { voicePreferences: item.voicePreferences as LiveVoicePreferences } : {}),
+        ...(item.voiceCallProfile && typeof item.voiceCallProfile === "object" && !Array.isArray(item.voiceCallProfile) ? { voiceCallProfile: normalizeVoiceCallProfile(item.voiceCallProfile as VoiceCallProfile) } : {}),
         scratchpad,
         triggerIds,
         triggerInstructions,
@@ -5132,6 +5142,7 @@ class MemoryBackend implements Backend {
       ...(session.telegramChatId === undefined ? {} : { telegramChatId: session.telegramChatId }),
       ...(session.voiceReplies === undefined ? {} : { voiceReplies: session.voiceReplies }),
       ...(session.voicePreferences ? { voicePreferences: session.voicePreferences } : {}),
+      ...(session.voiceCallProfile ? { voiceCallProfile: session.voiceCallProfile } : {}),
       scratchpad: structuredClone(session.scratchpad),
       triggerIds: [...session.triggerIds],
       triggerInstructions: { ...(session.triggerInstructions ?? {}) },
@@ -9012,6 +9023,18 @@ export async function setVoiceReplies(uid: number, enabled: boolean): Promise<vo
   const s = await getSession(uid);
   s.voiceReplies = enabled;
   await saveSession(uid, s);
+}
+
+export async function getVoiceCallProfile(uid: number): Promise<VoiceCallProfile | undefined> {
+  const profile = (await getSession(uid)).voiceCallProfile;
+  return profile ? normalizeVoiceCallProfile(profile) : undefined;
+}
+
+export async function setVoiceCallProfile(uid: number, input: unknown): Promise<VoiceCallProfile> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Voice representative profile must be an object");
+  const profile = normalizeVoiceCallProfile(input as Parameters<typeof normalizeVoiceCallProfile>[0]);
+  await mutateSession(uid, (session) => { session.voiceCallProfile = profile; }, { domains: ["profile"] });
+  return profile;
 }
 
 export async function setLiveVoicePreference(
