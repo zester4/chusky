@@ -15,6 +15,7 @@ export type TwilioNumberSummary = {
 export type TwilioNumberSearch = {
   countryCode: string;
   areaCode?: string;
+  areaCodes?: string[];
   region?: string;
   locality?: string;
   postalCode?: string;
@@ -101,25 +102,36 @@ function normalize(value: { sid?: string; phoneNumber: string; friendlyName?: st
 export async function searchTwilioNumbers(input: TwilioNumberSearch, options: TwilioNumberDependencies = defaults()): Promise<TwilioNumberSummary[]> {
   validate(options);
   const country = countryCode(input.countryCode);
-  const areaCode = input.areaCode?.trim();
-  if (areaCode && !/^\d{1,6}$/.test(areaCode)) throw new Error("areaCode must contain only digits.");
-  const areaCodeNumber = areaCode ? Number(areaCode) : undefined;
+  const requestedAreaCodes = [...new Set([
+    ...(input.areaCodes ?? []),
+    ...(input.areaCode ? [input.areaCode] : []),
+  ].map((value) => String(value).trim()).filter(Boolean))];
+  if (requestedAreaCodes.length > 5) throw new Error("You can search up to five area codes at a time.");
+  if (requestedAreaCodes.some((value) => !/^\d{1,6}$/.test(value))) throw new Error("areaCodes must contain only digits.");
   const region = input.region?.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
   const locality = input.locality?.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
   const postalCode = input.postalCode?.replace(/[^A-Za-z0-9 -]/g, "").trim().slice(0, 20);
   const contains = input.contains?.trim();
   if (contains && contains.length > 20) throw new Error("contains is too long.");
   const client = twilio(options.accountSid, options.authToken);
-  const results = await client.availablePhoneNumbers(country).local.list({
+  const limit = boundedLimit(input.limit);
+  const searchAreaCodes = requestedAreaCodes.length ? requestedAreaCodes : [undefined];
+  const perSearchLimit = Math.max(1, Math.ceil(limit / searchAreaCodes.length));
+  const results = await Promise.all(searchAreaCodes.map((areaCode) => client.availablePhoneNumbers(country).local.list({
     voiceEnabled: true,
-    ...(areaCodeNumber === undefined ? {} : { areaCode: areaCodeNumber }),
+    ...(areaCode ? { areaCode: Number(areaCode) } : {}),
     ...(region ? { inRegion: region } : {}),
     ...(locality ? { inLocality: locality } : {}),
     ...(postalCode ? { inPostalCode: postalCode } : {}),
     ...(contains ? { contains } : {}),
-    limit: boundedLimit(input.limit),
-  });
-  return results.map((item) => normalize(item));
+    limit: perSearchLimit,
+  })));
+  const unique = new Map<string, TwilioNumberSummary>();
+  for (const batch of results) for (const item of batch) {
+    const normalized = normalize(item);
+    if (!unique.has(normalized.phoneNumber)) unique.set(normalized.phoneNumber, normalized);
+  }
+  return [...unique.values()].slice(0, limit);
 }
 
 /** Purchase one number and point its inbound voice webhook at Chusky. */

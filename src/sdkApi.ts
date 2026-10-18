@@ -2901,6 +2901,7 @@ export function registerSdkApi(app: Hono): void {
       const data = await searchTwilioNumbers({
         countryCode: c.req.query("countryCode") ?? "",
         areaCode: c.req.query("areaCode") ?? undefined,
+        areaCodes: c.req.queries("areaCode")?.flatMap((value) => value.split(",")) ?? undefined,
         region: c.req.query("region") ?? undefined,
         locality: c.req.query("locality") ?? undefined,
         postalCode: c.req.query("postalCode") ?? undefined,

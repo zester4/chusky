@@ -30,3 +30,14 @@ test("number purchase rejects a selected country that does not match the number"
     /selected country does not match/i,
   );
 });
+
+test("number search bounds multi-area-code requests before provider dispatch", async () => {
+  await assert.rejects(
+    searchTwilioNumbers({ countryCode: "US", areaCodes: ["201", "202", "205", "206", "207", "208"] }, configured),
+    /up to five area codes/i,
+  );
+  await assert.rejects(
+    searchTwilioNumbers({ countryCode: "US", areaCodes: ["20A"] }, configured),
+    /areaCodes must contain only digits/i,
+  );
+});
