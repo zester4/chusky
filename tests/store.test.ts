@@ -2,15 +2,15 @@ import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import {
-  addHistorySummary, appendMessages, acquireUserLock, addReminder, addJob, addPhoneCall, clearHistory, clearSession, createTriggerEventIfAbsent,
+  addHistorySummary, appendMessages, acquireUserLock, addReminder, addJob, addPhoneCall, clearHistory, clearSession, createTask, createTriggerEventIfAbsent,
   createApproval, createCliDevice, createCliPairing, getApproval, getDaytonaWorkspace, getSession, initStore,
-  listReminders, listPhoneCalls, releaseUserLock, saveDaytonaWorkspace, saveSession, setApprovalStatus, setComposioSessionId, setModel,
+  listReminders, listJobs, listTasks, listPhoneCalls, releaseUserLock, saveDaytonaWorkspace, saveSession, setApprovalStatus, setComposioSessionId, setModel,
   upsertMemory, updateMemory, searchMemories, forgetMemory, writeScratchpad, readScratchpad, clearScratchpad,
   claimTelegramUpdate,
   claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease,
   type DaytonaWorkspaceRecord, type SdkRunRecord, type TriggerEventRecord,
   createTriggerEvent, getTriggerEvent, listTriggerEvents, updateTriggerEvent,
-  backfillSdkPrivateRunHistory, createWebTelegramLinkCode, ensureReminderWebProjection, ensureTriggerWebProjection, getTelegramUserIdForWebAuth, markTriggerWebApprovalResuming, mergeLinkedWebSession, mutateSession, redeemWebTelegramLinkCode,
+  backfillSdkPrivateRunHistory, createWebTelegramLinkCode, ensureReminderWebProjection, ensureTriggerWebProjection, getTelegramUserIdForWebAuth, markTriggerWebApprovalResuming, mergeLinkedTelegramSession, mergeLinkedWebSession, mutateSession, redeemWebTelegramLinkCode,
   createVideoJob, getVideoJob, listVideoJobs, updatePhoneCall, updateVideoJob,
   addRecallMeeting, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, updateRecallMeeting, claimRecallCopilotEvaluation,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
@@ -750,7 +750,7 @@ test("web-to-Telegram links are high-entropy, one-time, and cannot be rebound", 
   assert.equal(await redeemWebTelegramLinkCode(otherWeb.code, 810012), "conflict");
 });
 
-test("redeeming a web link merges its private history and memory into the Telegram owner once", async () => {
+test("redeeming a web link keeps the web owner canonical and imports legacy Telegram state once", async () => {
   const sourceUserId = 810131;
   const telegramUserId = 810132;
   const webAccount = `web-merge-${Date.now()}`;
@@ -771,40 +771,65 @@ test("redeeming a web link merges its private history and memory into the Telegr
   telegramSession.history = [{ role: "user", content: "Telegram context", createdAt: now }];
   telegramSession.composioSessionId = "telegram-composio-session";
   await saveSession(telegramUserId, telegramSession);
+  const canonicalWebSession = await getSession(sourceUserId);
+  canonicalWebSession.composioSessionId = "web-composio-session";
+  await saveSession(sourceUserId, canonicalWebSession);
 
   const { code } = await createWebTelegramLinkCode(webAccount, { sourceUserId });
   assert.equal(await redeemWebTelegramLinkCode(code, telegramUserId), "linked");
 
-  const merged = await getSession(telegramUserId);
+  const merged = await getSession(sourceUserId);
   assert.deepEqual(merged.history.map(({ content }) => content), [
     "My web preference", "I will remember it.", "Telegram context",
   ]);
   assert.equal(merged.summaries.includes("Earlier web context"), true);
   assert.equal(merged.memories.some((memory) => memory.key === "coffee" && memory.value === "Oat milk"), true);
   assert.equal(merged.scratchpad["web-plan"]?.content, "Finish the launch checklist");
-  assert.equal(merged.phoneCalls?.find((call) => call.id === "twc_web-before-link")?.userId, telegramUserId);
+  assert.equal(merged.phoneCalls?.find((call) => call.id === "twc_web-before-link")?.userId, sourceUserId);
   assert.equal(merged.phoneCalls?.find((call) => call.id === "twc_web-before-link")?.summary, "Discussed the launch date.");
-  assert.equal((await getApproval(telegramUserId, webApproval.id))?.userId, telegramUserId);
-  assert.equal(merged.composioSessionId, "telegram-composio-session", "linking must preserve the Telegram provider session");
+  assert.equal((await getApproval(sourceUserId, webApproval.id))?.userId, sourceUserId);
+  assert.equal(merged.composioSessionId, "web-composio-session", "the canonical web Composio session remains authoritative");
   assert.equal(await redeemWebTelegramLinkCode(code, telegramUserId), "invalid");
   const mergedUpdatedAt = merged.updatedAt;
-  await mergeLinkedWebSession(sourceUserId, telegramUserId);
-  assert.equal((await getSession(telegramUserId)).history.length, 3, "replaying the code cannot duplicate imported history");
-  assert.equal((await getSession(telegramUserId)).phoneCalls?.filter((call) => call.id === "twc_web-before-link").length, 1, "replaying a link cannot duplicate phone calls");
-  assert.equal((await getSession(telegramUserId)).updatedAt, mergedUpdatedAt, "an unchanged web session does not rewrite the Telegram session");
+  await mergeLinkedTelegramSession(telegramUserId, sourceUserId);
+  assert.equal((await getSession(sourceUserId)).history.length, 3, "replaying the code cannot duplicate imported history");
+  assert.equal((await getSession(sourceUserId)).phoneCalls?.filter((call) => call.id === "twc_web-before-link").length, 1, "replaying a link cannot duplicate phone calls");
+  assert.equal((await getSession(sourceUserId)).updatedAt, mergedUpdatedAt, "an unchanged alias session does not rewrite the canonical session");
 
   webSession.history.push(
     { role: "user", content: "A later web turn", createdAt: now + 100 },
     { role: "assistant", content: "Later web answer", createdAt: now + 200 },
   );
   await saveSession(sourceUserId, webSession);
-  const trimmedTarget = await getSession(telegramUserId);
+  const trimmedTarget = await getSession(sourceUserId);
   trimmedTarget.history = trimmedTarget.history.filter((message) => message.content === "Telegram context");
-  await saveSession(telegramUserId, trimmedTarget);
-  await mergeLinkedWebSession(sourceUserId, telegramUserId);
-  assert.deepEqual((await getSession(telegramUserId)).history.map(({ content }) => content), [
-    "Telegram context", "A later web turn", "Later web answer",
-  ], "a changed source snapshot does not re-import web messages that were already merged and later trimmed");
+  await saveSession(sourceUserId, trimmedTarget);
+  await mergeLinkedTelegramSession(telegramUserId, sourceUserId);
+  assert.deepEqual((await getSession(sourceUserId)).history.map(({ content }) => content), [
+    "Telegram context",
+  ], "reconciling an unchanged alias never copies canonical web history back into the channel");
+});
+
+test("link migration rehomes durable work and channel records to the web owner", async () => {
+  const webOwner = 810143;
+  const telegramOwner = 810144;
+  const webAccount = `web-durable-merge-${Date.now()}`;
+  const now = Date.now();
+  await addReminder(telegramOwner, { id: "rem_linked-owner", userId: telegramOwner, text: "Review the imported task", runAt: now + 60_000, status: "scheduled", createdAt: now });
+  await addJob(telegramOwner, { id: "job_linked-owner", userId: telegramOwner, text: "Check the imported workspace", cron: "0 9 * * 1", scheduleId: "schedule_linked-owner", status: "active", createdAt: now });
+  await createTask(telegramOwner, { id: "task_linked-owner", title: "Imported task", objective: "Continue the Telegram-created task" });
+  await saveAgentRun(agentRun({ id: "run_linked-owner", userId: telegramOwner, objective: "Imported durable run" }));
+  await createTriggerEventIfAbsent({ eventId: "event_linked-owner", userId: telegramOwner, triggerSlug: "GMAIL_NEW_MESSAGE", summary: "Imported trigger", status: "queued", createdAt: now, updatedAt: now });
+
+  const { code } = await createWebTelegramLinkCode(webAccount, { sourceUserId: webOwner });
+  assert.equal(await redeemWebTelegramLinkCode(code, telegramOwner), "linked");
+
+  assert.equal((await listReminders(webOwner)).find((item) => item.id === "rem_linked-owner")?.userId, webOwner);
+  assert.equal((await listJobs(webOwner)).find((item) => item.id === "job_linked-owner")?.userId, webOwner);
+  assert.equal((await listTasks(webOwner)).find((item) => item.id === "task_linked-owner")?.userId, webOwner);
+  assert.equal((await getAgentRun(webOwner, "run_linked-owner"))?.userId, webOwner);
+  assert.equal((await (await import("../src/store.js")).listTriggerEvents(webOwner, 50)).some((item) => item.eventId === "event_linked-owner"), true);
+  assert.equal((await listReminders(telegramOwner)).find((item) => item.id === "rem_linked-owner")?.userId, telegramOwner, "legacy source data remains available for rollback");
 });
 
 test("web-to-Telegram linking preserves dashboard threads and repairs legacy imports", async () => {

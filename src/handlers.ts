@@ -12,7 +12,7 @@ import {
 import { requiredTriggerConfigFields, type TriggerCatalogueItem } from "./triggerCatalog.js";
 import type { ContentPart } from "./types.js";
 import {
-  getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
+  getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit, canonicalUserIdForTelegram,
   getChannelConversation, appendChannelConversationMessages, setChannelConversationModel, clearChannelConversationHistory,
   setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies, listVideoJobs, registerImageAsset,
   setLiveVoicePreference, claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, cancelMissionTasks, retryTask, listApprovals, listJobs, listReminders, listOpenTasks, listMissions, getMission, updateMission, updateTask, pauseMission, resumeMission, cancelMission,
@@ -288,11 +288,11 @@ function voicePickerCard(provider: LiveVoiceProvider, voices: BlandSelectableVoi
 }
 
 async function editVoiceSettings(ctx: Context, messageId: number): Promise<void> {
-  await editCard(ctx, messageId, voiceSettingsCard(await getSession(ctx.from!.id)));
+  await editCard(ctx, messageId, voiceSettingsCard(await getSession(await telegramOwner(ctx))));
 }
 
 async function editVoiceProvider(ctx: Context, messageId: number, provider: LiveVoiceProvider, page = 0): Promise<void> {
-  const session = await getSession(ctx.from!.id);
+  const session = await getSession(await telegramOwner(ctx));
   const current = provider === "bland"
     ? session.voicePreferences?.bland?.id
     : provider === "twilio" ? session.voicePreferences?.twilio : session.voicePreferences?.meetings;
@@ -420,7 +420,7 @@ async function showMcpWorkspace(ctx: Context, messageId?: number): Promise<void>
 
   const catalog = listMcpCatalog();
   if (catalog.errors.length) logger.warn({ count: catalog.errors.length }, "Some MCP catalog entries were skipped");
-  const connections = await listMcpConnections(ctx.from!.id);
+  const connections = await listMcpConnections(await telegramOwner(ctx));
   const connected = new Set(connections.map((connection) => connection.serverId));
   const servers = catalog.servers.slice(0, 8);
   const buttons: NonNullable<TelegramCard["buttons"]> = [];
@@ -462,20 +462,21 @@ async function showWorkspace(ctx: Context, messageId?: number): Promise<void> {
     if (messageId) await editCard(ctx, messageId, card); else await replyCard(ctx, card);
     return;
   }
+  const uid = await telegramOwner(ctx);
   const [session, states, approvals, handoffs, triggers, reminders, jobs, tasks, missions, meetings, preparations, contacts, mcpConnections] = await Promise.all([
-    getSession(ctx.from!.id),
-    getToolkitStates(ctx.from!.id).catch((error) => { logger.warn({ err: error, userId: ctx.from!.id }, "Could not load workspace app summary"); return []; }),
-    listApprovals(ctx.from!.id, 50),
-    listHandoffRecords(ctx.from!.id),
-    listTriggers(ctx.from!.id).catch((error) => { logger.warn({ err: error, userId: ctx.from!.id }, "Could not load workspace trigger summary"); return []; }),
-    listReminders(ctx.from!.id),
-    listJobs(ctx.from!.id),
-    listOpenTasks(ctx.from!.id, 500),
-    listMissions(ctx.from!.id),
-    listRecallMeetings(ctx.from!.id, 20),
-    listCalendarMeetingPreparations(ctx.from!.id, 20),
-    listMeetingContacts(ctx.from!.id, 50),
-    listMcpConnections(ctx.from!.id).catch((error) => { logger.warn({ err: error, userId: ctx.from!.id }, "Could not load workspace MCP summary"); return []; }),
+    getSession(uid),
+    getToolkitStates(uid).catch((error) => { logger.warn({ err: error, userId: uid }, "Could not load workspace app summary"); return []; }),
+    listApprovals(uid, 50),
+    listHandoffRecords(uid),
+    listTriggers(uid).catch((error) => { logger.warn({ err: error, userId: uid }, "Could not load workspace trigger summary"); return []; }),
+    listReminders(uid),
+    listJobs(uid),
+    listOpenTasks(uid, 500),
+    listMissions(uid),
+    listRecallMeetings(uid, 20),
+    listCalendarMeetingPreparations(uid, 20),
+    listMeetingContacts(uid, 50),
+    listMcpConnections(uid).catch((error) => { logger.warn({ err: error, userId: uid }, "Could not load workspace MCP summary"); return []; }),
   ]);
   const connected = states.filter((state) => state.connected);
   const activeWorkerStatuses = new Set(["queued", "cancel_requested", "interrupted", "requires_approval", "requires_tool_request"]);
@@ -563,7 +564,7 @@ function triggerTypeKeyboard(types: TriggerCatalogueItem[], toolkit: string, too
 }
 
 async function triggerToolkitView(ctx: Context, requestedPage: number): Promise<void> {
-  const toolkits = await listAvailableTriggerToolkits(ctx.from!.id, true);
+  const toolkits = await listAvailableTriggerToolkits(await telegramOwner(ctx), true);
   if (!toolkits.length) {
     await ctx.editMessageText("<b>Create a trigger</b>\n\nConnect an app first with <code>/apps</code> or <code>/connect gmail</code>, then return here.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("← Triggers", "trg:menu") });
     return;
@@ -599,7 +600,7 @@ async function showTriggerConfirmation(ctx: Context, trigger: TriggerCatalogueIt
     );
     return;
   }
-  const accountIndex = (await listConnectedAccounts(ctx.from!.id, trigger.toolkit.slug)).filter((account) => account.status.toUpperCase() === "ACTIVE").findIndex((account) => account.id === accountId);
+  const accountIndex = (await listConnectedAccounts(await telegramOwner(ctx), trigger.toolkit.slug)).filter((account) => account.status.toUpperCase() === "ACTIVE").findIndex((account) => account.id === accountId);
   if (accountIndex < 0) throw new Error("That connected account is no longer available");
   await ctx.editMessageText(`${base}\n\nReady to activate this trigger for the selected ${escapeTelegramHtml(trigger.toolkit.name)} account.`, {
     parse_mode: "HTML",
@@ -625,7 +626,7 @@ function channelLinkKeyboard(userId: number): InlineKeyboard {
 }
 
 async function sendCliLink(ctx: Context): Promise<void> {
-  const code = await createCliPairing(ctx.from!.id);
+  const code = await createCliPairing(await telegramOwner(ctx));
   const serverHint = config.webhookUrl
     ? ` --server ${escapeTelegramHtml(config.webhookUrl.replace(/\/$/, ""))}`
     : "";
@@ -633,7 +634,7 @@ async function sendCliLink(ctx: Context): Promise<void> {
 }
 
 async function sendPrivateChannelLink(ctx: Context, provider: "slack" | "whatsapp" | "sendblue" | "sms" | "x" | "xchat" | "photon_imessage" | "photon_whatsapp" | "photon_telegram" | "photon_sms" | "photon_email"): Promise<void> {
-  const code = await createLinkCode(ctx.from!.id, provider);
+  const code = await createLinkCode(await telegramOwner(ctx), provider);
   if (provider === "slack" && config.webhookUrl && config.slackClientId && config.slackRedirectUri) {
     const install = `${config.webhookUrl.replace(/\/$/, "")}/slack/install?code=${encodeURIComponent(code)}`;
     await ctx.reply(`<b>Link Slack</b>\n\n<a href="${install}">Install Chusky in Slack</a>\n\nThis one-time link expires in 10 minutes.`, {
@@ -647,7 +648,7 @@ async function sendPrivateChannelLink(ctx: Context, provider: "slack" | "whatsap
 }
 
 async function sendGroupChannelLink(ctx: Context): Promise<void> {
-  const code = await createSendblueGroupLinkCode(ctx.from!.id);
+  const code = await createSendblueGroupLinkCode(await telegramOwner(ctx));
   await replyHtml(ctx, `<b>Link an iMessage group</b>\n\nOne-time code: <code>${code}</code>\n\nSend <code>/link-group ${code}</code> inside the iMessage group from the linked Sendblue number. It expires in 10 minutes.`);
 }
 async function acquireQueuedLock(userId: number, token: string, signal: AbortSignal): Promise<void> {
@@ -683,23 +684,34 @@ function isAllowed(ctx: Context): boolean {
 
 async function guard(ctx: Context): Promise<boolean> {
   if (ctx.from && ctx.chat && isAllowed(ctx)) {
+    const ownerId = await canonicalUserIdForTelegram(ctx.from.id);
     // Keep a direct-chat route for private fallback delivery. A group ID must
     // never replace it, otherwise a later approval could be sent publicly.
     if (ctx.chat.type === "private") {
       try {
-        await setTelegramChatId(ctx.from.id, ctx.chat.id);
+        await setTelegramChatId(ownerId, ctx.chat.id);
       } catch (error) {
         if (!(error instanceof DurableSessionDocumentsIncompleteError)) throw error;
-        logger.error({ err: error, userId: ctx.from.id }, "Telegram update blocked because durable session documents are incomplete");
+        logger.error({ err: error, userId: ownerId }, "Telegram update blocked because durable session documents are incomplete");
         await ctx.reply("I couldn't safely access your saved session, so I didn't process this message. The service needs a session-store repair; please try again later.");
         return false;
       }
     }
-    await linkChannelIdentity(ctx.from.id, { provider: "telegram", externalUserId: String(ctx.from.id), displayName: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") });
+    await linkChannelIdentity(ownerId, { provider: "telegram", externalUserId: String(ctx.from.id), displayName: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") });
   }
   if (isAllowed(ctx)) return true;
   await ctx.reply("⛔ You are not authorised to use Chusky.");
   return false;
+}
+
+/**
+ * Telegram is a transport, not an account namespace. Workspace state must be
+ * resolved to the linked web owner before it is read or written. Provider
+ * operations should continue to use ctx.from.id or ctx.chat.id explicitly.
+ */
+async function telegramOwner(ctx: Context): Promise<number> {
+  if (!ctx.from?.id) throw new Error("Telegram user context is missing");
+  return canonicalUserIdForTelegram(ctx.from.id);
 }
 
 async function replyHtml(ctx: Context, html: string): Promise<void> {
@@ -860,11 +872,12 @@ async function isTelegramGroupAdmin(ctx: Context): Promise<boolean> {
 }
 
 async function sendGeneratedArtifacts(ctx: Context, files: Array<{ data: Buffer; name: string; contentType: string; artifactId: string; type: string }> | undefined): Promise<void> {
+  const ownerId = await telegramOwner(ctx);
   for (const file of files ?? []) {
     try {
       const input = file.data.length
         ? new InputFile(file.data, file.name)
-        : new InputFile((await daytonaEngine.streamArtifact(ctx.from?.id ?? 0, file.artifactId)).stream, file.name);
+        : new InputFile((await daytonaEngine.streamArtifact(ownerId, file.artifactId)).stream, file.name);
       await ctx.replyWithDocument(input, { caption: `📦 ${file.name}\nArtifact ID: ${file.artifactId}` });
     } catch (error) {
       logger.warn({ err: error, userId: ctx.from?.id, artifactId: file.artifactId }, "Artifact delivery failed");
@@ -907,11 +920,11 @@ function telegramMessageReceivedAt(ctx: Context): number {
 
 async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: string, afterAgent?: (selectedModel: string) => Promise<void>): Promise<void> {
   if (!(await guard(ctx))) return;
-  if (!(await checkRateLimit(ctx.from!.id))) {
+  if (!(await checkRateLimit(await telegramOwner(ctx)))) {
     await ctx.reply(`⏱ Easy there. Max ${config.rateLimit} messages per ${config.rateWindowSeconds}s.`);
     return;
   }
-  const userId = ctx.from!.id;
+  const userId = await canonicalUserIdForTelegram(ctx.from!.id);
   const controller = new AbortController();
   const lockToken = randomUUID();
   activeRequests.set(userId, controller);
@@ -1016,7 +1029,7 @@ export function registerHandlers(bot: Bot): void {
   // /start ───────────────────────────────────────────────────────────────────
   bot.command("start", async (ctx) => {
     if (!(await guard(ctx))) return;
-    const model = await getModel(ctx.from!.id);
+    const model = await getModel(await telegramOwner(ctx));
     await replyHtml(ctx,
       `⚡ <b>Hey, I'm Chusky — your AI agent.</b>\n\n` +
       `I have access to <b>1,000+ tools</b> across every major platform — GitHub, Gmail, Slack, Notion, Linear, Stripe, and more. Just tell me what you need.\n\n` +
@@ -1139,7 +1152,7 @@ export function registerHandlers(bot: Bot): void {
   bot.command("browser", async (ctx) => {
     if (!(await guard(ctx))) return;
     if (isTelegramShared(ctx)) { await ctx.reply("For privacy, browser identities and activity are available only in your private chat with Chusky."); return; }
-    const uid = ctx.from!.id;
+    const uid = await telegramOwner(ctx);
     const [subcommand] = String(ctx.match ?? "").trim().toLowerCase().split(/\s+/).filter(Boolean);
     try {
       if (subcommand === "audit") {
@@ -1191,7 +1204,7 @@ export function registerHandlers(bot: Bot): void {
         return;
       }
       try {
-        const project = await createTelegramProject(ctx.from!.id, name);
+        const project = await createTelegramProject(await telegramOwner(ctx), name);
         await ctx.reply(apiKeyDelivery(project), { parse_mode: "HTML", reply_markup: apiKeyMenuKeyboard() });
       } catch (error) {
         await ctx.reply(`❌ ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" });
@@ -1199,7 +1212,7 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
     if (action?.toLowerCase() === "list") {
-      const projects = await listTelegramProjects(ctx.from!.id);
+      const projects = await listTelegramProjects(await telegramOwner(ctx));
       await ctx.reply(projects.length
         ? `<b>Your API keys</b>\n\n${projects.map((project) => `• <b>${escapeTelegramHtml(project.name)}</b>\n<code>${escapeTelegramHtml(project.keyPrefix)}…</code> · ${escapeTelegramHtml(project.scopes.join(", "))}`).join("\n\n")}\n\nRotate replaces a key immediately. Revoke permanently disables it.`
         : "<b>Your API keys</b>\n\nYou have no active API keys yet.", { parse_mode: "HTML", reply_markup: projects.length ? apiKeyProjectKeyboard(projects) : apiKeyMenuKeyboard() });
@@ -1210,7 +1223,7 @@ export function registerHandlers(bot: Bot): void {
 
   bot.command("cancel", async (ctx) => {
     if (!(await guard(ctx))) return;
-    const controller = activeRequests.get(ctx.from!.id);
+    const controller = activeRequests.get(await telegramOwner(ctx));
     if (!controller) { await ctx.reply("There is no active request to cancel."); return; }
     controller.abort();
     await ctx.reply("🛑 Cancellation requested.");
@@ -1226,18 +1239,19 @@ export function registerHandlers(bot: Bot): void {
     const requestedId = String(ctx.match ?? "").trim();
     try {
       if (requestedId) {
-        const safe = await getRecallMeetingForUser(ctx.from!.id, requestedId);
-        const record = safe ? (await listRecallMeetings(ctx.from!.id, 20)).find((item) => item.id === requestedId) : undefined;
+        const uid = await telegramOwner(ctx);
+        const safe = await getRecallMeetingForUser(uid, requestedId);
+        const record = safe ? (await listRecallMeetings(uid, 20)).find((item) => item.id === requestedId) : undefined;
         if (!safe || !record) { await ctx.reply("I couldn't find that meeting in your account."); return; }
-        const contacts = (await listMeetingContacts(ctx.from!.id, 50, requestedId));
+        const contacts = (await listMeetingContacts(uid, 50, requestedId));
         await replyHtml(ctx, telegramMeetingDetail(record, contacts));
         return;
       }
       const [safeMeetings, records, preparations, contacts] = await Promise.all([
-        listRecallMeetingsForUser(ctx.from!.id, 20),
-        listRecallMeetings(ctx.from!.id, 20),
-        listCalendarMeetingPreparations(ctx.from!.id, 20),
-        listMeetingContacts(ctx.from!.id, 50),
+        listRecallMeetingsForUser(await telegramOwner(ctx), 20),
+        listRecallMeetings(await telegramOwner(ctx), 20),
+        listCalendarMeetingPreparations(await telegramOwner(ctx), 20),
+        listMeetingContacts(await telegramOwner(ctx), 50),
       ]);
       const recordsById = new Map(records.map((record) => [record.id, record]));
       const active = safeMeetings.map((safe) => recordsById.get(safe.id) ?? safe).map((meeting) => telegramMeetingLine(meeting as any));
@@ -1262,7 +1276,7 @@ export function registerHandlers(bot: Bot): void {
     const separator = raw.search(/\s/);
     const action = (separator < 0 ? raw : raw.slice(0, separator)).toLowerCase();
     const rest = separator < 0 ? "" : raw.slice(separator).trim();
-    const uid = ctx.from!.id;
+    const uid = await telegramOwner(ctx);
     try {
       if (action === "profile") {
         if (!rest) {
@@ -1339,15 +1353,16 @@ export function registerHandlers(bot: Bot): void {
     const raw = String(ctx.match ?? "").trim();
     const [action, provider, voiceId, ...voiceNameParts] = raw.split(/\s+/).filter(Boolean).map((item) => item.trim());
     const normalizedAction = (action || "status").toLowerCase();
-    const currentSession = await getSession(ctx.from!.id);
+    const uid = await telegramOwner(ctx);
+    const currentSession = await getSession(uid);
     const current = currentSession.voiceReplies === true;
     if (normalizedAction === "on" || normalizedAction === "enable") {
-      await setVoiceReplies(ctx.from!.id, true);
+      await setVoiceReplies(uid, true);
       await ctx.reply("🔊 Voice replies are on. I’ll send text and an audio reply after each response.");
       return;
     }
     if (normalizedAction === "off" || normalizedAction === "disable") {
-      await setVoiceReplies(ctx.from!.id, false);
+      await setVoiceReplies(uid, false);
       await ctx.reply("🔇 Voice replies are off. I’ll continue replying with text.");
       return;
     }
@@ -1377,11 +1392,11 @@ export function registerHandlers(bot: Bot): void {
           const voices = await listBlandCuratedVoices(config.blandApiKey);
           const selected = voices.find((voice) => voice.id.toLowerCase() === voiceId.toLowerCase());
           if (!selected) throw new Error("That Bland voice is not in the current curated catalogue");
-          await setLiveVoicePreference(ctx.from!.id, "bland", { id: selected.id, name: selected.name });
+          await setLiveVoicePreference(uid, "bland", { id: selected.id, name: selected.name });
         } else {
           const selected = FLUX_TTS_VOICES.find((voice) => voice.id === voiceId);
           if (!selected) throw new Error("That Flux voice is not available");
-          await setLiveVoicePreference(ctx.from!.id, provider, selected.id);
+          await setLiveVoicePreference(uid, provider, selected.id);
         }
         await ctx.reply(`✅ ${provider} voice set to ${voiceId}.`);
       } catch (error) { await ctx.reply(`❌ ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" }); }
@@ -1401,7 +1416,7 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
     try {
-      const call = await nativeTool(ctx.from!.id, "CHUCK_START_PHONE_CALL", { phoneNumber, purpose, callProfile: "personal" });
+      const call = await nativeTool(await telegramOwner(ctx), "CHUCK_START_PHONE_CALL", { phoneNumber, purpose, callProfile: "personal" });
       const callId = call && typeof call === "object" && "id" in call ? String((call as { id?: unknown }).id ?? "") : "";
       await ctx.reply(`📞 Call started${callId ? ` · ${escapeTelegramHtml(callId)}` : ""}. I’m joining the call now.`, { parse_mode: "HTML" });
     } catch (error) {
@@ -1411,7 +1426,7 @@ export function registerHandlers(bot: Bot): void {
 
   bot.command("cli", async (ctx) => {
     if (!(await guard(ctx))) return;
-    const uid = ctx.from!.id;
+    const uid = await telegramOwner(ctx);
     const [action, ...rest] = (ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean);
     if (action === "link") {
       await sendCliLink(ctx);
@@ -1443,7 +1458,7 @@ export function registerHandlers(bot: Bot): void {
     const rawProvider = parts[1]?.toLowerCase();
     const provider = rawProvider === "imessage" ? "sendblue" : rawProvider;
     if (!action || (action === "link" && !provider)) {
-      await ctx.reply("Choose the channel to link:", { reply_markup: channelLinkKeyboard(ctx.from!.id) });
+      await ctx.reply("Choose the channel to link:", { reply_markup: channelLinkKeyboard(await telegramOwner(ctx)) });
       return;
     }
     if (action === "linkgroup" || (action === "link" && provider === "sendblue-group")) {
@@ -1455,22 +1470,22 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
     if (action === "list") {
-      const linked = await listLinkedChannels(ctx.from!.id);
+      const linked = await listLinkedChannels(await telegramOwner(ctx));
       await replyHtml(ctx, linked.length ? `<b>Linked channels</b>\n\n${linked.map((item) => `• ${item.provider} — <code>${item.externalUserId}</code>${item.workspaceId ? ` (${item.workspaceId})` : ""}`).join("\n")}` : "No external channels are linked yet.");
       return;
     }
     if (action === "notify" && (provider === "slack" || provider === "whatsapp" || provider === "sendblue" || provider === "x" || provider === "photon_imessage" || provider === "photon_whatsapp" || provider === "photon_telegram" || provider === "photon_sms" || provider === "photon_email")) {
       const enabled = String((ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean)[2] ?? "").toLowerCase() === "on";
-      const count = await setProactivePreference(ctx.from!.id, provider, enabled);
+      const count = await setProactivePreference(await telegramOwner(ctx), provider, enabled);
       await ctx.reply(count ? `✅ Proactive ${provider} notifications are ${enabled ? "on" : "off"}.` : `No linked ${provider} channel was found. Link it first with /channel link ${provider}.`);
       return;
     }
-    await ctx.reply("Choose a valid channel action:", { reply_markup: channelLinkKeyboard(ctx.from!.id) });
+    await ctx.reply("Choose a valid channel action:", { reply_markup: channelLinkKeyboard(await telegramOwner(ctx)) });
   });
 
   bot.command("linkgroup", async (ctx) => {
     if (!(await guard(ctx))) return;
-    await ctx.reply("Choose the channel group to link:", { reply_markup: channelLinkKeyboard(ctx.from!.id) });
+    await ctx.reply("Choose the channel group to link:", { reply_markup: channelLinkKeyboard(await telegramOwner(ctx)) });
   });
 
   bot.command("group-model", async (ctx) => {
@@ -1497,25 +1512,26 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
     if (!(await getChannelConversation(conversationId))) {
-      await appendChannelConversationMessages({ id: conversationId, accountId: `account_${ctx.from!.id}`, userId: ctx.from!.id, provider: "telegram", scope: "shared", messages: [] });
+      const uid = await telegramOwner(ctx);
+      await appendChannelConversationMessages({ id: conversationId, accountId: `account_${uid}`, userId: uid, provider: "telegram", scope: "shared", messages: [] });
     }
     await setChannelConversationModel(conversationId, model);
     await ctx.reply(`✅ This Telegram group will now use ${model ?? config.groupDefaultModel}.`);
   });
 
   // A web account proves possession of its Better Auth session by generating a
-  // one-time `web_…` code. Telegram remains the ownership authority: only the
-  // verified Telegram user who sends this command can attach that workspace.
+  // one-time `web_…` code. Telegram only proves possession of the channel being
+  // attached; the web account remains the owner of the workspace and history.
   bot.command("link", async (ctx) => {
     if (!(await guard(ctx))) return;
     const code = (ctx.match?.trim() ?? "");
     const result = await redeemWebTelegramLinkCode(code, ctx.from!.id);
     if (result === "linked") {
-      await ctx.reply("✅ Your Chusky web dashboard is now linked to this Telegram account. Refresh the dashboard to see the same workspace.");
+      await ctx.reply("✅ Telegram is now connected as an optional channel for your Chusky workspace. Refresh the dashboard to see it.");
       return;
     }
     if (result === "already_linked") {
-      await ctx.reply("✅ That web dashboard is already linked to this Telegram account.");
+      await ctx.reply("✅ This Telegram channel is already connected to that Chusky workspace.");
       return;
     }
     if (result === "conflict") {
@@ -1532,13 +1548,13 @@ export function registerHandlers(bot: Bot): void {
     try {
       const image = await generateImage(prompt);
       await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chusky.jpg" : "chusky.png"), { caption: "Generated by Chusky" });
-      if (image.cost) await addUsage(ctx.from!.id, image.cost);
+      if (image.cost) await addUsage(await telegramOwner(ctx), image.cost);
     } catch (e) { await ctx.reply(`❌ Image generation failed: ${String(e).slice(0, 500)}`); }
   });
 
   bot.command("video-status", async (ctx) => {
     if (!(await guard(ctx))) return;
-    const jobs = await listVideoJobs(ctx.from!.id);
+    const jobs = await listVideoJobs(await telegramOwner(ctx));
     const requestedId = ctx.match?.trim();
     const selected = requestedId ? jobs.filter((job) => job.id === requestedId) : jobs.slice(0, 5);
     if (!selected.length) { await ctx.reply(requestedId ? `No video job found for <code>${escapeTelegramHtml(requestedId)}</code>.` : "You have no video generation jobs yet.", { parse_mode: "HTML" }); return; }
@@ -1553,7 +1569,7 @@ export function registerHandlers(bot: Bot): void {
   // /agents ──────────────────────────────────────────────────────────────────
   bot.command("agents", async (ctx) => {
     if (!(await guard(ctx))) return;
-    const records = await listHandoffRecords(ctx.from!.id);
+    const records = await listHandoffRecords(await telegramOwner(ctx));
     if (!records.length) { await ctx.reply("No worker delegations recorded yet."); return; }
     const icon: Record<string, string> = { success: "✅", failed: "❌", timed_out: "⏱️", max_tool_calls_exceeded: "🔢", requires_approval: "⚠️", requires_tool_request: "🧩", fallback_executed: "🔄", cancelled: "🛑" };
     const lines = records.slice(0, 10).map((r) => {
@@ -1568,7 +1584,7 @@ export function registerHandlers(bot: Bot): void {
     if (!(await guard(ctx))) return;
     const handoffId = ctx.match?.trim();
     if (!handoffId) { await ctx.reply("Usage: /agent-status <handoff-id>"); return; }
-    const records = await listHandoffRecords(ctx.from!.id);
+    const records = await listHandoffRecords(await telegramOwner(ctx));
     const record = records.find((r) => r.id === handoffId);
     if (!record) { await ctx.reply(`Handoff <code>${escapeTelegramHtml(handoffId)}</code> not found.`, { parse_mode: "HTML" }); return; }
     const icon: Record<string, string> = { success: "✅", failed: "❌", timed_out: "⏱️", max_tool_calls_exceeded: "🔢", requires_approval: "⚠️", requires_tool_request: "🧩", fallback_executed: "🔄", cancelled: "🛑" };
@@ -1588,12 +1604,12 @@ export function registerHandlers(bot: Bot): void {
     if (!(await guard(ctx))) return;
     const handoffId = ctx.match?.trim();
     if (!handoffId) { await ctx.reply("Usage: /agent-cancel <handoff-id>"); return; }
-    const records = await listHandoffRecords(ctx.from!.id);
+    const records = await listHandoffRecords(await telegramOwner(ctx));
     const record = records.find((r) => r.id === handoffId);
     if (!record) { await ctx.reply(`Handoff <code>${escapeTelegramHtml(handoffId)}</code> not found.`, { parse_mode: "HTML" }); return; }
-    if (record.taskId) { await cancelTask(ctx.from!.id, record.taskId); }
+    if (record.taskId) { await cancelTask(await telegramOwner(ctx), record.taskId); }
     const updated = { ...record, status: "cancelled" as const };
-    await saveHandoffRecord(ctx.from!.id, updated);
+    await saveHandoffRecord(await telegramOwner(ctx), updated);
     await replyHtml(ctx, `✅ Worker <b>${escapeTelegramHtml(String(record.to))}</b> (<code>${escapeTelegramHtml(record.id)}</code>) has been cancelled.\n\n<i>Note: If the worker was mid-execution, it will finish its current turn but will not be retried.</i>`);
   });
 
@@ -1612,7 +1628,7 @@ export function registerHandlers(bot: Bot): void {
 
     const statusMsg = await ctx.reply(`🔗 Generating connection link for <b>${toolkit}</b>…`, { parse_mode: "HTML" });
     try {
-      const url = await getConnectionUrl(ctx.from!.id, toolkit, alias);
+      const url = await getConnectionUrl(await telegramOwner(ctx), toolkit, alias);
       await ctx.api.editMessageText(
         ctx.chat!.id,
         statusMsg.message_id,
@@ -1642,13 +1658,13 @@ export function registerHandlers(bot: Bot): void {
     if (isTelegramShared(ctx)) { await ctx.reply("For your security, reconnect connected apps in your private chat with Chusky."); return; }
     const target = ctx.match?.trim() ?? "";
     if (!target) { await ctx.reply("Usage: /reconnect <account-id-or-alias>\n\nUse /accounts to see expired connections."); return; }
-    const accounts = await listConnectedAccounts(ctx.from!.id);
+    const accounts = await listConnectedAccounts(await telegramOwner(ctx));
     const matches = accounts.filter((account) => account.id === target || account.alias?.toLowerCase() === target.toLowerCase());
     if (matches.length !== 1) { await ctx.reply(matches.length > 1 ? "That alias matches multiple accounts. Use the exact account ID from /accounts." : "That connected account was not found. Use /accounts to see the current IDs and aliases."); return; }
     const account = matches[0]!;
     const statusMsg = await ctx.reply(`🔄 Generating a reconnect link for <b>${escapeTelegramHtml(account.toolkit)}${account.alias ? ` (${escapeTelegramHtml(account.alias)})` : ""}…`, { parse_mode: "HTML" });
     try {
-      const url = await getReconnectUrl(ctx.from!.id, account.id);
+      const url = await getReconnectUrl(await telegramOwner(ctx), account.id);
       await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id,
         `🔄 <b>Reconnect ${escapeTelegramHtml(account.toolkit)}${account.alias ? ` (${escapeTelegramHtml(account.alias)})` : ""}</b>\n\n` +
         `This link re-authorizes that existing account; it will not add another account.\n\n<a href="${url}">→ Reconnect account</a>`,
@@ -1664,7 +1680,7 @@ export function registerHandlers(bot: Bot): void {
     const toolkit = (ctx.match?.trim() ?? "").toLowerCase() || undefined;
     const status = await ctx.reply("🔌 Loading connected accounts…");
     try {
-      const accounts = await listConnectedAccounts(ctx.from!.id, toolkit);
+      const accounts = await listConnectedAccounts(await telegramOwner(ctx), toolkit);
       const lines = accounts.map((account) => {
         const label = account.alias ? `${account.alias} <code>${account.id}</code>` : `<code>${account.id}</code>`;
         return `• <b>${escapeTelegramHtml(account.toolkit)}</b> — ${label} — ${escapeTelegramHtml(account.status)}`;
@@ -1692,9 +1708,9 @@ export function registerHandlers(bot: Bot): void {
     if (isTelegramShared(ctx)) { await ctx.editMessageText("For your security, reconnect connected apps in your private chat with Chusky."); return; }
     const accountId = ctx.match[1]!;
     try {
-      const account = (await listConnectedAccounts(ctx.from!.id)).find((item) => item.id === accountId);
+      const account = (await listConnectedAccounts(await telegramOwner(ctx))).find((item) => item.id === accountId);
       if (!account) { await ctx.editMessageText("That connected account is no longer available. Use /accounts to refresh the list."); return; }
-      const url = await getReconnectUrl(ctx.from!.id, account.id);
+      const url = await getReconnectUrl(await telegramOwner(ctx), account.id);
       await ctx.editMessageText(`🔄 <b>Reconnect ${escapeTelegramHtml(account.toolkit)}${account.alias ? ` (${escapeTelegramHtml(account.alias)})` : ""}</b>\n\nThis re-authorizes the existing account and does not add a duplicate.\n\n<a href="${url}">→ Reconnect account</a>`, { parse_mode: "HTML", link_preview_options: { is_disabled: true } });
     } catch (error) {
       logger.error({ err: error, userId: ctx.from!.id, accountId }, "Telegram connected account reconnect failed");
@@ -1713,7 +1729,7 @@ export function registerHandlers(bot: Bot): void {
     }
     const target = (ctx.match?.trim() ?? "").toLowerCase();
     try {
-      const accounts = await listConnectedAccounts(ctx.from!.id);
+      const accounts = await listConnectedAccounts(await telegramOwner(ctx));
       const matches = target
         ? accounts.filter((account) => account.id.toLowerCase() === target || account.alias?.toLowerCase() === target || account.toolkit.toLowerCase() === target)
         : accounts;
@@ -1746,7 +1762,7 @@ export function registerHandlers(bot: Bot): void {
     const action = ctx.match[1];
     const accountId = ctx.match[2] ?? "";
     try {
-      const accounts = await listConnectedAccounts(ctx.from!.id);
+      const accounts = await listConnectedAccounts(await telegramOwner(ctx));
       if (action === "list") {
         await ctx.editMessageText(disconnectAccountText(accounts), {
           parse_mode: "HTML",
@@ -1768,7 +1784,7 @@ export function registerHandlers(bot: Bot): void {
         await ctx.editMessageText(confirmation.text, { parse_mode: "HTML", reply_markup: confirmation.reply_markup });
         return;
       }
-      const removed = await disconnectConnectedAccount(ctx.from!.id, account.id);
+      const removed = await disconnectConnectedAccount(await telegramOwner(ctx), account.id);
       await ctx.editMessageText(removed
         ? `✅ Disconnected <b>${escapeTelegramHtml(account.toolkit)}${account.alias ? ` (${escapeTelegramHtml(account.alias)})` : ""}</b>.\n\nUse /connect to reconnect it later.`
         : "That connected account was already removed. Use /disconnect to refresh the list.", { parse_mode: "HTML" });
@@ -1783,7 +1799,7 @@ export function registerHandlers(bot: Bot): void {
     if (!(await guard(ctx))) return;
     const statusMsg = await ctx.reply("🔌 Loading connected apps…");
     try {
-      const states = await getToolkitStates(ctx.from!.id);
+      const states = await getToolkitStates(await telegramOwner(ctx));
       const connected = states.filter((s) => s.connected);
       const page = Math.max(1, parseInt(ctx.match?.trim() || "1", 10) || 1);
       const allDisconnected = states.filter((s) => !s.connected);
@@ -1822,7 +1838,7 @@ export function registerHandlers(bot: Bot): void {
     if (!(await guard(ctx))) return;
     if (/^list$/i.test(String(ctx.match ?? "").trim())) {
       try {
-        const triggers = await listTriggers(ctx.from!.id);
+        const triggers = await listTriggers(await telegramOwner(ctx));
         await replyHtml(ctx, triggers.length
           ? `<b>Your Composio triggers</b>\n\n${triggers.map((trigger: any) => `• <code>${escapeTelegramHtml(String(trigger.id ?? trigger.trigger_id ?? "unknown"))}</code> · ${escapeTelegramHtml(String(trigger.trigger_slug ?? trigger.slug ?? "trigger"))} · ${escapeTelegramHtml(String(trigger.status ?? (trigger.enabled === false ? "disabled" : "active")))}`).join("\n")}`
           : "You have no Composio triggers yet.");
@@ -1839,7 +1855,7 @@ export function registerHandlers(bot: Bot): void {
     if (!query) { await ctx.reply("Usage: /tools search <what you want to do>"); return; }
     const status = await ctx.reply(`🔎 Searching Composio tools for: <b>${query.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</b>…`, { parse_mode: "HTML" });
     try {
-      const tools = await searchTools(ctx.from!.id, query);
+      const tools = await searchTools(await telegramOwner(ctx), query);
       const text = tools.slice(0, 10).map((t: any) => `${t.slug || t.name || "tool"}\n${t.description || ""}`).join("\n\n") || "No matching tools found.";
       await ctx.api.editMessageText(ctx.chat!.id, status.message_id, `<b>Tool results</b>\n\n<pre>${text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`, { parse_mode: "HTML" });
     } catch (e) {
@@ -1859,13 +1875,13 @@ export function registerHandlers(bot: Bot): void {
       }
       if (action === "create" && idOrSlug) {
         const body = rest.length ? JSON.parse(rest.join(" ")) : {};
-        const result = await createTrigger(ctx.from!.id, idOrSlug, body);
+        const result = await createTrigger(await telegramOwner(ctx), idOrSlug, body);
         await ctx.reply(`✅ Trigger created: ${JSON.stringify(result).slice(0, 800)}`);
       } else if ((action === "enable" || action === "disable") && idOrSlug) {
-        await setTriggerState(ctx.from!.id, idOrSlug, action === "enable");
+        await setTriggerState(await telegramOwner(ctx), idOrSlug, action === "enable");
         await ctx.reply(`✅ Trigger ${action}d: ${idOrSlug}`);
       } else if (action === "delete" && idOrSlug) {
-        await deleteTrigger(ctx.from!.id, idOrSlug);
+        await deleteTrigger(await telegramOwner(ctx), idOrSlug);
         await ctx.reply(`✅ Trigger deleted: ${idOrSlug}`);
       } else {
         await ctx.reply("Usage: /triggers | /trigger create <slug> <json> | /trigger enable|disable|delete <id>");
@@ -1904,7 +1920,7 @@ export function registerHandlers(bot: Bot): void {
     try {
       const trigger = await getAvailableTriggerType(token);
       if (!trigger) { await ctx.editMessageText("That trigger menu expired. Open /triggers to refresh it.", { reply_markup: triggerMenuKeyboard() }); return; }
-      const accounts = (await listConnectedAccounts(ctx.from!.id, trigger.toolkit.slug)).filter((account) => account.status.toUpperCase() === "ACTIVE");
+      const accounts = (await listConnectedAccounts(await telegramOwner(ctx), trigger.toolkit.slug)).filter((account) => account.status.toUpperCase() === "ACTIVE");
       if (!accounts.length) { await ctx.editMessageText(`Connect ${escapeTelegramHtml(trigger.toolkit.name)} first, then reopen /triggers.`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("← Apps", `trg:apps:${toolkitPage}`) }); return; }
       if (accounts.length > 1) {
         const keyboard = new InlineKeyboard();
@@ -1922,7 +1938,7 @@ export function registerHandlers(bot: Bot): void {
     if (!(await guard(ctx))) return;
     const trigger = await getAvailableTriggerType(ctx.match[1]);
     if (!trigger) { await ctx.editMessageText("That trigger menu expired. Open /triggers to refresh it.", { reply_markup: triggerMenuKeyboard() }); return; }
-    const accounts = (await listConnectedAccounts(ctx.from!.id, trigger.toolkit.slug)).filter((account) => account.status.toUpperCase() === "ACTIVE");
+    const accounts = (await listConnectedAccounts(await telegramOwner(ctx), trigger.toolkit.slug)).filter((account) => account.status.toUpperCase() === "ACTIVE");
     const account = accounts[Number(ctx.match[2])];
     if (!account) { await ctx.editMessageText("That account is no longer available. Open /triggers to refresh it.", { reply_markup: triggerMenuKeyboard() }); return; }
     await showTriggerConfirmation(ctx, trigger, account.id, 0);
@@ -1933,11 +1949,11 @@ export function registerHandlers(bot: Bot): void {
     if (!(await guard(ctx))) return;
     const trigger = await getAvailableTriggerType(ctx.match[1]);
     if (!trigger) { await ctx.editMessageText("That trigger menu expired. Open /triggers to refresh it.", { reply_markup: triggerMenuKeyboard() }); return; }
-    const accounts = (await listConnectedAccounts(ctx.from!.id, trigger.toolkit.slug)).filter((account) => account.status.toUpperCase() === "ACTIVE");
+    const accounts = (await listConnectedAccounts(await telegramOwner(ctx), trigger.toolkit.slug)).filter((account) => account.status.toUpperCase() === "ACTIVE");
     const account = accounts[Number(ctx.match[2])];
     if (!account) { await ctx.editMessageText("That account is no longer available. Open /triggers to refresh it.", { reply_markup: triggerMenuKeyboard() }); return; }
     try {
-      const result: any = await createTrigger(ctx.from!.id, trigger.slug, { connectedAccountId: account.id, triggerConfig: {} });
+      const result: any = await createTrigger(await telegramOwner(ctx), trigger.slug, { connectedAccountId: account.id, triggerConfig: {} });
       const id = String(result?.triggerId ?? result?.id ?? "created");
       await ctx.editMessageText(`✅ <b>Trigger created</b>\n\n${escapeTelegramHtml(trigger.name)} is now watching ${escapeTelegramHtml(trigger.toolkit.name)}.\n\n<code>${escapeTelegramHtml(id)}</code>`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📋 My triggers", "trg:my").row().text("➕ Add another", "trg:apps:0") });
     } catch (error) { await ctx.editMessageText(`❌ Could not create this trigger: ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML", reply_markup: triggerMenuKeyboard() }); }
@@ -1947,7 +1963,7 @@ export function registerHandlers(bot: Bot): void {
     await ctx.answerCallbackQuery();
     if (!(await guard(ctx))) return;
     try {
-      const triggers = await listTriggers(ctx.from!.id);
+      const triggers = await listTriggers(await telegramOwner(ctx));
       const entries = triggers.slice(0, 20).map((item: any) => `• ${escapeTelegramHtml(String(item.triggerName ?? item.trigger_slug ?? item.slug ?? "trigger"))} — ${escapeTelegramHtml(String(item.disabledAt || item.enabled === false ? "disabled" : "active"))}`);
       await ctx.editMessageText(`<b>My triggers</b>\n\n${entries.length ? entries.join("\n") : "No triggers yet."}`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("➕ Add a trigger", "trg:apps:0").row().text("← Triggers", "trg:menu") });
     } catch (error) { await ctx.editMessageText(`❌ Could not load triggers: ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML", reply_markup: triggerMenuKeyboard() }); }
@@ -1964,7 +1980,7 @@ export function registerHandlers(bot: Bot): void {
   // /info ────────────────────────────────────────────────────────────────────
   bot.command("info", async (ctx) => {
     if (!(await guard(ctx))) return;
-    const uid = ctx.from!.id;
+    const uid = await telegramOwner(ctx);
     const s = await getSession(uid);
     const turns = Math.floor(s.history.length / 2);
     const age = Math.floor((Date.now() - s.createdAt) / 60000);
@@ -1984,7 +2000,7 @@ export function registerHandlers(bot: Bot): void {
   // /usage ───────────────────────────────────────────────────────────────────
   bot.command("usage", async (ctx) => {
     if (!(await guard(ctx))) return;
-    const s = await getSession(ctx.from!.id);
+    const s = await getSession(await telegramOwner(ctx));
     await replyHtml(ctx,
       `<b>Your Usage</b>\n\n` +
       `📨 Messages sent: <b>${s.totalMessages}</b>\n` +
@@ -2007,17 +2023,19 @@ export function registerHandlers(bot: Bot): void {
         await ctx.reply("Only a Telegram group administrator can clear this group's history.");
         return;
       }
+      const ownerId = await telegramOwner(ctx);
       await clearChannelConversationHistory({
-        id: telegramConversationId(ctx), accountId: `account_${ctx.from!.id}`, userId: ctx.from!.id,
+        id: telegramConversationId(ctx), accountId: `account_${ownerId}`, userId: ownerId,
         provider: "telegram", scope: "shared",
       });
       await ctx.reply("🗑 This group's Chusky history has been cleared. I will treat the next message as a fresh start.");
     } else if (action === "history") {
-      await clearHistory(ctx.from!.id);
+      await clearHistory(await telegramOwner(ctx));
       await ctx.reply("🗑 History cleared. Your Composio session was kept.");
     } else if (action === "session") {
-      invalidateSession(ctx.from!.id);
-      await clearSession(ctx.from!.id);
+      const uid = await telegramOwner(ctx);
+      invalidateSession(uid);
+      await clearSession(uid);
       await ctx.reply("🗑 Session and history cleared. Fresh start — what's next?");
     } else {
       await ctx.reply("Usage: /clear history, /clear session, or /clear group (inside a group)");
@@ -2027,7 +2045,7 @@ export function registerHandlers(bot: Bot): void {
   // /export ──────────────────────────────────────────────────────────────────
   bot.command("export", async (ctx) => {
     if (!(await guard(ctx))) return;
-    const uid = ctx.from!.id;
+    const uid = await telegramOwner(ctx);
     const s = await getSession(uid);
     if (s.history.length === 0) {
       await ctx.reply("Nothing to export yet — start a conversation first.");
@@ -2055,7 +2073,7 @@ export function registerHandlers(bot: Bot): void {
   // /model ───────────────────────────────────────────────────────────────────
   bot.command("model", async (ctx) => {
     if (!(await guard(ctx))) return;
-    const model = await getModel(ctx.from!.id);
+    const model = await getModel(await telegramOwner(ctx));
     await ctx.reply(
       `Active model: <code>${model}</code>\n\nChoose a provider:`,
       { parse_mode: "HTML", reply_markup: modelProviderKeyboard() }
@@ -2076,7 +2094,7 @@ export function registerHandlers(bot: Bot): void {
     const mode = ctx.match[1];
     try {
       const project = await createTelegramProject(
-        ctx.from!.id,
+        await telegramOwner(ctx),
         mode === "full" ? `Telegram project ${new Date().toISOString().slice(0, 10)}` : `Telegram app embed ${new Date().toISOString().slice(0, 10)}`,
         mode === "full" ? ["*"] : TELEGRAM_API_EMBED_SCOPES,
       );
@@ -2090,7 +2108,7 @@ export function registerHandlers(bot: Bot): void {
     await ctx.answerCallbackQuery();
     if (!(await guard(ctx))) return;
     if (isTelegramShared(ctx)) { await ctx.editMessageText("For your security, manage API keys in a private chat with Chusky."); return; }
-    const projects = await listTelegramProjects(ctx.from!.id);
+    const projects = await listTelegramProjects(await telegramOwner(ctx));
     await ctx.editMessageText(projects.length
       ? `<b>Your API keys</b>\n\n${projects.map((project) => `• <b>${escapeTelegramHtml(project.name)}</b>\n<code>${escapeTelegramHtml(project.keyPrefix)}…</code> · ${escapeTelegramHtml(project.scopes.join(", "))}`).join("\n\n")}\n\nRotate replaces a key immediately. Revoke permanently disables it.`
       : "<b>Your API keys</b>\n\nYou have no active API keys yet.", { parse_mode: "HTML", reply_markup: projects.length ? apiKeyProjectKeyboard(projects) : apiKeyMenuKeyboard() });
@@ -2101,7 +2119,7 @@ export function registerHandlers(bot: Bot): void {
     if (!(await guard(ctx))) return;
     if (isTelegramShared(ctx)) { await ctx.editMessageText("For your security, manage API keys in a private chat with Chusky."); return; }
     try {
-      const project = await rotateTelegramProjectKey(ctx.from!.id, ctx.match[1]);
+      const project = await rotateTelegramProjectKey(await telegramOwner(ctx), ctx.match[1]);
       await ctx.editMessageText(apiKeyDelivery(project, true), { parse_mode: "HTML", reply_markup: apiKeyMenuKeyboard() });
     } catch (error) {
       await ctx.editMessageText(`❌ ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML", reply_markup: apiKeyMenuKeyboard() });
@@ -2112,7 +2130,7 @@ export function registerHandlers(bot: Bot): void {
     await ctx.answerCallbackQuery();
     if (!(await guard(ctx))) return;
     if (isTelegramShared(ctx)) { await ctx.editMessageText("For your security, manage API keys in a private chat with Chusky."); return; }
-    const project = (await listTelegramProjects(ctx.from!.id)).find((item) => item.id === ctx.match[1]);
+    const project = (await listTelegramProjects(await telegramOwner(ctx))).find((item) => item.id === ctx.match[1]);
     if (!project) { await ctx.editMessageText("That API key is no longer active.", { reply_markup: apiKeyMenuKeyboard() }); return; }
     await ctx.editMessageText(`<b>Revoke ${escapeTelegramHtml(project.name)}?</b>\n\nThis disables <code>${escapeTelegramHtml(project.keyPrefix)}…</code> immediately. Existing apps using it will stop working.`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🗑 Revoke permanently", `api:revoke-confirm:${project.id}`).text("Cancel", "api:list") });
   });
@@ -2121,7 +2139,7 @@ export function registerHandlers(bot: Bot): void {
     await ctx.answerCallbackQuery({ text: "Revoking API key…" });
     if (!(await guard(ctx))) return;
     if (isTelegramShared(ctx)) { await ctx.editMessageText("For your security, manage API keys in a private chat with Chusky."); return; }
-    const revoked = await revokeTelegramProject(ctx.from!.id, ctx.match[1]);
+    const revoked = await revokeTelegramProject(await telegramOwner(ctx), ctx.match[1]);
     await ctx.editMessageText(revoked ? "✅ API key revoked. Requests using it are now rejected." : "That API key is no longer active.", { reply_markup: apiKeyMenuKeyboard() });
   });
 
@@ -2137,7 +2155,7 @@ export function registerHandlers(bot: Bot): void {
     await ctx.answerCallbackQuery();
     const provider = ctx.match[1];
     if (provider === "__back") {
-      const model = await getModel(ctx.from!.id);
+      const model = await getModel(await telegramOwner(ctx));
       await ctx.editMessageText(
         `Active model: <code>${model}</code>\n\nChoose a provider:`,
         { parse_mode: "HTML", reply_markup: modelProviderKeyboard() }
@@ -2183,7 +2201,7 @@ export function registerHandlers(bot: Bot): void {
   bot.callbackQuery(/^msel:(.+)$/, async (ctx) => {
     await ctx.answerCallbackQuery();
     const modelId = ctx.match[1];
-    await setModel(ctx.from.id, modelId);
+    await setModel(await telegramOwner(ctx), modelId);
     await ctx.editMessageText(
       `✅ <b>Model switched to:</b>\n<code>${modelId}</code>\n\n<i>Your history and Composio session were kept.</i>`,
       { parse_mode: "HTML" }
@@ -2239,6 +2257,7 @@ export function registerHandlers(bot: Bot): void {
     const action = ctx.match[1];
     const messageId = ctx.callbackQuery.message?.message_id;
     if (!messageId) return;
+    const uid = await telegramOwner(ctx);
     try {
       if (action === "refresh") {
         await showWorkspace(ctx, messageId);
@@ -2249,7 +2268,7 @@ export function registerHandlers(bot: Bot): void {
         return;
       }
       if (action === "apps") {
-        const states = await getToolkitStates(ctx.from!.id);
+        const states = await getToolkitStates(uid);
         const connected = states.filter((state) => state.connected);
         const card: TelegramCard = {
           title: "🧩 Connected apps",
@@ -2263,7 +2282,7 @@ export function registerHandlers(bot: Bot): void {
         return;
       }
       if (action === "reminders") {
-        const reminders = (await listReminders(ctx.from!.id)).filter((reminder) => reminder.status === "scheduled" || reminder.status === "waiting").sort((a, b) => a.runAt - b.runAt);
+        const reminders = (await listReminders(uid)).filter((reminder) => reminder.status === "scheduled" || reminder.status === "waiting").sort((a, b) => a.runAt - b.runAt);
         const card: TelegramCard = {
           title: "⏰ Upcoming reminders",
           body: reminders.length
@@ -2276,7 +2295,7 @@ export function registerHandlers(bot: Bot): void {
         return;
       }
       if (action === "schedules") {
-        const jobs = (await listJobs(ctx.from!.id)).filter((job) => job.status === "active");
+        const jobs = (await listJobs(uid)).filter((job) => job.status === "active");
         const card: TelegramCard = {
           title: "🗓️ Recurring schedules",
           body: jobs.length
@@ -2289,7 +2308,7 @@ export function registerHandlers(bot: Bot): void {
         return;
       }
       if (action === "tasks") {
-        const tasks = (await listOpenTasks(ctx.from!.id, 2000)).filter((task) => !["completed", "cancelled"].includes(task.status));
+        const tasks = (await listOpenTasks(uid, 2000)).filter((task) => !["completed", "cancelled"].includes(task.status));
         const card: TelegramCard = {
           title: "📋 Active tasks",
           body: tasks.length
@@ -2303,7 +2322,7 @@ export function registerHandlers(bot: Bot): void {
       }
       if (action === "missions") {
         if (isTelegramShared(ctx)) { await ctx.editMessageText("Mission details are available only in your private chat with Chusky."); return; }
-        const missions = await listMissions(ctx.from!.id);
+        const missions = await listMissions(uid);
         const visible = missions.slice(0, 12);
         const body = visible.length
           ? visible.map((mission) => {
@@ -2330,9 +2349,9 @@ export function registerHandlers(bot: Bot): void {
       if (action === "meetings") {
         if (isTelegramShared(ctx)) { await ctx.editMessageText("Meeting details are available only in your private chat with Chusky."); return; }
         const [meetings, preparations, contacts] = await Promise.all([
-          listRecallMeetings(ctx.from!.id, 20),
-          listCalendarMeetingPreparations(ctx.from!.id, 20),
-          listMeetingContacts(ctx.from!.id, 50),
+          listRecallMeetings(uid, 20),
+          listCalendarMeetingPreparations(uid, 20),
+          listMeetingContacts(uid, 50),
         ]);
         const active = meetings.filter((meeting) => ["creating", "scheduled", "joining", "waiting_room", "in_call", "leaving"].includes(meeting.status));
         const prepared = preparations.filter((item) => ["prepared", "auto_scheduled"].includes(item.status));
@@ -2356,7 +2375,7 @@ export function registerHandlers(bot: Bot): void {
         await showMcpWorkspace(ctx, messageId);
         return;
       }
-      const pending = (await listApprovals(ctx.from!.id, 50)).filter((approval) => approval.status === "pending" && approval.expiresAt > Date.now()).slice(0, 8);
+      const pending = (await listApprovals(uid, 50)).filter((approval) => approval.status === "pending" && approval.expiresAt > Date.now()).slice(0, 8);
       const card: TelegramCard = {
         title: "✅ Pending approvals",
         body: pending.length ? pending.map((approval) => `⚠️ ${approval.toolSlug}`) : ["Nothing is waiting for approval."],
@@ -2381,10 +2400,11 @@ export function registerHandlers(bot: Bot): void {
     }
     const messageId = ctx.callbackQuery.message?.message_id;
     if (!messageId) return;
+    const uid = await telegramOwner(ctx);
     let active = false;
     try {
-      active = (await listJobs(ctx.from!.id)).some((job) => job.kind === "attention_pulse" && job.status === "active");
-      await nativeTool(ctx.from!.id, "CHUCK_ATTENTION_PULSE", { action: active ? "disable" : "enable" }, {
+      active = (await listJobs(uid)).some((job) => job.kind === "attention_pulse" && job.status === "active");
+      await nativeTool(uid, "CHUCK_ATTENTION_PULSE", { action: active ? "disable" : "enable" }, {
         deliveryTarget: { provider: "telegram", conversationId: String(ctx.chat?.id ?? ctx.from!.id) },
       });
       await showWorkspace(ctx, messageId);
@@ -2416,7 +2436,7 @@ export function registerHandlers(bot: Bot): void {
       }
       if (server.enabled === false) throw new Error("That MCP server is no longer available");
       if (action === "d") {
-        const removed = await disconnectMcpServer(ctx.from!.id, serverId);
+      const removed = await disconnectMcpServer(await telegramOwner(ctx), serverId);
         if (!removed) throw new Error("That MCP server is not connected to your account");
         await showMcpWorkspace(ctx, messageId);
         return;
@@ -2432,7 +2452,7 @@ export function registerHandlers(bot: Bot): void {
         );
         return;
       }
-      await connectMcpServer(ctx.from!.id, serverId);
+      await connectMcpServer(await telegramOwner(ctx), serverId);
       await showMcpWorkspace(ctx, messageId);
     } catch (error) {
       logger.warn({ err: error, userId: ctx.from!.id, action, serverId }, "Telegram MCP action failed");
@@ -2456,13 +2476,15 @@ export function registerHandlers(bot: Bot): void {
       }
       if (action === "join-prepared") {
         if (!/^cmp_[A-Za-z0-9_-]{1,96}$/.test(id)) throw new Error("Invalid calendar preparation ID");
-        if (!(await checkRateLimit(ctx.from!.id))) throw new Error("Please wait a moment before starting another meeting action");
-        const result = await withTelegramUserLock(ctx.from!.id, (signal) => joinPreparedCalendarMeeting(ctx.from!.id, id, signal));
+        const uid = await telegramOwner(ctx);
+        if (!(await checkRateLimit(uid))) throw new Error("Please wait a moment before starting another meeting action");
+        const result = await withTelegramUserLock(uid, (signal) => joinPreparedCalendarMeeting(uid, id, signal));
         await ctx.editMessageText(`✅ Prepared calendar meeting join started${(result as any).id ? `: ${(result as any).id}` : "."}`);
         return;
       }
       if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(id)) throw new Error("Invalid meeting ID");
-      const result = await withTelegramUserLock(ctx.from!.id, (signal) => leaveRecallMeeting(ctx.from!.id, id, signal));
+      const uid = await telegramOwner(ctx);
+      const result = await withTelegramUserLock(uid, (signal) => leaveRecallMeeting(uid, id, signal));
       await ctx.editMessageText(`✅ Meeting leave requested${(result as any).id ? ` for ${(result as any).id}` : "."}`);
     } catch (error) {
       await ctx.editMessageText(`❌ ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" });
@@ -2476,7 +2498,7 @@ export function registerHandlers(bot: Bot): void {
     bot.command(command, async (ctx) => {
       if (!(await guard(ctx))) return;
       if (isTelegramShared(ctx)) { await ctx.reply(`For privacy, /${command} is available only in your private chat with Chusky.`); return; }
-        const uid = ctx.from!.id;
+        const uid = await telegramOwner(ctx);
         try {
         if (command === "missions") {
           const [action, missionId] = String(ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
@@ -2618,7 +2640,7 @@ export function registerHandlers(bot: Bot): void {
     if (!messageId) return;
     const provider = ctx.match[1] as "twilio" | "meetings";
     try {
-      await setLiveVoicePreference(ctx.from!.id, provider, ctx.match[2] as (typeof FLUX_TTS_VOICES)[number]["id"]);
+      await setLiveVoicePreference(await telegramOwner(ctx), provider, ctx.match[2] as (typeof FLUX_TTS_VOICES)[number]["id"]);
       await editVoiceSettings(ctx, messageId);
     } catch (error) {
       logger.warn({ err: error, userId: ctx.from!.id, provider }, "Live voice selection failed");
@@ -2637,7 +2659,7 @@ export function registerHandlers(bot: Bot): void {
       const voices = await listBlandCuratedVoices(config.blandApiKey);
       const voice = voices.find((item) => item.id.toLowerCase() === ctx.match[1].toLowerCase());
       if (!voice) throw new Error("That voice is no longer available in Bland's curated catalogue.");
-      await setLiveVoicePreference(ctx.from!.id, "bland", { id: voice.id, name: voice.name });
+      await setLiveVoicePreference(await telegramOwner(ctx), "bland", { id: voice.id, name: voice.name });
       await editVoiceSettings(ctx, messageId);
     } catch (error) {
       logger.warn({ err: error, userId: ctx.from!.id }, "Bland voice selection failed");
@@ -2653,7 +2675,7 @@ export function registerHandlers(bot: Bot): void {
     const messageId = ctx.callbackQuery.message?.message_id;
     if (!messageId) return;
     try {
-      await setLiveVoicePreference(ctx.from!.id, ctx.match[1] as LiveVoiceProvider, undefined);
+      await setLiveVoicePreference(await telegramOwner(ctx), ctx.match[1] as LiveVoiceProvider, undefined);
       await editVoiceSettings(ctx, messageId);
     } catch (error) {
       logger.warn({ err: error, userId: ctx.from!.id }, "Live voice preference reset failed");
@@ -2670,7 +2692,7 @@ export function registerHandlers(bot: Bot): void {
     if (!messageId) return;
     const enabled = ctx.match[1] === "on";
     try {
-      await setVoiceReplies(ctx.from!.id, enabled);
+      await setVoiceReplies(await telegramOwner(ctx), enabled);
       await editVoiceSettings(ctx, messageId);
     } catch (error) {
       logger.warn({ err: error, userId: ctx.from!.id, enabled }, "Telegram voice reply setting failed");
@@ -2681,7 +2703,7 @@ export function registerHandlers(bot: Bot): void {
   bot.callbackQuery(/^appr:review:(.+)$/, async (ctx) => {
     await ctx.answerCallbackQuery();
     if (!(await guard(ctx))) return;
-    const approval = await getApproval(ctx.from!.id, ctx.match[1]);
+    const approval = await getApproval(await telegramOwner(ctx), ctx.match[1]);
     if (!approval || approval.status !== "pending" || approval.expiresAt <= Date.now()) {
       await ctx.editMessageText("⚠️ This approval has expired or was already handled.");
       return;
@@ -2692,35 +2714,36 @@ export function registerHandlers(bot: Bot): void {
   bot.callbackQuery(/^appr:(approve|deny):(.+)$/, async (ctx) => {
     await ctx.answerCallbackQuery();
     if (!(await guard(ctx))) return;
+    const uid = await telegramOwner(ctx);
     const id = ctx.match[2];
-    const approval = await getApproval(ctx.from.id, id);
+    const approval = await getApproval(uid, id);
     if (!approval || approval.status !== "pending" || approval.expiresAt <= Date.now()) {
       await editApprovalOutcome(ctx, "⚠️ This approval has expired or was already handled.");
       return;
     }
     if (ctx.match[1] === "deny") {
-      if (!(await setApprovalStatus(ctx.from.id, id, "denied"))) {
+      if (!(await setApprovalStatus(uid, id, "denied"))) {
         await editApprovalOutcome(ctx, "⚠️ This approval was already handled or has expired.");
         return;
       }
       if (approval.triggerEventId) await notifyTriggerApproval(approval.id, false, approval.triggerEventId).catch((error) => logger.warn({ err: error }, "Trigger approval notification failed"));
-      const missionTarget = await findMissionApprovalTarget(ctx.from.id, approval.id);
+      const missionTarget = await findMissionApprovalTarget(uid, approval.id);
       if (missionTarget) {
-        await updateMission(ctx.from.id, missionTarget.mission.id, { status: "blocked", waiting: undefined, error: `Approval denied for ${approval.toolSlug}.`, nextAction: "Review the mission checkpoint and resume only after revising the action." });
+        await updateMission(uid, missionTarget.mission.id, { status: "blocked", waiting: undefined, error: `Approval denied for ${approval.toolSlug}.`, nextAction: "Review the mission checkpoint and resume only after revising the action." });
         await editApprovalOutcome(ctx, "🛑 Action denied. The mission is blocked at its checkpoint; revise the action before resuming.");
         return;
       }
       await editApprovalOutcome(ctx, "🛑 Action denied. Nothing was executed.");
       return;
     }
-    if (!(await claimApproval(ctx.from.id, id))) {
+    if (!(await claimApproval(uid, id))) {
       await editApprovalOutcome(ctx, "⚠️ This approval was already handled or has expired.");
       return;
     }
     await editApprovalOutcome(ctx, "✅ Approved. Chusky is executing the action…");
     if (approval.handoffId) {
       try {
-        const resumed = await resumeApprovedDelegation(ctx.from.id, approval.id);
+        const resumed = await resumeApprovedDelegation(uid, approval.id);
         const outcome = resumed.status === "success"
           ? `✅ Approved worker action completed.\n\n${resumed.output}`
           : resumed.status === "queued"
@@ -2730,8 +2753,8 @@ export function registerHandlers(bot: Bot): void {
       } catch (error) {
         logger.warn({ err: error, userId: ctx.from.id, approvalId: approval.id, handoffId: approval.handoffId }, "Approved worker action resume failed");
         if (error instanceof SubagentApprovalEnqueueError) {
-          await setApprovalStatus(ctx.from.id, approval.id, "pending");
-          const retryable = await getApproval(ctx.from.id, approval.id);
+          await setApprovalStatus(uid, approval.id, "pending");
+          const retryable = await getApproval(uid, approval.id);
           if (retryable?.status === "pending") {
             await editCard(ctx, ctx.callbackQuery.message!.message_id, approvalCard(retryable.toolSlug, retryable.id, retryable.args));
             return;
@@ -2755,7 +2778,7 @@ export function registerHandlers(bot: Bot): void {
     }
     if (approval.autonomyResume) {
       try {
-        await enqueueAutonomyApprovalResume({ userId: ctx.from.id, ...approval.autonomyResume, approvalId: approval.id });
+        await enqueueAutonomyApprovalResume({ userId: uid, ...approval.autonomyResume, approvalId: approval.id });
         await ctx.reply("▶️ Approved. The waiting autonomous run is resuming now; I’ll send its result when this slice completes.");
       } catch (error) {
         logger.warn({ err: error, userId: ctx.from.id, approvalId: approval.id }, "Autonomous approval resume enqueue failed");
@@ -2763,18 +2786,18 @@ export function registerHandlers(bot: Bot): void {
       }
       return;
     }
-    const missionTarget = await findMissionApprovalTarget(ctx.from.id, approval.id);
+    const missionTarget = await findMissionApprovalTarget(uid, approval.id);
     if (missionTarget) {
       const lockToken = randomUUID();
-      if (!(await acquireUserLock(ctx.from.id, lockToken))) {
-        await setApprovalStatus(ctx.from.id, approval.id, "pending");
+      if (!(await acquireUserLock(uid, lockToken))) {
+        await setApprovalStatus(uid, approval.id, "pending");
         await editApprovalOutcome(ctx, "⏳ Another request is still running. This approval remains pending; please approve it again shortly.");
         return;
       }
       try {
-        const resumed = await resumeMissionTaskAfterApproval(ctx.from.id, approval.id);
+        const resumed = await resumeMissionTaskAfterApproval(uid, approval.id);
         if (resumed.status === "not_resumable" || resumed.status === "task_running" || resumed.status === "not_mission") {
-          await setApprovalStatus(ctx.from.id, approval.id, "pending");
+          await setApprovalStatus(uid, approval.id, "pending");
           await editApprovalOutcome(ctx, "⚠️ The mission task is not ready to resume. The approval remains pending; check the mission status before retrying.");
           return;
         }
@@ -2791,7 +2814,7 @@ export function registerHandlers(bot: Bot): void {
         logger.warn({ err: error, userId: ctx.from.id, approvalId: approval.id, missionId: missionTarget.mission.id, taskId: missionTarget.task.id }, "Mission approval resume failed");
         await editApprovalOutcome(ctx, "⚠️ Approval was recorded, but the mission could not be queued. Check its status and retry the mission from the saved checkpoint.");
       } finally {
-        await releaseUserLock(ctx.from.id, lockToken);
+        await releaseUserLock(uid, lockToken);
       }
       return;
     }
@@ -2800,17 +2823,17 @@ export function registerHandlers(bot: Bot): void {
       // is still pending after the policy change. New calls do not create one.
       if (approval.toolSlug === "CHUCK_START_PHONE_CALL") {
         validateNativeToolArguments(approval.toolSlug, approval.args);
-        await nativeTool(ctx.from.id, approval.toolSlug, approval.args);
-        await setApprovalStatus(ctx.from.id, approval.id, "consumed");
+        await nativeTool(uid, approval.toolSlug, approval.args);
+        await setApprovalStatus(uid, approval.id, "consumed");
         const label = "Phone call";
-        await appendMessages(ctx.from.id, [{ role: "user", content: approval.request }, { role: "assistant", content: `${label} started. I’m joining the call now.` }]);
+        await appendMessages(uid, [{ role: "user", content: approval.request }, { role: "assistant", content: `${label} started. I’m joining the call now.` }]);
         await ctx.reply(`📞 ${label} started. I’m joining the call now.`);
         return;
       }
-      const result = await runAgent(ctx.from.id, approval.request, approval.history, approval.model, undefined, undefined, undefined, id, undefined, { ownerPrivateRun: true, forceApprovedAction: true });
-      await appendMessages(ctx.from.id, [{ role: "user", content: approval.request }, { role: "assistant", content: result.text }]);
+      const result = await runAgent(uid, approval.request, approval.history, approval.model, undefined, undefined, undefined, id, undefined, { ownerPrivateRun: true, forceApprovedAction: true });
+      await appendMessages(uid, [{ role: "user", content: approval.request }, { role: "assistant", content: result.text }]);
       await replyHtml(ctx, mdToTelegramHtml(result.text));
-      await sendVoiceReply(ctx, result.text, (await getSession(ctx.from.id)).voiceReplies === true);
+      await sendVoiceReply(ctx, result.text, (await getSession(await telegramOwner(ctx))).voiceReplies === true);
       await sendGeneratedArtifacts(ctx, result.generatedFiles);
     } catch (e) {
       if (e instanceof ApprovalRequiredError) {
@@ -2828,7 +2851,7 @@ export function registerHandlers(bot: Bot): void {
     const text = ctx.message.text;
     if (text.startsWith("/")) return;
 
-    const userId = ctx.from.id;
+    const userId = await canonicalUserIdForTelegram(ctx.from.id);
 
     if (!(await checkRateLimit(userId))) {
       await ctx.reply(`⏱ Easy there. Max ${config.rateLimit} messages per ${config.rateWindowSeconds}s.`);
@@ -3029,22 +3052,24 @@ function toolFooterLabel(slug: string): string {
   bot.on("message:photo", async (ctx) => {
     const photo = ctx.message.photo.at(-1);
     if (!photo) return;
+    if (!(await guard(ctx))) return;
+    const userId = await telegramOwner(ctx);
     try {
       const file = await downloadTelegramFile(ctx, photo.file_id);
       const mime = file.path.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
       const caption = ctx.message.caption?.trim() || defaultMediaInstruction("image");
       if (r2Configured()) {
         try {
-          const r2Key = `telegram/${ctx.from!.id}/images/${photo.file_id}.${mime === "image/png" ? "png" : "jpg"}`;
+          const r2Key = `workspace/${userId}/images/${photo.file_id}.${mime === "image/png" ? "png" : "jpg"}`;
           await putR2Object(r2Key, file.data, mime);
-          await registerImageAsset(ctx.from!.id, { name: `telegram-${photo.file_id}`, purpose: "Image uploaded from Telegram", description: caption, tags: ["telegram", "uploaded-image"], contentType: mime, r2Key, size: file.data.length });
+          await registerImageAsset(userId, { name: `telegram-${photo.file_id}`, purpose: "Image uploaded from Telegram", description: caption, tags: ["telegram", "uploaded-image"], contentType: mime, r2Key, size: file.data.length });
         } catch (error) { logger.warn({ err: error, userId: ctx.from?.id }, "Could not persist Telegram image asset"); }
       }
       await handleMedia(ctx, [
         { type: "text", text: caption },
         { type: "image_url", image_url: { url: `data:${mime};base64,${file.data.toString("base64")}` } },
       ], `[Image attached] ${caption}`, vectorConfigured() ? async (selectedModel) => {
-        await indexExtractedDocument({ userId: String(ctx.from!.id), documentId: `telegram_${photo.file_id}`, filename: `telegram-${photo.file_id}.${mime === "image/png" ? "png" : "jpg"}`, contentType: mime, text: await extractMediaText(file.data, `telegram-${photo.file_id}`, mime, selectedModel), sourceType: "telegram_image" });
+        await indexExtractedDocument({ userId: String(userId), documentId: `telegram_${photo.file_id}`, filename: `telegram-${photo.file_id}.${mime === "image/png" ? "png" : "jpg"}`, contentType: mime, text: await extractMediaText(file.data, `telegram-${photo.file_id}`, mime, selectedModel), sourceType: "telegram_image" });
       } : undefined);
     } catch (e) {
       await ctx.reply(`❌ Could not download the image: ${String(e).slice(0, 300)}`);
@@ -3054,6 +3079,8 @@ function toolFooterLabel(slug: string): string {
   // ── Document ───────────────────────────────────────────────────────────────
   bot.on("message:document", async (ctx) => {
     const doc = ctx.message.document;
+    if (!(await guard(ctx))) return;
+    const userId = await telegramOwner(ctx);
     try {
       const file = await downloadTelegramFile(ctx, doc.file_id);
       const filename = doc.file_name || file.path.split("/").pop() || "document";
@@ -3061,14 +3088,14 @@ function toolFooterLabel(slug: string): string {
       const prompt = ctx.message.caption?.trim() || defaultMediaInstruction("document");
       const documentId = `telegram_${doc.file_id}`;
       if (r2Configured()) {
-        try { await putR2Object(`telegram/${ctx.from!.id}/${documentId}/${filename.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120)}`, file.data, mime); }
+        try { await putR2Object(`workspace/${userId}/${documentId}/${filename.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120)}`, file.data, mime); }
         catch (error) { logger.warn({ err: error, userId: ctx.from?.id, filename }, "Could not persist Telegram document in R2"); }
       }
       const indexDocument = vectorConfigured() && (mime === "text/plain" || mime === "text/markdown" || /\.md$/i.test(filename) || mime === "application/pdf" || mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
         ? async (selectedModel: string) => {
           try {
             const extracted = mime === "application/pdf" || mime.includes("wordprocessingml") ? await extractMediaText(file.data, filename, mime, selectedModel) : file.data.toString("utf8");
-            await indexExtractedDocument({ userId: String(ctx.from!.id), documentId, filename, contentType: mime, text: extracted, sourceType: "telegram_upload" });
+            await indexExtractedDocument({ userId: String(userId), documentId, filename, contentType: mime, text: extracted, sourceType: "telegram_upload" });
           } catch (error) {
             logger.warn({ err: error, userId: ctx.from?.id, filename }, "Could not index text document");
           }
@@ -3131,8 +3158,9 @@ function toolFooterLabel(slug: string): string {
     const query = ctx.inlineQuery.query.trim();
     if (!query) { await ctx.answerInlineQuery([]); return; }
     try {
-      const model = await getModel(ctx.from.id);
-      const result = await runAgent(ctx.from.id, query, [], model);
+      const userId = await canonicalUserIdForTelegram(ctx.from.id);
+      const model = await getModel(userId);
+      const result = await runAgent(userId, query, [], model);
       const html = mdToTelegramHtml(result.text);
       await ctx.answerInlineQuery([{
         type: "article",

@@ -19,7 +19,7 @@ export function twilioInboundCallerAllowed(callProfile: CallProfile, allowedCall
 
 export function inboundTwilioOwner(value: string): number {
   const userId = Number(value);
-  if (!Number.isSafeInteger(userId) || userId <= 0) throw new Error("TWILIO_INBOUND_OWNER_USER_ID must be a positive Telegram user ID");
+  if (!Number.isSafeInteger(userId) || userId <= 0) throw new Error("TWILIO_INBOUND_OWNER_USER_ID must be a positive Chusky owner ID");
   return userId;
 }
 

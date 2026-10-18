@@ -41,22 +41,22 @@ test("web history reconciliation is persisted and published through one stable t
   assert.equal((await getTask(sourceUserId, first.task.id))?.workflowRunId, "workflow-web-reconcile-stable");
 });
 
-test("the durable reconciliation worker imports private web history and is replay-safe", async () => {
+test("the durable reconciliation worker imports legacy Telegram history into the web owner and is replay-safe", async () => {
   const sourceUserId = 991103;
   const telegramUserId = 991104;
-  const source = await getSession(sourceUserId);
-  source.history = [{ role: "user", content: "A durable web message", createdAt: Date.now() - 1_000 }];
-  await saveSession(sourceUserId, source);
+  const legacyTelegramSession = await getSession(telegramUserId);
+  legacyTelegramSession.history = [{ role: "user", content: "A durable Telegram message", createdAt: Date.now() - 1_000 }];
+  await saveSession(telegramUserId, legacyTelegramSession);
 
   const { task } = await ensureWebSessionReconciliationTask(sourceUserId, telegramUserId, async () => "workflow-web-reconcile-worker");
   const first = await executeWebSessionReconciliationTask(task);
   assert.equal(first.status, "completed");
-  assert.equal((await getSession(telegramUserId)).history.some((message) => message.content === "A durable web message"), true);
+  assert.equal((await getSession(sourceUserId)).history.some((message) => message.content === "A durable Telegram message"), true);
 
   const second = await executeWebSessionReconciliationTask(task);
   assert.equal(second.status, "completed");
-  const merged = await getSession(telegramUserId);
-  assert.equal(merged.history.filter((message) => message.content === "A durable web message").length, 1);
+  const merged = await getSession(sourceUserId);
+  assert.equal(merged.history.filter((message) => message.content === "A durable Telegram message").length, 1);
 });
 
 test("lease contention becomes a durable future retry instead of blocking the request", async () => {
@@ -67,7 +67,7 @@ test("lease contention becomes a durable future retry instead of blocking the re
   let holderStarted!: () => void;
   const holderReady = new Promise<void>((resolve) => { holderStarted = resolve; });
   const holderReleased = new Promise<void>((resolve) => { releaseHolder = resolve; });
-  const holder = mutateSession(telegramUserId, async () => {
+  const holder = mutateSession(sourceUserId, async () => {
     holderStarted();
     await holderReleased;
     return true;

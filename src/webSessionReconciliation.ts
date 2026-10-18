@@ -5,7 +5,7 @@ import {
   getTask,
   listTaskOwnerIds,
   listOpenTasks,
-  mergeLinkedWebSession,
+  mergeLinkedTelegramSession,
   requeueExpiredTask,
   retryTask,
   type TaskRecord,
@@ -59,7 +59,7 @@ function waitingOutcome(): TaskRunResult {
 }
 
 /**
- * Create the one stable reconciliation task for an owner/session pair and
+ * Create the one stable reconciliation task for an owner/channel pair and
  * publish it through the same claim-before-QStash path as ordinary tasks.
  * The task payload contains IDs only; all history remains in owner-scoped
  * session storage and is read by the worker at execution time.
@@ -75,8 +75,8 @@ export async function ensureWebSessionReconciliationTask(
   if (!task) {
     task = await createTask(sourceUserId, {
       id: taskId,
-      title: "Reconcile linked web history",
-      objective: "Import the owner’s private web session into the canonical Telegram session.",
+      title: "Reconcile linked channel history",
+      objective: "Import legacy Telegram channel history into the canonical web workspace without changing ownership.",
       runAt: Date.now(),
       maxAttempts: 10,
       taskKind: "web_session_reconciliation",
@@ -105,9 +105,12 @@ export async function executeWebSessionReconciliationTask(task: TaskRecord): Pro
   if (telegramUserId === undefined) {
     return { status: "completed", message: "Private web history reconciliation completed.", result: "Private web history reconciliation completed." };
   }
-  const merged = await mergeLinkedWebSession(sourceUserId, telegramUserId, { skipIfBusy: true });
+  // sourceUserId is the canonical web owner and telegramUserId is only the
+  // linked channel alias. Existing legacy records were written in the reverse
+  // direction, so migrate the alias into the web owner exactly once.
+  const merged = await mergeLinkedTelegramSession(telegramUserId, sourceUserId, { skipIfBusy: true });
   if (!merged) return waitingOutcome();
-  return { status: "completed", message: "Linked web history reconciliation completed.", result: "Linked web history reconciliation completed." };
+  return { status: "completed", message: "Linked channel history reconciliation completed.", result: "Linked channel history reconciliation completed." };
 }
 
 export interface WebSessionReconciliationRecoveryReport {

@@ -91,9 +91,17 @@ export async function deliverReminder(payload: ReminderWorkflowPayload, deps: Wo
   const deliveryKey = `reminder:${payload.reminderId}:${payload.attemptId ?? "initial"}${payload.approvalId ? `:approval:${payload.approvalId}` : ""}`;
   if (deps.claimDelivery && !(await deps.claimDelivery(deliveryKey, 15 * 60 * 1000))) return { skipped: true, delivered: false };
   const target = reminder.deliveryTarget;
+  // A linked Telegram identity is an optional delivery channel, never the
+  // owner. The canonical web projection remains the fallback when no channel
+  // is linked or an external target was not selected.
   const chatId = target?.provider === "telegram" ? Number(target.conversationId) : await deps.getTelegramChatId(payload.userId);
-  if ((!target && !chatId) || (target?.provider === "telegram" && !Number.isSafeInteger(chatId)) || (target && target.provider !== "telegram" && !deps.sendChannelMessage)) {
-    await deps.updateReminder(payload.userId, payload.reminderId, { status: "failed", deliveryError: "No Telegram mapping" });
+  // The authenticated web workspace is a first-class notification surface.
+  // A reminder without an explicit external target is therefore not blocked
+  // merely because Telegram is not linked; its projection remains available
+  // in the dashboard and activity feed.
+  const dashboardOnly = !target && !Number.isSafeInteger(chatId);
+  if ((!dashboardOnly && target?.provider === "telegram" && !Number.isSafeInteger(chatId)) || (target && target.provider !== "telegram" && !deps.sendChannelMessage)) {
+    await deps.updateReminder(payload.userId, payload.reminderId, { status: "failed", deliveryError: target ? `No adapter for ${target.provider}` : "No configured delivery channel" });
     return { delivered: false };
   }
   try {
@@ -116,10 +124,14 @@ export async function deliverReminder(payload: ReminderWorkflowPayload, deps: Wo
     }
     const response = result.text.trim() || "Reminder check-in completed.";
     if (deps.projectReminder) await deps.projectReminder({ reminder, executionKey, result: response, status: "completed", reminderStatus: "sent" });
-    if (target && target.provider !== "telegram") {
+    if (dashboardOnly) {
+      // projectReminder is the durable dashboard receipt. It is intentionally
+      // not treated as an external send and remains visible to the owner.
+      await deps.updateReminder(payload.userId, payload.reminderId, { status: "sent", deliveryError: undefined });
+    } else if (target && target.provider !== "telegram") {
       await deps.sendChannelMessage!(target, `⏰ Chusky reminder\n\n${response}`, `reminder:${payload.reminderId}`);
     } else {
-      if (!chatId) throw new Error("No Telegram mapping");
+      if (!chatId) throw new Error("No configured delivery channel");
       await deps.sendMessage(chatId, `⏰ <b>Chusky reminder</b>\n\n${mdToTelegramHtml(response)}`, { parse_mode: "HTML" });
     }
     // Commit the delivery dedupe marker immediately after the provider send.
@@ -165,17 +177,17 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
     }
   }
   const target = deliveryJob.deliveryTarget;
+  // A linked Telegram identity is only a channel destination. It never
+  // changes the canonical owner of the scheduled job.
   const chatId = target?.provider === "telegram" ? Number(target.conversationId) : (!target ? await deps.getTelegramChatId(payload.userId) : undefined);
   const hasTelegramChat = Number.isSafeInteger(chatId) && Number(chatId) > 0;
-  // The dashboard is a first-class delivery surface for Attention Pulse. A
-  // web-only account may have no Telegram mapping and no linked external
-  // channel, but Elena must still be able to run, persist a candidate, and
-  // expose it through the bell/Approvals feed. Other scheduled jobs retain
-  // their existing hard delivery requirement.
-  const dashboardOnly = job.kind === "attention_pulse" && !target && !hasTelegramChat;
+  // Every scheduled job can complete against the canonical web workspace. An
+  // external channel is optional; when none is linked, the durable occurrence
+  // and web notification are the owner-facing receipt.
+  const dashboardOnly = !target && !hasTelegramChat;
   if ((!target && !hasTelegramChat && !dashboardOnly) || (target?.provider === "telegram" && !hasTelegramChat) || (target && target.provider !== "telegram" && !deps.sendChannelMessage)) {
-    if (occurrence && deps.updateJobOccurrence) await deps.updateJobOccurrence(payload.userId, occurrence.id, { status: "failed", error: target ? `No adapter for ${target.provider}` : "No Telegram mapping", completedAt: Date.now() }, occurrence.version);
-    await deps.updateJob(payload.userId, payload.jobId, { deliveryError: target ? `No adapter for ${target.provider}` : "No Telegram mapping" });
+    if (occurrence && deps.updateJobOccurrence) await deps.updateJobOccurrence(payload.userId, occurrence.id, { status: "failed", error: target ? `No adapter for ${target.provider}` : "No configured delivery channel", completedAt: Date.now() }, occurrence.version);
+    await deps.updateJob(payload.userId, payload.jobId, { deliveryError: target ? `No adapter for ${target.provider}` : "No configured delivery channel" });
     return { delivered: false };
   }
   try {
@@ -242,7 +254,7 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
     // this after the send and delivery dedupe marker so a failed attempt
     // remains visible and a bookkeeping hiccup cannot cause a duplicate
     // provider message on retry.
-    if (!dashboardOnly) await deps.updateJob(payload.userId, payload.jobId, { deliveryError: undefined });
+    await deps.updateJob(payload.userId, payload.jobId, { deliveryError: undefined });
     // Dashboard delivery intentionally does not call confirmDelivery: the
     // pending candidate is the notification and must remain actionable until
     // the owner opens it and selects an action in Chat/Approvals.

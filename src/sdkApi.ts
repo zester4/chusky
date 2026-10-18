@@ -28,6 +28,7 @@ import { getSdkRunUsage } from "./store.js";
 import { getVoiceCallProfile, setVoiceCallProfile } from "./store.js";
 import { applyVoicePersonaToProfile, listVoicePersonas } from "./calls/personas.js";
 import { getSessionProfile, getSessionWebhooks } from "./store.js";
+import { unlinkWebTelegramLink } from "./store.js";
 import { listOpenTaskSummaries } from "./store.js";
 import { listMissionsPage } from "./store.js";
 import { listReminderSummaries, listJobSummaries } from "./store.js";
@@ -583,12 +584,16 @@ async function resolveSdkUser(c: any): Promise<SdkOwner | undefined> {
   const webAuthUserId = c.get("webAuthUserId") as string | undefined;
   const telegramUserId = webAuthUserId ? await getTelegramUserIdForWebAuth(webAuthUserId) : undefined;
   if (owner.projectId === "web") {
-    // This is deliberately fire-and-forget. The durable import marker and the
-    // canonical Telegram owner keep reads correct while reconciliation catches
-    // up, and no dashboard route should wait on a cross-session lease.
-    void scheduleWebSessionReconciliation(owner.userId, telegramUserId);
+    // The web owner is canonical. Telegram is only an optional channel alias;
+    // it must never replace the authenticated dashboard subject. Reconciliation
+    // is deliberately fire-and-forget so a linked account cannot make every
+    // dashboard request contend on a cross-session lease.
+    // A web-only account is already canonical. Do not create a recurring
+    // "linked channel" repair task for it; reconciliation is only needed when
+    // a legacy Telegram alias actually exists.
+    if (telegramUserId !== undefined) void scheduleWebSessionReconciliation(owner.userId, telegramUserId);
   }
-  return telegramUserId ? { ...owner, userId: telegramUserId } : owner;
+  return owner;
 }
 
 function isAdminRequest(c: { req: { path: string; url: string } }): boolean {
@@ -755,18 +760,21 @@ async function accountCanAccessProject(c: any, project: SdkProjectRecord, manage
   return project.ownerWebAuthUserId === owner.id;
 }
 
+/** Resolve the owner for company autonomy projections without consulting a channel. */
 async function linkedWebCallOwner(c: any): Promise<{ userId: number } | undefined> {
   const web = webProjectOwner(c);
   if (!web?.verified) return undefined;
-  const userId = await getTelegramUserIdForWebAuth(web.id);
-  return userId ? { userId } : undefined;
+  const owner = sdkUser(c);
+  return owner ? { userId: owner.userId } : undefined;
 }
 
 async function callOwner(c: any): Promise<{ userId: number } | undefined> {
   const web = webProjectOwner(c);
   if (web) {
     if (!web.verified) return undefined;
-    return (await linkedWebCallOwner(c)) ?? sdkUser(c);
+    // Calls, transcripts, outcomes, follow-up tasks, and approvals all belong
+    // to the canonical web account even when Telegram is linked or absent.
+    return sdkUser(c);
   }
   return sdkUser(c);
 }
@@ -2712,6 +2720,18 @@ export function registerSdkApi(app: Hono): void {
     return c.json({ code: link.code, expiresAt: new Date(link.expiresAt).toISOString() }, 201);
   });
 
+  app.delete("/v1/account/telegram-link", async (c) => {
+    const webAuthUserId = (c as any).get("webAuthUserId") as string | undefined;
+    if (!webAuthUserId) return apiError(c, 403, "web_session_required", "Sign in to the Chusky dashboard before changing channel links.");
+    const telegramUserId = await getTelegramUserIdForWebAuth(webAuthUserId);
+    if (!telegramUserId) return apiError(c, 404, "channel_not_linked", "Telegram is not connected to this workspace.");
+    const owner = sdkUser(c)!.userId;
+    const identity = (await listChannelIdentities(owner)).find((item) => item.provider === "telegram" && item.externalUserId === String(telegramUserId));
+    if (identity) await unlinkChannelIdentity(owner, identityFingerprint(identity));
+    if (!(await unlinkWebTelegramLink(webAuthUserId, telegramUserId))) return apiError(c, 409, "channel_link_changed", "The Telegram link changed while it was being removed. Refresh and try again.");
+    return c.body(null, 204);
+  });
+
   app.get("/v1/account/calls", async (c) => {
     const owner = await callOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before using calls.");
@@ -2971,8 +2991,8 @@ export function registerSdkApi(app: Hono): void {
   });
 
   app.post("/v1/account/calls", async (c) => {
-    // Dashboard users resolve to their linked Telegram owner; SDK callers use
-    // the project/end-user session established by the v1 middleware.
+    // Dashboard users and SDK callers both use the owner established by the
+    // authenticated request. A linked Telegram address is never substituted.
     const owner = await callOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before using calls.");
     if (!phoneCallingProvider()) return apiError(c, 503, "phone_calling_unavailable", "The selected phone provider is not configured on this Chusky deployment.");
@@ -3103,11 +3123,8 @@ export function registerSdkApi(app: Hono): void {
   // and lets an API consumer resume the exact next action from durable state.
   app.get("/v1/account/autonomy/queue", async (c) => {
     // Autonomy belongs to the authenticated Chusky account, not to a
-    // particular transport. sdkUser already resolves a linked dashboard
-    // session to its Telegram owner when one exists, and otherwise keeps the
-    // verified web-account identity. Do not reuse callOwner here: phone calls
-    // intentionally require a linked Telegram workspace, but read-only
-    // autonomy must work before or after that optional link.
+    // particular transport. Telegram linking never changes this owner, and
+    // read-only autonomy works before or after that optional channel link.
     const owner = sdkUser(c);
     if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before reading autonomy state.");
     if (!config.elenaEnabled) return apiError(c, 404, "elena_disabled", elenaDisabledMessage());
@@ -4078,7 +4095,7 @@ export function registerSdkApi(app: Hono): void {
   });
   app.delete("/v1/channels/:provider/:identityId", async (c) => {
     const provider = c.req.param("provider") as ChannelProvider;
-    if (provider === "telegram") return apiError(c, 409, "primary_channel_link", "The primary Telegram workspace link is managed from account settings.");
+    if (provider === "telegram") return apiError(c, 409, "channel_link_managed", "Telegram is an optional channel. Manage its link from account settings so its alias can be detached safely from the workspace.");
     const identity = (await listChannelIdentities(sdkUser(c)!.userId)).find((item) => item.provider === provider && identityFingerprint(item) === c.req.param("identityId"));
     if (!identity) return apiError(c, 404, "channel_not_found", "Linked channel not found for this Chusky account.");
     return await unlinkChannelIdentity(sdkUser(c)!.userId, c.req.param("identityId")) ? c.body(null, 204) : apiError(c, 404, "channel_not_found", "Linked channel not found for this Chusky account.");

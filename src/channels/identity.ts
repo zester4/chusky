@@ -8,9 +8,11 @@ import {
   getSendblueGroupAuthorization,
   saveSendblueGroupAuthorization,
   consumeSendblueGroupLinkCode,
+  getWebAuthUserIdForTelegram,
   type SendblueGroupAuthorizationRecord,
   type ChannelIdentityRecord,
 } from "../store.js";
+import { stableSdkUserId } from "../sdkIdentity.js";
 import type { ChannelProvider, InboundMessage } from "./contracts.js";
 import { accountIdForUser } from "./contracts.js";
 
@@ -22,7 +24,23 @@ export async function resolveIdentity(message: Pick<InboundMessage, "provider" |
   // Group identity is intentionally strict. A private Sendblue link proves
   // ownership of the sender, not authorization to inject that account into a
   // shared conversation. Groups must have their own explicit authorization.
-  return getChannelIdentity(message.provider, message.providerUserId, message.providerWorkspaceId);
+  const identity = await getChannelIdentity(message.provider, message.providerUserId, message.providerWorkspaceId);
+  if (!identity) return undefined;
+
+  // Telegram remains a transport address. Older records may still point at
+  // the numeric Telegram session, so resolve the linked web subject at the
+  // channel boundary until the durable identity-transfer repair has completed.
+  if (message.provider === "telegram" || message.provider === "photon_telegram") {
+    const telegramUserId = Number(message.providerUserId);
+    if (Number.isSafeInteger(telegramUserId) && telegramUserId > 0) {
+      const webAuthUserId = await getWebAuthUserIdForTelegram(telegramUserId);
+      if (webAuthUserId) {
+        const userId = stableSdkUserId(webAuthUserId, "web");
+        return { ...identity, userId, accountId: accountIdForUser(userId) };
+      }
+    }
+  }
+  return identity;
 }
 
 export async function linkChannelIdentity(userId: number, input: { provider: ChannelProvider; externalUserId: string; workspaceId?: string; displayName?: string }): Promise<ChannelIdentityRecord> {

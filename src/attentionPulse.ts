@@ -316,7 +316,7 @@ export function selectAttentionPulseDeliveryTarget(
   // Preferences are ordered by the dashboard selection order. Honor the first
   // selected connected channel, and never silently switch away from an
   // explicitly selected Telegram target.
-  const explicitTelegram = preferences.find((item) => item.provider === "telegram");
+  const explicitTelegram = preferences.find((item) => item.provider === "telegram" && item.enabled && item.mode !== "silent");
   if (explicitTelegram) return telegramTarget;
   for (const preference of preferences) {
     if (!preference.enabled || preference.mode === "silent" || (preference.provider !== "slack" && preference.provider !== "sendblue")) continue;
@@ -325,9 +325,8 @@ export function selectAttentionPulseDeliveryTarget(
   }
 
   // Older records may have no delivery preference at all. Preserve their
-  // existing iMessage fallback, then try Slack before Telegram. Once an
-  // external provider has an explicit preference, a disabled/silent record is
-  // intentional and must not be overridden by the legacy fallback.
+  // existing linked-channel fallback for compatibility; the returned target
+  // is still only a channel route and never an owner identity.
   if (!preferences.some((item) => item.provider === "slack" || item.provider === "sendblue")) {
     for (const provider of ["sendblue", "slack"] as const) {
       const target = eligible(provider);

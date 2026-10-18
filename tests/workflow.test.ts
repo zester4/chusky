@@ -100,11 +100,11 @@ test("channel-targeted reminders deliver to the originating iMessage conversatio
   assert.deepEqual(state.updates, [{ status: "sent" }]);
 });
 
-test("reminders without a Telegram mapping fail without attempting delivery", async () => {
+test("reminders without an external channel complete as dashboard-only delivery", async () => {
   const state = deps({ getTelegramChatId: async () => undefined });
   const result = await deliverReminder({ reminderId: "rem-1", userId: 1 }, state);
-  assert.deepEqual(result, { delivered: false });
-  assert.deepEqual(state.updates, [{ status: "failed", deliveryError: "No Telegram mapping" }]);
+  assert.deepEqual(result, { delivered: true });
+  assert.deepEqual(state.updates, [{ status: "sent", deliveryError: undefined }, { status: "sent" }]);
   assert.equal(state.sent.length, 0);
 });
 
@@ -121,6 +121,14 @@ test("recurring job delivery escapes content and sends only to the mapped owner"
   assert.deepEqual(result, { delivered: true });
   assert.equal(state.sent[0].chatId, 99);
   assert.match(state.sent[0].text, /Run &lt;task&gt;/);
+});
+
+test("recurring jobs without an external channel complete against the dashboard", async () => {
+  const state = deps({ getTelegramChatId: async () => undefined });
+  const result = await deliverJob({ jobId: "job-1", userId: 1 }, state);
+  assert.deepEqual(result, { delivered: true });
+  assert.equal(state.sent.length, 0);
+  assert.deepEqual(state.jobUpdates, [{ deliveryError: undefined }]);
 });
 
 test("successful recurring delivery clears a previous delivery error", async () => {
@@ -174,7 +182,7 @@ test("web-only attention pulse runs without an external channel and keeps the ca
   assert.equal(state.sent.length, 0);
   assert.equal(state.sentChannels.length, 0);
   assert.equal(confirmations, 0);
-  assert.deepEqual(state.jobUpdates, [{ attentionPulse: { lastDigestKey: "digest-web" }, deliveryError: undefined }]);
+  assert.deepEqual(state.jobUpdates, [{ attentionPulse: { lastDigestKey: "digest-web" }, deliveryError: undefined }, { deliveryError: undefined }]);
 });
 
 test("web-only attention pulse records a dashboard run receipt", async () => {
@@ -335,10 +343,10 @@ test("recurring job delivery splits long agent responses for Telegram", async ()
   assert.ok(state.sent.every((message) => message.text.startsWith("🔁 <b>Chusky scheduled job</b>")));
 });
 
-test("recurring jobs do not deliver without a Telegram mapping", async () => {
+test("recurring jobs complete without an external channel", async () => {
   const state = deps({ getTelegramChatId: async () => undefined });
   const result = await deliverJob({ jobId: "job-1", userId: 1 }, state);
-  assert.deepEqual(result, { delivered: false });
+  assert.deepEqual(result, { delivered: true });
   assert.equal(state.sent.length, 0);
 });
 

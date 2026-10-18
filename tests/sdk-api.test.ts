@@ -38,6 +38,9 @@ afterEach(() => {
 
 function app(): Hono { const value = new Hono(); registerSdkApi(value); return value; }
 function request(body: unknown, key = "idem_1") { return new Request("http://local/v1/threads", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(body) }); }
+function webOwnerId(webUserId: string): number {
+  return Number.parseInt(createHash("sha256").update(`sdk:web:${webUserId}`).digest("hex").slice(0, 12), 16);
+}
 
 test("dashboard model history is reconstructed from the active thread's settled runs", () => {
   const history = dashboardThreadHistoryFromRuns([
@@ -1730,7 +1733,7 @@ test("dashboard autonomy works before and after optional Telegram linking", asyn
   assert.equal(linkedQueue.status, 200);
   const linkedSnapshot = await linkedQueue.json() as { userId: number; mode: string };
   assert.equal(linkedSnapshot.mode, "personal");
-  assert.equal(linkedSnapshot.userId, 820010);
+  assert.equal(linkedSnapshot.userId, webOwnerId("autonomy-web-owner"));
 
   const linkedReconcile = await api.fetch(new Request("http://local/v1/account/autonomy/reconcile", { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ mode: "personal", maxWatches: 8 }) }));
   assert.equal(linkedReconcile.status, 200);
@@ -2195,11 +2198,12 @@ test("linked dashboard can read owner-scoped meeting preparation, outcomes, rost
   setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
   const link = await createWebTelegramLinkCode("meeting-owner");
   assert.equal(await redeemWebTelegramLinkCode(link.code, 820001), "linked");
+  const ownerId = webOwnerId("meeting-owner");
   const now = Date.now();
-  await createTriggerEvent({ eventId: "cal-trigger-820001", userId: 820001, triggerSlug: "GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CREATED_TRIGGER", summary: "Calendar meeting created", status: "completed", result: "Recommendation: review the last pricing discussion and ask about their launch date.", createdAt: now, updatedAt: now });
-  await saveCalendarMeetingPreparation(820001, { id: "cmp_owner_meeting_1", userId: 820001, sourceTriggerEventId: "cal-trigger-820001", calendarEventId: "event-820001", lifecycle: "created", status: "prepared", title: "Acme discovery", startAt: new Date(now + 60_000).toISOString(), participants: ["Avery", "client@example.com"], attendees: [{ name: "Avery", email: "avery@example.com", responseStatus: "accepted" }], createdAt: now, updatedAt: now });
-  await addRecallMeeting(820001, { id: "mtg_owner_meeting_1", userId: 820001, platform: "google_meet", status: "in_call", interactionMode: "representative", meetingUrlHash: "a".repeat(64), title: "Acme discovery", missionState: { summary: "The client wants to agree on a test-drive time.", decisions: [], openQuestions: ["Which day works?"], commitments: [], nextMove: "Check calendar availability.", checkpointAt: now }, participantRoster: [{ id: "p1", name: "Avery", isHost: true, email: "avery@example.com", emailSource: "recall_match", assurance: "calendar_matched", status: "present", updatedAt: now }], history: [{ role: "user", content: "Can we schedule a test drive?", createdAt: now }, { role: "assistant", content: "I can check a time that works.", createdAt: now }], createdAt: now, updatedAt: now });
-  await upsertMeetingContact(820001, "mtg_owner_meeting_1", { participantName: "Avery", email: "avery@example.com", contactPreference: "email", interest: "Test drive", nextStep: "Confirm a time" });
+  await createTriggerEvent({ eventId: "cal-trigger-820001", userId: ownerId, triggerSlug: "GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CREATED_TRIGGER", summary: "Calendar meeting created", status: "completed", result: "Recommendation: review the last pricing discussion and ask about their launch date.", createdAt: now, updatedAt: now });
+  await saveCalendarMeetingPreparation(ownerId, { id: "cmp_owner_meeting_1", userId: ownerId, sourceTriggerEventId: "cal-trigger-820001", calendarEventId: "event-820001", lifecycle: "created", status: "prepared", title: "Acme discovery", startAt: new Date(now + 60_000).toISOString(), participants: ["Avery", "client@example.com"], attendees: [{ name: "Avery", email: "avery@example.com", responseStatus: "accepted" }], createdAt: now, updatedAt: now });
+  await addRecallMeeting(ownerId, { id: "mtg_owner_meeting_1", userId: ownerId, platform: "google_meet", status: "in_call", interactionMode: "representative", meetingUrlHash: "a".repeat(64), title: "Acme discovery", missionState: { summary: "The client wants to agree on a test-drive time.", decisions: [], openQuestions: ["Which day works?"], commitments: [], nextMove: "Check calendar availability.", checkpointAt: now }, participantRoster: [{ id: "p1", name: "Avery", isHost: true, email: "avery@example.com", emailSource: "recall_match", assurance: "calendar_matched", status: "present", updatedAt: now }], history: [{ role: "user", content: "Can we schedule a test drive?", createdAt: now }, { role: "assistant", content: "I can check a time that works.", createdAt: now }], createdAt: now, updatedAt: now });
+  await upsertMeetingContact(ownerId, "mtg_owner_meeting_1", { participantName: "Avery", email: "avery@example.com", contactPreference: "email", interest: "Test drive", nextStep: "Confirm a time" });
 
   const api = app();
   const headers = { "X-Test-Web-User": "meeting-owner", "Content-Type": "application/json" };
@@ -2233,7 +2237,8 @@ test("linked dashboard receives an owner-scoped meeting workspace snapshot over 
   setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
   const link = await createWebTelegramLinkCode("meeting-stream-owner");
   assert.equal(await redeemWebTelegramLinkCode(link.code, 820004), "linked");
-  await addRecallMeeting(820004, { id: "mtg_stream_owner_1", userId: 820004, platform: "google_meet", status: "in_call", interactionMode: "representative", meetingUrlHash: "b".repeat(64), history: [], createdAt: Date.now(), updatedAt: Date.now() });
+  const ownerId = webOwnerId("meeting-stream-owner");
+  await addRecallMeeting(ownerId, { id: "mtg_stream_owner_1", userId: ownerId, platform: "google_meet", status: "in_call", interactionMode: "representative", meetingUrlHash: "b".repeat(64), history: [], createdAt: Date.now(), updatedAt: Date.now() });
   const controller = new AbortController();
   const response = await app().fetch(new Request("http://local/v1/meetings/stream", { headers: { "X-Test-Web-User": "meeting-stream-owner" }, signal: controller.signal }));
   assert.equal(response.status, 200);
@@ -2253,6 +2258,7 @@ test("linked dashboard can manage the meeting representative profile and per-pro
   setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
   const link = await createWebTelegramLinkCode("meeting-settings-owner");
   assert.equal(await redeemWebTelegramLinkCode(link.code, 820003), "linked");
+  const ownerId = webOwnerId("meeting-settings-owner");
   const api = app();
   const headers = { "X-Test-Web-User": "meeting-settings-owner", "Content-Type": "application/json" };
   const profile = await api.fetch(new Request("http://local/v1/meetings/profile", { headers }));
@@ -2263,7 +2269,7 @@ test("linked dashboard can manage the meeting representative profile and per-pro
   assert.equal((await update.json() as { allowedComposioTools: string[] }).allowedComposioTools[0], "GOOGLECALENDAR_FIND_EVENT");
   const autoJoinEnabled = await api.fetch(new Request("http://local/v1/meetings/profile", { method: "PATCH", headers, body: JSON.stringify({ autoJoinCalendar: true }) }));
   assert.equal(autoJoinEnabled.status, 200);
-  await addRecallMeeting(820003, { id: "mtg_auto_join_disable", userId: 820003, platform: "google_meet", interactionMode: "representative", status: "scheduled", providerBotId: "recall-auto-join-test", meetingUrlHash: "a".repeat(64), calendarPreparationId: "cmp_auto_join_disable", history: [], createdAt: Date.now(), updatedAt: Date.now() });
+  await addRecallMeeting(ownerId, { id: "mtg_auto_join_disable", userId: ownerId, platform: "google_meet", interactionMode: "representative", status: "scheduled", providerBotId: "recall-auto-join-test", meetingUrlHash: "a".repeat(64), calendarPreparationId: "cmp_auto_join_disable", history: [], createdAt: Date.now(), updatedAt: Date.now() });
   const autoJoinDisabled = await api.fetch(new Request("http://local/v1/meetings/profile", { method: "PATCH", headers, body: JSON.stringify({ autoJoinCalendar: false }) }));
   assert.equal(autoJoinDisabled.status, 200);
   const autoJoinResult = await autoJoinDisabled.json() as { autoJoinCalendar: boolean; autoJoinReconciliation: { failures: number } };
@@ -2319,7 +2325,7 @@ test("dashboard Telegram linking binds and imports its authenticated private web
   const code = (await response.json() as { code: string }).code;
   const telegramUserId = 820021;
   assert.equal(await redeemWebTelegramLinkCode(code, telegramUserId), "linked");
-  assert.equal((await getSession(telegramUserId)).history[0]?.content, "Remember this from web");
+  assert.equal((await getSession(sourceUserId)).history[0]?.content, "Remember this from web");
   const accountHistory = await api.fetch(new Request("http://local/v1/account/history", { headers: { "X-Test-Web-User": webUser } }));
   assert.deepEqual((await accountHistory.json() as { data: Array<{ content: string }> }).data.map((item) => item.content), ["Remember this from web"]);
 });
@@ -2329,9 +2335,10 @@ test("linked dashboard memory and account overview share one active, owner-scope
   setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
   const link = await createWebTelegramLinkCode("memory-owner");
   assert.equal(await redeemWebTelegramLinkCode(link.code, 820006), "linked");
-  await upsertMemory(820006, { category: "fact", key: "preferred_crm", value: "HubSpot", confidence: 1, sensitivity: "normal", source: "telegram" });
-  await upsertMemory(820006, { category: "fact", key: "expired_fact", value: "must not be shown", confidence: 1, sensitivity: "normal", source: "telegram", expiresAt: Date.now() - 1 });
-  await createTriggerEvent({ eventId: "web-trigger-event-owned", userId: 820006, triggerSlug: "GMAIL_NEW_GMAIL_MESSAGE", summary: "subject: Project question", status: "completed", notificationStatus: "unavailable", result: "I replied in the original thread.", createdAt: Date.now(), updatedAt: Date.now() });
+  const ownerId = webOwnerId("memory-owner");
+  await upsertMemory(ownerId, { category: "fact", key: "preferred_crm", value: "HubSpot", confidence: 1, sensitivity: "normal", source: "telegram" });
+  await upsertMemory(ownerId, { category: "fact", key: "expired_fact", value: "must not be shown", confidence: 1, sensitivity: "normal", source: "telegram", expiresAt: Date.now() - 1 });
+  await createTriggerEvent({ eventId: "web-trigger-event-owned", userId: ownerId, triggerSlug: "GMAIL_NEW_GMAIL_MESSAGE", summary: "subject: Project question", status: "completed", notificationStatus: "unavailable", result: "I replied in the original thread.", createdAt: Date.now(), updatedAt: Date.now() });
   await createTriggerEvent({ eventId: "web-trigger-event-foreign", userId: 820007, triggerSlug: "SLACK_MESSAGE", summary: "private other account", status: "completed", createdAt: Date.now(), updatedAt: Date.now() });
 
   const api = app();
@@ -2432,7 +2439,7 @@ test("dashboard devices are revocable by opaque owner-scoped IDs, without exposi
   setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
   const link = await createWebTelegramLinkCode("device-owner");
   assert.equal(await redeemWebTelegramLinkCode(link.code, 820005), "linked");
-  const paired = await createCliDevice(820005, "Harvey's laptop");
+  const paired = await createCliDevice(webOwnerId("device-owner"), "Harvey's laptop");
   const api = app();
   const headers = { "X-Test-Web-User": "device-owner", "Content-Type": "application/json" };
   const response = await api.fetch(new Request("http://local/v1/devices", { headers }));

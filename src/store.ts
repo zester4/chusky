@@ -307,7 +307,7 @@ export interface UserSession {
   handoffRecords?: HandoffRecord[];
   /** Owner-scoped context graph nodes. Sensitive values are never returned to models unless selected by purpose. */
   contextNodes?: ContextNodeRecord[];
-  /** Web sessions already merged into this canonical owner session, keyed by source snapshot time. */
+  /** Linked channel/session imports already merged into this owner, keyed by source snapshot time. */
   linkedWebSessionImports?: Array<{
     sourceUserId: number;
     sourceUpdatedAt: number;
@@ -877,7 +877,7 @@ export interface SdkProjectRecord {
   companyAgents?: CompanyAgentProfile[];
   /** Project-scoped replay protection for agent-profile creation. */
   agentIdempotency?: Record<string, { fingerprint: string; response: unknown; createdAt: number }>;
-  /** Telegram owner for keys generated through Chusky's private Telegram UI. */
+  /** Optional channel owner for keys generated through a private channel UI. */
   ownerTelegramUserId?: number;
   rotatedAt?: number;
   revokedAt?: number;
@@ -1112,7 +1112,7 @@ export interface DaytonaAppRecord {
 
 export type TaskStatus = "queued" | "running" | "blocked" | "completed" | "failed" | "cancel_requested" | "cancelled";
 
-/** Narrow durable payload for the one-time web-to-Telegram history repair. */
+/** Narrow durable payload for the one-time linked-channel history repair. */
 export interface WebSessionReconciliationTask {
   sourceUserId: number;
   telegramUserId?: number;
@@ -1986,7 +1986,7 @@ export interface WebTelegramLinkCodeRecord {
 }
 
 export type WebTelegramLinkResult = "linked" | "already_linked" | "conflict" | "invalid";
-interface WebTelegramLinkRedemption { status: WebTelegramLinkResult; sourceUserId?: number }
+interface WebTelegramLinkRedemption { status: WebTelegramLinkResult; sourceUserId?: number; webAuthUserId?: string }
 
 export interface OutboxRecord {
   id: string;
@@ -2138,6 +2138,7 @@ interface Backend {
   findCompanyBrandingByDomain(hostname: string): Promise<CompanyBranding | undefined>;
   getAgentRun(userId: number, id: string): Promise<AgentRunRecord | undefined>;
   saveAgentRun(record: AgentRunRecord, expectedVersion?: number): Promise<AgentRunRecord>;
+  reassignAgentRunOwner(id: string, fromUserId: number, toUserId: number): Promise<boolean>;
   listAgentRuns(userId: number, limit?: number): Promise<AgentRunRecord[]>;
   requestAgentRunCancellation(userId: number, id: string): Promise<boolean>;
   isAgentRunCancellationRequested(userId: number, id: string): Promise<boolean>;
@@ -2197,6 +2198,7 @@ interface Backend {
   deleteMeetingContact(userId: number, id: string): Promise<boolean>;
   createTriggerEvent(record: TriggerEventRecord): Promise<TriggerEventRecord>;
   createTriggerEventIfAbsent(record: TriggerEventRecord): Promise<{ record: TriggerEventRecord; created: boolean }>;
+  reassignTriggerEventOwner(eventId: string, fromUserId: number, toUserId: number): Promise<boolean>;
   getTriggerEvent(eventId: string): Promise<TriggerEventRecord | undefined>;
   updateTriggerEvent(eventId: string, patch: Partial<TriggerEventRecord>): Promise<TriggerEventRecord | undefined>;
   listTriggerEvents(userId: number, limit?: number): Promise<TriggerEventRecord[]>;
@@ -2258,6 +2260,8 @@ interface Backend {
   getChannelIdentity(provider: ChannelProvider, externalUserId: string, workspaceId?: string): Promise<ChannelIdentityRecord | undefined>;
   listChannelIdentities(userId: number): Promise<ChannelIdentityRecord[]>;
   saveChannelIdentity(record: ChannelIdentityRecord): Promise<boolean>;
+  /** Move an existing provider identity to the canonical owner without changing its external address. */
+  reassignChannelIdentity(provider: ChannelProvider, externalUserId: string, workspaceId: string | undefined, fromUserId: number, toUserId: number): Promise<boolean>;
   getChannelInstallation(provider: ChannelInstallationRecord["provider"], workspaceId: string): Promise<ChannelInstallationRecord | undefined>;
   saveChannelInstallation(record: ChannelInstallationRecord): Promise<void>;
   createChannelOAuthState(record: ChannelOAuthStateRecord): Promise<void>;
@@ -2271,6 +2275,7 @@ interface Backend {
   revokeSendblueGroupAuthorization(groupId: string, workspaceId: string, userId: number): Promise<boolean>;
   createWebTelegramLinkCode(record: WebTelegramLinkCodeRecord): Promise<void>;
   redeemWebTelegramLinkCode(codeHash: string, telegramUserId: number): Promise<WebTelegramLinkRedemption>;
+  unlinkWebTelegramLink(webAuthUserId: string, telegramUserId: number): Promise<boolean>;
   getTelegramUserIdForWebAuth(webAuthUserId: string): Promise<number | undefined>;
   getWebAuthUserIdForTelegram(telegramUserId: number): Promise<string | undefined>;
   claimChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number): Promise<boolean>;
@@ -3820,6 +3825,28 @@ class RedisBackend implements Backend {
     }
     throw new Error("Could not persist agent run checkpoint after concurrent updates.");
   }
+  async reassignAgentRunOwner(id: string, fromUserId: number, toUserId: number): Promise<boolean> {
+    const key = this.runKey(id);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.r.watch(key);
+      const raw = await this.r.get(key);
+      if (!raw) { await this.r.unwatch(); return false; }
+      let current: AgentRunRecord;
+      try { current = JSON.parse(raw) as AgentRunRecord; }
+      catch { await this.r.unwatch(); return false; }
+      if (current.userId === toUserId) { await this.r.unwatch(); return true; }
+      if (current.userId !== fromUserId) { await this.r.unwatch(); return false; }
+      const next = boundedAgentRun({ ...current, userId: toUserId });
+      const result = await this.r.multi()
+        .set(key, JSON.stringify(next), "EX", agentRunTtlSeconds(next))
+        .zadd(this.runIndexKey(toUserId), next.updatedAt, next.id)
+        .expire(this.runIndexKey(toUserId), agentRunTtlSeconds(next))
+        .zrem(this.runIndexKey(fromUserId), next.id)
+        .exec();
+      if (result) return true;
+    }
+    return false;
+  }
   async listAgentRuns(userId: number, limit = 50): Promise<AgentRunRecord[]> {
     const ids = await this.r.zrevrange(this.runIndexKey(userId), 0, Math.max(0, limit - 1));
     const records = await Promise.all(ids.map((id) => this.getAgentRun(userId, id)));
@@ -3919,6 +3946,28 @@ class RedisBackend implements Backend {
     const stored = await this.getTriggerEvent(record.eventId);
     if (!stored) throw new Error("Trigger event persistence did not return the saved record");
     return { record: stored, created };
+  }
+  async reassignTriggerEventOwner(eventId: string, fromUserId: number, toUserId: number): Promise<boolean> {
+    const key = this.triggerEventKey(eventId);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.r.watch(key);
+      const raw = await this.r.get(key);
+      if (!raw) { await this.r.unwatch(); return false; }
+      let current: TriggerEventRecord;
+      try { current = JSON.parse(raw) as TriggerEventRecord; }
+      catch { await this.r.unwatch(); return false; }
+      if (current.userId === toUserId) { await this.r.unwatch(); return true; }
+      if (current.userId !== fromUserId) { await this.r.unwatch(); return false; }
+      const next = { ...current, userId: toUserId, updatedAt: Date.now() };
+      const transaction = this.r.multi()
+        .set(key, JSON.stringify(next), "EX", 30 * 24 * 60 * 60)
+        .zadd(this.triggerEventsIndexKey(toUserId), next.updatedAt, eventId)
+        .expire(this.triggerEventsIndexKey(toUserId), 30 * 24 * 60 * 60)
+        .zrem(this.triggerEventsIndexKey(fromUserId), eventId);
+      const result = await transaction.exec();
+      if (result) return true;
+    }
+    return false;
   }
   async getTriggerEvent(eventId: string): Promise<TriggerEventRecord | undefined> {
     const raw = await this.r.get(this.triggerEventKey(eventId));
@@ -4832,6 +4881,26 @@ class RedisBackend implements Backend {
     }
     return false;
   }
+  async reassignChannelIdentity(provider: ChannelProvider, externalUserId: string, workspaceId: string | undefined, fromUserId: number, toUserId: number): Promise<boolean> {
+    if (!Number.isSafeInteger(fromUserId) || fromUserId <= 0 || !Number.isSafeInteger(toUserId) || toUserId <= 0 || fromUserId === toUserId) return false;
+    const key = this.channelIdentityKey(provider, externalUserId, workspaceId);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.r.watch(key);
+      const raw = await this.r.get(key);
+      if (!raw) { await this.r.unwatch(); return false; }
+      let existing: ChannelIdentityRecord;
+      try { existing = JSON.parse(raw) as ChannelIdentityRecord; } catch { await this.r.unwatch(); return false; }
+      if (existing.userId !== fromUserId || existing.disabledAt) { await this.r.unwatch(); return false; }
+      const next: ChannelIdentityRecord = { ...existing, userId: toUserId, accountId: `account_${toUserId}`, updatedAt: Date.now() };
+      const result = await this.r.multi()
+        .set(key, JSON.stringify(next))
+        .srem(this.channelIdentityUserKey(fromUserId), key)
+        .sadd(this.channelIdentityUserKey(toUserId), key)
+        .exec();
+      if (result) return true;
+    }
+    return false;
+  }
   async getChannelInstallation(provider: ChannelInstallationRecord["provider"], workspaceId: string): Promise<ChannelInstallationRecord | undefined> {
     const raw = await this.r.get(this.channelInstallationKey(provider, workspaceId));
     if (!raw) return undefined;
@@ -4902,7 +4971,7 @@ class RedisBackend implements Backend {
   async redeemWebTelegramLinkCode(codeHash: string, telegramUserId: number): Promise<WebTelegramLinkRedemption> {
     const codeKey = this.webTelegramLinkKey(codeHash);
     const result = await this.r.eval(
-      "local raw=redis.call('get',KEYS[1]); if not raw then return cjson.encode({status='invalid'}) end; local record=cjson.decode(raw); local function done(status) local result={status=status}; if type(record.sourceUserId)=='number' then result.sourceUserId=record.sourceUserId end; return cjson.encode(result) end; if record.used or record.expiresAt <= tonumber(ARGV[1]) then redis.call('del',KEYS[1]); return done('invalid') end; redis.call('del',KEYS[1]); local webKey='chuck:web-telegram:web:' .. redis.sha1hex(record.webAuthUserId); local currentTelegram=redis.call('get',webKey); local currentWeb=redis.call('get',KEYS[2]); if (currentTelegram and currentTelegram ~= ARGV[2]) or (currentWeb and currentWeb ~= record.webAuthUserId) then return done('conflict') end; if currentTelegram and currentWeb then return done('already_linked') end; redis.call('set',webKey,ARGV[2]); redis.call('set',KEYS[2],record.webAuthUserId); return done('linked')",
+      "local raw=redis.call('get',KEYS[1]); if not raw then return cjson.encode({status='invalid'}) end; local record=cjson.decode(raw); local function done(status) local result={status=status,webAuthUserId=record.webAuthUserId}; if type(record.sourceUserId)=='number' then result.sourceUserId=record.sourceUserId end; return cjson.encode(result) end; if record.used or record.expiresAt <= tonumber(ARGV[1]) then redis.call('del',KEYS[1]); return done('invalid') end; redis.call('del',KEYS[1]); local webKey='chuck:web-telegram:web:' .. redis.sha1hex(record.webAuthUserId); local currentTelegram=redis.call('get',webKey); local currentWeb=redis.call('get',KEYS[2]); if (currentTelegram and currentTelegram ~= ARGV[2]) or (currentWeb and currentWeb ~= record.webAuthUserId) then return done('conflict') end; if currentTelegram and currentWeb then return done('already_linked') end; redis.call('set',webKey,ARGV[2]); redis.call('set',KEYS[2],record.webAuthUserId); return done('linked')",
       2,
       codeKey,
       this.telegramWebUserKey(telegramUserId),
@@ -4914,10 +4983,23 @@ class RedisBackend implements Backend {
       return {
         status: ["linked", "already_linked", "conflict", "invalid"].includes(redemption.status) ? redemption.status : "invalid",
         ...(Number.isSafeInteger(redemption.sourceUserId) && Number(redemption.sourceUserId) > 0 ? { sourceUserId: Number(redemption.sourceUserId) } : {}),
+        ...(typeof redemption.webAuthUserId === "string" && redemption.webAuthUserId.length <= 200 ? { webAuthUserId: redemption.webAuthUserId } : {}),
       };
     } catch {
-      return { status: "invalid" };
+    return { status: "invalid" };
     }
+  }
+  async unlinkWebTelegramLink(webAuthUserId: string, telegramUserId: number): Promise<boolean> {
+    const webKey = this.webTelegramUserKey(webAuthUserId);
+    const telegramKey = this.telegramWebUserKey(telegramUserId);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.r.watch(webKey, telegramKey);
+      const [webValue, telegramValue] = await Promise.all([this.r.get(webKey), this.r.get(telegramKey)]);
+      if (webValue !== String(telegramUserId) || telegramValue !== webAuthUserId) { await this.r.unwatch(); return false; }
+      const result = await this.r.multi().del(webKey).del(telegramKey).exec();
+      if (result) return true;
+    }
+    return false;
   }
   async getTelegramUserIdForWebAuth(webAuthUserId: string): Promise<number | undefined> {
     const raw = await this.r.get(this.webTelegramUserKey(webAuthUserId));
@@ -5571,6 +5653,14 @@ class MemoryBackend implements Backend {
     this.agentRuns.set(next.id, next);
     return next;
   }
+  async reassignAgentRunOwner(id: string, fromUserId: number, toUserId: number) {
+    const current = this.agentRuns.get(id);
+    if (!current) return false;
+    if (current.userId === toUserId) return true;
+    if (current.userId !== fromUserId) return false;
+    this.agentRuns.set(id, structuredClone({ ...current, userId: toUserId }));
+    return true;
+  }
   async listAgentRuns(userId: number, limit = 50) {
     return [...this.agentRuns.values()].filter((record) => record.userId === userId).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, limit);
   }
@@ -5662,6 +5752,14 @@ class MemoryBackend implements Backend {
     if (existing) return { record: existing, created: false };
     this.triggerEvents.set(record.eventId, record);
     return { record, created: true };
+  }
+  async reassignTriggerEventOwner(eventId: string, fromUserId: number, toUserId: number) {
+    const current = this.triggerEvents.get(eventId);
+    if (!current) return false;
+    if (current.userId === toUserId) return true;
+    if (current.userId !== fromUserId) return false;
+    this.triggerEvents.set(eventId, structuredClone({ ...current, userId: toUserId, updatedAt: Date.now() }));
+    return true;
   }
   async getTriggerEvent(eventId: string) { return this.triggerEvents.get(eventId); }
   async updateTriggerEvent(eventId: string, patch: Partial<TriggerEventRecord>) {
@@ -6114,6 +6212,19 @@ class MemoryBackend implements Backend {
     this.channelIdentityUsers.set(record.userId, userKeys);
     return true;
   }
+  async reassignChannelIdentity(provider: ChannelProvider, externalUserId: string, workspaceId: string | undefined, fromUserId: number, toUserId: number) {
+    if (!Number.isSafeInteger(fromUserId) || fromUserId <= 0 || !Number.isSafeInteger(toUserId) || toUserId <= 0 || fromUserId === toUserId) return false;
+    const key = this.identityKey(provider, externalUserId, workspaceId);
+    const existing = this.channelIdentities.get(key);
+    if (!existing || existing.disabledAt || existing.userId !== fromUserId) return false;
+    const next = { ...existing, userId: toUserId, accountId: `account_${toUserId}`, updatedAt: Date.now() };
+    this.channelIdentities.set(key, next);
+    this.channelIdentityUsers.get(fromUserId)?.delete(key);
+    const targetKeys = this.channelIdentityUsers.get(toUserId) ?? new Set<string>();
+    targetKeys.add(key);
+    this.channelIdentityUsers.set(toUserId, targetKeys);
+    return true;
+  }
   private installationKey(provider: ChannelInstallationRecord["provider"], workspaceId: string): string { return `${provider}:${workspaceId}`; }
   async getChannelInstallation(provider: ChannelInstallationRecord["provider"], workspaceId: string) { return this.channelInstallations.get(this.installationKey(provider, workspaceId)); }
   async saveChannelInstallation(record: ChannelInstallationRecord) { this.channelInstallations.set(this.installationKey(record.provider, record.workspaceId), record); }
@@ -6164,11 +6275,17 @@ class MemoryBackend implements Backend {
     const linkedTelegram = this.telegramUserByWebAuth.get(record.webAuthUserId);
     const linkedWeb = this.webAuthByTelegramUser.get(telegramUserId);
     const source = Number.isSafeInteger(record.sourceUserId) && Number(record.sourceUserId) > 0 ? { sourceUserId: Number(record.sourceUserId) } : {};
-    if ((linkedTelegram && linkedTelegram !== telegramUserId) || (linkedWeb && linkedWeb !== record.webAuthUserId)) return { status: "conflict", ...source };
-    if (linkedTelegram && linkedWeb) return { status: "already_linked", ...source };
+    if ((linkedTelegram && linkedTelegram !== telegramUserId) || (linkedWeb && linkedWeb !== record.webAuthUserId)) return { status: "conflict", ...source, webAuthUserId: record.webAuthUserId };
+    if (linkedTelegram && linkedWeb) return { status: "already_linked", ...source, webAuthUserId: record.webAuthUserId };
     this.telegramUserByWebAuth.set(record.webAuthUserId, telegramUserId);
     this.webAuthByTelegramUser.set(telegramUserId, record.webAuthUserId);
-    return { status: "linked", ...source };
+    return { status: "linked", ...source, webAuthUserId: record.webAuthUserId };
+  }
+  async unlinkWebTelegramLink(webAuthUserId: string, telegramUserId: number) {
+    if (this.telegramUserByWebAuth.get(webAuthUserId) !== telegramUserId || this.webAuthByTelegramUser.get(telegramUserId) !== webAuthUserId) return false;
+    this.telegramUserByWebAuth.delete(webAuthUserId);
+    this.webAuthByTelegramUser.delete(telegramUserId);
+    return true;
   }
   async getTelegramUserIdForWebAuth(webAuthUserId: string) { return this.telegramUserByWebAuth.get(webAuthUserId); }
   async getWebAuthUserIdForTelegram(telegramUserId: number) { return this.webAuthByTelegramUser.get(telegramUserId); }
@@ -8107,20 +8224,39 @@ function mergeImportedWebSdkThreads(target: UserSession, sourceThreads: SdkThrea
   target.sdkThreads = targetThreads.slice(-100);
 }
 
-function sdkThreadImportComplete(
-  priorImport: NonNullable<UserSession["linkedWebSessionImports"]>[number] | undefined,
-  sourceThreads: SdkThreadRecord[],
-  target: UserSession,
-): boolean {
-  if (!priorImport || !Array.isArray(priorImport.sourceSdkThreadIds) || !Number.isFinite(priorImport.sourceSdkThreadsUpdatedAt)) return false;
-  const sourceIds = sourceThreads.map((thread) => thread.id).slice(-100);
-  if (priorImport.sourceSdkThreadsUpdatedAt !== Math.max(0, ...sourceThreads.map((thread) => Number.isFinite(thread.updatedAt) ? thread.updatedAt : 0))) return false;
-  if (priorImport.sourceSdkThreadIds.length !== sourceIds.length || priorImport.sourceSdkThreadIds.some((id, index) => id !== sourceIds[index])) return false;
-  const targetIds = new Set((target.sdkThreads ?? []).map((thread) => thread.id));
-  return sourceIds.every((id) => targetIds.has(id));
+/** Re-home an owner-scoped record without changing its durable identity. */
+function rehomeOwnerRecord<T extends object>(record: T, ownerId: number): T {
+  const next = structuredClone(record) as T;
+  const fields = next as unknown as Record<string, unknown>;
+  if (typeof fields.userId === "number") fields.userId = ownerId;
+  if (typeof fields.ownerId === "number") fields.ownerId = ownerId;
+  return next;
 }
 
-/** Merge only private web conversation context into its explicitly linked Telegram owner. */
+/** Merge legacy owner records additively. The canonical web record wins when
+ * both sides contain the same ID; the Telegram source remains available for
+ * rollback and old channel callbacks, but recovery indexes only process the
+ * canonical owner after linking. */
+function mergeOwnedRecordLists<T extends object>(
+  target: T[],
+  source: T[],
+  ownerId: number,
+  key: (record: T) => string,
+): T[] {
+  const merged = new Map<string, T>();
+  for (const record of target) merged.set(key(record), rehomeOwnerRecord(record, ownerId));
+  for (const record of source) {
+    const recordKey = key(record);
+    if (!merged.has(recordKey)) merged.set(recordKey, rehomeOwnerRecord(record, ownerId));
+  }
+  return [...merged.values()];
+}
+
+/**
+ * Legacy-compatible session merge primitive. The caller chooses the source
+ * and target owner IDs; it does not grant the source any ownership authority.
+ * The old export remains available for replaying pre-channel-neutral data.
+ */
 export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId: number, options: { skipIfBusy?: boolean } = {}): Promise<boolean> {
   if (!Number.isSafeInteger(sourceUserId) || sourceUserId <= 0 || !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 || sourceUserId === telegramUserId) return true;
   const source = await getSessionWithSdkRuns(sourceUserId);
@@ -8130,16 +8266,12 @@ export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId
   const existingTarget = await getSession(telegramUserId);
   const priorImport = existingTarget.linkedWebSessionImports?.find((item) => item.sourceUserId === sourceUserId);
   const durableMemoryNeedsMerge = durableMemoryConfigured() && priorImport?.sourceDurableMemoryUpdatedAt !== source.updatedAt;
-  const linkedRecordsComplete = Boolean(priorImport && sourcePhoneCallIds.every((id) => priorImport.sourcePhoneCallIds?.includes(id)) && sourceApprovalIds.every((id) => priorImport.sourceApprovalIds?.includes(id)));
-  if (priorImport?.sourceUpdatedAt === source.updatedAt && !durableMemoryNeedsMerge && linkedRecordsComplete && sdkThreadImportComplete(priorImport, sourceSdkThreads, existingTarget)) return true;
   let importedMemories: MemoryFact[] = [];
 
   if (durableMemoryNeedsMerge) await mergeDurablePersonalMemories(sourceUserId, telegramUserId);
 
   const completed = await mutateSession(telegramUserId, async (target) => {
     const currentPriorImport = target.linkedWebSessionImports?.find((item) => item.sourceUserId === sourceUserId);
-    const currentRecordsComplete = Boolean(currentPriorImport && sourcePhoneCallIds.every((id) => currentPriorImport.sourcePhoneCallIds?.includes(id)) && sourceApprovalIds.every((id) => currentPriorImport.sourceApprovalIds?.includes(id)));
-    if (currentPriorImport?.sourceUpdatedAt === source.updatedAt && !durableMemoryNeedsMerge && currentRecordsComplete && sdkThreadImportComplete(currentPriorImport, sourceSdkThreads, target)) return true;
     const previouslyImportedSourceIds = new Set(currentPriorImport?.sourceMessageIds ?? []);
 
     const canonicalCounts = new Map<string, number>();
@@ -8210,6 +8342,53 @@ export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId
       .map((node) => ({ ...structuredClone(node), userId: telegramUserId }));
     if (importedContext.length) target.contextNodes = [...(target.contextNodes ?? []), ...importedContext].slice(-1000);
 
+    // Move the remainder of the owner-scoped session state in one idempotent
+    // pass. These fields used to be left under the Telegram numeric owner,
+    // which made the web dashboard appear empty even after chat history was
+    // imported.
+    target.composioSessionId ??= source.composioSessionId;
+    target.daytonaWorkspaceId ??= source.daytonaWorkspaceId;
+    target.e2bBrowser ??= structuredClone(source.e2bBrowser);
+    target.kernelBrowserProfileId ??= source.kernelBrowserProfileId;
+    target.kernelBrowserPending ??= structuredClone(source.kernelBrowserPending);
+    target.kernelAuthConnections ??= structuredClone(source.kernelAuthConnections);
+    target.voicePreferences ??= structuredClone(source.voicePreferences);
+    target.voiceCallProfile ??= structuredClone(source.voiceCallProfile);
+    target.telegramChatId ??= source.telegramChatId;
+    target.linkedWebSessionImports ??= [];
+    target.triggerIds = [...new Set([...(target.triggerIds ?? []), ...(source.triggerIds ?? [])])].slice(-200);
+    target.triggerInstructions = { ...(source.triggerInstructions ?? {}), ...(target.triggerInstructions ?? {}) };
+    target.reminders = mergeOwnedRecordLists(target.reminders ?? [], source.reminders ?? [], telegramUserId, (item) => String(item.id));
+    target.jobs = mergeOwnedRecordLists(target.jobs ?? [], source.jobs ?? [], telegramUserId, (item) => String(item.id));
+    target.autonomyRuns = mergeOwnedRecordLists(target.autonomyRuns ?? [], source.autonomyRuns ?? [], telegramUserId, (item) => String(item.id));
+    target.jobOccurrences = mergeOwnedRecordLists(target.jobOccurrences ?? [], source.jobOccurrences ?? [], telegramUserId, (item) => String(item.id));
+    target.externalActions = mergeOwnedRecordLists(target.externalActions ?? [], source.externalActions ?? [], telegramUserId, (item) => String(item.id));
+    target.reliabilitySamples = mergeOwnedRecordLists(target.reliabilitySamples ?? [], source.reliabilitySamples ?? [], telegramUserId, (item) => String(item.id));
+    target.outcomeVerifications = mergeOwnedRecordLists(target.outcomeVerifications ?? [], source.outcomeVerifications ?? [], telegramUserId, (item) => String(item.id));
+    target.compensations = mergeOwnedRecordLists(target.compensations ?? [], source.compensations ?? [], telegramUserId, (item) => String(item.id));
+    target.reliabilityTrace = mergeOwnedRecordLists(target.reliabilityTrace ?? [], source.reliabilityTrace ?? [], telegramUserId, (item) => String(item.id));
+    target.approvalEscalations = mergeOwnedRecordLists(target.approvalEscalations ?? [], source.approvalEscalations ?? [], telegramUserId, (item) => String(item.id));
+    target.sdkFiles = mergeOwnedRecordLists(target.sdkFiles ?? [], source.sdkFiles ?? [], telegramUserId, (item) => String(item.id));
+    target.artifacts = mergeOwnedRecordLists(target.artifacts ?? [], source.artifacts ?? [], telegramUserId, (item) => String(item.id));
+    target.artifactRegistrationIntents = mergeOwnedRecordLists(target.artifactRegistrationIntents ?? [], source.artifactRegistrationIntents ?? [], telegramUserId, (item) => String(item.id));
+    target.imageAssets = mergeOwnedRecordLists(target.imageAssets ?? [], source.imageAssets ?? [], telegramUserId, (item) => String(item.id));
+    target.videoJobs = mergeOwnedRecordLists(target.videoJobs ?? [], source.videoJobs ?? [], telegramUserId, (item) => String(item.id));
+    target.mcpConnections = mergeOwnedRecordLists(target.mcpConnections ?? [], source.mcpConnections ?? [], telegramUserId, (item) => String(item.serverId));
+    target.mcpOAuthStates = mergeOwnedRecordLists(target.mcpOAuthStates ?? [], source.mcpOAuthStates ?? [], telegramUserId, (item) => String(item.state));
+    target.tregOAuthStates = mergeOwnedRecordLists(target.tregOAuthStates ?? [], source.tregOAuthStates ?? [], telegramUserId, (item) => String(item.stateHash));
+    target.linkOAuthStates = mergeOwnedRecordLists(target.linkOAuthStates ?? [], source.linkOAuthStates ?? [], telegramUserId, (item) => String(item.state));
+    target.linkSpendRequests = mergeOwnedRecordLists(target.linkSpendRequests ?? [], source.linkSpendRequests ?? [], telegramUserId, (item) => String(item.id));
+    target.workflowComposers = mergeOwnedRecordLists(target.workflowComposers ?? [], source.workflowComposers ?? [], telegramUserId, (item) => String(item.id));
+    target.browserFiles = mergeOwnedRecordLists(target.browserFiles ?? [], source.browserFiles ?? [], telegramUserId, (item) => String(item.id));
+    target.browserPlaybooks = mergeOwnedRecordLists(target.browserPlaybooks ?? [], source.browserPlaybooks ?? [], telegramUserId, (item) => String(item.id));
+    target.browserAudit = mergeOwnedRecordLists(target.browserAudit ?? [], source.browserAudit ?? [], telegramUserId, (item) => String(item.id));
+    target.browserHandoffs = mergeOwnedRecordLists(target.browserHandoffs ?? [], source.browserHandoffs ?? [], telegramUserId, (item) => String(item.id));
+    target.shoppingRuns = mergeOwnedRecordLists(target.shoppingRuns ?? [], source.shoppingRuns ?? [], telegramUserId, (item) => String(item.id));
+    target.shoppingSites = mergeOwnedRecordLists(target.shoppingSites ?? [], source.shoppingSites ?? [], telegramUserId, (item) => String(item.id));
+    target.recallMeetings = mergeOwnedRecordLists(target.recallMeetings ?? [], source.recallMeetings ?? [], telegramUserId, (item) => String(item.id));
+    target.calendarMeetingPreparations = mergeOwnedRecordLists(target.calendarMeetingPreparations ?? [], source.calendarMeetingPreparations ?? [], telegramUserId, (item) => String(item.id));
+    target.handoffRecords = mergeOwnedRecordLists(target.handoffRecords ?? [], source.handoffRecords ?? [], telegramUserId, (item) => String(item.id));
+
     const sourceCalls = source.phoneCalls ?? [];
     const sourceCallSet = new Set(sourcePhoneCallIds);
     const retainedCalls = (target.phoneCalls ?? []).filter((call) => !sourceCallSet.has(call.id));
@@ -8246,6 +8425,145 @@ export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId
     }
   }
   return true;
+}
+
+/**
+ * Migrate a legacy Telegram session into the canonical web owner. Telegram is
+ * an alias only: calls, memories, tasks, approvals, and conversation history
+ * must be written under the web owner after this operation completes.
+ *
+ * This intentionally reuses the idempotent merge primitive above with the
+ * source and target reversed. The primitive has no provider-specific writes;
+ * its parameter names are retained for compatibility with persisted legacy
+ * reconciliation tasks and existing callers.
+ */
+export async function mergeLinkedTelegramSession(
+  telegramUserId: number,
+  canonicalWebUserId: number,
+  options: { skipIfBusy?: boolean } = {},
+): Promise<boolean> {
+  const merged = await mergeLinkedWebSession(telegramUserId, canonicalWebUserId, options);
+  if (!merged) return false;
+  await migrateLinkedImageCatalog(telegramUserId, canonicalWebUserId);
+  await migrateLinkedOwnerRecords(telegramUserId, canonicalWebUserId);
+  return true;
+}
+
+/** Re-home durable image catalog entries before a web request tries to read
+ * the imported asset. The R2 object is immutable and stays at the same key;
+ * only the owner-scoped catalog authorization is copied. */
+async function migrateLinkedImageCatalog(sourceUserId: number, canonicalUserId: number): Promise<void> {
+  if (!config.durableObjectCatalogEnabled || !r2Configured()) return;
+  const source = await getSession(sourceUserId);
+  for (const asset of source.imageAssets ?? []) {
+    try {
+      const objectId = durableImageObjectId(asset.id);
+      const legacy = await getDurableObjectMetadata(sourceUserId, objectId);
+      if (legacy && legacy.status === "available") {
+        await createDurableObjectMetadata({ ...legacy, ownerUserId: canonicalUserId, updatedAt: Date.now() });
+        continue;
+      }
+      await registerDurableImageAsset({ userId: canonicalUserId, assetId: asset.id, r2Key: asset.r2Key, contentType: asset.contentType, size: asset.size }, {
+        inspect: inspectR2Object,
+        readBounded: readR2ObjectBounded,
+        create: createDurableObjectMetadata,
+        get: getDurableObjectMetadata,
+        markDeleting: markDurableObjectDeleting,
+        markDeleted: markDurableObjectDeleted,
+        deleteObject: deleteR2Object,
+      }, Math.max(asset.size, 1));
+    } catch (error) {
+      // The metadata migration must never make identity linking fail. The
+      // source record remains intact and can be retried by the next link or a
+      // maintenance sweep after the legacy object is available.
+      logger.warn({ err: error, sourceUserId, canonicalUserId, assetId: asset.id }, "Linked image catalog migration deferred");
+    }
+  }
+}
+
+/**
+ * Migrate records stored outside UserSession. This is intentionally additive:
+ * the canonical web owner receives every source record exactly once, while
+ * the legacy Telegram key is retained until normal retention removes it.
+ */
+async function migrateLinkedOwnerRecords(sourceUserId: number, canonicalUserId: number): Promise<void> {
+  if (!Number.isSafeInteger(sourceUserId) || sourceUserId <= 0 || !Number.isSafeInteger(canonicalUserId) || canonicalUserId <= 0 || sourceUserId === canonicalUserId) return;
+
+  const mergeById = async <T extends object>(
+    read: (userId: number) => Promise<T[]>,
+    write: (userId: number, records: T[]) => Promise<void>,
+    key: (record: T) => string,
+  ) => {
+    const [target, source] = await Promise.all([read(canonicalUserId), read(sourceUserId)]);
+    if (!source.length) return;
+    await write(canonicalUserId, mergeOwnedRecordLists(target, source, canonicalUserId, key));
+  };
+
+  await Promise.all([
+    mergeById((userId) => backend.getTasks(userId), (userId, records) => backend.saveTasks(userId, records as TaskRecord[]), (record) => String(record.id)),
+    mergeById((userId) => backend.getMissions(userId), (userId, records) => backend.saveMissions(userId, records as MissionRecord[]), (record) => String(record.id)),
+    mergeById((userId) => backend.getReminders(userId), (userId, records) => backend.saveReminders(userId, records as ReminderRecord[]), (record) => String(record.id)),
+    mergeById((userId) => backend.getJobs(userId), (userId, records) => backend.saveJobs(userId, records as JobRecord[]), (record) => String(record.id)),
+    mergeById((userId) => backend.listRecallMeetings(userId, 100), (userId, records) => Promise.all(records.map((record) => backend.saveRecallMeeting(record as RecallMeetingRecord))).then(() => undefined), (record) => String(record.id)).then(() => undefined),
+  ]);
+
+  const [sourceRuns, targetRuns] = await Promise.all([
+    backend.listAgentRuns(sourceUserId, 100),
+    backend.listAgentRuns(canonicalUserId, 100),
+  ]);
+  const targetRunIds = new Set(targetRuns.map((record) => record.id));
+  await Promise.all(sourceRuns.filter((record) => !targetRunIds.has(record.id)).map((record) => backend.reassignAgentRunOwner(record.id, sourceUserId, canonicalUserId)));
+
+  const [sourceContacts, targetContacts] = await Promise.all([
+    backend.listMeetingContacts(sourceUserId, 200),
+    backend.listMeetingContacts(canonicalUserId, 200),
+  ]);
+  const contactIds = new Set(targetContacts.map((record) => record.id));
+  await Promise.all(sourceContacts.filter((record) => !contactIds.has(record.id)).map((record) => backend.upsertMeetingContact(rehomeOwnerRecord(record, canonicalUserId))));
+
+  const [sourceTriggers, targetTriggers] = await Promise.all([
+    backend.listTriggerEvents(sourceUserId, 200),
+    backend.listTriggerEvents(canonicalUserId, 200),
+  ]);
+  const triggerIds = new Set(targetTriggers.map((record) => record.eventId));
+  await Promise.all(sourceTriggers.filter((record) => !triggerIds.has(record.eventId)).map((record) => backend.reassignTriggerEventOwner(record.eventId, sourceUserId, canonicalUserId)));
+
+  for (const collection of Object.values(attentionCollections)) {
+    const [sourceRecords, targetRecords] = await Promise.all([
+      backend.getAttentionRecords(sourceUserId, collection),
+      backend.getAttentionRecords(canonicalUserId, collection),
+    ]);
+    if (!sourceRecords.length) continue;
+    const merged = mergeOwnedRecordLists(targetRecords, sourceRecords, canonicalUserId, (record) => String(record.id));
+    await backend.mutateAttentionRecords(canonicalUserId, collection, () => merged);
+  }
+
+  const [sourceRoutes, targetRoutes] = await Promise.all([
+    backend.listVoiceInboundRoutes(sourceUserId),
+    backend.listVoiceInboundRoutes(canonicalUserId),
+  ]);
+  const routeKeys = new Set(targetRoutes.map((record) => `${record.provider}:${record.phoneNumber}`));
+  await Promise.all(sourceRoutes.filter((record) => !routeKeys.has(`${record.provider}:${record.phoneNumber}`)).map((record) => backend.saveVoiceInboundRoute(rehomeOwnerRecord(record, canonicalUserId))));
+
+  const [sourceSubaccount, targetSubaccount] = await Promise.all([
+    backend.getTwilioSubaccountByUserId(sourceUserId),
+    backend.getTwilioSubaccountByUserId(canonicalUserId),
+  ]);
+  if (sourceSubaccount && !targetSubaccount) await backend.saveTwilioSubaccount(rehomeOwnerRecord(sourceSubaccount, canonicalUserId));
+
+  const [sourceNumbers, targetNumbers] = await Promise.all([
+    backend.listTwilioNumberOwnership(sourceUserId, 500),
+    backend.listTwilioNumberOwnership(canonicalUserId, 500),
+  ]);
+  const numberIds = new Set(targetNumbers.map((record) => record.providerNumberId));
+  await Promise.all(sourceNumbers.filter((record) => !numberIds.has(record.providerNumberId)).map((record) => backend.saveTwilioNumberOwnership(rehomeOwnerRecord(record, canonicalUserId))));
+
+  const [sourceBilling, targetBilling] = await Promise.all([
+    backend.listTwilioBillingEntries(sourceUserId, 500),
+    backend.listTwilioBillingEntries(canonicalUserId, 500),
+  ]);
+  const billingIds = new Set(targetBilling.map((record) => record.id));
+  await Promise.all(sourceBilling.filter((record) => !billingIds.has(record.id)).map((record) => backend.appendTwilioBillingEntry(rehomeOwnerRecord(record, canonicalUserId))));
 }
 
 export async function updatePhoneCall(uid: number, id: string, patch: PhoneCallPatch): Promise<PhoneCallRecord | undefined> {
@@ -9327,15 +9645,18 @@ export async function clearDaytonaWorkspace(uid: number): Promise<void> {
 }
 
 export async function listSessionOwnerIds(limit = 1000): Promise<number[]> {
-  return backend.listSessionOwnerIds(Math.max(1, Math.min(10_000, Math.floor(limit))));
+  const ownerIds = await backend.listSessionOwnerIds(Math.max(1, Math.min(10_000, Math.floor(limit))));
+  return canonicalizeOwnerIds(ownerIds, limit);
 }
 
 export async function listTaskOwnerIds(limit = 1000): Promise<number[]> {
-  return backend.listTaskOwnerIds(Math.max(1, Math.min(10_000, Math.floor(limit))));
+  const ownerIds = await backend.listTaskOwnerIds(Math.max(1, Math.min(10_000, Math.floor(limit))));
+  return canonicalizeOwnerIds(ownerIds, limit);
 }
 
 export async function listJobOwnerIds(limit = 1000): Promise<number[]> {
-  return backend.listJobOwnerIds(Math.max(1, Math.min(10_000, Math.floor(limit))));
+  const ownerIds = await backend.listJobOwnerIds(Math.max(1, Math.min(10_000, Math.floor(limit))));
+  return canonicalizeOwnerIds(ownerIds, limit);
 }
 
 function normalizeTask(task: TaskRecord): TaskRecord {
@@ -10421,7 +10742,7 @@ export async function updateMissionControl(userId: number, id: string, input: { 
 
 /** Owners with durable mission state; used by the recovery sweeper. */
 export async function listMissionOwnerIds(): Promise<number[]> {
-  return backend.listMissionOwnerIds();
+  return canonicalizeOwnerIds(await backend.listMissionOwnerIds(), 10_000);
 }
 
 /** Durable fairness cursors and lease for the process-wide mission recovery sweep. */
@@ -10976,7 +11297,14 @@ export async function setTelegramChatId(uid: number, chatId: number): Promise<vo
 }
 
 export async function getTelegramChatId(uid: number): Promise<number | undefined> {
-  return (await getSession(uid)).telegramChatId;
+  const sessionChatId = (await getSession(uid)).telegramChatId;
+  if (sessionChatId !== undefined) return sessionChatId;
+  // Telegram is an optional delivery channel. Once its identity is attached
+  // to the canonical web owner, the channel record—not a Telegram-owned
+  // session—is the durable address for notifications.
+  const identity = (await backend.listChannelIdentities(uid)).find((item) => item.provider === "telegram" && !item.disabledAt);
+  const channelId = identity ? Number(identity.externalUserId) : NaN;
+  return Number.isSafeInteger(channelId) && channelId > 0 ? channelId : undefined;
 }
 
 export async function checkRateLimit(uid: number): Promise<boolean> {
@@ -12548,6 +12876,16 @@ export async function saveChannelIdentity(record: ChannelIdentityRecord): Promis
   return backend.saveChannelIdentity({ ...record, externalUserId: record.externalUserId.trim(), workspaceId: record.workspaceId?.trim() || undefined });
 }
 
+export async function reassignChannelIdentity(
+  provider: ChannelProvider,
+  externalUserId: string,
+  workspaceId: string | undefined,
+  fromUserId: number,
+  toUserId: number,
+): Promise<boolean> {
+  return backend.reassignChannelIdentity(provider, externalUserId.trim(), workspaceId?.trim() || undefined, fromUserId, toUserId);
+}
+
 export async function getChannelInstallation(provider: ChannelInstallationRecord["provider"], workspaceId: string): Promise<ChannelInstallationRecord | undefined> {
   return backend.getChannelInstallation(provider, workspaceId);
 }
@@ -12625,15 +12963,46 @@ export async function redeemWebTelegramLinkCode(code: string, telegramUserId: nu
   if (!webTelegramCodePattern.test(clean) || !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0) return "invalid";
   const redemption = await backend.redeemWebTelegramLinkCode(hashCliSecret(clean), telegramUserId);
   if (redemption.sourceUserId && (redemption.status === "linked" || redemption.status === "already_linked")) {
-    try { await mergeLinkedWebSession(redemption.sourceUserId, telegramUserId); }
-    catch (error) { logger.warn({ err: error, telegramUserId }, "Web account history merge deferred until the next authenticated request"); }
+    try {
+      await reassignChannelIdentity("telegram", String(telegramUserId), undefined, telegramUserId, redemption.sourceUserId);
+      if (redemption.webAuthUserId) await migrateTelegramOwnedProjects(telegramUserId, redemption.sourceUserId, redemption.webAuthUserId);
+      await mergeLinkedTelegramSession(telegramUserId, redemption.sourceUserId);
+    }
+    catch (error) { logger.warn({ err: error, telegramUserId }, "Linked channel history merge deferred until the next authenticated request"); }
   }
   return redemption.status;
+}
+
+/**
+ * API projects created through the legacy Telegram command surface live in the
+ * control session rather than the user's session. Transfer their ownership to
+ * the Better Auth subject during linking so dashboard project management sees
+ * the same keys without changing or rotating any secret.
+ */
+export async function migrateTelegramOwnedProjects(telegramUserId: number, canonicalWebUserId: number, webAuthUserId: string): Promise<number> {
+  if (!Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 || !Number.isSafeInteger(canonicalWebUserId) || canonicalWebUserId <= 0 || !webAuthUserId.trim()) return 0;
+  const control = await getSession(0);
+  const projects = control.sdkProjects ?? [];
+  let migrated = 0;
+  for (const project of projects) {
+    if (project.organizationId || project.ownerTelegramUserId !== telegramUserId || project.revokedAt) continue;
+    project.ownerTelegramUserId = undefined;
+    project.ownerWebAuthUserId = webAuthUserId.trim().slice(0, 200);
+    migrated++;
+  }
+  if (migrated) await saveSession(0, control);
+  return migrated;
 }
 
 export async function getTelegramUserIdForWebAuth(webAuthUserId: string): Promise<number | undefined> {
   const owner = webAuthUserId.trim();
   return owner && owner.length <= 200 ? backend.getTelegramUserIdForWebAuth(owner) : undefined;
+}
+
+export async function unlinkWebTelegramLink(webAuthUserId: string, telegramUserId: number): Promise<boolean> {
+  const owner = webAuthUserId.trim();
+  if (!owner || owner.length > 200 || !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0) return false;
+  return backend.unlinkWebTelegramLink(owner, telegramUserId);
 }
 
 export async function getWebAuthUserIdForTelegram(telegramUserId: number): Promise<string | undefined> {
@@ -12642,11 +13011,29 @@ export async function getWebAuthUserIdForTelegram(telegramUserId: number): Promi
     : undefined;
 }
 
+/** Resolve a Telegram transport identity to the canonical web owner when it is linked. */
+export async function canonicalUserIdForTelegram(telegramUserId: number): Promise<number> {
+  if (!Number.isSafeInteger(telegramUserId) || telegramUserId <= 0) return telegramUserId;
+  const webAuthUserId = await getWebAuthUserIdForTelegram(telegramUserId);
+  return webAuthUserId ? stableSdkUserId(webAuthUserId, "web") : telegramUserId;
+}
+
 /**
- * Return the exact legacy web-session owners explicitly imported into this
- * Telegram owner.  This is used only to reconcile provider state created
- * before the dashboard account was linked; it is never a global account
- * search or an ownership grant.
+ * Recovery indexes can still contain a legacy Telegram owner after a channel
+ * is linked. Collapse those aliases before a sweeper starts work so the same
+ * durable task, job, mission, or workspace is never processed twice.
+ */
+async function canonicalizeOwnerIds(ownerIds: number[], limit: number): Promise<number[]> {
+  const canonical = await Promise.all(ownerIds.map((ownerId) => canonicalUserIdForTelegram(ownerId)));
+  return [...new Set(canonical.filter((ownerId) => Number.isSafeInteger(ownerId) && ownerId > 0))]
+    .sort((left, right) => left - right)
+    .slice(0, Math.max(1, Math.min(10_000, Math.floor(limit))));
+}
+
+/**
+ * Return the exact legacy session owners explicitly imported into this owner.
+ * This is used only to reconcile provider state created before a channel was
+ * linked; it is never a global account search or an ownership grant.
  */
 export async function listLinkedWebSessionSourceUserIds(userId: number): Promise<number[]> {
   if (!Number.isSafeInteger(userId) || userId <= 0) return [];
