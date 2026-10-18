@@ -3,7 +3,7 @@ import test from "node:test";
 import { Hono } from "hono";
 import { config } from "../src/config.js";
 import { registerBuilderAdmin, builderRole, freshBuilderSession, type BuilderSession } from "../src/builderAdmin.js";
-import { BuilderExecutionGate, parseBuilderControl, type BuilderControl, type BuilderAuditEvent, type BuilderRepository } from "../src/builderControl.js";
+import { BuilderExecutionGate, parseBuilderControl, type BuilderControl, type BuilderAuditEvent, type BuilderRepository, type BuilderVoiceControl } from "../src/builderControl.js";
 
 const identity = (): BuilderSession => ({ user: { id: "builder-id", name: "Builder", emailVerified: true, twoFactorEnabled: true }, session: { token: "test-session-token", createdAt: new Date(), expiresAt: new Date(Date.now() + 60_000) } });
 class Repository implements BuilderRepository {
@@ -15,6 +15,11 @@ class Repository implements BuilderRepository {
   async change(expected: number, enabled: boolean, event: BuilderAuditEvent) {
     if (expected !== this.state.version) return undefined;
     this.state = { version: expected + 1, agentEnabled: enabled, changedAt: event.at };
+    this.audit.unshift({ ...event, version: this.state.version }); return this.state;
+  }
+  async changeVoice(expected: number, voice: BuilderVoiceControl, event: BuilderAuditEvent) {
+    if (expected !== this.state.version) return undefined;
+    this.state = { version: expected + 1, agentEnabled: this.state.agentEnabled, voice, changedAt: event.at };
     this.audit.unshift({ ...event, version: this.state.version }); return this.state;
   }
   async events() { return this.audit; }
@@ -90,6 +95,24 @@ test("control writes use optimistic concurrency and preserve a reviewable audit 
   assert.equal(repo.audit[0].actorId, "builder-id");
   assert.equal((await request("audit")).headers.get("cache-control"), "private, no-store");
 });
+test("voice controls are admin-only, versioned, and audited", async () => {
+  const { repo, request } = setup();
+  const state = { version: 0, subaccountManagementEnabled: false, numberManagementEnabled: false, personaLibraryEnabled: true };
+  const input = {
+    version: state.version,
+    subaccountManagementEnabled: state.subaccountManagementEnabled,
+    numberManagementEnabled: state.numberManagementEnabled,
+    personaLibraryEnabled: false,
+    reason: "maintenance",
+  };
+  const saved = await request("voice/control", input);
+  assert.equal(saved.status, 200);
+  assert.equal(repo.state.voice?.personaLibraryEnabled, false);
+  assert.equal(repo.audit[0].action, "builder_voice_control_changed");
+  assert.equal((await request("voice/control", input)).status, 409);
+  assert.equal((await setup({ role: "builder_viewer" }).request("voice/control", input)).status, 403);
+  assert.equal((await request("voice/control", { ...input, version: repo.state.version, numberManagementEnabled: true, subaccountManagementEnabled: false })).status, 400);
+});
 test("Redis failures block administration without leaking provider errors", async () => {
   const { repo, request } = setup(); repo.read = async () => { throw new Error("redis://private-token@host"); };
   const response = await request("controls");
@@ -108,7 +131,10 @@ test("execution controls cache concurrent reads, observe pauses, and fail closed
   await gate.assertEnabled();
   const failed = new BuilderExecutionGate(async () => { throw new Error("unavailable"); });
   await assert.rejects(failed.assertEnabled(), /unavailable/);
-  assert.deepEqual(parseBuilderControl(null), { version: 0, agentEnabled: true });
+  const parsed = parseBuilderControl(null);
+  assert.equal(parsed.version, 0);
+  assert.equal(parsed.agentEnabled, true);
+  assert.equal(typeof parsed.voice?.personaLibraryEnabled, "boolean");
   assert.throws(() => parseBuilderControl('{"version":0,"agentEnabled":"true"}'));
 });
 test("an in-flight read cannot overwrite a newer local control write", async () => {

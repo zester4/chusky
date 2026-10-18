@@ -6,7 +6,7 @@ import { config } from "./config.js";
 import { durableStorageMetrics, durableStateStatus, isDurableStore } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { logger } from "./logger.js";
-import { builderEnabled, builderRepository, invalidateBuilderControl, newBuilderEvent, type BuilderRepository } from "./builderControl.js";
+import { builderEnabled, builderRepository, builderVoiceControl, invalidateBuilderControl, newBuilderEvent, type BuilderRepository, type BuilderVoiceControl } from "./builderControl.js";
 import { checkTwilioSubaccountHealth, listTwilioSubaccountViews, provisionTwilioSubaccount, updateTwilioSubaccountStatus, type TwilioSubaccountView } from "./calls/twilioSubaccounts.js";
 
 export interface BuilderSession {
@@ -165,10 +165,42 @@ export function registerBuilderAdmin(app: Hono, dependencies: BuilderDependencie
     await repository().record({ ...newBuilderEvent(session.user.id, auditAction), targetUserId: userId });
     return c.json({ ok: true, action });
   });
+  builder.patch("/voice/control", async (c) => {
+    const { session, role } = c.get("principal");
+    if (role !== "builder_admin") return c.json(error("permission_denied", "Manage-voice permission is required."), 403);
+    const body = await c.req.json().catch(() => null) as Record<string, unknown> | null;
+    const keys = body ? Object.keys(body) : [];
+    const allowed = new Set(["version", "subaccountManagementEnabled", "numberManagementEnabled", "personaLibraryEnabled", "reason"]);
+    if (!body || Array.isArray(body) || keys.some((key) => !allowed.has(key)) || !Number.isSafeInteger(body.version) || (body.version as number) < 0
+      || typeof body.subaccountManagementEnabled !== "boolean" || typeof body.numberManagementEnabled !== "boolean"
+      || typeof body.personaLibraryEnabled !== "boolean" || !["incident", "maintenance", "release"].includes(String(body.reason))) {
+      return c.json(error("invalid_voice_control", "Provide a version, all voice feature settings, and a change reason."), 400);
+    }
+    const voice: BuilderVoiceControl = {
+      subaccountManagementEnabled: body.subaccountManagementEnabled,
+      numberManagementEnabled: body.numberManagementEnabled,
+      personaLibraryEnabled: body.personaLibraryEnabled,
+    };
+    if (voice.numberManagementEnabled && !voice.subaccountManagementEnabled) return c.json(error("invalid_voice_control", "Number management requires tenant subaccount management."), 400);
+    if (voice.subaccountManagementEnabled && (!config.twilioAccountSid || !config.twilioAuthToken || !config.twilioSubaccountEncryptionKey || !/^https:\/\//i.test(config.twilioWebhookBaseUrl))) {
+      return c.json(error("voice_prerequisites_missing", "Configure the parent Twilio credentials, encryption key, and HTTPS voice webhook before enabling tenant phone accounts."), 400);
+    }
+    const event = {
+      ...newBuilderEvent(session.user.id, "builder_voice_control_changed"),
+      voice,
+      reason: body.reason as "incident" | "maintenance" | "release",
+    };
+    const changed = await repository().changeVoice(body.version as number, voice, event);
+    if (!changed) return c.json(error("control_conflict", "Another builder changed these controls. Refresh before trying again."), 409);
+    invalidateBuilderControl();
+    return c.json({ ...changed, voice: builderVoiceControl(changed) });
+  });
   builder.get("/voice/subaccounts", async (c) => {
     if (!(["builder_admin", "builder_viewer"] as BuilderRole[]).includes(c.get("principal").role)) return c.json(error("permission_denied", "Voice administration is restricted to builder personnel."), 403);
     try {
-      return c.json({ enabled: config.twilioSubaccountManagementEnabled, numberManagementEnabled: config.twilioNumberManagementEnabled, data: await listTwilioSubaccountViews(200) });
+      const state = await repository().read();
+      const voice = builderVoiceControl(state);
+      return c.json({ ...voice, enabled: voice.subaccountManagementEnabled, numberManagementEnabled: voice.numberManagementEnabled, version: state.version, changedAt: state.changedAt, data: await listTwilioSubaccountViews(200) });
     } catch {
       return c.json(error("voice_unavailable", "Tenant voice administration is temporarily unavailable."), 503);
     }

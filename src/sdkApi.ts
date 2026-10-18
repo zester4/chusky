@@ -7,7 +7,7 @@ import { routePath } from "hono/route";
 import { config } from "./config.js";
 import { createTurnOpening } from "./turnOpeningModel.js";
 import { needsTurnOpening, type TurnOpening } from "./turnOpening.js";
-import { assertAgentExecutionEnabled } from "./builderControl.js";
+import { assertAgentExecutionEnabled, getBuilderVoiceControls } from "./builderControl.js";
 import { canonicalSdkFingerprint, stableSdkUserId } from "./sdkIdentity.js";
 import { withNeonQueryMetricRoute, type DurableObjectMetadata } from "./neonDurableState.js";
 import { withRedisMetricRoute } from "./redisMetrics.js";
@@ -2728,12 +2728,14 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/account/calls/personas", async (c) => {
     const owner = await callOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before loading voice personas.");
+    if (!(await getBuilderVoiceControls()).personaLibraryEnabled) return apiError(c, 503, "voice_personas_disabled", "Voice persona presets are temporarily unavailable.");
     return c.json({ version: 1, data: listVoicePersonas() });
   });
 
   app.post("/v1/account/calls/profile/persona", async (c) => {
     const owner = await callOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before configuring the voice representative.");
+    if (!(await getBuilderVoiceControls()).personaLibraryEnabled) return apiError(c, 503, "voice_personas_disabled", "Voice persona presets are temporarily unavailable.");
     const body = await c.req.json().catch(() => ({})) as { personaId?: unknown };
     try {
       const current = await getVoiceCallProfile(owner.userId);

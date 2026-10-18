@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import twilio from "twilio";
 import { config } from "../config.js";
+import { getBuilderVoiceControls } from "../builderControl.js";
 import { decryptCredential, encryptCredential } from "../vault/crypto.js";
 import {
   appendTwilioBillingEntry,
@@ -36,8 +37,8 @@ function assertEncryptionKey(): string {
   return config.twilioSubaccountEncryptionKey;
 }
 
-function assertManagementEnabled(): void {
-  if (!config.twilioSubaccountManagementEnabled) throw new Error("Tenant phone-number management is disabled.");
+async function assertManagementEnabled(): Promise<void> {
+  if (!(await getBuilderVoiceControls()).subaccountManagementEnabled) throw new Error("Tenant phone-number management is disabled.");
 }
 
 function cleanLabel(value: unknown, fallback: string): string {
@@ -70,11 +71,11 @@ export async function twilioWebhookCredentialsForCall(call?: Pick<PhoneCallRecor
   return twilioWebhookCredentialsForRoute(call);
 }
 
-function dependenciesFor(record: TwilioSubaccountRecord): TwilioNumberDependencies {
+function dependenciesFor(record: TwilioSubaccountRecord, numberManagementEnabled: boolean): TwilioNumberDependencies {
   const value = credentials(record);
   if (record.status !== "active" || record.providerStatus === "suspended" || record.providerStatus === "closed") throw new Error("This workspace phone account is not active.");
   if (!/^https:\/\//i.test(config.twilioWebhookBaseUrl)) throw new Error("The voice webhook is not configured.");
-  return { enabled: config.twilioNumberManagementEnabled, accountSid: value.accountSid, authToken: value.authToken, webhookBaseUrl: config.twilioWebhookBaseUrl };
+  return { enabled: numberManagementEnabled, accountSid: value.accountSid, authToken: value.authToken, webhookBaseUrl: config.twilioWebhookBaseUrl };
 }
 
 function view(record: TwilioSubaccountRecord, numberCount = 0): TwilioSubaccountView {
@@ -85,23 +86,25 @@ function view(record: TwilioSubaccountRecord, numberCount = 0): TwilioSubaccount
 /** The customer API uses this only as an availability gate. It does not
  * expose why a tenant is not provisioned. */
 export async function tenantNumberDependencies(userId: number): Promise<TwilioNumberDependencies | undefined> {
-  if (!config.twilioSubaccountManagementEnabled || !config.twilioNumberManagementEnabled) return undefined;
+  const controls = await getBuilderVoiceControls();
+  if (!controls.subaccountManagementEnabled || !controls.numberManagementEnabled) return undefined;
   const record = await getTwilioSubaccountByUserId(userId);
   if (!record) return undefined;
-  try { return dependenciesFor(record); } catch { return undefined; }
+  try { return dependenciesFor(record, controls.numberManagementEnabled); } catch { return undefined; }
 }
 
 /** Existing legacy parent-account routes remain readable and releasable by
  * their old path; new inventory must always use an active tenant account. */
 export async function subaccountNumberDependencies(id: string): Promise<TwilioNumberDependencies> {
-  if (!config.twilioSubaccountManagementEnabled || !config.twilioNumberManagementEnabled) throw new Error("Tenant phone-number management is disabled.");
+  const controls = await getBuilderVoiceControls();
+  if (!controls.subaccountManagementEnabled || !controls.numberManagementEnabled) throw new Error("Tenant phone-number management is disabled.");
   const record = await getTwilioSubaccount(id);
   if (!record) throw new Error("The workspace phone account was not found.");
-  return dependenciesFor(record);
+  return dependenciesFor(record, controls.numberManagementEnabled);
 }
 
 export async function provisionTwilioSubaccount(userId: number, friendlyName?: unknown): Promise<TwilioSubaccountView> {
-  assertManagementEnabled();
+  await assertManagementEnabled();
   assertParentCredentials();
   const existing = await getTwilioSubaccountByUserId(userId);
   if (existing) return view(existing);
@@ -134,7 +137,7 @@ export async function provisionTwilioSubaccount(userId: number, friendlyName?: u
 }
 
 export async function updateTwilioSubaccountStatus(id: string, status: "active" | "suspended"): Promise<TwilioSubaccountView> {
-  assertManagementEnabled();
+  await assertManagementEnabled();
   assertParentCredentials();
   const record = await getTwilioSubaccount(id);
   if (!record) throw new Error("The workspace phone account was not found.");
@@ -147,7 +150,7 @@ export async function updateTwilioSubaccountStatus(id: string, status: "active" 
 }
 
 export async function checkTwilioSubaccountHealth(id: string): Promise<TwilioSubaccountView> {
-  assertManagementEnabled();
+  await assertManagementEnabled();
   assertParentCredentials();
   const record = await getTwilioSubaccount(id);
   if (!record) throw new Error("The workspace phone account was not found.");

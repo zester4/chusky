@@ -1,11 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import Redis from "ioredis";
 
-export interface BuilderControl { version: number; agentEnabled: boolean; changedAt?: number }
-export interface BuilderAuditEvent { id: string; actorId: string; action: "agent_execution_changed" | "builder_verified" | "user_suspended" | "user_restored" | "user_sessions_revoked" | "user_removed" | "twilio_subaccount_provisioned" | "twilio_subaccount_suspended" | "twilio_subaccount_resumed" | "twilio_subaccount_health_checked"; at: number; enabled?: boolean; reason?: "incident" | "maintenance" | "release"; version?: number; targetUserId?: string; subaccountId?: string }
+export interface BuilderVoiceControl {
+  subaccountManagementEnabled: boolean;
+  numberManagementEnabled: boolean;
+  personaLibraryEnabled: boolean;
+}
+export interface BuilderControl { version: number; agentEnabled: boolean; voice?: BuilderVoiceControl; changedAt?: number }
+export interface BuilderAuditEvent { id: string; actorId: string; action: "agent_execution_changed" | "builder_voice_control_changed" | "builder_verified" | "user_suspended" | "user_restored" | "user_sessions_revoked" | "user_removed" | "twilio_subaccount_provisioned" | "twilio_subaccount_suspended" | "twilio_subaccount_resumed" | "twilio_subaccount_health_checked"; at: number; enabled?: boolean; voice?: BuilderVoiceControl; reason?: "incident" | "maintenance" | "release"; version?: number; targetUserId?: string; subaccountId?: string }
 export interface BuilderRepository {
   read(): Promise<BuilderControl>;
   change(expected: number, enabled: boolean, event: BuilderAuditEvent): Promise<BuilderControl | undefined>;
+  changeVoice(expected: number, voice: BuilderVoiceControl, event: BuilderAuditEvent): Promise<BuilderControl | undefined>;
   events(): Promise<BuilderAuditEvent[]>;
   record(event: BuilderAuditEvent): Promise<void>;
   verified(token: string): Promise<boolean>;
@@ -17,14 +23,39 @@ const AUDIT_KEY = "chuck:builder:{control}:audit";
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 export const builderEnabled = () => process.env.CHUSKY_BUILDER_ADMIN_ENABLED === "true";
 
+export function defaultBuilderVoiceControl(): BuilderVoiceControl {
+  return {
+    subaccountManagementEnabled: process.env.TWILIO_SUBACCOUNT_MANAGEMENT_ENABLED === "true",
+    numberManagementEnabled: process.env.TWILIO_NUMBER_MANAGEMENT_ENABLED === "true",
+    // The persona catalogue is safe to expose by default. It does not grant
+    // provider credentials or external-write permissions.
+    personaLibraryEnabled: process.env.CHUSKY_VOICE_PERSONA_LIBRARY_ENABLED !== "false",
+  };
+}
+
+export function builderVoiceControl(state?: BuilderControl): BuilderVoiceControl {
+  return state?.voice ? { ...defaultBuilderVoiceControl(), ...state.voice } : defaultBuilderVoiceControl();
+}
+
+export async function getBuilderVoiceControls(): Promise<BuilderVoiceControl> {
+  const defaults = defaultBuilderVoiceControl();
+  if (!builderEnabled()) return defaults;
+  try { return builderVoiceControl(await builderRepository().read()); }
+  catch {
+    // A control-plane outage must never accidentally enable billable tenant
+    // provisioning, number purchases, or a newly-administered feature.
+    return { subaccountManagementEnabled: false, numberManagementEnabled: false, personaLibraryEnabled: false };
+  }
+}
+
 export function parseBuilderControl(raw: string | null): BuilderControl {
-  if (raw === null) return { version: 0, agentEnabled: true };
+  if (raw === null) return { version: 0, agentEnabled: true, voice: defaultBuilderVoiceControl() };
   const value: unknown = JSON.parse(raw);
   if (!value || typeof value !== "object" || !("version" in value) || !("agentEnabled" in value)
     || !Number.isSafeInteger(value.version) || (value.version as number) < 0 || typeof value.agentEnabled !== "boolean") {
     throw new Error("Builder control state is invalid.");
   }
-  return value as BuilderControl;
+  return { ...(value as BuilderControl), voice: builderVoiceControl(value as BuilderControl) };
 }
 
 // Same Redis hash slot: the control change and its audit record commit atomically.
@@ -33,6 +64,20 @@ local raw = redis.call("GET", KEYS[1])
 local current = raw and cjson.decode(raw) or {version=0, agentEnabled=true}
 if current.version ~= tonumber(ARGV[1]) then return nil end
 local next = {version=current.version+1, agentEnabled=ARGV[2]=="true", changedAt=tonumber(ARGV[3])}
+if current.voice then next.voice=current.voice end
+local event = cjson.decode(ARGV[4])
+event.version = next.version
+redis.call("LPUSH", KEYS[2], cjson.encode(event))
+redis.call("LTRIM", KEYS[2], 0, 999)
+redis.call("SET", KEYS[1], cjson.encode(next))
+return cjson.encode(next)
+`;
+
+export const CHANGE_BUILDER_VOICE_CONTROL = `
+local raw = redis.call("GET", KEYS[1])
+local current = raw and cjson.decode(raw) or {version=0, agentEnabled=true}
+if current.version ~= tonumber(ARGV[1]) then return nil end
+local next = {version=current.version+1, agentEnabled=current.agentEnabled ~= false, voice=cjson.decode(ARGV[2]), changedAt=tonumber(ARGV[3])}
 local event = cjson.decode(ARGV[4])
 event.version = next.version
 redis.call("LPUSH", KEYS[2], cjson.encode(event))
@@ -46,6 +91,10 @@ export class RedisBuilderRepository implements BuilderRepository {
   async read() { return parseBuilderControl(await this.redis.get(STATE_KEY)); }
   async change(expected: number, enabled: boolean, event: BuilderAuditEvent) {
     const raw = await this.redis.eval(CHANGE_BUILDER_CONTROL, 2, STATE_KEY, AUDIT_KEY, expected, String(enabled), event.at, JSON.stringify(event));
+    return typeof raw === "string" ? parseBuilderControl(raw) : undefined;
+  }
+  async changeVoice(expected: number, voice: BuilderVoiceControl, event: BuilderAuditEvent) {
+    const raw = await this.redis.eval(CHANGE_BUILDER_VOICE_CONTROL, 2, STATE_KEY, AUDIT_KEY, expected, JSON.stringify(voice), event.at, JSON.stringify(event));
     return typeof raw === "string" ? parseBuilderControl(raw) : undefined;
   }
   async events() { return (await this.redis.lrange(AUDIT_KEY, 0, 99)).map((item) => JSON.parse(item) as BuilderAuditEvent); }
