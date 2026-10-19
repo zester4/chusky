@@ -3188,7 +3188,17 @@ class RedisBackend implements Backend {
       Object.assign(core as UserSession & DurableSessionMetadata, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableDomainSnapshots: nextSnapshots, durableSdkTablesSnapshot: nextSdkTablesSnapshot, durableConversationHeadId: nextHeadId });
       Object.assign(s as UserSession & DurableSessionMetadata, withMessageIds, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableDomainSnapshots: nextSnapshots, durableSdkTablesSnapshot: nextSdkTablesSnapshot, durableConversationHeadId: nextHeadId });
       await this.writeSessionDomainCache(userId, domains, nextVersions, changedDomains.keys());
-      if (this.durableSdkTablesEnabled) await this.writeSdkTablesCache(userId, { threads: withMessageIds.sdkThreads!.map((thread) => ({ userId, threadId: thread.id, externalId: thread.externalId, metadata: thread.metadata, history: thread.history, createdAt: thread.createdAt, updatedAt: thread.updatedAt })), audit: withMessageIds.sdkAudit!.map((event) => ({ userId, auditId: event.id, action: event.action, requestId: event.requestId, status: event.status, createdAt: event.at })), idempotency: Object.entries(withMessageIds.sdkIdempotency ?? {}).map(([key, record]) => ({ userId, key, fingerprint: record.fingerprint, response: record.response, createdAt: record.createdAt })) });
+      // Ordinary session reads intentionally omit the SDK domain. Do not
+      // rebuild or overwrite the SDK cache from that partial snapshot: a
+      // fresh Redis instance (or a cold migration read) legitimately has no
+      // sdkThreads/sdkAudit fields on the in-memory session yet.
+      if (this.durableSdkTablesEnabled && sdkDomainLoaded) {
+        await this.writeSdkTablesCache(userId, {
+          threads: (withMessageIds.sdkThreads ?? []).map((thread) => ({ userId, threadId: thread.id, externalId: thread.externalId, metadata: thread.metadata, history: thread.history, createdAt: thread.createdAt, updatedAt: thread.updatedAt })),
+          audit: (withMessageIds.sdkAudit ?? []).map((event) => ({ userId, auditId: event.id, action: event.action, requestId: event.requestId, status: event.status, createdAt: event.at })),
+          idempotency: Object.entries(withMessageIds.sdkIdempotency ?? {}).map(([key, record]) => ({ userId, key, fingerprint: record.fingerprint, response: record.response, createdAt: record.createdAt })),
+        });
+      }
        if (changedSdkRuns.length) await this.invalidateSdkRunCaches(userId, changedSdkRuns.map(({ threadId }) => threadId), changedSdkRuns.map(({ run }) => run.id));
       persisted = core;
     }
