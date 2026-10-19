@@ -9156,11 +9156,11 @@ export async function getMeetingRepresentativeProfile(uid: number): Promise<Meet
 
 export async function updateMeetingRepresentativeProfile(uid: number, patch: unknown): Promise<MeetingRepresentativeProfile> {
   if (!Number.isSafeInteger(uid) || uid <= 0) throw new Error("Meeting representative owner is invalid");
-  const session = await getSession(uid);
-  const profile = normalizeMeetingRepresentativeProfile(patch, session.meetingRepresentativeProfile ?? defaultMeetingRepresentativeProfile());
-  session.meetingRepresentativeProfile = profile;
-  await saveSession(uid, session);
-  return profile;
+  return mutateSession(uid, (session) => {
+    const profile = normalizeMeetingRepresentativeProfile(patch, session.meetingRepresentativeProfile ?? defaultMeetingRepresentativeProfile());
+    session.meetingRepresentativeProfile = profile;
+    return profile;
+  }, { domains: ["profile"] });
 }
 
 function meetingContactText(value: unknown, field: string, maximum: number, required = false): string | undefined {
