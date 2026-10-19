@@ -68,8 +68,6 @@ export const TWILIO_SUPPORTED_NUMBER_COUNTRIES: readonly TwilioNumberCountry[] =
   { code: "IE", callingCode: "+353", name: "Ireland", flag: "🇮🇪", regionLabel: "Region", regionPlaceholder: "Dublin" },
   { code: "NL", callingCode: "+31", name: "Netherlands", flag: "🇳🇱", regionLabel: "Region", regionPlaceholder: "Amsterdam" },
   { code: "PT", callingCode: "+351", name: "Portugal", flag: "🇵🇹", regionLabel: "Region", regionPlaceholder: "Lisbon" },
-  { code: "NO", callingCode: "+47", name: "Norway", flag: "🇳🇴", regionLabel: "Region", regionPlaceholder: "Oslo" },
-  { code: "DK", callingCode: "+45", name: "Denmark", flag: "🇩🇰", regionLabel: "Region", regionPlaceholder: "Copenhagen" },
 ];
 
 export type TwilioNumberDependencies = {

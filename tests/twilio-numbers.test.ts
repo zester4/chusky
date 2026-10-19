@@ -9,11 +9,11 @@ const configured = {
   webhookBaseUrl: "https://chusky.example.com",
 };
 
-test("customer number catalog exposes the initial US, Canada, and ten European markets", () => {
+test("customer number catalog exposes the initial US, Canada, and eight European markets", () => {
   const countries = twilioNumberCatalog();
-  assert.equal(countries.length, 12);
+  assert.equal(countries.length, 10);
   assert.deepEqual(countries.slice(0, 2).map((country) => country.code), ["US", "CA"]);
-  assert.deepEqual(countries.slice(2).map((country) => country.code), ["GB", "DE", "FR", "BE", "AT", "IE", "NL", "PT", "NO", "DK"]);
+  assert.deepEqual(countries.slice(2).map((country) => country.code), ["GB", "DE", "FR", "BE", "AT", "IE", "NL", "PT"]);
   assert.equal(countries.find((country) => country.code === "US")?.regionLabel, "State");
 });
 

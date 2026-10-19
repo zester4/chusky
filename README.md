@@ -1461,9 +1461,9 @@ billing history; it does not silently release or delete numbers. The private
 Builder Voice panel exposes only safe account status, number counts, and health
 state—never auth tokens or raw provider errors.
 
-The initial customer catalog is the United States, Canada, and ten European
-markets: the United Kingdom, Germany, France, Ireland, the Netherlands, Spain,
-Italy, Sweden, Norway, and Denmark. Region and area-code filters are forwarded
+The initial customer catalog is the United States, Canada, and eight European
+markets: the United Kingdom, Germany, France, Belgium, Austria, Ireland, the
+Netherlands, and Portugal. Region and area-code filters are forwarded
 to Twilio. `TWILIO_MANAGED_NUMBER_PRICE_CENTS` is the customer-facing list price
 and ledger amount; actual customer payment collection still belongs to the
 platform billing integration and must not be represented as captured merely
