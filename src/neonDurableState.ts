@@ -2,6 +2,8 @@ import type { QueryResultRow } from "pg";
 import { createHash, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { REDIS_METRIC_FAMILIES, type RedisCommandFamilyMetrics, type RedisMetricFamily, type RedisRouteMetricSample } from "./redisMetrics.js";
+import { logger } from "./logger.js";
+import type { VoiceCallReconciliationRecord } from "./calls/reconciliationTypes.js";
 
 export const DURABLE_SESSION_DOMAINS = ["profile", "conversation", "memories", "assets", "calls", "sdk"] as const;
 export type DurableSessionDomain = typeof DURABLE_SESSION_DOMAINS[number];
@@ -80,6 +82,13 @@ export interface QueryMetricSample {
   responseBytes: number;
   durationMs: number;
   maxValueBytes: number;
+}
+
+interface QueryMetricBatch {
+  instanceId: string;
+  batchId: number;
+  observedAt: number;
+  samples: QueryMetricSample[];
 }
 
 const queryMetricRoute = new AsyncLocalStorage<string>();
@@ -176,6 +185,22 @@ type SdkThreadRow = { user_id: string | number; thread_id: string; external_id: 
 type SdkAuditRow = { user_id: string | number; audit_id: string; action: string; request_id: string; status: number; created_at: Date };
 type SdkIdempotencyRow = { user_id: string | number; idempotency_key: string; fingerprint: string; response: unknown; created_at: Date };
 type MissionRow = { owner_user_id: string | number; mission_id: string; status: string; idempotency_key: string | null; payload: unknown; version: number; created_at: Date; updated_at: Date };
+type VoiceReconciliationRow = {
+  id: string;
+  user_id: string | number;
+  call_id: string;
+  provider: "twilio" | "bland";
+  provider_call_id: string | null;
+  phase: "provider" | "outcome";
+  status: "pending" | "running";
+  attempts: number;
+  next_attempt_at: Date;
+  lease_token: string | null;
+  lease_until: Date | null;
+  last_error: string | null;
+  created_at: Date;
+  updated_at: Date;
+};
 const MISSION_STATUSES = new Set(["queued", "running", "waiting", "paused", "blocked", "completed", "failed", "cancelled"]);
 const REDIS_FAMILY_SET = new Set<string>(REDIS_METRIC_FAMILIES);
 
@@ -335,6 +360,31 @@ function millis(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : Date.now();
 }
 
+function voiceReconciliationFromRow(row: VoiceReconciliationRow): VoiceCallReconciliationRecord {
+  const userId = Number(row.user_id);
+  if (!Number.isSafeInteger(userId) || userId <= 0) throw new Error("Voice reconciliation owner is invalid.");
+  if (!/^vcr_[A-Za-z0-9_-]{1,120}$/.test(row.id) || !/^(twc|blc)_[A-Za-z0-9_-]{1,120}$/.test(row.call_id)) throw new Error("Voice reconciliation identity is invalid.");
+  if (row.provider !== "twilio" && row.provider !== "bland") throw new Error("Voice reconciliation provider is invalid.");
+  if (row.phase !== "provider" && row.phase !== "outcome") throw new Error("Voice reconciliation phase is invalid.");
+  if (row.status !== "pending" && row.status !== "running") throw new Error("Voice reconciliation status is invalid.");
+  return {
+    id: row.id,
+    userId,
+    callId: row.call_id,
+    provider: row.provider,
+    ...(row.provider_call_id ? { providerCallId: row.provider_call_id } : {}),
+    phase: row.phase,
+    status: row.status,
+    attempts: Math.max(0, Math.min(100, Number(row.attempts))),
+    nextAttemptAt: millis(row.next_attempt_at),
+    ...(row.lease_token ? { leaseToken: row.lease_token } : {}),
+    ...(row.lease_until ? { leaseUntil: millis(row.lease_until) } : {}),
+    ...(row.last_error ? { lastError: row.last_error.slice(0, 500) } : {}),
+    createdAt: millis(row.created_at),
+    updatedAt: millis(row.updated_at),
+  };
+}
+
 function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -398,6 +448,12 @@ export class NeonDurableState {
   private readonly queryMetricInstanceId = randomUUID();
   private queryMetricBatchId = 0;
   private readonly queryMetrics = new Map<string, QueryMetricSample>();
+  /** A failed batch stays separate from newer in-memory samples. */
+  private pendingQueryMetricBatch?: QueryMetricBatch;
+  /** Flushes are single-flight so interval and shutdown paths cannot contend for Neon connections. */
+  private queryMetricFlushInFlight?: Promise<void>;
+  private queryMetricFlushRetryAt = 0;
+  private queryMetricFlushBackoffMs = 0;
 
   constructor(private readonly database: TransactionPool) {}
 
@@ -442,21 +498,47 @@ export class NeonDurableState {
   }
 
   /** Take the process-local query/transfer counters without retaining SQL or payloads. */
-  takeQueryMetricSnapshot(): { instanceId: string; batchId: number; observedAt: number; samples: QueryMetricSample[] } | undefined {
+  takeQueryMetricSnapshot(): QueryMetricBatch | undefined {
     if (!this.queryMetrics.size) return undefined;
     const samples = [...this.queryMetrics.values()].map((sample) => ({ ...sample }));
     this.queryMetrics.clear();
     return { instanceId: this.queryMetricInstanceId, batchId: ++this.queryMetricBatchId, observedAt: Date.now(), samples };
   }
 
-  /** Persist a snapshot and restore it if the metrics table is temporarily unavailable. */
+  /**
+   * Persist a snapshot and retain it across transient Neon failures.
+   *
+   * This is deliberately best-effort telemetry. It must never block or roll
+   * back canonical user data, but it also must not discard a batch merely
+   * because the pooled connection was unavailable for one flush interval.
+   */
   async flushQueryMetrics(): Promise<void> {
-    const batch = this.takeQueryMetricSnapshot();
+    if (this.queryMetricFlushInFlight) return this.queryMetricFlushInFlight;
+    if (Date.now() < this.queryMetricFlushRetryAt) return;
+
+    const inFlight = this.flushQueryMetricsInternal();
+    this.queryMetricFlushInFlight = inFlight;
+    try { await inFlight; }
+    finally {
+      if (this.queryMetricFlushInFlight === inFlight) this.queryMetricFlushInFlight = undefined;
+    }
+  }
+
+  private async flushQueryMetricsInternal(): Promise<void> {
+    this.pendingQueryMetricBatch ??= this.takeQueryMetricSnapshot();
+    const batch = this.pendingQueryMetricBatch;
     if (!batch) return;
     try {
       await this.recordQueryMetricBatch(batch);
+      if (this.pendingQueryMetricBatch === batch) this.pendingQueryMetricBatch = undefined;
+      this.queryMetricFlushBackoffMs = 0;
+      this.queryMetricFlushRetryAt = 0;
     } catch (error) {
-      for (const sample of batch.samples) this.recordQueryMetric(sample);
+      const nextBackoff = this.queryMetricFlushBackoffMs
+        ? Math.min(5 * 60_000, this.queryMetricFlushBackoffMs * 2)
+        : 5_000;
+      this.queryMetricFlushBackoffMs = nextBackoff;
+      this.queryMetricFlushRetryAt = Date.now() + nextBackoff;
       throw error;
     }
   }
@@ -1101,6 +1183,80 @@ export class NeonDurableState {
     if (!definition.includes("profile") || !definition.includes("calls") || !definition.includes("sdk")) throw new Error("Neon durable session-domain constraint is missing required domains; apply the latest durable-state migrations.");
   }
 
+  async assertVoiceCallReconciliationSchema(): Promise<void> {
+    await this.measuredQuery(this.database,
+      "SELECT id, user_id, call_id, provider, provider_call_id, phase, status, attempts, next_attempt_at, lease_token, lease_until, last_error, created_at, updated_at FROM chusky_voice_call_reconciliation LIMIT 0");
+  }
+
+  async enqueueVoiceCallReconciliation(record: VoiceCallReconciliationRecord): Promise<void> {
+    if (!/^vcr_[A-Za-z0-9_-]{1,120}$/.test(record.id) || !/^(twc|blc)_[A-Za-z0-9_-]{1,120}$/.test(record.callId)
+      || !Number.isSafeInteger(record.userId) || record.userId <= 0 || (record.provider !== "twilio" && record.provider !== "bland")
+      || (record.phase !== "provider" && record.phase !== "outcome") || record.status !== "pending"
+      || !Number.isSafeInteger(record.attempts) || record.attempts < 0 || record.attempts > 100
+      || !Number.isSafeInteger(record.nextAttemptAt) || record.nextAttemptAt <= 0) {
+      throw new Error("Voice reconciliation record is invalid.");
+    }
+    await this.measuredQuery(this.database,
+      `INSERT INTO chusky_voice_call_reconciliation
+       (id, user_id, call_id, provider, provider_call_id, phase, status, attempts, next_attempt_at, last_error, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, to_timestamp($8 / 1000.0), $9, to_timestamp($10 / 1000.0), to_timestamp($10 / 1000.0))
+       ON CONFLICT (user_id, call_id, phase) DO UPDATE SET
+         provider_call_id = COALESCE(EXCLUDED.provider_call_id, chusky_voice_call_reconciliation.provider_call_id),
+         next_attempt_at = LEAST(chusky_voice_call_reconciliation.next_attempt_at, EXCLUDED.next_attempt_at),
+         status = CASE WHEN chusky_voice_call_reconciliation.status = 'running'
+           AND chusky_voice_call_reconciliation.lease_until > NOW() THEN chusky_voice_call_reconciliation.status ELSE 'pending' END,
+         lease_token = CASE WHEN chusky_voice_call_reconciliation.lease_until > NOW() THEN chusky_voice_call_reconciliation.lease_token ELSE NULL END,
+         lease_until = CASE WHEN chusky_voice_call_reconciliation.lease_until > NOW() THEN chusky_voice_call_reconciliation.lease_until ELSE NULL END,
+         updated_at = NOW()`,
+      [record.id, record.userId, record.callId, record.provider, record.providerCallId ?? null, record.phase, record.attempts, record.nextAttemptAt, record.lastError ?? null, record.createdAt]);
+  }
+
+  async claimVoiceCallReconciliations(nowMs: number, limit: number, leaseMs: number, leaseToken: string): Promise<VoiceCallReconciliationRecord[]> {
+    if (!Number.isSafeInteger(nowMs) || nowMs <= 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(leaseMs) || leaseMs < 5_000 || leaseMs > 10 * 60_000 || !/^[A-Za-z0-9_-]{1,120}$/.test(leaseToken)) throw new Error("Voice reconciliation claim arguments are invalid.");
+    const client = await this.database.connect();
+    try {
+      await this.measuredQuery(client, "BEGIN");
+      const result = await this.measuredQuery<VoiceReconciliationRow>(client,
+        `WITH due AS (
+           SELECT id FROM chusky_voice_call_reconciliation
+           WHERE next_attempt_at <= to_timestamp($1 / 1000.0)
+             AND (status = 'pending' OR lease_until IS NULL OR lease_until <= NOW())
+           ORDER BY next_attempt_at, updated_at, id
+           FOR UPDATE SKIP LOCKED
+           LIMIT $2
+         )
+         UPDATE chusky_voice_call_reconciliation AS queue
+         SET status = 'running', lease_token = $3, lease_until = to_timestamp(($1 + $4) / 1000.0),
+             attempts = LEAST(100, queue.attempts + 1), updated_at = NOW()
+         FROM due WHERE queue.id = due.id
+         RETURNING queue.id, queue.user_id, queue.call_id, queue.provider, queue.provider_call_id,
+           queue.phase, queue.status, queue.attempts, queue.next_attempt_at, queue.lease_token,
+           queue.lease_until, queue.last_error, queue.created_at, queue.updated_at`,
+        [nowMs, limit, leaseToken, leaseMs]);
+      await this.measuredQuery(client, "COMMIT");
+      return result.rows.map(voiceReconciliationFromRow);
+    } catch (error) {
+      await this.measuredQuery(client, "ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  }
+
+  async completeVoiceCallReconciliation(id: string, leaseToken: string): Promise<boolean> {
+    if (!/^vcr_[A-Za-z0-9_-]{1,120}$/.test(id) || !/^[A-Za-z0-9_-]{1,120}$/.test(leaseToken)) throw new Error("Voice reconciliation completion arguments are invalid.");
+    const result = await this.measuredQuery(this.database,
+      "DELETE FROM chusky_voice_call_reconciliation WHERE id = $1 AND lease_token = $2 RETURNING id", [id, leaseToken]);
+    return result.rows.length > 0;
+  }
+
+  async retryVoiceCallReconciliation(id: string, leaseToken: string, nextAttemptAt: number, errorMessage: string): Promise<boolean> {
+    if (!/^vcr_[A-Za-z0-9_-]{1,120}$/.test(id) || !/^[A-Za-z0-9_-]{1,120}$/.test(leaseToken) || !Number.isSafeInteger(nextAttemptAt) || nextAttemptAt <= 0) throw new Error("Voice reconciliation retry arguments are invalid.");
+    const result = await this.measuredQuery(this.database,
+      `UPDATE chusky_voice_call_reconciliation SET status = 'pending', lease_token = NULL, lease_until = NULL,
+        next_attempt_at = to_timestamp($3 / 1000.0), last_error = $4, updated_at = NOW()
+       WHERE id = $1 AND lease_token = $2 RETURNING id`, [id, leaseToken, nextAttemptAt, errorMessage.slice(0, 500)]);
+    return result.rows.length > 0;
+  }
+
   /** Fail startup before enabling run cutover if migrations 0002 and 0005 are absent. */
   async assertSdkRunSchema(): Promise<void> {
     await this.measuredQuery(this.database, "SELECT user_id, thread_id, run_id, payload, version FROM chusky_sdk_run LIMIT 0");
@@ -1586,6 +1742,8 @@ export async function createNeonDurableState(databaseUrl: string): Promise<NeonD
   // Keep the dependency dormant unless the explicit durable-state feature is
   // enabled. This also lets memory-only test runs exercise domain logic.
   const { Pool } = await import("pg");
-  const { securePostgresConnectionString } = await import("./postgresConnection.js");
-  return new NeonDurableState(new Pool({ connectionString: securePostgresConnectionString(connectionString), max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 }));
+  const { postgresPoolOptions, securePostgresConnectionString } = await import("./postgresConnection.js");
+  const pool = new Pool(postgresPoolOptions(securePostgresConnectionString(connectionString)));
+  pool.on("error", (error) => logger.warn({ errorType: error instanceof Error ? error.name : "PostgresError" }, "Durable state database pool error"));
+  return new NeonDurableState(pool);
 }

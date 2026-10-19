@@ -377,6 +377,11 @@ export const config = {
   sendblueWorkflowUrl: optional("SENDBLUE_WORKFLOW_URL", ""),
   // Twilio is Chusky's telephone transport for incoming and outgoing calls.
   twilioVoiceEnabled: optional("TWILIO_VOICE_ENABLED", "false") === "true",
+  // Provider selection is explicit. Calls never silently switch providers,
+  // which keeps caller identity, billing, and webhook ownership deterministic.
+  voiceCallProvider: oneOf("VOICE_CALL_PROVIDER", "twilio", ["twilio", "bland"] as const),
+  twilioVoiceMaxActiveCalls: boundedInt("TWILIO_VOICE_MAX_ACTIVE_CALLS", 20, 1, 500),
+  twilioVoiceMaxCallSeconds: boundedInt("TWILIO_VOICE_MAX_CALL_SECONDS", 7_200, 60, 14_400),
   twilioSmsEnabled: optional("TWILIO_SMS_ENABLED", "false") === "true",
   twilioAccountSid: optional("TWILIO_ACCOUNT_SID", ""),
   twilioAuthToken: optional("TWILIO_AUTH_TOKEN", ""),
@@ -388,6 +393,12 @@ export const config = {
   // routing have been verified in a controlled canary.
   twilioSubaccountManagementEnabled: optional("TWILIO_SUBACCOUNT_MANAGEMENT_ENABLED", "false") === "true",
   twilioSubaccountEncryptionKey: optional("TWILIO_SUBACCOUNT_ENCRYPTION_KEY", "").trim(),
+  // These are release attestations, not a substitute for a billing or
+  // regulatory integration. Number sales stay closed until the platform has
+  // verified customer charging, cancellation, and country/emergency-address
+  // handling in the controlled environment.
+  twilioCustomerBillingReady: optional("TWILIO_CUSTOMER_BILLING_READY", "false") === "true",
+  twilioRegulatoryReady: optional("TWILIO_REGULATORY_READY", "false") === "true",
   twilioManagedNumberPriceCents: boundedInt("TWILIO_MANAGED_NUMBER_PRICE_CENTS", 200, 0, 100_000),
   twilioManagedNumberPriceThresholdCents: boundedInt("TWILIO_MANAGED_NUMBER_PRICE_THRESHOLD_CENTS", 150, 0, 100_000),
   twilioManagedNumberMarkupCents: boundedInt("TWILIO_MANAGED_NUMBER_MARKUP_CENTS", 25, 0, 100_000),
@@ -441,8 +452,8 @@ export const config = {
   // server-side configuration so a caller cannot choose the represented
   // business, connected-app grant, or disclosure policy.
   twilioInboundVoiceProfile: optional("TWILIO_INBOUND_VOICE_PROFILE", ""),
-  // Bland is an optional parallel phone provider. Twilio remains available
-  // independently and is selected when BLAND_VOICE_ENABLED=false.
+  // Bland is an optional provider. It is selected only when
+  // VOICE_CALL_PROVIDER=bland; it is never an implicit fallback.
   blandVoiceEnabled: optional("BLAND_VOICE_ENABLED", "false") === "true",
   blandApiKey: optional("BLAND_API_KEY", ""),
   blandWebhookSecret: optional("BLAND_WEBHOOK_SECRET", ""),
@@ -834,6 +845,10 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // Each upstream attempt has a bounded wall-clock deadline. OpenRouter may
   // still choose a healthy provider/model fallback within that deadline.
   openRouterTimeoutMs: positiveInt("OPENROUTER_TIMEOUT_MS", 45_000),
+  // Bound the whole model turn, including transient retries. Without this
+  // ceiling a 45s attempt followed by a 90s retry can hold a user-facing run
+  // open for more than two minutes before it reports a recoverable failure.
+  openRouterTotalTimeoutMs: boundedInt("OPENROUTER_TOTAL_TIMEOUT_MS", 75_000, 30_000, 180_000),
   // Keep provider retries bounded even if deployment configuration is wrong.
   // The workflow/task layers provide the outer retry boundary; a single model
   // turn should never be allowed to spin indefinitely.
@@ -906,6 +921,15 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   durableStateEnabled: optional("DURABLE_STATE_ENABLED", "false") === "true",
   durableStateDatabaseUrl: optional("DURABLE_STATE_DATABASE_URL", ""),
   durableStateMigrationDatabaseUrl: optional("DURABLE_STATE_MIGRATION_DATABASE_URL", ""),
+  // Keep Neon connection pressure bounded across the auth, durable-state,
+  // and optional durable-memory pools. Runtime URLs should be pooled; these
+  // limits are intentionally separate from the single-connection migration
+  // pools.
+  postgresPoolMax: boundedInt("POSTGRES_POOL_MAX", 5, 1, 20),
+  postgresConnectionTimeoutMs: boundedInt("POSTGRES_CONNECTION_TIMEOUT_MS", 5_000, 1_000, 30_000),
+  postgresIdleTimeoutMs: boundedInt("POSTGRES_IDLE_TIMEOUT_MS", 10_000, 1_000, 120_000),
+  postgresStatementTimeoutMs: boundedInt("POSTGRES_STATEMENT_TIMEOUT_MS", 30_000, 1_000, 120_000),
+  postgresQueryTimeoutMs: boundedInt("POSTGRES_QUERY_TIMEOUT_MS", 35_000, 1_000, 120_000),
   // Durable deployments enable storage/query telemetry by default. Set the
   // explicit flag to false only for a deliberately unobserved local rollout.
   durableStorageMetricsEnabled: optional("DURABLE_STORAGE_METRICS_ENABLED", optional("DURABLE_STATE_ENABLED", "false") === "true" ? "true" : "false") === "true",

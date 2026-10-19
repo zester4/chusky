@@ -8,6 +8,7 @@ import { monitoringSnapshot } from "./monitoring.js";
 import { logger } from "./logger.js";
 import { builderEnabled, builderRepository, builderVoiceControl, invalidateBuilderControl, newBuilderEvent, type BuilderRepository, type BuilderVoiceControl } from "./builderControl.js";
 import { checkTwilioSubaccountHealth, listTwilioSubaccountViews, provisionTwilioSubaccount, updateTwilioSubaccountStatus, type TwilioSubaccountView } from "./calls/twilioSubaccounts.js";
+import { isTwilioVoiceBridgeConfigured } from "./calls/twilioNumbers.js";
 
 export interface BuilderSession {
   user: { id: string; name?: string; emailVerified?: boolean; twoFactorEnabled?: boolean };
@@ -56,7 +57,7 @@ async function systemSnapshot() {
       { name: "E2B browser", configured: Boolean(config.e2bEnabled && config.e2bApiKey) },
       { name: "Daytona", configured: Boolean(config.daytonaApiKey) },
       { name: "Twilio voice", configured: Boolean(config.twilioVoiceEnabled && config.twilioAccountSid && config.twilioAuthToken) },
-      { name: "Twilio tenant numbers", configured: Boolean(config.twilioSubaccountManagementEnabled && config.twilioNumberManagementEnabled && config.twilioSubaccountEncryptionKey && config.twilioWebhookBaseUrl) },
+      { name: "Twilio tenant numbers", configured: Boolean(config.twilioSubaccountManagementEnabled && config.twilioNumberManagementEnabled && config.twilioSubaccountEncryptionKey && isTwilioVoiceBridgeConfigured() && config.twilioCustomerBillingReady && config.twilioRegulatoryReady) },
     ],
   };
 }
@@ -184,6 +185,12 @@ export function registerBuilderAdmin(app: Hono, dependencies: BuilderDependencie
     if (voice.numberManagementEnabled && !voice.subaccountManagementEnabled) return c.json(error("invalid_voice_control", "Number management requires tenant subaccount management."), 400);
     if (voice.subaccountManagementEnabled && (!config.twilioAccountSid || !config.twilioAuthToken || !config.twilioSubaccountEncryptionKey || !/^https:\/\//i.test(config.twilioWebhookBaseUrl))) {
       return c.json(error("voice_prerequisites_missing", "Configure the parent Twilio credentials, encryption key, and HTTPS voice webhook before enabling tenant phone accounts."), 400);
+    }
+    if (voice.numberManagementEnabled && (!config.twilioCustomerBillingReady || !config.twilioRegulatoryReady)) {
+      return c.json(error("voice_prerequisites_missing", "Customer billing and country/regulatory workflows must be verified before enabling customer number sales."), 400);
+    }
+    if (voice.numberManagementEnabled && !isTwilioVoiceBridgeConfigured()) {
+      return c.json(error("voice_prerequisites_missing", "Enable Twilio inbound voice and configure the HTTPS webhook, WSS media bridge, and bridge secret before enabling customer number sales."), 400);
     }
     const event = {
       ...newBuilderEvent(session.user.id, "builder_voice_control_changed"),

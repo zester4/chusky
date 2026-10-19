@@ -312,8 +312,15 @@ export const VOICE_TURN_NATIVE_TOOLS = [
   "CHUCK_TASK_LIST",
   "CHUCK_TASK_GET",
   "CHUCK_LIST_PHONE_CALLS",
+  "CHUCK_CONTROL_PHONE_CALL",
 ] as const;
 const VOICE_TURN_TOOL_NAMES = new Set<string>(VOICE_TURN_NATIVE_TOOLS);
+// Live calls may control their own active call (for example, a requested
+// handoff), but must never receive owner-chat tools such as browser access or
+// connected-account discovery. Those tools caused the model to leave the
+// external conversation and speak as if it were still chatting with the
+// owner.
+const VOICE_TURN_SAFE_NATIVE_TOOLS = new Set<string>(VOICE_TURN_NATIVE_TOOLS);
 
 /** Pure capability fence used by the live voice payload and its contract tests. */
 export function voiceToolIsWithinCapabilityFence(name: string, capabilityNames: Iterable<string>, explicitAllow: Iterable<string> = []): boolean {
@@ -689,17 +696,18 @@ export async function orChat(
   let budgetExhausted = false;
   let attemptsMade = 0;
   const requestStartedAt = Date.now();
-  const maxTotalElapsedMs = routing.maxTotalElapsedMs
+  const requestedTotalElapsedMs = routing.maxTotalElapsedMs
     ? Math.max(1, Math.min(routing.maxTotalElapsedMs, 120_000))
-    : undefined;
-  const deadlineAt = maxTotalElapsedMs ? requestStartedAt + maxTotalElapsedMs : undefined;
+    : Number.POSITIVE_INFINITY;
+  const maxTotalElapsedMs = Math.min(config.openRouterTotalTimeoutMs, requestedTotalElapsedMs);
+  const deadlineAt = requestStartedAt + maxTotalElapsedMs;
   const trace = routing.triggerEventId
     ? { triggerEventId: routing.triggerEventId, round: routing.triggerRound }
     : undefined;
   let streamedOutputExposed = false;
   for (let attempt = 0; attempt < config.openRouterMaxAttempts; attempt++) {
     if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
-    const remainingMs = deadlineAt ? deadlineAt - Date.now() : Number.POSITIVE_INFINITY;
+    const remainingMs = deadlineAt - Date.now();
     if (remainingMs <= 0) {
       budgetExhausted = true;
       break;
@@ -747,17 +755,17 @@ export async function orChat(
     }
     if (attempt + 1 < config.openRouterMaxAttempts) {
       const retryDelayMs = 400 * 2 ** attempt + Math.random() * 250;
-      const retryRemainingMs = deadlineAt ? deadlineAt - Date.now() : Number.POSITIVE_INFINITY;
+      const retryRemainingMs = deadlineAt - Date.now();
       if (retryRemainingMs <= retryDelayMs) {
         budgetExhausted = true;
         break;
       }
-      logger.debug({ model, attempt: attempt + 1, timeoutMs: openRouterAttemptTimeoutMs(attempt + 1) }, "Retrying OpenRouter request after a transient failure");
+      logger.debug({ model, attempt: attempt + 1, timeoutMs: Math.max(1, Math.min(openRouterAttemptTimeoutMs(attempt + 1), retryRemainingMs - retryDelayMs)) }, "Retrying OpenRouter request after a transient failure");
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
   }
   const elapsedMs = Date.now() - requestStartedAt;
-  const exhaustedBudget = budgetExhausted || Boolean(deadlineAt && elapsedMs >= maxTotalElapsedMs!);
+  const exhaustedBudget = budgetExhausted || elapsedMs >= maxTotalElapsedMs;
   if ((timedOut && lastError instanceof Error && lastError.name === "TimeoutError") || exhaustedBudget) {
     logger.warn({
       model: model.slice(0, 160),
@@ -2655,7 +2663,10 @@ async function executeAgent(
   // The trusted outbound purpose selects the capability preload, but it must
   // not make ordinary greetings pay for action routing on every turn.
   const voiceFastLane = voiceTurn && ownerPrivateRun && !approvedApprovalId && !options?.meetingId && !options?.toolAllow?.length
-    && voiceFastLaneEligible(voiceRoutingText);
+    // The trusted call objective is part of the routing decision. A caller
+    // saying only “Hey” must not put a scheduling/email call into the tool-
+    // free lane when the objective requires Calendar or Gmail.
+    && voiceFastLaneEligible(`${voiceRoutingText}\n${options?.voiceRoutingHint ?? ""}`);
   const sharedMeetingRoomAccess = sharedScope && options?.sharedMeetingRoomAccess === true && Boolean(options?.meetingId);
   const existingRun = options?.ephemeral || voiceTurn ? undefined : await getAgentRun(userId, durableRunId);
   let durableRunRecord = existingRun;
@@ -2795,6 +2806,19 @@ async function executeAgent(
       if (name.startsWith("COMPOSIO_")) return voiceToolPolicy.enabled;
       return voiceToolkitAllowed(name, voiceToolPolicy);
     });
+  }
+  if (voiceTurn) {
+    availableTools = availableTools.filter((tool) => {
+      const name = toolName(tool);
+      return !name.startsWith("CHUCK_") || VOICE_TURN_SAFE_NATIVE_TOOLS.has(name);
+    });
+  }
+  // A normal chat turn may see the durable-wait schema, but only a worker
+  // owning an active task can execute it. Keeping it out of interactive runs
+  // prevents a phone-call request from trying to park itself with a durable
+  // timer and surfacing “only available inside an active durable task.”
+  if (!options?.taskId) {
+    availableTools = availableTools.filter((tool) => toolName(tool) !== "CHUCK_TASK_WAIT");
   }
   // A bounded voice preload may resolve an exact action through Composio's
   // catalogue without that action appearing in session.tools(). Treat that
@@ -5466,6 +5490,26 @@ async function discoverVoiceCalendarTools(sessionObj: any, sessionTools: any[], 
     }
   } catch (error) {
     logger.debug({ err: error }, "Voice calendar tool discovery unavailable; continuing without calendar actions");
+  }
+  // ToolRouter versions can return only gateway cards from search(). That is
+  // useful for discovery but not callable by the voice model. Resolve the
+  // bounded calendar action family by exact slug as a final fallback so a
+  // connected Google Calendar never degrades into owner-chat discovery or a
+  // browser detour simply because the catalogue response was compact.
+  const calendarSlugs = VOICE_COMPOSIO_BUNDLES.calendar;
+  const missing = calendarSlugs.filter((slug) => !discovered.has(slug));
+  if (missing.length && sessionObj) {
+    try {
+      const exact = await resolveExactComposioModelTools(sessionObj, missing, signal);
+      for (const slug of missing) {
+        const resolved = exact.get(composioActionSlug(slug));
+        if (resolved) add(resolved.tool);
+        if (discovered.size >= VOICE_CALENDAR_TOOL_LIMIT) break;
+      }
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      logger.debug({ err: error, count: missing.length }, "Exact voice calendar schema lookup unavailable");
+    }
   }
   return [...discovered.values()];
 }

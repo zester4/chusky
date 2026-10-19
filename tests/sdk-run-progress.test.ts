@@ -109,3 +109,12 @@ test("completed SDK progress exposes generated artifacts as safe evidence", () =
   assert.equal(progress.progress, 1);
   assert.deepEqual(progress.evidence, [{ id: "artifact_1", label: "proposal.pdf", kind: "artifact", href: "artifact:artifact_1" }]);
 });
+
+test("terminal SDK progress preserves failure and cancellation instead of impersonating approval", () => {
+  const failed = terminalSdkRunProgress("failed", { error: "The model request timed out." });
+  const cancelled = terminalSdkRunProgress("cancelled");
+  assert.equal(failed.phase, "failed");
+  assert.equal(failed.requiresApproval, undefined);
+  assert.equal(cancelled.phase, "cancelled");
+  assert.equal(cancelled.requiresApproval, undefined);
+});

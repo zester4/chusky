@@ -16,6 +16,8 @@
     "sdk:publish": "node scripts/publish-sdk.mjs",
     "agent:upgrade": "tsx scripts/record-agent-upgrade.ts",
     "provider:webhook-smoke": "tsx scripts/provider-webhook-smoke.ts",
+    "voice:canary": "tsx scripts/voice-canary.ts",
+    "voice:load": "tsx scripts/voice-load-test.ts",
     "voice:evaluate": "tsx scripts/voice-evaluate.ts",
     "start": "node dist/index.js",
     "cli": "tsx src/cli.ts",

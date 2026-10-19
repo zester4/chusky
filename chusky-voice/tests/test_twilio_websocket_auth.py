@@ -109,6 +109,15 @@ class TwilioWebSocketSignatureTests(unittest.TestCase):
 
         self.assertFalse(self.validate())
 
+    def test_managed_stream_can_defer_secret_validation_after_url_validation(self):
+        self.websocket.headers = {}
+        self.assertTrue(valid_twilio_websocket(self.websocket, self.settings, require_signature=False))
+        self.assertEqual(StubRequestValidator.calls, [])
+
+    def test_deferred_validation_still_rejects_forged_url(self):
+        self.websocket.url = "wss://attacker.example/twilio/stream"
+        self.assertFalse(valid_twilio_websocket(self.websocket, self.settings, require_signature=False))
+
 
 if __name__ == "__main__":
     unittest.main()

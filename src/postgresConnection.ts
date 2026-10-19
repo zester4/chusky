@@ -1,3 +1,6 @@
+import type { PoolConfig } from "pg";
+import { config } from "./config.js";
+
 const POSTGRES_PROTOCOLS = new Set(["postgres:", "postgresql:"]);
 
 /**
@@ -16,4 +19,23 @@ export function securePostgresConnectionString(value: string): string {
 
   url.searchParams.set("sslmode", "verify-full");
   return url.toString();
+}
+
+/**
+ * Runtime pool policy for Neon-backed application traffic.
+ *
+ * Migrations deliberately do not use this helper: they use a direct URL and
+ * their own single-connection settings. Keeping that distinction prevents a
+ * pooled PgBouncer connection from being used for session-scoped migration
+ * work while bounding the long-lived application pools.
+ */
+export function postgresPoolOptions(connectionString: string): PoolConfig {
+  return {
+    connectionString,
+    max: config.postgresPoolMax,
+    idleTimeoutMillis: config.postgresIdleTimeoutMs,
+    connectionTimeoutMillis: config.postgresConnectionTimeoutMs,
+    statement_timeout: config.postgresStatementTimeoutMs,
+    query_timeout: config.postgresQueryTimeoutMs,
+  };
 }

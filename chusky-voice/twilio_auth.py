@@ -8,7 +8,7 @@ import time
 from urllib.parse import urlsplit
 
 
-def valid_twilio_websocket(websocket, settings) -> bool:
+def valid_twilio_websocket(websocket, settings, require_signature: bool = True) -> bool:
     """Validate the Media Streams handshake with Twilio's official SDK.
 
     Use the configured public WSS URL as the signature URL instead of trusting
@@ -27,9 +27,7 @@ def valid_twilio_websocket(websocket, settings) -> bool:
         return False
 
     if (
-        not auth_token
-        or not signature
-        or configured.scheme.lower() != "wss"
+        configured.scheme.lower() != "wss"
         or not configured.hostname
         or configured.username is not None
         or configured.password is not None
@@ -43,6 +41,16 @@ def valid_twilio_websocket(websocket, settings) -> bool:
         or requested.fragment
         or configured.path not in {"/twilio/stream", "/twilio/stream/"}
     ):
+        return False
+
+    # Managed Twilio numbers are signed by their tenant subaccount. The
+    # bridge intentionally does not receive tenant secrets, so a valid URL may
+    # be accepted provisionally and authorized by Chusky's root service after
+    # the start event identifies the call. Parent-account calls still take the
+    # fast local signature path below.
+    if not require_signature:
+        return True
+    if not auth_token or not signature:
         return False
 
     try:

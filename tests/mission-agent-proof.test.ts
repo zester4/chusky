@@ -4,6 +4,7 @@ import { config } from "../src/config.js";
 import { runAgent, invalidateSession, setAgentDependenciesForTests } from "../src/agent.js";
 import { createMission, getMission, getTask, initStore, listTasks, startMission, updateTask, type TaskRecord } from "../src/store.js";
 import { reconcileMissionExecution } from "../src/missionScheduler.js";
+import { recoverMissionsForOwner } from "../src/missionRecovery.js";
 import { executeDurableTask } from "../src/taskRunner.js";
 import { executeTaskSlice } from "../src/taskSlice.js";
 import { captureMissionSliceState, missionWorkerToolAllowlist, MISSION_WORKER_CONTROL_TOOLS } from "../src/missionWorker.js";
@@ -127,6 +128,200 @@ test("real agent dispatch preserves the owning mission step for a durable timer"
   assert.equal(result.taskWait?.nextAction, "Verify stage 1 after wake");
   assert.ok(typeof result.taskWait?.runAt === "number" && result.taskWait.runAt > Date.now());
   assert.deepEqual(result.toolOutcomes, [{ callId: "wait-1", toolSlug: "CHUCK_TASK_WAIT", status: "succeeded", dispatched: true }]);
+});
+
+test("one mocked mission wakes from a durable timer and finishes the same step", async () => {
+  const userId = 981006;
+  const queue = new MissionFakeQStash();
+  const created = await createMission(userId, {
+    title: "Timer continuation proof",
+    objective: "Park work, wake, and verify the result",
+    definitionOfDone: "The post-wake verification is complete",
+    steps: [{ id: "wait-and-verify", title: "Wait and verify", objective: "Save a checkpoint, wait, then verify the result." }],
+  });
+  await startMission(userId, created.id);
+  await reconcileMissionExecution(userId, created.id, queue.enqueue);
+  const initialTask = (await listTasks(userId)).find((candidate) => candidate.missionId === created.id && candidate.status === "queued");
+  assert.ok(initialTask);
+
+  let calls = 0;
+  const fakeRunAgent = (async (userIdFromRun: number, ...args: unknown[]) => {
+    const options = args.at(-1) as { taskId?: string; missionId?: string; missionStepId?: string; enqueueMissionTask?: typeof queue.enqueue; missionTimerResumed?: boolean };
+    let taskWait: { runAt: number; checkpoint: string; nextAction: string; reason?: string } | undefined;
+    const runtime = {
+      taskId: options.taskId,
+      missionId: options.missionId,
+      missionStepId: options.missionStepId,
+      enqueueMissionTask: options.enqueueMissionTask ?? queue.enqueue,
+      requestTaskWait: (request: { runAt: number; checkpoint: string; nextAction: string; reason?: string }) => { taskWait = request; },
+      missionTimerResumed: options.missionTimerResumed,
+    };
+    if (calls++ === 0) {
+      await nativeTool(userIdFromRun, "CHUCK_MISSION_CHECKPOINT", {
+        id: created.id,
+        checkpoint: "The pre-wake state was saved.",
+        nextAction: "After the timer wakes, verify the saved state.",
+      }, runtime);
+      await nativeTool(userIdFromRun, "CHUCK_TASK_WAIT", {
+        delaySeconds: 60,
+        checkpoint: "The work is parked with its pre-wake state saved.",
+        nextAction: "Verify the saved state after the timer wakes.",
+        reason: "The bounded fixture wait is intentional.",
+      }, runtime);
+      assert.ok(taskWait, "The mocked CHUCK_TASK_WAIT call must return a durable continuation request.");
+      return {
+        text: "The work is parked until the durable timer wakes.",
+        toolsUsed: ["CHUCK_MISSION_CHECKPOINT", "CHUCK_TASK_WAIT"],
+        toolsSucceeded: ["CHUCK_MISSION_CHECKPOINT", "CHUCK_TASK_WAIT"],
+        toolOutcomes: [],
+        taskWait,
+      };
+    }
+    assert.equal(options.missionTimerResumed, true, "The second turn must be marked as a post-wake continuation.");
+    await nativeTool(userIdFromRun, "CHUCK_MISSION_STEP_COMPLETE", {
+      id: created.id,
+      stepId: "wait-and-verify",
+      result: "The saved state was verified after the timer wake.",
+    }, runtime);
+    return {
+      text: "The saved state was verified after the timer wake.",
+      toolsUsed: ["CHUCK_MISSION_STEP_COMPLETE"],
+      toolsSucceeded: ["CHUCK_MISSION_STEP_COMPLETE"],
+      toolOutcomes: [],
+    };
+  }) as unknown as typeof runAgent;
+
+  const execute = (task: TaskRecord, signal?: AbortSignal) => executeTaskSlice(task, signal, {
+    attempt: 0,
+    sdkTaskMessage: async () => "",
+    sdkTaskSkillInstructions: async () => undefined,
+    sdkDurationSeconds: () => undefined,
+    withUserLock: async (_ownerId, _signal, work) => work(),
+    sendMessage: async () => undefined,
+    runAgent: fakeRunAgent,
+    enqueueMissionTask: queue.enqueue,
+  });
+
+  const firstRun = await executeDurableTask({ userId, taskId: initialTask.id }, { workerId: "timer-proof-worker-1", execute });
+  assert.equal(firstRun.claimed, true);
+  assert.equal(firstRun.task?.status, "queued");
+  const parked = await getMission(userId, created.id);
+  assert.equal(parked?.status, "waiting", JSON.stringify({ firstRun, parked, calls }));
+  assert.equal(parked?.waiting?.kind, "timer");
+  assert.equal(parked?.waiting?.stepId, "wait-and-verify");
+  const runAt = parked?.waiting?.runAt;
+  assert.ok(runAt);
+
+  const originalNow = Date.now;
+  try {
+    Date.now = () => runAt + 1;
+    const recovery = await recoverMissionsForOwner(userId, queue.enqueue);
+    assert.equal(recovery.timerWakes, 1);
+    assert.equal((await getMission(userId, created.id))?.status, "running");
+
+    const resumedTask = await getTask(userId, initialTask.id);
+    assert.ok(resumedTask);
+    const secondRun = await executeDurableTask({ userId, taskId: initialTask.id }, { workerId: "timer-proof-worker-2", execute });
+    assert.equal(secondRun.claimed, true);
+    assert.equal(secondRun.task?.status, "completed");
+    assert.equal((await getMission(userId, created.id))?.status, "completed");
+    assert.equal((await getMission(userId, created.id))?.steps.find((step) => step.id === "wait-and-verify")?.status, "completed");
+    assert.equal(calls, 2);
+    assert.equal(resumedTask.id, initialTask.id, "The wake must resume the existing durable task, not create a replacement identity.");
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("a no-live-model golden mission advances all 13 relationship stages step by step", async () => {
+  const userId = 981005;
+  const queue = new MissionFakeQStash();
+  const stages = [
+    ["goal", "Define the business outcome"],
+    ["signals", "Record the relevant change signals"],
+    ["list", "Build the working people list"],
+    ["shortlist", "Select the strongest fits"],
+    ["enrichment", "Add bounded contact and company details"],
+    ["saved-work", "Save the working list"],
+    ["next-action", "Persist the next action"],
+    ["research", "Prepare person-specific research"],
+    ["outreach", "Prepare and record approved outreach"],
+    ["meeting", "Record the meeting outcome"],
+    ["follow-up", "Persist the agreed follow-up"],
+    ["client", "Check the customer relationship state"],
+    ["feedback", "Record customer feedback and attention"],
+  ] as const;
+  const created = await createMission(userId, {
+    title: "Golden relationship mission",
+    objective: "Complete the full relationship lifecycle using deterministic local fixtures.",
+    definitionOfDone: "All 13 stages have a durable result and the mission is completed.",
+    budget: { maxDurationSeconds: 3_600, maxSteps: 20, maxToolCalls: 100, maxCost: 1 },
+    steps: stages.map(([id, objective], index) => ({
+      id,
+      title: id,
+      objective,
+      dependsOn: index ? [stages[index - 1]![0]] : [],
+    })),
+  });
+  await startMission(userId, created.id);
+  await reconcileMissionExecution(userId, created.id, queue.enqueue);
+
+  let modelCalls = 0;
+  const fakeRunAgent = (async (ownerId: number, ...args: unknown[]) => {
+    const options = args.at(-1) as { taskId?: string; missionId?: string; missionStepId?: string; enqueueMissionTask?: typeof queue.enqueue };
+    const stage = stages.find(([id]) => id === options.missionStepId);
+    assert.ok(stage, `the worker must receive one of the typed mission stages: ${options.missionStepId}`);
+    const runtime = { taskId: options.taskId, missionId: options.missionId, missionStepId: options.missionStepId, enqueueMissionTask: options.enqueueMissionTask ?? queue.enqueue };
+    modelCalls += 1;
+    await nativeTool(ownerId, "CHUCK_MISSION_CHECKPOINT", {
+      id: created.id,
+      checkpoint: `Mock provider receipt: ${stage[0]} stage completed locally.`,
+      nextAction: `Complete the ${stage[0]} stage after its local receipt is saved.`,
+    }, runtime);
+    await nativeTool(ownerId, "CHUCK_MISSION_STEP_COMPLETE", {
+      id: created.id,
+      stepId: stage[0],
+      result: `Local fixture verified the ${stage[0]} stage without a live model or provider.`,
+    }, runtime);
+    return {
+      text: `The ${stage[0]} stage is durably complete.`,
+      toolsUsed: ["CHUCK_MISSION_CHECKPOINT", "CHUCK_MISSION_STEP_COMPLETE"],
+      toolsSucceeded: ["CHUCK_MISSION_CHECKPOINT", "CHUCK_MISSION_STEP_COMPLETE"],
+      toolOutcomes: [
+        { callId: `checkpoint-${stage[0]}`, toolSlug: "CHUCK_MISSION_CHECKPOINT", status: "succeeded" as const, dispatched: true },
+        { callId: `complete-${stage[0]}`, toolSlug: "CHUCK_MISSION_STEP_COMPLETE", status: "succeeded" as const, dispatched: true },
+      ],
+    };
+  }) as unknown as typeof runAgent;
+
+  for (let index = 0; index < stages.length; index++) {
+    const task = (await listTasks(userId)).find((candidate) => candidate.missionId === created.id && candidate.status === "queued");
+    assert.ok(task, `stage ${index + 1} should be queued after the prior stage settles`);
+    await updateTask(userId, task.id, { runAt: Date.now() - 1 });
+    const execution = await executeDurableTask({ userId, taskId: task.id }, {
+      workerId: `golden-relationship-worker-${index}`,
+      execute: (claimed, signal) => executeTaskSlice(claimed, signal, {
+        attempt: 0,
+        sdkTaskMessage: async () => "",
+        sdkTaskSkillInstructions: async () => undefined,
+        sdkDurationSeconds: () => undefined,
+        withUserLock: async (_ownerId, _signal, work) => work(),
+        sendMessage: async () => undefined,
+        runAgent: fakeRunAgent,
+        enqueueMissionTask: queue.enqueue,
+      }),
+    });
+    assert.equal(execution.claimed, true);
+    assert.equal((await getTask(userId, task.id))?.status, "completed");
+  }
+
+  const finished = await getMission(userId, created.id);
+  assert.equal(modelCalls, stages.length);
+  assert.equal(finished?.status, "completed");
+  assert.deepEqual(finished?.steps.map((step) => step.id), stages.map(([id]) => id));
+  assert.ok(finished?.steps.every((step) => step.status === "completed"));
+  assert.ok(finished?.steps.every((step) => /Local fixture verified/.test(step.result ?? "")));
+  assert.equal(queue.published.length, stages.length);
 });
 
 test("a prose-only real agent is not promoted to mission completion", async () => {

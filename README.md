@@ -1387,7 +1387,10 @@ searchable transcript.
 #### Twilio voice calls
 
 Twilio handles inbound calls and default outbound calls; Bland can be enabled
-as an optional outbound alternative. Outbound calls start after normal destination and purpose validation. Verify
+as an optional outbound provider. Set `VOICE_CALL_PROVIDER=twilio` or
+`VOICE_CALL_PROVIDER=bland` explicitly; Chusky never silently switches
+providers after a configuration error or ambiguous provider response. Outbound
+calls start after normal destination and purpose validation. Verify
 `TWILIO_CALLER_ID` in Twilio, then configure
 `TWILIO_VOICE_ENABLED=true`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
 `TWILIO_WEBHOOK_BASE_URL=https://chusky.up.railway.app`, and
@@ -1468,7 +1471,13 @@ to Twilio for local numbers only; toll-free inventory is intentionally excluded.
 `TWILIO_MANAGED_NUMBER_PRICE_CENTS` is the customer-facing list price
 and ledger amount; actual customer payment collection still belongs to the
 platform billing integration and must not be represented as captured merely
-because the Twilio purchase succeeded.
+because the Twilio purchase succeeded. Number sales are fail-closed unless
+`TWILIO_CUSTOMER_BILLING_READY=true` and `TWILIO_REGULATORY_READY=true` are
+set as release attestations after customer billing/cancellation and
+country-specific regulatory/emergency-address workflows have been verified.
+The Builder control plane rejects the sales switch without both attestations.
+Releasing a managed number records a release event and stops future rental
+billing for that number.
 
 The private bridge routes are `/internal/twilio/turn`,
 `/internal/twilio/turn-stream`, `/internal/twilio/commit-turn`,
@@ -1497,6 +1506,22 @@ optional `VOICE_FALLBACK_MODELS`; this is not a hard real-time guarantee.
 Configure the same `TWILIO_AUTH_TOKEN` and `TWILIO_MEDIA_STREAM_URL` inside
 `chusky-voice/.env`; see [`chusky-voice/README.md`](chusky-voice/README.md)
 for latency tuning and Nginx WebSocket settings.
+
+Voice requires Redis in production. The root service uses Redis for a
+distributed active-call lease and a durable provider/outcome reconciliation
+queue shared by every Railway replica. A terminal provider state is read back
+from Twilio when a callback is delayed; reconciliation never dials a second
+call. Raw telephone audio is not retained by the bridge. Call recording is
+therefore fail-closed until a provider recording, consent announcement,
+encrypted storage, authenticated playback, deletion, retention-expiry, and
+audit-log path are enabled together; configuring a recording policy currently
+blocks the call instead of pretending that recording works.
+
+Workspace profiles may pin `twilio` or `bland`; the deployment setting is only
+the default and is never used as an implicit fallback. Phone transcripts are
+owner-scoped, bounded, retained for the profile's one, seven, or thirty-day
+policy after the call ends, automatically expired, and can be deleted sooner
+through `DELETE /v1/account/calls/:callId/transcript`.
 
 Per-account live-call voice choices are available in Telegram at `/home` →
 `Voice`. Twilio calls and Recall meetings use the verified Deepgram Flux
@@ -1720,6 +1745,11 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `DURABLE_STATE_ENABLED` | Neon | `false` | Enable the canonical owner-scoped session/domain repository; apply all `migrations/` first |
 | `DURABLE_STATE_DATABASE_URL` | Neon | — | Pooled runtime PostgreSQL URL for durable state |
 | `DURABLE_STATE_MIGRATION_DATABASE_URL` | Neon | — | Direct PostgreSQL URL used only by `npm run durable-state:migrate` |
+| `POSTGRES_POOL_MAX` | Neon/Postgres | `5` | Maximum connections per long-lived runtime pool; migration pools remain single-connection |
+| `POSTGRES_CONNECTION_TIMEOUT_MS` | Neon/Postgres | `5000` | Runtime connection deadline |
+| `POSTGRES_IDLE_TIMEOUT_MS` | Neon/Postgres | `10000` | Close idle runtime connections after this interval |
+| `POSTGRES_STATEMENT_TIMEOUT_MS` | Neon/Postgres | `30000` | Server-side deadline for runtime statements |
+| `POSTGRES_QUERY_TIMEOUT_MS` | Neon/Postgres | `35000` | Client-side deadline for runtime queries |
 | `DURABLE_STATE_SDK_RUNS_ENABLED` | Neon | follows durable state | Store SDK run payloads in the bounded `chusky_sdk_run` table |
 | `DURABLE_STATE_SDK_TABLES_ENABLED` | Neon | follows durable state | Store SDK threads, audit events, and idempotency records in separate bounded tables |
 | `DURABLE_STORAGE_METRICS_ENABLED` | Neon/Redis | follows durable state | Persist Redis and PostgreSQL query/transfer samples for admin diagnostics |

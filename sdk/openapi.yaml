@@ -46,7 +46,7 @@ paths:
   /admin/projects/{projectId}/rotate-key:
     post: { summary: Replace an API key and return the new value exactly once, responses: { '201': { description: Rotated } } }
   /account/projects:
-    get: { summary: List personal projects or projects attached to a verified organization member, responses: { '200': { description: OK } } }
+    get: { summary: List personal projects or projects attached to a verified organization member, responses: { '200': { description: Project data plus the valid scope catalog and least-privilege defaults for the authenticated dashboard session } } }
     post: { summary: Create a personal or organization project and return its key exactly once, responses: { '201': { description: Created }, '403': { description: Dashboard session, verified email, or organization admin required }, '409': { description: Active key limit reached } } }
   /account/projects/{projectId}:
     patch: { summary: Replace scopes for the authenticated owner's active API key, responses: { '200': { description: Updated }, '404': { description: Not found } } }
@@ -381,6 +381,19 @@ paths:
                 title: { type: string, maxLength: 240 }
                 objective: { type: string, maxLength: 8000 }
                 definitionOfDone: { type: string, maxLength: 4000 }
+                steps:
+                  type: array
+                  maxItems: 1000
+                  items:
+                    type: object
+                    required: [title, objective]
+                    properties:
+                      id: { type: string, maxLength: 160 }
+                      title: { type: string, maxLength: 240 }
+                      objective: { type: string, maxLength: 4000 }
+                      dependsOn: { type: array, maxItems: 20, items: { type: string } }
+                      allowedTools: { type: array, maxItems: 100, items: { type: string }, description: An explicit execution fence; an empty list disables provider/native tools while supervisor controls remain available. }
+                      retryLimit: { type: integer, minimum: 0, maximum: 20 }
                 maxDurationSeconds: { type: integer, minimum: 60, maximum: 2592000 }
                 durationMode: { type: string, enum: [active, wall_clock], default: active }
                 maxLifetimeSeconds: { type: integer, minimum: 60, maximum: 2592000, description: Absolute elapsed-time limit from start including waits; active default is 14 days. }

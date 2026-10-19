@@ -1255,6 +1255,36 @@ test("gives a transient OpenRouter retry a bounded larger timeout", () => {
   }
 });
 
+test("caps the whole OpenRouter turn instead of multiplying retry timeouts", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  const previous = { timeout: config.openRouterTimeoutMs, total: config.openRouterTotalTimeoutMs, attempts: config.openRouterMaxAttempts };
+  let now = 1_000;
+  let requests = 0;
+  config.openRouterTimeoutMs = 45_000;
+  config.openRouterTotalTimeoutMs = 75_000;
+  config.openRouterMaxAttempts = 3;
+  Date.now = () => now;
+  globalThis.fetch = (async () => {
+    requests += 1;
+    now += requests === 1 ? 45_000 : 30_000;
+    return new Response("upstream timeout", { status: 504 });
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      () => orChat("test/model", [{ role: "user", content: "hello" }], []),
+      (error: unknown) => error instanceof OpenRouterTimeoutError && error.attempts === 2,
+    );
+    assert.equal(requests, 2, "the total turn budget must stop a third retry after 75 seconds");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+    config.openRouterTimeoutMs = previous.timeout;
+    config.openRouterTotalTimeoutMs = previous.total;
+    config.openRouterMaxAttempts = previous.attempts;
+  }
+});
+
 test("raises the output budget for structured artifact calls", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830054);

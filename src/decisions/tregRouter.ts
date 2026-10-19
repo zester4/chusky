@@ -16,6 +16,7 @@ import { NONE_OPTION, awaitRoute, jevClient, jevEnabled, jevText, type JevChoice
 import { recordDecision } from "./telemetry.js";
 
 export const TREG_TOOL_CRITERIA: Record<string, string> = {
+  CHUCK_TREG_PLAN: "Explain the available Treg research playbooks and the bounded workflow for this request without calling a provider.",
   CHUCK_TREG_ENRICH_PERSON: "Find live data about a specific person: work email, title, company, domain, or profile URL.",
   CHUCK_TREG_ENRICH_COMPANY: "Find live firmographic data about a specific company by domain or name: industry, headcount, website, description.",
   CHUCK_TREG_RESOLVE: "Answer a bounded external data need that requires calling one or more live data providers and returning sourced fields.",
@@ -28,7 +29,28 @@ export const TREG_TOOL_CRITERIA: Record<string, string> = {
 
 export type TregTurnRoute = { tool?: string; probability: number; needsLiveData: number; fallbackReason?: string };
 
+/**
+ * An explicit Treg request must not be downgraded to a generic conversation
+ * merely because the routing model does not recognize the product name. This
+ * is a route hint only: native dispatch, spend limits, approvals, and provider
+ * calls remain governed by their normal runtime boundaries.
+ */
+export function explicitTregToolRoute(objective: string): string | undefined {
+  const text = objective.toLowerCase();
+  if (!/\b(?:treg|treg\.com)\b/.test(text)) return undefined;
+  if (/\b(?:what can you do|what does it do|how does it work|capabilit(?:y|ies)|tell me about|use (?:it|treg)|with treg)\b/.test(text)) return "CHUCK_TREG_PLAN";
+  if (/\b(?:work email|email|contact|person|people|lead|prospect|decision[- ]maker|title|profile)\b/.test(text)) return "CHUCK_TREG_PEOPLE_SEARCH";
+  if (/\b(?:company|account|firmographic|headcount|industry|domain|employee)\b/.test(text)) return "CHUCK_TREG_ENRICH_COMPANY";
+  if (/\b(?:enrich|research|signal|hiring|technology|market|provider|search|find)\b/.test(text)) return "CHUCK_TREG_PLAN";
+  return "CHUCK_TREG_PLAN";
+}
+
 export async function computeTregTurnRoute(objective: string, options: { client?: JevClient; signal?: AbortSignal; sessionId?: string } = {}): Promise<TregTurnRoute> {
+  const explicitTool = explicitTregToolRoute(objective);
+  if (explicitTool) {
+    recordDecision({ surface: "treg_tool", mode: "enforce", applied: true, fallbackReason: "explicit_treg_intent", jev: [{ id: explicitTool, p: 1 }], latencyMs: 0, model: "deterministic" });
+    return { tool: explicitTool, probability: 1, needsLiveData: explicitTool !== "CHUCK_TREG_PLAN" ? 1 : 0 };
+  }
   const client = options.client ?? jevClient();
   const result = await client.evaluate({ request: jevText(objective, 3_000) }, {
     tool: {

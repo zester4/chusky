@@ -423,6 +423,13 @@ export const chuckTools: NativeToolDefinition[] = [...baseChuckTools, ...shoppin
       enum: parameters.properties.processName.enum.filter((value: string) => value !== "browser" && value !== "chrome"),
     };
   }
+  if (name === "CHUCK_START_PHONE_CALL" && parameters?.properties) {
+    parameters.properties.contactName = {
+      type: "string",
+      maxLength: 180,
+      description: "The named person who should answer. Pass the owner's supplied name exactly; never infer or invent it.",
+    };
+  }
   return { ...tool, function: { ...tool.function, name, description, parameters } };
   })
   .filter((tool) => config.elenaEnabled || !isElenaToolSlug(tool.function.name));

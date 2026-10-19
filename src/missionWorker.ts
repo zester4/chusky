@@ -81,13 +81,26 @@ export function missionWorkerToolAllowlist(stepTools?: string[], inheritedTools?
   if (stepTools === undefined) return inheritedTools;
   const inherited = inheritedTools ? new Set(inheritedTools) : undefined;
   const selected = new Set(stepTools.filter((tool) => !inherited || inherited.has(tool)));
+  const controls = stepTools.length === 0
+    ? MISSION_WORKER_CONTROL_TOOLS.filter((tool) => tool !== "CHUCK_MISSION_VERIFY")
+    : MISSION_WORKER_CONTROL_TOOLS;
   // Image-bearing provider actions cannot use the batch executor: the media
   // bridge must stage the file and verify the exact provider receipt through
   // the single-action path. Keep both meta-tools available whenever a mission
   // step requests batching so a model retry is not blocked by an incomplete
   // permission fence.
   if (selected.has("COMPOSIO_MULTI_EXECUTE_TOOL")) selected.add("COMPOSIO_EXECUTE_TOOL");
-  return [...new Set([...MISSION_WORKER_CONTROL_TOOLS, ...selected])];
+  return [...new Set([...controls, ...selected])];
+}
+
+/** A model-driven replan cannot widen the tool fence of the step that caused it. */
+export function constrainMissionReplanTools<T extends { allowedTools?: string[] }>(steps: readonly T[], currentAllowedTools?: readonly string[]): T[] {
+  if (currentAllowedTools === undefined) return steps.map((step) => ({ ...step }));
+  const allowed = new Set(currentAllowedTools);
+  return steps.map((step) => ({
+    ...step,
+    allowedTools: (step.allowedTools ?? [...allowed]).filter((tool) => allowed.has(tool)),
+  }));
 }
 
 /** Capture only durable fields that a worker slice is expected to change. */
@@ -254,6 +267,11 @@ export function missionHasTimerWakeContinuation(
     // durable task is claimed; keep the wake marker visible to that worker.
     if (event.type === "step_started" && /^Reconciled\b/i.test(event.message)) continue;
     if (event.type === "resumed" && /^Timer wait reached\b/i.test(event.message)) return true;
+    // Recovery may republish the same durable task after the timer wake. The
+    // scheduler records that publication as a synthetic step_started event;
+    // it is coordination metadata, not post-wake mission progress. Keep the
+    // wake marker visible so the worker receives the continuation contract.
+    if (event.type === "step_started" && /^Reconciled \d+ dependency-ready mission task/i.test(event.message)) continue;
     if (terminalOrProgressEvents.has(event.type)) return false;
   }
   return false;

@@ -79,6 +79,39 @@ export type TwilioNumberDependencies = {
   smsEnabled?: boolean;
 };
 
+export type TwilioVoiceBridgeReadiness = {
+  enabled: boolean;
+  inboundEnabled?: boolean;
+  accountSid?: string;
+  authToken?: string;
+  webhookBaseUrl?: string;
+  mediaStreamUrl?: string;
+  mediaBridgeSecret?: string;
+};
+
+/**
+ * Number purchasing is only useful when an inbound number can actually be
+ * answered. Keep this check separate from the provider client validation so
+ * unit callers can still exercise the Twilio inventory client in isolation.
+ * Customer-facing routes and tenant dependencies must use this stricter gate.
+ */
+export function isTwilioVoiceBridgeConfigured(input: TwilioVoiceBridgeReadiness = {
+  enabled: config.twilioVoiceEnabled,
+  inboundEnabled: config.twilioInboundEnabled,
+  accountSid: config.twilioAccountSid,
+  authToken: config.twilioAuthToken,
+  webhookBaseUrl: config.twilioWebhookBaseUrl,
+  mediaStreamUrl: config.twilioMediaStreamUrl,
+  mediaBridgeSecret: config.twilioMediaBridgeSecret,
+}): boolean {
+  return input.enabled
+    && input.inboundEnabled === true
+    && Boolean(input.accountSid && input.authToken)
+    && /^https:\/\//i.test(input.webhookBaseUrl ?? "")
+    && /^wss:\/\//i.test(input.mediaStreamUrl ?? "")
+    && Boolean(input.mediaBridgeSecret);
+}
+
 const defaults = (): TwilioNumberDependencies => ({
   enabled: config.twilioNumberManagementEnabled,
   accountSid: config.twilioAccountSid,

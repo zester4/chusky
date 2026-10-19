@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { addPhoneCall, listPhoneCalls, type PhoneCallRecord } from "../store.js";
-import { parseVoiceCallProfileJson, type CallProfile, type VoiceCallProfile } from "./voiceProfile.js";
+import { parseVoiceCallProfileJson, voiceRecordingBlockReason, type CallProfile, type VoiceCallProfile } from "./voiceProfile.js";
 
 const E164 = /^\+[1-9]\d{7,14}$/;
 
@@ -52,6 +52,8 @@ export function parseTwilioInboundVoiceProfile(value: string, callProfile: CallP
  * for idempotency and lifecycle correlation; no call audio is retained. */
 export async function registerTwilioInboundCall(input: { userId: number; from: string; to: string; callSid: string; callProfile?: CallProfile; voiceProfile?: VoiceCallProfile; verification?: "public" | "identified" | "verified"; twilioSubaccountId?: string }): Promise<PhoneCallRecord> {
   if (!E164.test(input.from) || !E164.test(input.to) || !/^CA[a-zA-Z0-9]{10,64}$/.test(input.callSid)) throw new Error("Invalid Twilio inbound call data");
+  const recordingBlock = input.voiceProfile ? voiceRecordingBlockReason(input.voiceProfile) : undefined;
+  if (recordingBlock) throw new Error(recordingBlock);
   const existing = (await listPhoneCalls(input.userId)).find((call) => call.provider === "twilio" && call.direction === "inbound" && call.providerCallId === input.callSid);
   if (existing) return existing;
   const now = Date.now();
@@ -65,6 +67,7 @@ export async function registerTwilioInboundCall(input: { userId: number; from: s
     phoneNumber: input.from,
     purpose: "Inbound phone call",
     ...(input.voiceProfile ? { voiceProfile: input.voiceProfile } : {}),
+    transcriptRetentionDays: input.voiceProfile?.controls?.retentionDays ?? 30,
     status: "bridging",
     providerStatus: "initiated",
     providerCallId: input.callSid,

@@ -18,7 +18,7 @@ import {
   type TwilioSubaccountRecord,
 } from "../store.js";
 import type { PhoneCallRecord, VoiceInboundRouteRecord } from "../store.js";
-import { isTwilioNumberManagementConfigured, platformTwilioNumberDependencies, type TwilioNumberDependencies } from "./twilioNumbers.js";
+import { isTwilioNumberManagementConfigured, isTwilioVoiceBridgeConfigured, platformTwilioNumberDependencies, type TwilioNumberDependencies } from "./twilioNumbers.js";
 
 type TwilioCredentials = { accountSid: string; authToken: string };
 
@@ -76,6 +76,7 @@ function dependenciesFor(record: TwilioSubaccountRecord, numberManagementEnabled
   const value = credentials(record);
   if (record.status !== "active" || record.providerStatus === "suspended" || record.providerStatus === "closed") throw new Error("This workspace phone account is not active.");
   if (!/^https:\/\//i.test(config.twilioWebhookBaseUrl)) throw new Error("The voice webhook is not configured.");
+  if (!isTwilioVoiceBridgeConfigured()) throw new Error("The Twilio voice bridge is not ready for tenant numbers.");
   return {
     enabled: numberManagementEnabled,
     accountSid: value.accountSid,
@@ -106,6 +107,9 @@ export async function tenantNumberDependencies(userId: number): Promise<TwilioNu
 export async function customerNumberSearchDependencies(): Promise<TwilioNumberDependencies | undefined> {
   const controls = await getBuilderVoiceControls();
   if (!controls.subaccountManagementEnabled || !controls.numberManagementEnabled) return undefined;
+  // Do not let a customer buy a number while the inbound bridge is disabled,
+  // missing its WSS endpoint, or unable to authenticate media streams.
+  if (!isTwilioVoiceBridgeConfigured()) return undefined;
   // The persisted Builder switch is the runtime gate once the control plane
   // is enabled. The environment flag remains the safe default when no saved
   // Builder state exists; it must not override an audited administrator
@@ -127,6 +131,9 @@ export async function twilioSmsCredentialsForNumber(phoneNumber: string): Promis
 /** Provisioning is lazy: the first purchase creates the isolated Twilio
  * subaccount automatically, while Twilio still bills the platform parent. */
 export async function ensureTenantNumberDependencies(userId: number, friendlyName?: unknown): Promise<{ dependencies: TwilioNumberDependencies; subaccount: TwilioSubaccountView }> {
+  const controls = await getBuilderVoiceControls();
+  if (!controls.subaccountManagementEnabled || !controls.numberManagementEnabled) throw new Error("Tenant phone-number management is disabled.");
+  if (!isTwilioVoiceBridgeConfigured()) throw new Error("The Twilio voice bridge is not ready for tenant numbers.");
   const subaccount = await provisionTwilioSubaccount(userId, friendlyName);
   const dependencies = await subaccountNumberDependencies(subaccount.id);
   return { dependencies, subaccount };
@@ -136,10 +143,13 @@ export async function ensureTenantNumberDependencies(userId: number, friendlyNam
  * their old path; new inventory must always use an active tenant account. */
 export async function subaccountNumberDependencies(id: string): Promise<TwilioNumberDependencies> {
   const controls = await getBuilderVoiceControls();
-  if (!controls.subaccountManagementEnabled || !controls.numberManagementEnabled) throw new Error("Tenant phone-number management is disabled.");
+  // Turning off inventory sales must not strand numbers already owned by a
+  // workspace. Existing calls, callbacks, controls, and release operations
+  // remain available while the separate sales switch is off.
+  if (!controls.subaccountManagementEnabled) throw new Error("Tenant phone-account management is disabled.");
   const record = await getTwilioSubaccount(id);
   if (!record) throw new Error("The workspace phone account was not found.");
-  return dependenciesFor(record, controls.numberManagementEnabled);
+  return dependenciesFor(record, true);
 }
 
 export async function provisionTwilioSubaccount(userId: number, friendlyName?: unknown): Promise<TwilioSubaccountView> {

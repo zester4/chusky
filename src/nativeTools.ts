@@ -5,6 +5,7 @@ import { Client as WorkflowClient } from "@upstash/workflow";
 import { enqueueTaskWorkflow, enqueueTinyFishResearchWorkflow, workflowFailureUrl } from "./triggerWorkflow.js";
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
 import { resumeMissionTaskAfterApproval } from "./missionApproval.js";
+import { constrainMissionReplanTools } from "./missionWorker.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { createHash, randomUUID } from "node:crypto";
 import { classifyMemory } from "./memory/classifier.js";
@@ -18,7 +19,7 @@ import { assertPublicHttpUrl, createTinyFishClient } from "./tinyfish.js";
 import { receiveTinyFishMonitorWebhook, tinyFishMonitorSignature, tinyFishMonitorSnapshotHash, validateTinyFishMonitorSchedule } from "./tinyfishMonitors.js";
 import { reconcileTinyFishResearchRun } from "./tinyfishResearch.js";
 import {
-  addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, listJobs, listJobOccurrences, createJobOccurrence, updateJobOccurrence, listReminders, claimHandoffBudget, searchConversationMessages, getConversationMessage, isDurableStore,
+  addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, getVoiceCallProfile, listJobs, listJobOccurrences, createJobOccurrence, updateJobOccurrence, listReminders, claimHandoffBudget, searchConversationMessages, getConversationMessage, isDurableStore,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
   upsertMeetingContact, listMeetingContacts, deleteMeetingContact, getMeetingContact, updateMeetingContact,
   readScratchpad, updateJob, updateReminder, transitionReminderStatus, writeScratchpad,
@@ -2340,7 +2341,9 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
       if (runtime.meetingId && !runtime.ownerPrivateRun) {
         throw new Error("Outbound phone calls cannot be initiated from a shared live meeting; ask the owner to start that call from a private control.");
       }
-      const profile = args.profile && typeof args.profile === "object" && !Array.isArray(args.profile) ? args.profile as Record<string, unknown> : undefined;
+      const baseProfile = args.profile && typeof args.profile === "object" && !Array.isArray(args.profile) ? args.profile as Record<string, unknown> : undefined;
+      const suppliedContactName = args.contactName === undefined ? undefined : text(args.contactName, 180);
+      const profile = baseProfile || suppliedContactName ? { ...(baseProfile ?? {}), ...(suppliedContactName ? { contactName: suppliedContactName } : {}) } : undefined;
       const callProfile: "business" | "personal" = args.callProfile === "business" ? "business" : "personal";
       const continuityFromCallId = args.continuityFromCallId === undefined ? undefined : text(args.continuityFromCallId, 128);
       const phoneNumber = text(args.phoneNumber);
@@ -2349,16 +2352,23 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
       // durable agent run. Hash the bounded call intent so the provider side
       // effect is claimed once before either Twilio or Bland is contacted.
       const requestKey = runtime.currentRunId?.trim()
-        ? `pc_${createHash("sha256").update(JSON.stringify({ version: 1, userId, runId: runtime.currentRunId.trim(), phoneNumber: phoneNumber.replace(/[^0-9+]/g, ""), purpose: purpose.replace(/\s+/g, " ").trim().toLowerCase(), callProfile, continuityFromCallId: continuityFromCallId ?? null })).digest("hex")}`
+        ? `pc_${createHash("sha256").update(JSON.stringify({ version: 2, userId, runId: runtime.currentRunId.trim(), phoneNumber: phoneNumber.replace(/[^0-9+]/g, ""), purpose: purpose.replace(/\s+/g, " ").trim().toLowerCase(), callProfile, contactName: suppliedContactName ?? null, continuityFromCallId: continuityFromCallId ?? null })).digest("hex")}`
         : undefined;
       const input = { phoneNumber, purpose, ...(profile ? { profile } : {}), ...(continuityFromCallId ? { continuityFromCallId } : {}), callProfile, ...(requestKey ? { requestKey } : {}) };
       if (phoneCallLauncherForTests) return phoneCallLauncherForTests(userId, input);
-      // Prefer Bland when it is fully configured, but fall back to a healthy
-      // Twilio transport when Bland is enabled but unavailable. Do not fail
-      // over after an ambiguous provider request: that could place two calls.
-      return config.blandVoiceEnabled && isBlandVoiceConfigured()
-        ? startBlandCallForUser(userId, input)
-        : startTwilioCallForUser(userId, input);
+      // Provider choice is pinned by deployment configuration. Never switch
+      // transports implicitly: a fallback can change caller ID/billing and
+      // can place a duplicate call after an ambiguous provider response.
+      const savedVoiceProfile = await getVoiceCallProfile(userId);
+      const selectedProvider = savedVoiceProfile?.provider ?? config.voiceCallProvider;
+      if (selectedProvider === "bland") {
+        if (!config.blandVoiceEnabled || !isBlandVoiceConfigured()) {
+          throw new Error("The configured voice provider is Bland, but Bland is not fully configured. No alternate provider was selected.");
+        }
+        return startBlandCallForUser(userId, input);
+      }
+      if (!config.twilioVoiceEnabled) throw new Error("The configured voice provider is Twilio, but Twilio calling is disabled. No alternate provider was selected.");
+      return startTwilioCallForUser(userId, input);
     }
     case "CHUCK_LIST_PHONE_CALLS": return listPhoneCalls(userId);
     case "CHUCK_CONTROL_PHONE_CALL": {
@@ -2949,6 +2959,10 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
       const missionId = text(args.id);
       const existing = await getMission(userId, missionId);
       if (!existing) throw new Error("Mission not found or not owned by you");
+      const activeStepTools = runtime.missionStepId
+        ? existing.steps.find((step) => step.id === runtime.missionStepId)?.allowedTools
+        : undefined;
+      const constrainedSteps = constrainMissionReplanTools(steps, activeStepTools);
       const rejected = (mission: NonNullable<typeof existing>, completedStepIds: string[], reason: string) => ({
         operation: "mission_replan" as const,
         status: "rejected" as const,
@@ -2963,13 +2977,13 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
         return rejected(existing, existing.steps.filter((step) => step.status === "completed").map((step) => step.id), `This ${existing.status} mission can no longer be replanned.`);
       }
       const completedStepIds = existing.steps.filter((step) => step.status === "completed").map((step) => step.id).sort();
-      const proposedStepIds = new Set(steps.flatMap((step) => step.id ? [step.id] : []));
+      const proposedStepIds = new Set(constrainedSteps.flatMap((step) => step.id ? [step.id] : []));
       const omittedCompletedStepIds = completedStepIds.filter((stepId) => !proposedStepIds.has(stepId));
       if (omittedCompletedStepIds.length) {
         return rejected(existing, omittedCompletedStepIds, "Completed mission steps are immutable and must be preserved.");
       }
       try {
-        const mission = await replanMissionAndSchedule(userId, missionId, steps, text(args.reason, 2000), runtime.enqueueMissionTask ?? enqueueTaskWorkflow, runtime.taskId);
+        const mission = await replanMissionAndSchedule(userId, missionId, constrainedSteps, text(args.reason, 2000), runtime.enqueueMissionTask ?? enqueueTaskWorkflow, runtime.taskId);
         if (mission) return mission;
         const latest = await getMission(userId, missionId);
         if (latest && ["completed", "cancelled"].includes(latest.status)) {

@@ -71,6 +71,7 @@ DEEPGRAM_TTS_API_HOST=api.deepgram.com
 CHUSKY_VOICE_TURN_URL=https://chusky.up.railway.app/internal/twilio/turn
 CHUSKY_VOICE_CONTEXT_URL=https://chusky.up.railway.app/internal/twilio/context
 CHUSKY_VOICE_STATUS_URL=https://chusky.up.railway.app/internal/twilio/status
+CHUSKY_VOICE_STREAM_AUTHORIZE_URL=https://chusky.up.railway.app/internal/twilio/stream-authorize
 VOICE_BRIDGE_HOST=0.0.0.0
 ```
 
@@ -89,7 +90,12 @@ $rng.Dispose()
 ```
 
 For Twilio Media Streams, configure the same `TWILIO_MEDIA_BRIDGE_SECRET` on
-Chusky, and set the bridge's `TWILIO_AUTH_TOKEN` plus:
+Chusky. `TWILIO_AUTH_TOKEN` on the bridge is optional and is only a local fast
+path for parent-account streams; the bridge must never receive a customer
+subaccount token. Every stream is also authorized through
+`CHUSKY_VOICE_STREAM_AUTHORIZE_URL`, where the root service verifies the
+signature against the encrypted account that owns the number and claims the
+distributed active-call lease. Set:
 
 ```ini
 TWILIO_MEDIA_STREAM_URL=wss://chusky-voice-production.up.railway.app/twilio/stream
@@ -169,9 +175,11 @@ a browser or persisted in Chusky.
 Add these to `chusky-voice/.env`:
 
 ```ini
+# Optional parent-account fast path; never put a customer subaccount token here.
 TWILIO_AUTH_TOKEN=<same root Twilio auth token>
 TWILIO_MEDIA_STREAM_URL=wss://voice.selithub.shop/twilio/stream
 CHUSKY_VOICE_CONTEXT_URL=https://chusky.up.railway.app/internal/twilio/context
+CHUSKY_VOICE_STREAM_AUTHORIZE_URL=https://chusky.up.railway.app/internal/twilio/stream-authorize
 VOICE_STT_MODEL=flux-general-en
 VOICE_STT_EAGER_EOT_THRESHOLD=0.45
 VOICE_STT_EOT_THRESHOLD=0.65

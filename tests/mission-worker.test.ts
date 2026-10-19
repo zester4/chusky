@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { boundedMissionHistory, captureMissionSliceState, deriveMissionToolHints, missionHasTimerWakeContinuation, missionNeedsLifecycleCloseoutNudge, missionNoProgressNextAction, missionPostWakeNextAction, missionSliceHasPersistedProgress, missionStepInstruction, missionTimerResumeStep, missionWakeNeedsRecovery, missionWorkerToolAllowlist, MISSION_WORKER_CONTROL_TOOLS } from "../src/missionWorker.js";
+import { boundedMissionHistory, captureMissionSliceState, constrainMissionReplanTools, deriveMissionToolHints, missionHasTimerWakeContinuation, missionNeedsLifecycleCloseoutNudge, missionNoProgressNextAction, missionPostWakeNextAction, missionSliceHasPersistedProgress, missionStepInstruction, missionTimerResumeStep, missionWakeNeedsRecovery, missionWorkerToolAllowlist, MISSION_WORKER_CONTROL_TOOLS } from "../src/missionWorker.js";
 
 test("mission instructions keep timer waits inside a step and reserve event waits for real providers", () => {
   const instruction = missionStepInstruction({ title: "Wait and verify", objective: "Wait two minutes, then reload and verify the saved checkpoint." });
@@ -94,6 +94,18 @@ test("mission worker fences provider tools while retaining lifecycle controls", 
   for (const control of MISSION_WORKER_CONTROL_TOOLS) assert.equal(allowed?.includes(control), true);
   assert.ok(missionWorkerToolAllowlist(["COMPOSIO_MULTI_EXECUTE_TOOL"])?.includes("COMPOSIO_EXECUTE_TOOL"));
   assert.deepEqual(missionWorkerToolAllowlist(undefined, ["TEST_SAFE_TOOL"]), ["TEST_SAFE_TOOL"]);
+  assert.equal(missionWorkerToolAllowlist([])?.includes("CHUCK_MISSION_VERIFY"), false, "tool-less steps cannot invoke provider-read verification through a supervisor control");
+});
+
+test("model-driven replans inherit and cannot widen the active step tool fence", () => {
+  assert.deepEqual(constrainMissionReplanTools([{ title: "Next", allowedTools: ["SAFE_TOOL", "NEW_TOOL"] }, { title: "Later" }], ["SAFE_TOOL"]), [
+    { title: "Next", allowedTools: ["SAFE_TOOL"] },
+    { title: "Later", allowedTools: ["SAFE_TOOL"] },
+  ]);
+  assert.deepEqual(constrainMissionReplanTools([{ title: "No tools", allowedTools: ["EMAIL_SEND"] }], []), [
+    { title: "No tools", allowedTools: [] },
+  ]);
+  assert.deepEqual(constrainMissionReplanTools([{ title: "Unfenced" }]), [{ title: "Unfenced" }]);
 });
 
 test("a supervisor-resumed timer remains a post-wake continuation for the same step", () => {

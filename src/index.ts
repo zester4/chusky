@@ -14,7 +14,7 @@ import { listAttentionRecords } from "./store.js";
 import { updateAttentionRecord } from "./store.js";
 import type { AttentionCandidateRecord, AutonomyProfileRecord, DeliveryPreferenceRecord, ObservationRecord, AutonomyWatchRecord, TriggerEventRecord } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
-import { initStore, getTelegramChatId, createTriggerEventIfAbsent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkRunById, listSdkRunsForUser, saveSdkRun, saveSdkThread, deleteSdkThread, saveSession, appendMessages, appendPhoneCallTranscriptTurn, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, withScopedKeyLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, listTasksSince, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, getVoiceInboundRoute, hasVoiceInboundRoutes, updatePhoneCall, appendPhoneCallEvent, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, saveRecallMeetingMissionState, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
+import { initStore, getTelegramChatId, createTriggerEventIfAbsent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkRunById, listSdkRunsForUser, saveSdkRun, saveSdkThread, deleteSdkThread, saveSession, appendMessages, appendPhoneCallTranscriptTurn, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, withScopedKeyLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, listTasksSince, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, getVoiceInboundRoute, hasVoiceInboundRoutes, updatePhoneCall, appendPhoneCallEvent, enqueueVoiceCallReconciliation, claimVoiceCallReconciliations, completeVoiceCallReconciliation, retryVoiceCallReconciliation, claimVoiceCapacity, releaseVoiceCapacity, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, saveRecallMeetingMissionState, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, OpenRouterTimeoutError, invalidateSession, transcriptionFormatForMimeType, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
 import type { AgentResult } from "./agent.js";
 import { listOpenTasks, listTasksForMission } from "./store.js";
@@ -53,12 +53,12 @@ import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
 import { recordMeetingTurn } from "./decisions/telemetry.js";
-import { twilioVoiceHistory, twilioVoiceInstructions, twilioVoiceKeyterms, twilioVoiceOpening, twilioVoiceTranscript } from "./calls/twilioContext.js";
+import { sanitizeUnverifiedVoiceAction, twilioVoiceHistory, twilioVoiceInstructions, twilioVoiceKeyterms, twilioVoiceOpening, twilioVoiceTranscript, voiceActionNeedsProviderReceipt } from "./calls/twilioContext.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
 import { buildMeetingMissionStatePrompt, parseMeetingMissionState } from "./meetings/liveState.js";
 import { attentionPulseCloseoutOutput, attentionPulseDeliveredToday, attentionPulseDeliveryConfirmation, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, attentionPulseRefreshOwnerState, attentionPulseRequireDueWatchReport, buildAttentionPulsePlan, getAttentionPulseWatchCoverage, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "./attentionPulse.js";
 import { hasExternalRecallParticipants, resolveRecallMeetingSpeaker } from "./meetings/participants.js";
-import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
+import { createVoiceBridgeTicket, verifyVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import { createSignedWebBotAuthDirectory, WEB_BOT_AUTH_DIRECTORY_CONTENT_TYPE, WEB_BOT_AUTH_DIRECTORY_PATH, webBotAuthConfigurationIssue, webBotAuthConfigurationStatus, webBotAuthSigningEnabled } from "./webBotAuth.js";
 import twilio from "twilio";
 import { inboundTwilioOwnerForNumber, parseTwilioCallerAllowlist, parseTwilioInboundVoiceProfile, registerTwilioInboundCall, twilioInboundCallerAllowed } from "./calls/twilioInbound.js";
@@ -68,7 +68,7 @@ import { answerBlandQuestion } from "./calls/blandBrain.js";
 import { processBlandConsult, processBlandWebhook } from "./calls/blandWebhooks.js";
 import { isBlandVoiceConfigured } from "./calls/bland.js";
 import { isBlandInboundConfigured, normalizeBlandInboundNumber, parseBlandInboundAllowedCallers, parseBlandInboundRoutes, resolveBlandInboundRoute, type BlandInboundRoute } from "./calls/blandInbound.js";
-import { parseVoiceCallProfileJson } from "./calls/voiceProfile.js";
+import { isVoiceOptOutRequest, parseVoiceCallProfileJson } from "./calls/voiceProfile.js";
 import { listBlandCuratedVoices } from "./calls/blandVoices.js";
 import { FLUX_TTS_VOICES } from "./voiceSettings.js";
 import { twilioSmsCredentialsForNumber, twilioWebhookCredentialsForCall, twilioWebhookCredentialsForRoute } from "./calls/twilioSubaccounts.js";
@@ -115,6 +115,7 @@ import { buildPhoneCallOutcomePrompt, fallbackPhoneCallOutcome, parsePhoneCallOu
 import { schedulePhoneCallFollowUps } from "./calls/followUp.js";
 import { scorePhoneCallTrace } from "./calls/voiceEvaluation.js";
 import { providerStatusCanAdvance } from "./calls/voiceEvents.js";
+import { reconcileVoiceCalls } from "./calls/reconciler.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -315,6 +316,13 @@ import type { ChannelProvider } from "./channels/contracts.js";
 
 async function main(): Promise<void> {
   await initStore();
+  // A saved workspace profile may pin a provider different from the
+  // deployment default, so reconciliation and distributed-capacity checks
+  // must cover every enabled transport, not only the environment default.
+  const voiceProviderEnabled = config.twilioVoiceEnabled || config.blandVoiceEnabled;
+  if (voiceProviderEnabled && !isDurableStore()) {
+    throw new Error("Enabled voice providers require Redis for distributed capacity and durable call reconciliation.");
+  }
   if (config.betterAuthEnabled) await initAuth();
   let sdkWebhookRecovery: ReturnType<typeof setInterval> | undefined;
   let missionRecovery: ReturnType<typeof setInterval> | undefined;
@@ -324,9 +332,29 @@ async function main(): Promise<void> {
   let memoryReflectionRecovery: ReturnType<typeof setInterval> | undefined;
   let telegramWebhookRecovery: ReturnType<typeof setInterval> | undefined;
   let daytonaRetentionSweep: ReturnType<typeof setInterval> | undefined;
+  let voiceReconciliationRecovery: ReturnType<typeof setInterval> | undefined;
   let httpServer: ServerType | undefined;
   let shuttingDown = false;
   const inFlightTelegramUpdates = new Set<Promise<unknown>>();
+
+  if (voiceProviderEnabled) {
+    let inFlight = false;
+    const sweepVoiceCalls = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const report = await reconcileVoiceCalls(20);
+        if (report.claimed) logger.info(report, "Voice lifecycle reconciliation sweep completed");
+      } catch (error) {
+        logger.warn({ errorType: error instanceof Error ? error.name : "VoiceReconciliationError" }, "Voice lifecycle reconciliation sweep failed");
+      } finally {
+        inFlight = false;
+      }
+    };
+    void sweepVoiceCalls();
+    voiceReconciliationRecovery = setInterval(() => { void sweepVoiceCalls(); }, 15_000);
+    if (typeof voiceReconciliationRecovery === "object" && "unref" in voiceReconciliationRecovery) voiceReconciliationRecovery.unref();
+  }
 
   const bot = new Bot(config.telegramToken);
   registerHandlers(bot);
@@ -534,6 +562,7 @@ async function main(): Promise<void> {
     if (memoryProjectionRecovery) clearInterval(memoryProjectionRecovery);
     if (telegramWebhookRecovery) clearInterval(telegramWebhookRecovery);
     if (daytonaRetentionSweep) clearInterval(daytonaRetentionSweep);
+    if (voiceReconciliationRecovery) clearInterval(voiceReconciliationRecovery);
     // Stop accepting HTTP work first. During a PM2 cluster reload, the ready
     // replacement worker is already serving this port before this worker gets
     // SIGINT. Give an update already accepted by this worker a bounded chance
@@ -914,8 +943,10 @@ async function main(): Promise<void> {
       const ticket = createVoiceBridgeTicket(callId, userId, config.twilioMediaBridgeSecret, Date.now(), ttsModel);
       const streamUrl = config.twilioMediaStreamUrl.replace(/\/+$/, "");
       const statusCallback = twilioCallbackUrl("/twilio/stream-status", callId, userId);
+      const call = await getPhoneCall(userId, callId);
+      const fallbackGreeting = call ? twilioVoiceOpening(call) : "Hello, this is Chusky, an assistant calling on behalf of the person or business who asked me to reach you.";
       const voiceParameter = ttsModel ? `<Parameter name="ttsModel" value="${ttsModel}"/>` : "";
-      return `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${xmlEscape(streamUrl)}" statusCallback="${xmlEscape(statusCallback)}" statusCallbackMethod="POST"><Parameter name="callId" value="${xmlEscape(callId)}"/><Parameter name="userId" value="${userId}"/><Parameter name="ticket" value="${ticket}"/>${voiceParameter}</Stream></Connect></Response>`;
+      return `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${xmlEscape(streamUrl)}" statusCallback="${xmlEscape(statusCallback)}" statusCallbackMethod="POST"><Parameter name="callId" value="${xmlEscape(callId)}"/><Parameter name="userId" value="${userId}"/><Parameter name="ticket" value="${ticket}"/><Parameter name="fallbackGreeting" value="${xmlEscape(fallbackGreeting.slice(0, 500))}"/>${voiceParameter}</Stream></Connect></Response>`;
     };
 
     // Provider callbacks can arrive on a different replica immediately after
@@ -930,6 +961,12 @@ async function main(): Promise<void> {
       }
       logger.warn({ userId, callId }, "Twilio callback referenced a missing call record");
       return undefined;
+    };
+    const enforceVoiceOptOut = async (call: NonNullable<Awaited<ReturnType<typeof getPhoneCall>>>) => {
+      await appendPhoneCallEvent(call.userId, call.id, { type: "call_ended", summary: "The contact requested no further calls." }).catch(() => undefined);
+      await updatePhoneCall(call.userId, call.id, { status: "ended", runtimeState: "ended", terminalReason: "opt_out", summary: "The contact requested no further calls." }).catch(() => undefined);
+      await releaseVoiceCapacity(call.id).catch(() => false);
+      await enqueueVoiceCallReconciliation(call.userId, call.id, "outcome").catch(() => undefined);
     };
 
     // Twilio signs the initial TwiML request. Do not derive the signed URL
@@ -951,11 +988,15 @@ async function main(): Promise<void> {
         await appendPhoneCallEvent(userId, callId, { type: "voicemail_detected", summary: "The recipient's voicemail system answered." });
         await appendPhoneCallEvent(userId, callId, { type: "voicemail_left", summary: "The configured voicemail message was delivered." });
         await updatePhoneCall(userId, callId, { status: "ended", runtimeState: "ended", providerStatus: "machine", summary: "A voicemail message was delivered.", terminalReason: "voicemail" });
+        await releaseVoiceCapacity(callId).catch(() => false);
+        await enqueueVoiceCallReconciliation(userId, callId, "outcome").catch(() => undefined);
         return c.body(twilioVoicemailTwiML(config.twilioVoicemailMessage), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
       }
       if (answeredBy.startsWith("machine_")) {
         await appendPhoneCallEvent(userId, callId, { type: "voicemail_detected", summary: "The recipient's voicemail system answered; voicemail delivery is disabled." });
         await updatePhoneCall(userId, callId, { status: "ended", runtimeState: "ended", providerStatus: "machine", summary: "Voicemail delivery was disabled by call controls.", terminalReason: "voicemail_disabled" });
+        await releaseVoiceCapacity(callId).catch(() => false);
+        await enqueueVoiceCallReconciliation(userId, callId, "outcome").catch(() => undefined);
         return c.body("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Hangup/></Response>", 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
       }
       await updatePhoneCall(userId, callId, { status: "bridging", providerCallId: callSid || call.providerCallId });
@@ -980,6 +1021,29 @@ async function main(): Promise<void> {
         keyterms: twilioVoiceKeyterms(call),
         greeting: twilioVoiceOpening(call),
       }, 200, { "Cache-Control": "no-store" });
+    });
+
+    // Managed Twilio numbers are signed with their tenant subaccount token.
+    // The media bridge must not receive that token, so it forwards the
+    // provider signature here and the root verifies it against the call's
+    // encrypted, owner-scoped account credentials.
+    app.post("/internal/twilio/stream-authorize", async (c) => {
+      if (!hasBridgeAuthorization(c.req.header("Authorization"), config.twilioMediaBridgeSecret)) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as { callId?: unknown; userId?: unknown; ticket?: unknown; ttsModel?: unknown };
+      const callId = String(body.callId ?? "").trim();
+      const userId = Number(body.userId);
+      const ticket = String(body.ticket ?? "");
+      const ttsModel = body.ttsModel === undefined ? undefined : String(body.ttsModel).trim();
+      if (!/^twc_[A-Za-z0-9_-]{1,120}$/.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !ticket || (ttsModel !== undefined && !/^flux-[a-z]+-en$/.test(ttsModel))) return c.json({ ok: false, error: "invalid stream authorization" }, 400);
+      const call = await readTwilioCallForCallback(userId, callId);
+      const credentials = await twilioWebhookCredentialsForCall(call);
+      const signature = c.req.header("X-Twilio-Signature");
+      const signatureUrl = config.twilioMediaStreamUrl.replace(/\/+$/, "");
+      const providerTrusted = Boolean(call && call.provider === "twilio" && credentials?.authToken && signature && twilio.validateRequest(credentials.authToken, signature, signatureUrl, {}));
+      const ticketTrusted = verifyVoiceBridgeTicket(callId, userId, ticket, config.twilioMediaBridgeSecret, Date.now(), ttsModel);
+      if (!providerTrusted || !ticketTrusted || !call || !["starting", "bridging", "active"].includes(call.status)) return c.json({ ok: false, error: "stream authorization rejected" }, 403);
+      if (!(await claimVoiceCapacity(callId, config.twilioVoiceMaxActiveCalls, config.twilioVoiceMaxCallSeconds * 1000))) return c.json({ ok: false, error: "voice capacity is temporarily full", retryable: true }, 429);
+      return c.json({ ok: true }, 200, { "Cache-Control": "no-store" });
     });
 
     // Configure this URL as the incoming Voice webhook on the Twilio number.
@@ -1008,6 +1072,7 @@ async function main(): Promise<void> {
         const verifiedCallers = durableRoute?.verifiedCallers ?? parseTwilioCallerAllowlist(config.twilioInboundVerifiedCallers);
         const voiceProfile = durableRoute?.voiceProfile ?? parseTwilioInboundVoiceProfile(config.twilioInboundVoiceProfile, callProfile);
         const call = await registerTwilioInboundCall({ userId: ownerUserId, from, to, callSid, callProfile, voiceProfile, verification: callProfile === "business" && verifiedCallers.includes(from) ? "verified" : "identified", ...(durableRoute?.twilioSubaccountId ? { twilioSubaccountId: durableRoute.twilioSubaccountId } : {}) });
+        await enqueueVoiceCallReconciliation(ownerUserId, call.id, "provider").catch(() => undefined);
         return c.body(await twilioStreamTwiML(call.id, ownerUserId), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
       } catch (error) {
         logger.warn({ err: error }, "Rejected Twilio inbound call configuration or payload");
@@ -1042,6 +1107,14 @@ async function main(): Promise<void> {
       if (nextEvent && providerStatusCanAdvance(call.providerStatus, providerStatus as NonNullable<typeof call.providerStatus>)) await appendPhoneCallEvent(userId, callId, nextEvent);
       if (providerStatus) {
         await updatePhoneCall(userId, callId, { ...(status ? { status } : {}), providerStatus: (status ? providerStatus : "unknown") as "queued" | "initiated" | "ringing" | "in-progress" | "answered" | "completed" | "busy" | "no-answer" | "failed" | "canceled" | "machine" | "unknown", providerCallId, ...(duration !== undefined ? { callLengthSeconds: duration } : {}), ...(status === "failed" ? { error: `Twilio call ${providerStatus}`, terminalReason: providerStatus } : status === "ended" ? { terminalReason: providerStatus } : {}) });
+        await enqueueVoiceCallReconciliation(userId, callId, "provider").catch(() => undefined);
+        if (status === "bridging" || status === "active") {
+          await claimVoiceCapacity(callId, config.twilioVoiceMaxActiveCalls, config.twilioVoiceMaxCallSeconds * 1000).catch(() => false);
+        }
+        if (status === "ended" || status === "failed") {
+          await releaseVoiceCapacity(callId).catch(() => false);
+          await enqueueVoiceCallReconciliation(userId, callId, "outcome").catch(() => undefined);
+        }
       }
       return c.body(null, 204);
     });
@@ -1074,6 +1147,8 @@ async function main(): Promise<void> {
           await appendPhoneCallEvent(userId, callId, { type: "call_ended", summary: "The voice bridge ended the call." });
         }
         await updatePhoneCall(userId, callId, { status: "ended", runtimeState: "ended", terminalReason: "stream_stopped" });
+        await releaseVoiceCapacity(callId).catch(() => false);
+        await enqueueVoiceCallReconciliation(userId, callId, "outcome").catch(() => undefined);
       }
       return c.body(null, 204);
     });
@@ -1084,7 +1159,7 @@ async function main(): Promise<void> {
     // speculative audio turns remain tool-less.
     app.post("/internal/twilio/turn", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.twilioMediaBridgeSecret)) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string; speculative?: boolean; interruptedAssistantSpeech?: string };
+      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string; speculative?: boolean; interruptedAssistantSpeech?: string; opening?: string };
       const callId = String(body.callId ?? "").trim();
       const userId = Number(body.userId);
       const transcript = String(body.transcript ?? "").trim();
@@ -1092,6 +1167,10 @@ async function main(): Promise<void> {
       if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000) return c.json({ ok: false, error: "invalid Twilio voice turn" }, 400);
       const call = await getPhoneCall(userId, callId);
       if (!call || !["bridging", "active"].includes(call.status)) return c.json({ ok: false, error: "unknown or inactive call" }, 404);
+      if (!speculative && call.voiceProfile?.controls?.optOutEnabled !== false && isVoiceOptOutRequest(transcript)) {
+        await enforceVoiceOptOut(call);
+        return c.json({ ok: true, text: "Understood. I will not contact you again. Goodbye.", cost: 0, endCall: true, speculative: false });
+      }
       const [rateAllowed, spendAllowed] = await Promise.all([checkRateLimit(userId), canSpend(userId)]);
       if (!rateAllowed) return c.json({ ok: false, error: "rate limit exceeded" }, 429);
       if (!spendAllowed) return c.json({ ok: false, error: "usage cap reached" }, 402);
@@ -1254,7 +1333,7 @@ async function main(): Promise<void> {
     // interrupted speech from being persisted.
     app.post("/internal/twilio/turn-stream", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.twilioMediaBridgeSecret)) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string; speculative?: boolean; interruptedAssistantSpeech?: string };
+      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string; speculative?: boolean; interruptedAssistantSpeech?: string; opening?: string };
       const callId = String(body.callId ?? "").trim();
       const userId = Number(body.userId);
       const transcript = String(body.transcript ?? "").trim();
@@ -1275,14 +1354,21 @@ async function main(): Promise<void> {
             // first latency-sensitive response on the live voice path.
             send({ type: "start", model: config.voiceModel, speculative });
             if (!speculative) void appendPhoneCallEvent(userId, callId, { type: "turn_started", summary: "The agent started processing a caller turn." }).catch(() => undefined);
+            if (!speculative && call.voiceProfile?.controls?.optOutEnabled !== false && isVoiceOptOutRequest(transcript)) {
+              await enforceVoiceOptOut(call);
+              send({ type: "done", text: "Understood. I will not contact you again. Goodbye.", cost: 0, endCall: true, speculative: false });
+              return;
+            }
+            const verifiedActions: Array<{ toolSlug: string; receiptId: string; summary?: string }> = [];
             const result = await withVoiceCallLock(userId, callId, c.req.raw.signal, async () => {
               const liveCall = call;
+              const bufferActionResponse = voiceActionNeedsProviderReceipt(liveCall);
               const privateVoiceAccess = liveCall.direction !== "inbound"
                 || (liveCall.callProfile === "personal" && liveCall.callVerification === "verified");
               const scopedVoiceAccess = liveCall.direction === "inbound"
                 && liveCall.callProfile === "business"
                 && liveCall.voiceProfile?.toolPolicy?.enabled === true;
-              return runAgent(userId, twilioVoiceTranscript(liveCall, transcript, body.interruptedAssistantSpeech), twilioVoiceHistory(liveCall), config.voiceModel, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined,
+              return runAgent(userId, twilioVoiceTranscript(liveCall, transcript, body.interruptedAssistantSpeech), twilioVoiceHistory(liveCall, body.opening), config.voiceModel, undefined, c.req.raw.signal, bufferActionResponse ? undefined : (delta) => send({ type: "delta", text: delta }), undefined,
                 { accountId: `account_${userId}`, provider: "voice", conversationId: callId, scope: "private" }, {
                 instructions: twilioVoiceInstructions(liveCall),
                 ...(speculative ? { toolAllow: [], ephemeral: true } : privateVoiceAccess ? { ownerPrivateRun: true } : scopedVoiceAccess ? { ephemeral: true, voiceScopedAccess: true } : { toolAllow: [], ephemeral: true }),
@@ -1291,15 +1377,22 @@ async function main(): Promise<void> {
                 voiceRoutingHint: liveCall.purpose,
                 voiceToolPolicy: liveCall.voiceProfile?.toolPolicy,
                 voiceAllowHumanHandoff: liveCall.voiceProfile?.controls?.allowHumanHandoff,
-                onVoiceActivity: (activity) => send({ type: activity.type, toolSlug: activity.toolSlug, text: normalizeVoiceText(activity.message).slice(0, 4000) }),
+                // Tool activity is an owner-facing call log concern, not
+                // caller-facing speech. Sending these status messages to the
+                // bridge made labels such as "reminders" and "memory" leak
+                // into the live conversation (and their emoji could be read
+                // aloud by TTS). Keep the durable onToolActivity audit below;
+                // the voice agent should speak only its actual response.
                 onToolActivity: async (activity) => {
                   if (speculative) return;
                   const eventType = activity.status === "started" ? "tool_started" : activity.status === "completed" ? "tool_completed" : activity.status === "failed" ? "tool_failed" : undefined;
-                  if (eventType) void appendPhoneCallEvent(userId, callId, { type: eventType, summary: normalizeVoiceText(activity.message).slice(0, 400), toolSlug: activity.toolSlug, ...(activity.receiptId ? { receiptId: activity.receiptId } : {}) }).catch(() => undefined);
+                  if (activity.status === "completed" && activity.receiptId) verifiedActions.push({ toolSlug: activity.toolSlug, receiptId: activity.receiptId, summary: normalizeVoiceText(activity.message).slice(0, 400) });
+                  if (eventType) await appendPhoneCallEvent(userId, callId, { type: eventType, summary: normalizeVoiceText(activity.message).slice(0, 400), toolSlug: activity.toolSlug, ...(activity.receiptId ? { receiptId: activity.receiptId } : {}) }).catch(() => undefined);
                 },
               });
             });
-            send({ type: "done", text: normalizeVoiceText(result.text).slice(0, 5000), cost: result.cost ?? 0, speculative });
+            const callText = sanitizeUnverifiedVoiceAction(call, normalizeVoiceText(result.text), verifiedActions).slice(0, 5000);
+            send({ type: "done", text: callText, cost: result.cost ?? 0, speculative });
             if (!speculative) void appendPhoneCallEvent(userId, callId, { type: "turn_completed", summary: "The agent completed the caller turn." }).catch(() => undefined);
           } catch (error) {
             if (error instanceof ApprovalRequiredError && !speculative) {
@@ -1358,16 +1451,18 @@ async function main(): Promise<void> {
     // tools or treated as authorization.
     app.post("/internal/twilio/commit-outcome", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.twilioMediaBridgeSecret)) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; turns?: unknown; firstResponseMs?: number };
+      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; opening?: string; turns?: unknown; firstResponseMs?: number };
       const callId = String(body.callId ?? "").trim();
       const userId = Number(body.userId);
       if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !Array.isArray(body.turns) || body.turns.length > 12) return c.json({ ok: false, error: "invalid Twilio voice outcome" }, 400);
+      const opening = typeof body.opening === "string" ? normalizeVoiceText(body.opening).slice(0, 1_000) : "";
       const turns = body.turns.flatMap((value) => {
         if (!value || typeof value !== "object" || Array.isArray(value)) return [];
         const item = value as Record<string, unknown>;
         const transcript = typeof item.transcript === "string" ? item.transcript.trim().slice(0, 900) : "";
         const response = typeof item.response === "string" ? item.response.trim().slice(0, 900) : "";
-        return transcript && response ? [{ transcript, response }] : [];
+        const id = typeof item.id === "string" && /^[A-Za-z0-9:_-]{1,160}$/.test(item.id) ? item.id : undefined;
+        return transcript && response ? [{ ...(id ? { id } : {}), transcript, response }] : [];
       });
       const call = await getPhoneCall(userId, callId);
       // Outcome delivery runs during shutdown. Twilio may report failed before
@@ -1380,6 +1475,7 @@ async function main(): Promise<void> {
       if (lease === "completed") return c.json({ ok: true, duplicate: true });
       if (lease === "busy") return c.json({ ok: false, error: "voice outcome is in progress", retryable: true }, 409);
       try {
+        if (opening) await appendPhoneCallTranscriptTurn(userId, callId, { turnId: "opening", assistant: opening, kind: "opening" });
         if (call.outcomeStatus === "completed" && call.outcome) {
           const followUp = await schedulePhoneCallFollowUps(call, call.outcome);
           await updatePhoneCall(userId, callId, { followUpTaskIds: followUp.taskIds, followUpStatus: "scheduled", followUpErrorCode: undefined });
@@ -1393,7 +1489,7 @@ async function main(): Promise<void> {
         // before deciding that there is no conversation to summarize.
         const effectiveTurns = turns.length
           ? turns
-          : (outcomeCall.transcript?.turns ?? []).map((turn) => ({ transcript: turn.caller, response: turn.assistant })).slice(-12);
+          : (outcomeCall.transcript?.turns ?? []).flatMap((turn) => turn.caller && turn.assistant ? [{ transcript: turn.caller, response: turn.assistant }] : []).slice(-12);
         if (!effectiveTurns.length) {
           const outcome = fallbackPhoneCallOutcome();
           const qa = scorePhoneCallTrace({ direction: outcomeCall.direction, provider: outcomeCall.provider, purpose: outcomeCall.purpose, outcome, timeline: outcomeCall.timeline });
@@ -1486,6 +1582,10 @@ async function main(): Promise<void> {
       }
       const call = await updatePhoneCall(userId, callId, { status: status as "active" | "ended" | "failed", ...(body.runtimeState ? { runtimeState: body.runtimeState as "healthy" | "degraded" | "reconnecting" | "ended" } : {}), ...(body.sessionId ? { bridgeSessionId: body.sessionId } : {}), ...(status === "failed" && body.error ? { error: String(body.error).slice(0, 500) } : {}) });
       if (!call) return c.json({ ok: false, error: "unknown call" }, 404);
+      if (status === "ended" || status === "failed") {
+        await releaseVoiceCapacity(callId).catch(() => false);
+        await enqueueVoiceCallReconciliation(userId, callId, "outcome").catch(() => undefined);
+      }
       return c.json({ ok: true });
     });
 

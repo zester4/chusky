@@ -13,7 +13,8 @@ import Redis from "ioredis";
 import { createRedisClient } from "./redisClient.js";
 import { config } from "./config.js";
 import { sendAuthEmail } from "./auth-email.js";
-import { securePostgresConnectionString } from "./postgresConnection.js";
+import { logger } from "./logger.js";
+import { postgresPoolOptions, securePostgresConnectionString } from "./postgresConnection.js";
 import { clearPersonalMemories, clearSession, getTelegramUserIdForWebAuth } from "./store.js";
 
 // The Redis storage package and Better Auth core currently expose separate
@@ -53,7 +54,11 @@ function createDatabase(): AuthDatabase {
   if (process.env.NODE_ENV === "production" && !databaseUrl) {
     throw new Error("BETTER_AUTH_DATABASE_URL must be configured in production; use Neon Postgres instead of local SQLite.");
   }
-  if (databaseUrl) return postgres = new Pool({ connectionString: securePostgresConnectionString(databaseUrl), max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 });
+  if (databaseUrl) {
+    postgres = new Pool(postgresPoolOptions(securePostgresConnectionString(databaseUrl)));
+    postgres.on("error", (error) => logger.warn({ errorType: error instanceof Error ? error.name : "PostgresError" }, "Better Auth database pool error"));
+    return postgres;
+  }
   mkdirSync(dirname(resolve(config.betterAuthDatabasePath)), { recursive: true });
   return sqlite = new Database(config.betterAuthDatabasePath);
 }

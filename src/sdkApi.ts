@@ -20,7 +20,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, appendSdkAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createCliDevice, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, deleteSdkThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkIdempotency, getSdkRun, getSdkThread, listSdkAuditEvents, listSdkRuns, listSdkThreads, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, getVoiceInboundRoute, getTwilioSubaccountByUserId, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, deleteVoiceInboundRoute, listVoiceInboundRoutes, saveVoiceInboundRoute, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listTasksSince, listOpenTasks, listTasksForMission, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, saveSdkIdempotency, saveSdkRun, saveSdkThread, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type TriggerEventRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord, mergeLinkedTelegramSession } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, appendSdkAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createCliDevice, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, deleteSdkThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkIdempotency, getSdkRun, getSdkThread, listSdkAuditEvents, listSdkRuns, listSdkThreads, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, getVoiceInboundRoute, getTwilioSubaccountByUserId, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, deletePhoneCallTranscript, deleteVoiceInboundRoute, listVoiceInboundRoutes, saveVoiceInboundRoute, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listTasksSince, listOpenTasks, listTasksForMission, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, saveSdkIdempotency, saveSdkRun, saveSdkThread, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type TriggerEventRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord, mergeLinkedTelegramSession } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
@@ -38,6 +38,7 @@ import { appendSdkRunHistory, appendSdkRunHistoryToSession, mutateSession } from
 import { updateTriggerEvent } from "./store.js";
 import { markTriggerWebApprovalResuming } from "./store.js";
 import { ensureMissionWebProjection } from "./store.js";
+import { ensureTaskWebProjection } from "./store.js";
 import { missionProjectionFailureDetails } from "./missionProjectionDiagnostics.js";
 import { notifyTriggerApproval } from "./triggerWorkflow.js";
 import { logger } from "./logger.js";
@@ -70,7 +71,7 @@ import { chuckTools } from "./agentTools.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 import { daytonaEngine } from "./lib/daytona/engine.js";
 import { requestDelegationCancellation, resumeApprovedDelegation } from "./subagents/executor.js";
-import { SELF_SERVICE_PROJECT_SCOPES } from "./developerProjects.js";
+import { DEFAULT_SELF_SERVICE_PROJECT_SCOPES, SELF_SERVICE_PROJECT_SCOPES } from "./developerProjects.js";
 import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinPreparedCalendarMeeting, joinRecallMeeting, leaveRecallMeeting, lookupRecallMeetingContext, prepareRecallMeetingMission } from "./meetings/service.js";
 import { MEETING_REPRESENTATIVE_NATIVE_TOOLS } from "./meetings/representative.js";
 import { addCustomMcpServer, connectMcpServer, disconnectMcpServer, listMcpCatalogForUser, listMcpConnections } from "./mcp/client.js";
@@ -107,6 +108,7 @@ import { chooseReliableRoute } from "./reliability/routing.js";
 import { PROVIDER_SURFACES, providerMatrixWithProofs } from "./reliability/providerMatrix.js";
 import { normalizeProviderSmokeChecks, PROVIDER_SMOKE_CAPABILITIES } from "./reliability/providerSmoke.js";
 import { buildReadinessReport } from "./reliability/readiness.js";
+import { buildTwilioActivationChecklist } from "./calls/twilioActivation.js";
 import { listApprovalEscalations, runDueApprovalEscalations, scheduleApprovalEscalation } from "./approvals/escalation.js";
 import { buildOperatorTimeline } from "./reliability/timeline.js";
 import { diagnoseMission } from "./reliability/missionDoctor.js";
@@ -617,7 +619,6 @@ function isAdminRequest(c: { req: { path: string; url: string } }): boolean {
 }
 
 function accountProjectScopes(value: unknown): string[] | undefined {
-  if (value === undefined) return ["*"];
   if (!Array.isArray(value) || !value.length || value.length > SELF_SERVICE_SCOPES.size || !value.every((scope) => typeof scope === "string" && SELF_SERVICE_SCOPES.has(scope))) return undefined;
   const scopes = [...new Set(value)];
   return scopes.includes("*") && scopes.length !== 1 ? undefined : scopes;
@@ -791,12 +792,13 @@ async function callOwner(c: any): Promise<{ userId: number } | undefined> {
   return sdkUser(c);
 }
 
-function phoneCallingProvider(): "bland" | "twilio" | undefined {
-  if (config.blandVoiceEnabled && isBlandVoiceConfigured()) return "bland";
+async function phoneCallingProvider(userId: number): Promise<"bland" | "twilio" | undefined> {
+  const selectedProvider = (await getVoiceCallProfile(userId))?.provider ?? config.voiceCallProvider;
+  if (selectedProvider === "bland") return config.blandVoiceEnabled && isBlandVoiceConfigured() ? "bland" : undefined;
   return isTwilioVoiceConfigured() ? "twilio" : undefined;
 }
 
-function callView(call: { id: string; provider?: string; direction?: string; callProfile?: string; phoneNumber: string; purpose: string; status: string; runtimeState?: string; providerStatus?: string; terminalReason?: string; callLengthSeconds?: number; error?: string; summary?: string; voiceProfile?: { toolPolicy?: unknown }; outcome?: unknown; outcomeStatus?: string; transcript?: unknown; timeline?: unknown; qa?: unknown; followUpTaskIds?: string[]; followUpStatus?: string; followUpErrorCode?: string; createdAt: number; updatedAt: number }) {
+function callView(call: { id: string; provider?: string; direction?: string; callProfile?: string; phoneNumber: string; purpose: string; status: string; runtimeState?: string; providerStatus?: string; terminalReason?: string; callLengthSeconds?: number; error?: string; summary?: string; voiceProfile?: { toolPolicy?: unknown }; outcome?: unknown; outcomeStatus?: string; transcript?: unknown; transcriptRetentionDays?: number; transcriptExpiresAt?: number; transcriptStatus?: string; timeline?: unknown; qa?: unknown; followUpTaskIds?: string[]; followUpStatus?: string; followUpErrorCode?: string; createdAt: number; updatedAt: number }) {
   const digits = call.phoneNumber.replace(/\D/g, "");
   const phoneNumber = digits.length > 4 ? `${call.phoneNumber.slice(0, Math.max(2, call.phoneNumber.length - 4)).replace(/\d/g, "•")}${digits.slice(-4)}` : "••••";
   const outcome = normalizePhoneCallOutcome(call.outcome);
@@ -823,7 +825,7 @@ function callView(call: { id: string; provider?: string; direction?: string; cal
   const qa = call.qa && typeof call.qa === "object" && !Array.isArray(call.qa) ? call.qa : undefined;
   const toolPolicy = call.voiceProfile?.toolPolicy && typeof call.voiceProfile.toolPolicy === "object" && !Array.isArray(call.voiceProfile.toolPolicy) ? call.voiceProfile.toolPolicy : undefined;
   const reconciliationPending = call.terminalReason === "provider_accepted_reconciliation_pending";
-  return { id: call.id, provider: call.provider ?? "twilio", direction: call.direction ?? "outbound", callProfile: call.callProfile === "business" ? "business" : "personal", phoneNumber, status: call.status, ...(call.runtimeState ? { runtimeState: call.runtimeState } : {}), ...(call.providerStatus ? { providerStatus: call.providerStatus } : {}), ...(call.terminalReason ? { terminalReason: call.terminalReason } : {}), ...(call.callLengthSeconds !== undefined ? { callLengthSeconds: call.callLengthSeconds } : {}), ...(toolPolicy ? { toolPolicy } : {}), summary: call.summary, ...(outcome ? { outcome } : {}), ...(call.outcomeStatus ? { outcomeStatus: call.outcomeStatus } : {}), ...(transcript ? { transcript } : {}), ...(timeline.length ? { timeline } : {}), ...(qa ? { qa } : {}), ...(Array.isArray(call.followUpTaskIds) && call.followUpTaskIds.length ? { followUpTaskIds: call.followUpTaskIds.slice(0, 10) } : {}), ...(call.followUpStatus ? { followUpStatus: call.followUpStatus } : {}), ...(call.followUpErrorCode ? { followUpErrorCode: call.followUpErrorCode } : {}), error: reconciliationPending ? "The provider accepted this call, but its durable status is still being reconciled. Do not retry it." : call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
+  return { id: call.id, provider: call.provider ?? "twilio", direction: call.direction ?? "outbound", callProfile: call.callProfile === "business" ? "business" : "personal", phoneNumber, status: call.status, ...(call.runtimeState ? { runtimeState: call.runtimeState } : {}), ...(call.providerStatus ? { providerStatus: call.providerStatus } : {}), ...(call.terminalReason ? { terminalReason: call.terminalReason } : {}), ...(call.callLengthSeconds !== undefined ? { callLengthSeconds: call.callLengthSeconds } : {}), ...(toolPolicy ? { toolPolicy } : {}), summary: call.summary, ...(outcome ? { outcome } : {}), ...(call.outcomeStatus ? { outcomeStatus: call.outcomeStatus } : {}), ...(transcript ? { transcript } : {}), ...(call.transcriptRetentionDays ? { transcriptRetentionDays: call.transcriptRetentionDays } : {}), ...(call.transcriptExpiresAt ? { transcriptExpiresAt: new Date(call.transcriptExpiresAt).toISOString() } : {}), ...(call.transcriptStatus ? { transcriptStatus: call.transcriptStatus } : {}), ...(timeline.length ? { timeline } : {}), ...(qa ? { qa } : {}), ...(Array.isArray(call.followUpTaskIds) && call.followUpTaskIds.length ? { followUpTaskIds: call.followUpTaskIds.slice(0, 10) } : {}), ...(call.followUpStatus ? { followUpStatus: call.followUpStatus } : {}), ...(call.followUpErrorCode ? { followUpErrorCode: call.followUpErrorCode } : {}), error: reconciliationPending ? "The provider accepted this call, but its durable status is still being reconciled. Do not retry it." : call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
 }
 
 function meetingRoomView(room: MeetingRoomRecord) {
@@ -2012,7 +2014,7 @@ export function registerSdkApi(app: Hono): void {
       logger.warn({ errorType: error instanceof Error ? error.name : "UnknownError", userId: owner.userId }, "Account overview memory projection unavailable");
       return { memory: [], status: "degraded" as const };
     });
-    const [channels, devices, reminders, jobs, workspace, deliveries, memoryProjectionResult, triggerEvents, approvals, attentionCandidates, terminalMissions] = await Promise.all([
+    const [channels, devices, reminders, jobs, workspace, deliveries, memoryProjectionResult, triggerEvents, approvals, attentionCandidates, terminalMissions, attentionTasks] = await Promise.all([
       listChannelIdentities(owner.userId),
       listCliDevices(owner.userId),
       listReminderSummaries(owner.userId),
@@ -2027,7 +2029,9 @@ export function registerSdkApi(app: Hono): void {
       listApprovals(owner.userId, 50),
       listAttentionRecords(owner.userId, "attention_candidate", { limit: 50 }),
       listMissionsPage(owner.userId, 50, ["completed", "failed", "cancelled"]).then((items) => items.filter((item) => Number.isSafeInteger(item.webNotificationEligibleAt)).slice(0, 50)),
+      listTasks(owner.userId, ["blocked", "failed"]).then((items) => items.slice(0, 50)),
     ]);
+    await Promise.all(attentionTasks.map((task) => ensureTaskWebProjection(task).catch((error) => logger.warn({ errorName: error instanceof Error ? error.name : "UnknownError", taskId: task.id }, "Task notification projection unavailable"))));
     const missionNotifications = terminalMissions.map((mission) => {
       return {
         id: mission.id,
@@ -2039,6 +2043,16 @@ export function registerSdkApi(app: Hono): void {
         ...(mission.webNotificationThreadId && mission.webNotificationRunId ? { threadId: mission.webNotificationThreadId, runId: mission.webNotificationRunId } : {}),
       };
     });
+    const taskNotifications = attentionTasks.map((task) => ({
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      summary: (task.error || task.nextAction || task.result || "Review this task.").slice(0, 500),
+      updatedAt: new Date(task.updatedAt).toISOString(),
+      unread: !task.webNotificationReadAt || task.webNotificationReadAt < task.updatedAt,
+      threadId: "thr_task_updates",
+      ...(task.webNotificationReadAt ? { webReadAt: new Date(task.webNotificationReadAt).toISOString() } : {}),
+    }));
     const visibleApprovals = await visibleApprovalsForDashboard(owner.userId, approvals);
     const visibleJobs = config.elenaEnabled ? jobs : jobs.filter((item) => item.kind !== "attention_pulse");
     const pulseJob = config.elenaEnabled ? jobs.find((item) => item.kind === "attention_pulse") : undefined;
@@ -2086,6 +2100,7 @@ export function registerSdkApi(app: Hono): void {
         updatedAt: new Date(event.updatedAt).toISOString(),
       })),
       missionNotifications,
+      taskNotifications,
       devices: devices.filter((item) => !item.revokedAt).map(({ tokenHash, ...item }) => ({ ...item, id: createHash("sha256").update(tokenHash).digest("hex").slice(0, 24), createdAt: new Date(item.createdAt).toISOString(), lastSeenAt: new Date(item.lastSeenAt).toISOString() })),
       workspace: workspace ? { sandboxId: workspace.sandboxId, name: workspace.name, lastKnownState: workspace.lastKnownState, createdAt: new Date(workspace.createdAt).toISOString(), updatedAt: new Date(workspace.updatedAt).toISOString(), ptySessions: workspace.ptySessions?.length ?? 0, lastUrl: workspace.browser?.lastUrl } : null,
       webhooks: (sessionWebhooks ?? []).filter((item) => !item.disabledAt).map(({ secretCiphertext: _secret, ...item }) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
@@ -2198,9 +2213,9 @@ export function registerSdkApi(app: Hono): void {
     return streamSSE(c, async (stream) => {
       let closed = false;
       let wake: (() => void) | undefined;
-      const queue: Array<{ eventId: string; kind?: "run" | "call" | "mission" | "reminder"; callId?: string; missionId?: string; reminderId?: string; threadId?: string; runId?: string }> = [];
+      const queue: Array<{ eventId: string; kind?: "run" | "call" | "mission" | "reminder" | "task"; callId?: string; missionId?: string; reminderId?: string; taskId?: string; threadId?: string; runId?: string }> = [];
       const unsubscribe = subscribeWebNotifications(userId, (event) => {
-        queue.push({ eventId: event.eventId, ...(event.kind ? { kind: event.kind } : {}), ...(event.callId ? { callId: event.callId } : {}), ...(event.missionId ? { missionId: event.missionId } : {}), ...(event.reminderId ? { reminderId: event.reminderId } : {}), ...(event.threadId ? { threadId: event.threadId } : {}), ...(event.runId ? { runId: event.runId } : {}) });
+        queue.push({ eventId: event.eventId, ...(event.kind ? { kind: event.kind } : {}), ...(event.callId ? { callId: event.callId } : {}), ...(event.missionId ? { missionId: event.missionId } : {}), ...(event.reminderId ? { reminderId: event.reminderId } : {}), ...(event.taskId ? { taskId: event.taskId } : {}), ...(event.threadId ? { threadId: event.threadId } : {}), ...(event.runId ? { runId: event.runId } : {}) });
         wake?.();
       });
       const abort = () => { closed = true; wake?.(); };
@@ -2757,8 +2772,18 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/account/calls", async (c) => {
     const owner = await callOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before using calls.");
-    const provider = phoneCallingProvider();
-    return c.json({ available: Boolean(provider), provider: provider ?? null, data: (await listPhoneCalls(owner.userId)).map(callView) });
+    const provider = await phoneCallingProvider(owner.userId);
+    return c.json({ available: Boolean(provider), provider: provider ?? null, capabilities: { rawAudioRecording: false, transcriptRetention: true, transcriptDeletion: true }, data: (await listPhoneCalls(owner.userId)).map(callView) });
+  });
+
+  app.delete("/v1/account/calls/:callId/transcript", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before deleting call transcripts.");
+    const callId = c.req.param("callId");
+    if (!/^(?:twc|blc)_[A-Za-z0-9_-]{1,120}$/.test(callId)) return apiError(c, 400, "invalid_call_id", "The call ID is invalid.");
+    const deleted = await deletePhoneCallTranscript(owner.userId, callId);
+    if (!deleted) return apiError(c, 404, "call_transcript_not_found", "That call transcript is already deleted or unavailable.");
+    return c.json({ deleted: true, callId });
   });
 
   app.get("/v1/account/calls/profile", async (c) => {
@@ -3056,7 +3081,7 @@ export function registerSdkApi(app: Hono): void {
     // authenticated request. A linked Telegram address is never substituted.
     const owner = await callOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before using calls.");
-    if (!phoneCallingProvider()) return apiError(c, 503, "phone_calling_unavailable", "The selected phone provider is not configured on this Chusky deployment.");
+    if (!(await phoneCallingProvider(owner.userId))) return apiError(c, 503, "phone_calling_unavailable", "The selected phone provider is not configured on this Chusky deployment.");
     const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; purpose?: unknown; callProfile?: unknown; profile?: unknown; continuityFromCallId?: unknown };
     if (body.profile !== undefined && (!body.profile || typeof body.profile !== "object" || Array.isArray(body.profile))) return apiError(c, 400, "invalid_call_profile", "profile must be an object.");
     if (body.callProfile !== undefined && body.callProfile !== "personal" && body.callProfile !== "business") return apiError(c, 400, "invalid_call_profile", "callProfile must be personal or business.");
@@ -3344,9 +3369,9 @@ export function registerSdkApi(app: Hono): void {
     const organizationId = c.req.query("organizationId");
     if (organizationId) {
       if (!(await organizationAccessForRequest(c, organizationId))) return apiError(c, 404, "not_found", "Workspace not found.");
-      return c.json({ data: control.sdkProjects!.filter((project) => project.organizationId === organizationId && !project.revokedAt).map(accountProjectView) });
+      return c.json({ data: control.sdkProjects!.filter((project) => project.organizationId === organizationId && !project.revokedAt).map(accountProjectView), availableScopes: SELF_SERVICE_PROJECT_SCOPES, defaultScopes: DEFAULT_SELF_SERVICE_PROJECT_SCOPES });
     }
-    return c.json({ data: control.sdkProjects!.filter((project) => project.ownerWebAuthUserId === owner.id && !project.organizationId).map(accountProjectView) });
+    return c.json({ data: control.sdkProjects!.filter((project) => project.ownerWebAuthUserId === owner.id && !project.organizationId).map(accountProjectView), availableScopes: SELF_SERVICE_PROJECT_SCOPES, defaultScopes: DEFAULT_SELF_SERVICE_PROJECT_SCOPES });
   });
 
   app.get("/v1/account/projects/:projectId/company/runs", async (c) => {
@@ -3378,7 +3403,9 @@ export function registerSdkApi(app: Hono): void {
     if (organizationId && !(await organizationAccessForRequest(c, organizationId).then((access) => access?.role === "owner" || access?.role === "admin"))) {
       return apiError(c, 403, "workspace_admin_required", "Only workspace owners and admins can create company API projects.");
     }
-    const scopes = accountProjectScopes(body.scopes === undefined && organizationId ? COMPANY_PROJECT_DEFAULT_SCOPES : body.scopes);
+    const scopes = accountProjectScopes(body.scopes === undefined
+      ? organizationId ? COMPANY_PROJECT_DEFAULT_SCOPES : DEFAULT_SELF_SERVICE_PROJECT_SCOPES
+      : body.scopes);
     if (!name) return apiError(c, 400, "invalid_project", "Project name is required.");
     if (!scopes) return apiError(c, 400, "invalid_scopes", "Choose supported API scopes.");
     const control = await getSession(0);
@@ -4325,6 +4352,13 @@ export function registerSdkApi(app: Hono): void {
   });
   app.post("/v1/tasks/:taskId/retry", async (c) => { const userId = sdkUser(c)!.userId; const task = await retryTask(userId, c.req.param("taskId")); if (!task) return apiError(c, 409, "task_not_retryable", "Only failed, blocked, or cancelled tasks can be retried."); try { const workflowRunId = await enqueueTaskWithClaim(userId, task.id, task.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer); if (!workflowRunId) return apiError(c, 409, "task_enqueue_in_progress", "This task is already being queued."); const updated = await getTask(userId, task.id); return c.json(updated ?? task); } catch (error) { return apiError(c, 503, "task_enqueue_failed", error instanceof Error ? error.message : "Task could not be queued."); } });
   app.post("/v1/tasks/:taskId/cancel", async (c) => { const task = await cancelTask(sdkUser(c)!.userId, c.req.param("taskId")); return task ? c.json(task) : apiError(c, 409, "task_not_cancellable", "This task is already completed or cancelled."); });
+  app.post("/v1/tasks/:taskId/notification/read", async (c) => {
+    const userId = sdkUser(c)!.userId;
+    const task = await getTask(userId, c.req.param("taskId"));
+    if (!task) return apiError(c, 404, "task_not_found", "Task not found.");
+    const updated = await updateTask(userId, task.id, { webNotificationReadAt: Date.now() });
+    return updated ? c.json({ ok: true, taskId: updated.id, readAt: updated.webNotificationReadAt }) : apiError(c, 409, "task_read_failed", "Task notification could not be marked read.");
+  });
   app.get("/v1/missions", async (c) => {
     const limit = Math.max(1, Math.min(200, Number(c.req.query("limit") ?? 100) || 100));
     c.header("Cache-Control", "private, max-age=2, stale-while-revalidate=10");
@@ -4352,7 +4386,7 @@ export function registerSdkApi(app: Hono): void {
       if (!value || typeof value !== "object") return [];
       const step = value as Record<string, unknown>;
       if (typeof step.title !== "string" || typeof step.objective !== "string") return [];
-      return [{ id: typeof step.id === "string" ? step.id : undefined, title: step.title, objective: step.objective, dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((item): item is string => typeof item === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit), input: step.input && typeof step.input === "object" ? step.input as Record<string, unknown> : undefined, outputSchema: step.outputSchema && typeof step.outputSchema === "object" ? step.outputSchema as Record<string, unknown> : undefined, evidenceRequired: Array.isArray(step.evidenceRequired) ? step.evidenceRequired.filter((item): item is string => typeof item === "string") : undefined, compensationObjective: typeof step.compensationObjective === "string" ? step.compensationObjective : undefined, retryBackoffSeconds: step.retryBackoffSeconds === undefined ? undefined : Number(step.retryBackoffSeconds), parallelGroup: typeof step.parallelGroup === "string" ? step.parallelGroup : undefined }];
+      return [{ id: typeof step.id === "string" ? step.id : undefined, title: step.title, objective: step.objective, dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((item): item is string => typeof item === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit), allowedTools: Array.isArray(step.allowedTools) ? step.allowedTools.filter((item): item is string => typeof item === "string") : undefined, input: step.input && typeof step.input === "object" ? step.input as Record<string, unknown> : undefined, outputSchema: step.outputSchema && typeof step.outputSchema === "object" ? step.outputSchema as Record<string, unknown> : undefined, evidenceRequired: Array.isArray(step.evidenceRequired) ? step.evidenceRequired.filter((item): item is string => typeof item === "string") : undefined, compensationObjective: typeof step.compensationObjective === "string" ? step.compensationObjective : undefined, retryBackoffSeconds: step.retryBackoffSeconds === undefined ? undefined : Number(step.retryBackoffSeconds), parallelGroup: typeof step.parallelGroup === "string" ? step.parallelGroup : undefined }];
     }) : undefined;
     if (!title || !objective || !definitionOfDone || title.length > 240 || objective.length > 8000 || definitionOfDone.length > 4000) return apiError(c, 400, "invalid_mission", "title, objective, and definitionOfDone are required and must be within their size limits.");
     if (body.verificationMode !== undefined && body.verificationMode !== "legacy" && body.verificationMode !== "strict") return apiError(c, 400, "invalid_mission", "verificationMode must be either legacy or strict.");
@@ -4370,7 +4404,11 @@ export function registerSdkApi(app: Hono): void {
         maxToolCalls: body.maxToolCalls === undefined ? undefined : Number(body.maxToolCalls),
         maxCost: body.maxCost === undefined ? undefined : Number(body.maxCost),
       } });
-      const started = mission.status === "queued" ? await startMission(owner.userId, mission.id) : mission.status === "running" ? mission : undefined;
+      const retryableScheduleFailure = mission.status === "blocked" && mission.error?.startsWith("Mission could not be scheduled:");
+      const started = mission.status === "queued" ? await startMission(owner.userId, mission.id)
+        : mission.status === "running" ? mission
+          : retryableScheduleFailure ? await resumeMissionAndSchedule(owner.userId, mission.id, sdkTaskWorkflowEnqueuer)
+            : undefined;
       if (!started) return c.json(mission, mission.status === "queued" ? 409 : 200);
       try {
         const linked = await reconcileMissionExecution(owner.userId, started.id, sdkTaskWorkflowEnqueuer);
@@ -4610,8 +4648,12 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/operator/readiness", async (c) => {
     const proofs = await listProviderProofs();
     const matrix = providerMatrixWithProofs(process.env, proofs);
-    return c.json(buildReadinessReport({ durableStore: isDurableStore(), qstashConfigured: Boolean(config.qstashToken && config.qstashCurrentSigningKey && config.qstashNextSigningKey), providerMatrix: matrix, proofs }));
+    return c.json({
+      ...buildReadinessReport({ durableStore: isDurableStore(), qstashConfigured: Boolean(config.qstashToken && config.qstashCurrentSigningKey && config.qstashNextSigningKey), providerMatrix: matrix, proofs }),
+      twilioActivation: buildTwilioActivationChecklist(),
+    });
   });
+  app.get("/v1/operator/twilio/activation", async (c) => c.json({ data: buildTwilioActivationChecklist() }));
   app.post("/v1/operator/escalations/run", async (c) => { const owner = sdkUser(c)!; const result = await runDueApprovalEscalations(owner.userId, { create: async (record) => { if (!record.toolSlug) throw new Error("No exact escalation action was configured; no external issue or message was created."); const output = await executeExactComposioAction(owner.userId, record.toolSlug, record.toolArgs ?? {}); const payload = output && typeof output === "object" ? output as Record<string, unknown> : {}; const key = [payload.key, payload.issueKey, payload.issue_key, payload.id].find((value): value is string => typeof value === "string" && value.length <= 240); return { ...(key ? { externalIssueKey: key } : {}), summary: key ? `Escalation action completed (${key}).` : "Escalation action completed." }; } }); return c.json({ data: result, executed: result.some((item) => item.status === "escalated"), message: result.length ? "Due escalations were processed through the exact owner-selected connected-app action." : "No due escalations." }); });
   app.post("/v1/operator/outcomes/verify", async (c) => {
     const owner = sdkUser(c)!;

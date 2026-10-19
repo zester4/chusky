@@ -2,6 +2,18 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.15.1 - 2026-10-19
+
+- Expose mission-step `allowedTools` as a typed execution fence and preserve it
+  through mission creation, including an explicit empty list.
+- Keep provider-read verification out of explicitly tool-less worker slices,
+  prevent model-driven replans from widening their current tool fence, and
+  honor creation-time budget ceilings.
+- Recover retryable durable scheduling failures when a mission create is
+  retried with its original idempotency key.
+- Document the authenticated dashboard's scope catalog and least-privilege
+  personal API-key defaults.
+
 ## 1.15.0 - 2026-10-12
 
 - Add typed `RunProgress` data to run snapshots and append-only `run.progress`
