@@ -16,6 +16,11 @@ function clean(value: string, maximum: number): string {
   return value.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, maximum);
 }
 
+function actionOwner(value: string): string {
+  const owner = clean(value, 120);
+  return !owner || /^unassigned$/i.test(owner) ? "Workspace owner" : owner;
+}
+
 function taskIdFor(call: PhoneCallRecord, index: number, item: PhoneCallOutcome["actionItems"][number]): string {
   const fingerprint = [call.id, index, item.task, item.owner, item.dueDate ?? ""].join("\n");
   return `task_call_${createHash("sha256").update(fingerprint).digest("hex").slice(0, 48)}`;
@@ -58,13 +63,14 @@ export async function schedulePhoneCallFollowUps(
       title: `Call follow-up: ${clean(item.task, 100)}`,
       objective: [
         `Follow up on the completed phone call ${call.id}.`,
-        `Action owner: ${clean(item.owner, 120)}.`,
+        `Action owner: ${actionOwner(item.owner)}.`,
         `Verified action item: ${clean(item.task, 500)}`,
         item.dueDate ? `Recorded due date: ${clean(item.dueDate, 80)}.` : "No due date was explicitly recorded.",
         "Use only the verified call outcome and the owner's available tools. Preserve normal approval requirements for external messages, commitments, payments, permissions, and other high-impact actions. Do not invent contact details or claim completion without a provider receipt.",
       ].join(" ").slice(0, 3_000),
       runAt,
       maxAttempts: 5,
+      phoneCallId: call.id,
     });
     taskIds.push(task.id);
 

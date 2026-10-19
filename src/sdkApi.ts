@@ -38,6 +38,7 @@ import { appendSdkRunHistory, appendSdkRunHistoryToSession, mutateSession } from
 import { updateTriggerEvent } from "./store.js";
 import { markTriggerWebApprovalResuming } from "./store.js";
 import { ensureMissionWebProjection } from "./store.js";
+import { ensureTaskWebProjection } from "./store.js";
 import { missionProjectionFailureDetails } from "./missionProjectionDiagnostics.js";
 import { notifyTriggerApproval } from "./triggerWorkflow.js";
 import { logger } from "./logger.js";
@@ -2013,7 +2014,7 @@ export function registerSdkApi(app: Hono): void {
       logger.warn({ errorType: error instanceof Error ? error.name : "UnknownError", userId: owner.userId }, "Account overview memory projection unavailable");
       return { memory: [], status: "degraded" as const };
     });
-    const [channels, devices, reminders, jobs, workspace, deliveries, memoryProjectionResult, triggerEvents, approvals, attentionCandidates, terminalMissions] = await Promise.all([
+    const [channels, devices, reminders, jobs, workspace, deliveries, memoryProjectionResult, triggerEvents, approvals, attentionCandidates, terminalMissions, attentionTasks] = await Promise.all([
       listChannelIdentities(owner.userId),
       listCliDevices(owner.userId),
       listReminderSummaries(owner.userId),
@@ -2028,7 +2029,9 @@ export function registerSdkApi(app: Hono): void {
       listApprovals(owner.userId, 50),
       listAttentionRecords(owner.userId, "attention_candidate", { limit: 50 }),
       listMissionsPage(owner.userId, 50, ["completed", "failed", "cancelled"]).then((items) => items.filter((item) => Number.isSafeInteger(item.webNotificationEligibleAt)).slice(0, 50)),
+      listTasks(owner.userId, ["blocked", "failed"]).then((items) => items.slice(0, 50)),
     ]);
+    await Promise.all(attentionTasks.map((task) => ensureTaskWebProjection(task).catch((error) => logger.warn({ errorName: error instanceof Error ? error.name : "UnknownError", taskId: task.id }, "Task notification projection unavailable"))));
     const missionNotifications = terminalMissions.map((mission) => {
       return {
         id: mission.id,
@@ -2040,6 +2043,16 @@ export function registerSdkApi(app: Hono): void {
         ...(mission.webNotificationThreadId && mission.webNotificationRunId ? { threadId: mission.webNotificationThreadId, runId: mission.webNotificationRunId } : {}),
       };
     });
+    const taskNotifications = attentionTasks.map((task) => ({
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      summary: (task.error || task.nextAction || task.result || "Review this task.").slice(0, 500),
+      updatedAt: new Date(task.updatedAt).toISOString(),
+      unread: !task.webNotificationReadAt || task.webNotificationReadAt < task.updatedAt,
+      threadId: "thr_task_updates",
+      ...(task.webNotificationReadAt ? { webReadAt: new Date(task.webNotificationReadAt).toISOString() } : {}),
+    }));
     const visibleApprovals = await visibleApprovalsForDashboard(owner.userId, approvals);
     const visibleJobs = config.elenaEnabled ? jobs : jobs.filter((item) => item.kind !== "attention_pulse");
     const pulseJob = config.elenaEnabled ? jobs.find((item) => item.kind === "attention_pulse") : undefined;
@@ -2087,6 +2100,7 @@ export function registerSdkApi(app: Hono): void {
         updatedAt: new Date(event.updatedAt).toISOString(),
       })),
       missionNotifications,
+      taskNotifications,
       devices: devices.filter((item) => !item.revokedAt).map(({ tokenHash, ...item }) => ({ ...item, id: createHash("sha256").update(tokenHash).digest("hex").slice(0, 24), createdAt: new Date(item.createdAt).toISOString(), lastSeenAt: new Date(item.lastSeenAt).toISOString() })),
       workspace: workspace ? { sandboxId: workspace.sandboxId, name: workspace.name, lastKnownState: workspace.lastKnownState, createdAt: new Date(workspace.createdAt).toISOString(), updatedAt: new Date(workspace.updatedAt).toISOString(), ptySessions: workspace.ptySessions?.length ?? 0, lastUrl: workspace.browser?.lastUrl } : null,
       webhooks: (sessionWebhooks ?? []).filter((item) => !item.disabledAt).map(({ secretCiphertext: _secret, ...item }) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
@@ -2199,9 +2213,9 @@ export function registerSdkApi(app: Hono): void {
     return streamSSE(c, async (stream) => {
       let closed = false;
       let wake: (() => void) | undefined;
-      const queue: Array<{ eventId: string; kind?: "run" | "call" | "mission" | "reminder"; callId?: string; missionId?: string; reminderId?: string; threadId?: string; runId?: string }> = [];
+      const queue: Array<{ eventId: string; kind?: "run" | "call" | "mission" | "reminder" | "task"; callId?: string; missionId?: string; reminderId?: string; taskId?: string; threadId?: string; runId?: string }> = [];
       const unsubscribe = subscribeWebNotifications(userId, (event) => {
-        queue.push({ eventId: event.eventId, ...(event.kind ? { kind: event.kind } : {}), ...(event.callId ? { callId: event.callId } : {}), ...(event.missionId ? { missionId: event.missionId } : {}), ...(event.reminderId ? { reminderId: event.reminderId } : {}), ...(event.threadId ? { threadId: event.threadId } : {}), ...(event.runId ? { runId: event.runId } : {}) });
+        queue.push({ eventId: event.eventId, ...(event.kind ? { kind: event.kind } : {}), ...(event.callId ? { callId: event.callId } : {}), ...(event.missionId ? { missionId: event.missionId } : {}), ...(event.reminderId ? { reminderId: event.reminderId } : {}), ...(event.taskId ? { taskId: event.taskId } : {}), ...(event.threadId ? { threadId: event.threadId } : {}), ...(event.runId ? { runId: event.runId } : {}) });
         wake?.();
       });
       const abort = () => { closed = true; wake?.(); };
@@ -4338,6 +4352,13 @@ export function registerSdkApi(app: Hono): void {
   });
   app.post("/v1/tasks/:taskId/retry", async (c) => { const userId = sdkUser(c)!.userId; const task = await retryTask(userId, c.req.param("taskId")); if (!task) return apiError(c, 409, "task_not_retryable", "Only failed, blocked, or cancelled tasks can be retried."); try { const workflowRunId = await enqueueTaskWithClaim(userId, task.id, task.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer); if (!workflowRunId) return apiError(c, 409, "task_enqueue_in_progress", "This task is already being queued."); const updated = await getTask(userId, task.id); return c.json(updated ?? task); } catch (error) { return apiError(c, 503, "task_enqueue_failed", error instanceof Error ? error.message : "Task could not be queued."); } });
   app.post("/v1/tasks/:taskId/cancel", async (c) => { const task = await cancelTask(sdkUser(c)!.userId, c.req.param("taskId")); return task ? c.json(task) : apiError(c, 409, "task_not_cancellable", "This task is already completed or cancelled."); });
+  app.post("/v1/tasks/:taskId/notification/read", async (c) => {
+    const userId = sdkUser(c)!.userId;
+    const task = await getTask(userId, c.req.param("taskId"));
+    if (!task) return apiError(c, 404, "task_not_found", "Task not found.");
+    const updated = await updateTask(userId, task.id, { webNotificationReadAt: Date.now() });
+    return updated ? c.json({ ok: true, taskId: updated.id, readAt: updated.webNotificationReadAt }) : apiError(c, 409, "task_read_failed", "Task notification could not be marked read.");
+  });
   app.get("/v1/missions", async (c) => {
     const limit = Math.max(1, Math.min(200, Number(c.req.query("limit") ?? 100) || 100));
     c.header("Cache-Control", "private, max-age=2, stale-while-revalidate=10");

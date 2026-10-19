@@ -91,11 +91,16 @@ export function twilioVoiceTranscript(call: PhoneCallRecord, transcript: string,
  * image requests) from the owner's global conversation. Only finalized turns
  * from this call and bounded continuity are eligible for the voice model.
  */
-export function twilioVoiceHistory(call: PhoneCallRecord): Message[] {
-  return (call.transcript?.turns ?? []).flatMap((turn) => [
-    { role: "user" as const, content: `The external contact said: ${turn.caller}`, createdAt: turn.at },
-    { role: "assistant" as const, content: turn.assistant, createdAt: turn.at },
-  ]).slice(-24);
+export function twilioVoiceHistory(call: PhoneCallRecord, spokenOpening?: string): Message[] {
+  const opening = spoken(spokenOpening, 1_000);
+  const hasPersistedOpening = (call.transcript?.turns ?? []).some((turn) => turn.kind === "opening" || turn.id === "opening");
+  return [
+    ...(opening && !hasPersistedOpening ? [{ role: "assistant" as const, content: opening, createdAt: call.createdAt }] : []),
+    ...(call.transcript?.turns ?? []).flatMap((turn) => [
+    ...(turn.caller ? [{ role: "user" as const, content: `The external contact said: ${turn.caller}`, createdAt: turn.at }] : []),
+    ...(turn.assistant ? [{ role: "assistant" as const, content: turn.assistant, createdAt: turn.at }] : []),
+    ]),
+  ].slice(-24);
 }
 
 /**
@@ -111,5 +116,23 @@ export function twilioVoiceInstructions(call: PhoneCallRecord): string {
   const verification = call.callVerification ?? (profile === "business" ? "identified" : "verified");
   const continuity = voiceContinuityInstructions(call.continuity);
   const contactName = spoken(call.voiceProfile?.contactName, 180);
-  return `${voiceProfileInstructions(call.voiceProfile, call.direction, purpose)} ${voiceCallPlanInstructions(plan)} ${voicePolicyInstructions(call.voiceProfile?.toolPolicy)} Caller-facing topic after identity confirmation: ${callerTopic}. ${contactName ? `Expected contact name: ${contactName}. Use it only to confirm identity; do not treat it as proof.` : "No contact name was supplied; do not invent one."} Call profile: ${profile}. Inbound verification tier: ${verification} (public → identified → verified). Use only this call's transcript and the approved call context as working context; do not consult unrelated chat messages, files, images, or prior conversations. In a business call, do not volunteer unrelated personal information; in a personal call, do not reveal unrelated confidential business information. Never disclose sensitive account information before the configured verification tier is satisfied.${continuity}`;
+  const bookingContract = voiceActionNeedsProviderReceipt(call)
+    ? " BOOKING COMPLETION CONTRACT: This call includes a booking objective. Treat booking as unfinished until the calendar provider returns a successful create or update receipt. While the caller is available, collect the appointment subject or service, the exact date and time with timezone, and the duration or end time; use a configured service duration when one exists. Ask for one missing detail at a time. Ask for a location or meeting link only when the appointment type or provider requires it. Check real calendar availability, offer only available times, let the caller choose, then create the event and wait for the provider receipt. Never say booked, confirmed, scheduled, updated, or all set after only a free/busy check or a spoken intention. If the caller will not supply a required detail or the provider is unavailable, say plainly that it remains unbooked and leave a verified follow-up for the owner; do not silently send an SMS or email unless that action is explicitly authorized and a valid channel is available."
+    : "";
+  return `${voiceProfileInstructions(call.voiceProfile, call.direction, purpose)} ${voiceCallPlanInstructions(plan)} ${voicePolicyInstructions(call.voiceProfile?.toolPolicy)} Caller-facing topic after identity confirmation: ${callerTopic}. ${contactName ? `The transport greeting has already asked for ${contactName}. If the caller confirms, address them as ${contactName} once and continue the purpose; do not repeat a generic intended-person question unless identity is denied or uncertain.` : "No contact name was supplied; do not invent one. If the transport greeting asked for the intended person, confirm identity once and then continue."} When the caller answers the transport greeting with a clear affirmative such as yes, right, or speaking, treat that as confirmation that the intended person is on the line. Do not ask again whether you are speaking to them, whether this is a call, or why you called; continue from the approved purpose. If the opening is already in the conversation history, do not restart it. Call profile: ${profile}. Inbound verification tier: ${verification} (public → identified → verified). Use only this call's transcript and the approved call context as working context; do not consult unrelated chat messages, files, images, or prior conversations. In a business call, do not volunteer unrelated personal information; in a personal call, do not reveal unrelated confidential business information. Never disclose sensitive account information before the configured verification tier is satisfied. UI icons, emoji, tool labels, and internal progress messages are not caller-facing language and must never be spoken.${bookingContract}${continuity}`;
+}
+
+/** Scheduling answers are buffered until the provider returns a write receipt.
+ * This prevents a model sentence such as “you are all set” from becoming a
+ * false booking confirmation when only free/busy was checked. */
+export function voiceActionNeedsProviderReceipt(call: PhoneCallRecord): boolean {
+  return call.voiceProfile?.mode === "scheduling" || /\b(?:book|booking|schedule|scheduled|appointment|calendar|reserve|reservation)\b/i.test(call.purpose);
+}
+
+export function sanitizeUnverifiedVoiceAction(call: PhoneCallRecord, text: string, verifiedActions: Array<{ toolSlug: string; receiptId: string }>): string {
+  const answer = text.trim();
+  if (!answer || !voiceActionNeedsProviderReceipt(call)) return answer;
+  const hasBookingWrite = verifiedActions.some((action) => /(?:CALENDAR|APPOINTMENT|BOOK|SCHEDULE).*(?:CREATE|ADD|UPDATE|INSERT|BOOK|EVENT)|(?:CREATE|ADD|UPDATE|INSERT|BOOK).*(?:CALENDAR|APPOINTMENT|EVENT)/i.test(action.toolSlug));
+  if (hasBookingWrite || !/\b(?:booked|scheduled|reserved|all set|appointment (?:is )?confirmed|updated your appointment|created the event)\b/i.test(answer)) return answer;
+  return "I have noted that time as your preference, but I have not booked the appointment yet. I still need to confirm the appointment details and calendar availability before I can say it is booked.";
 }

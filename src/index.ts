@@ -53,7 +53,7 @@ import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
 import { recordMeetingTurn } from "./decisions/telemetry.js";
-import { twilioVoiceHistory, twilioVoiceInstructions, twilioVoiceKeyterms, twilioVoiceOpening, twilioVoiceTranscript } from "./calls/twilioContext.js";
+import { sanitizeUnverifiedVoiceAction, twilioVoiceHistory, twilioVoiceInstructions, twilioVoiceKeyterms, twilioVoiceOpening, twilioVoiceTranscript, voiceActionNeedsProviderReceipt } from "./calls/twilioContext.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
 import { buildMeetingMissionStatePrompt, parseMeetingMissionState } from "./meetings/liveState.js";
 import { attentionPulseCloseoutOutput, attentionPulseDeliveredToday, attentionPulseDeliveryConfirmation, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, attentionPulseRefreshOwnerState, attentionPulseRequireDueWatchReport, buildAttentionPulsePlan, getAttentionPulseWatchCoverage, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "./attentionPulse.js";
@@ -1148,7 +1148,7 @@ async function main(): Promise<void> {
     // speculative audio turns remain tool-less.
     app.post("/internal/twilio/turn", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.twilioMediaBridgeSecret)) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string; speculative?: boolean; interruptedAssistantSpeech?: string };
+      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string; speculative?: boolean; interruptedAssistantSpeech?: string; opening?: string };
       const callId = String(body.callId ?? "").trim();
       const userId = Number(body.userId);
       const transcript = String(body.transcript ?? "").trim();
@@ -1322,7 +1322,7 @@ async function main(): Promise<void> {
     // interrupted speech from being persisted.
     app.post("/internal/twilio/turn-stream", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.twilioMediaBridgeSecret)) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string; speculative?: boolean; interruptedAssistantSpeech?: string };
+      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string; speculative?: boolean; interruptedAssistantSpeech?: string; opening?: string };
       const callId = String(body.callId ?? "").trim();
       const userId = Number(body.userId);
       const transcript = String(body.transcript ?? "").trim();
@@ -1348,14 +1348,16 @@ async function main(): Promise<void> {
               send({ type: "done", text: "Understood. I will not contact you again. Goodbye.", cost: 0, endCall: true, speculative: false });
               return;
             }
+            const verifiedActions: Array<{ toolSlug: string; receiptId: string; summary?: string }> = [];
             const result = await withVoiceCallLock(userId, callId, c.req.raw.signal, async () => {
               const liveCall = call;
+              const bufferActionResponse = voiceActionNeedsProviderReceipt(liveCall);
               const privateVoiceAccess = liveCall.direction !== "inbound"
                 || (liveCall.callProfile === "personal" && liveCall.callVerification === "verified");
               const scopedVoiceAccess = liveCall.direction === "inbound"
                 && liveCall.callProfile === "business"
                 && liveCall.voiceProfile?.toolPolicy?.enabled === true;
-              return runAgent(userId, twilioVoiceTranscript(liveCall, transcript, body.interruptedAssistantSpeech), twilioVoiceHistory(liveCall), config.voiceModel, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined,
+              return runAgent(userId, twilioVoiceTranscript(liveCall, transcript, body.interruptedAssistantSpeech), twilioVoiceHistory(liveCall, body.opening), config.voiceModel, undefined, c.req.raw.signal, bufferActionResponse ? undefined : (delta) => send({ type: "delta", text: delta }), undefined,
                 { accountId: `account_${userId}`, provider: "voice", conversationId: callId, scope: "private" }, {
                 instructions: twilioVoiceInstructions(liveCall),
                 ...(speculative ? { toolAllow: [], ephemeral: true } : privateVoiceAccess ? { ownerPrivateRun: true } : scopedVoiceAccess ? { ephemeral: true, voiceScopedAccess: true } : { toolAllow: [], ephemeral: true }),
@@ -1364,15 +1366,22 @@ async function main(): Promise<void> {
                 voiceRoutingHint: liveCall.purpose,
                 voiceToolPolicy: liveCall.voiceProfile?.toolPolicy,
                 voiceAllowHumanHandoff: liveCall.voiceProfile?.controls?.allowHumanHandoff,
-                onVoiceActivity: (activity) => send({ type: activity.type, toolSlug: activity.toolSlug, text: normalizeVoiceText(activity.message).slice(0, 4000) }),
+                // Tool activity is an owner-facing call log concern, not
+                // caller-facing speech. Sending these status messages to the
+                // bridge made labels such as "reminders" and "memory" leak
+                // into the live conversation (and their emoji could be read
+                // aloud by TTS). Keep the durable onToolActivity audit below;
+                // the voice agent should speak only its actual response.
                 onToolActivity: async (activity) => {
                   if (speculative) return;
                   const eventType = activity.status === "started" ? "tool_started" : activity.status === "completed" ? "tool_completed" : activity.status === "failed" ? "tool_failed" : undefined;
-                  if (eventType) void appendPhoneCallEvent(userId, callId, { type: eventType, summary: normalizeVoiceText(activity.message).slice(0, 400), toolSlug: activity.toolSlug, ...(activity.receiptId ? { receiptId: activity.receiptId } : {}) }).catch(() => undefined);
+                  if (activity.status === "completed" && activity.receiptId) verifiedActions.push({ toolSlug: activity.toolSlug, receiptId: activity.receiptId, summary: normalizeVoiceText(activity.message).slice(0, 400) });
+                  if (eventType) await appendPhoneCallEvent(userId, callId, { type: eventType, summary: normalizeVoiceText(activity.message).slice(0, 400), toolSlug: activity.toolSlug, ...(activity.receiptId ? { receiptId: activity.receiptId } : {}) }).catch(() => undefined);
                 },
               });
             });
-            send({ type: "done", text: normalizeVoiceText(result.text).slice(0, 5000), cost: result.cost ?? 0, speculative });
+            const callText = sanitizeUnverifiedVoiceAction(call, normalizeVoiceText(result.text), verifiedActions).slice(0, 5000);
+            send({ type: "done", text: callText, cost: result.cost ?? 0, speculative });
             if (!speculative) void appendPhoneCallEvent(userId, callId, { type: "turn_completed", summary: "The agent completed the caller turn." }).catch(() => undefined);
           } catch (error) {
             if (error instanceof ApprovalRequiredError && !speculative) {
@@ -1431,16 +1440,18 @@ async function main(): Promise<void> {
     // tools or treated as authorization.
     app.post("/internal/twilio/commit-outcome", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.twilioMediaBridgeSecret)) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; turns?: unknown; firstResponseMs?: number };
+      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; opening?: string; turns?: unknown; firstResponseMs?: number };
       const callId = String(body.callId ?? "").trim();
       const userId = Number(body.userId);
       if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !Array.isArray(body.turns) || body.turns.length > 12) return c.json({ ok: false, error: "invalid Twilio voice outcome" }, 400);
+      const opening = typeof body.opening === "string" ? normalizeVoiceText(body.opening).slice(0, 1_000) : "";
       const turns = body.turns.flatMap((value) => {
         if (!value || typeof value !== "object" || Array.isArray(value)) return [];
         const item = value as Record<string, unknown>;
         const transcript = typeof item.transcript === "string" ? item.transcript.trim().slice(0, 900) : "";
         const response = typeof item.response === "string" ? item.response.trim().slice(0, 900) : "";
-        return transcript && response ? [{ transcript, response }] : [];
+        const id = typeof item.id === "string" && /^[A-Za-z0-9:_-]{1,160}$/.test(item.id) ? item.id : undefined;
+        return transcript && response ? [{ ...(id ? { id } : {}), transcript, response }] : [];
       });
       const call = await getPhoneCall(userId, callId);
       // Outcome delivery runs during shutdown. Twilio may report failed before
@@ -1453,6 +1464,7 @@ async function main(): Promise<void> {
       if (lease === "completed") return c.json({ ok: true, duplicate: true });
       if (lease === "busy") return c.json({ ok: false, error: "voice outcome is in progress", retryable: true }, 409);
       try {
+        if (opening) await appendPhoneCallTranscriptTurn(userId, callId, { turnId: "opening", assistant: opening, kind: "opening" });
         if (call.outcomeStatus === "completed" && call.outcome) {
           const followUp = await schedulePhoneCallFollowUps(call, call.outcome);
           await updatePhoneCall(userId, callId, { followUpTaskIds: followUp.taskIds, followUpStatus: "scheduled", followUpErrorCode: undefined });
@@ -1466,7 +1478,7 @@ async function main(): Promise<void> {
         // before deciding that there is no conversation to summarize.
         const effectiveTurns = turns.length
           ? turns
-          : (outcomeCall.transcript?.turns ?? []).map((turn) => ({ transcript: turn.caller, response: turn.assistant })).slice(-12);
+          : (outcomeCall.transcript?.turns ?? []).flatMap((turn) => turn.caller && turn.assistant ? [{ transcript: turn.caller, response: turn.assistant }] : []).slice(-12);
         if (!effectiveTurns.length) {
           const outcome = fallbackPhoneCallOutcome();
           const qa = scorePhoneCallTrace({ direction: outcomeCall.direction, provider: outcomeCall.provider, purpose: outcomeCall.purpose, outcome, timeline: outcomeCall.timeline });

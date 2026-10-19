@@ -105,7 +105,7 @@ function compactPersistedMessage(value: unknown, maxChars = PERSISTED_MESSAGE_MA
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const item = value as Partial<Message>;
   if ((item.role !== "user" && item.role !== "assistant") || typeof item.content !== "string") return undefined;
-  return {
+  const normalized: Message = {
     ...(typeof item.id === "string" && /^[A-Za-z0-9:_-]{1,180}$/.test(item.id) ? { id: item.id } : {}),
     role: item.role,
     content: boundPersistedText(item.content, maxChars),
@@ -118,6 +118,7 @@ function compactPersistedMessage(value: unknown, maxChars = PERSISTED_MESSAGE_MA
     ...(typeof item.projectId === "string" && item.projectId.length <= 180 ? { projectId: item.projectId } : {}),
     ...(typeof item.meetingId === "string" && item.meetingId.length <= 180 ? { meetingId: item.meetingId } : {}),
   };
+  return normalized;
 }
 
 function fitPersistedHistory(messages: unknown[], maxMessages: number, maxChars = PERSISTED_HISTORY_MAX_CHARS): { history: Message[]; dropped: Message[] } {
@@ -537,7 +538,7 @@ export interface PhoneCallRecord {
   qa?: VoiceQaScorecard;
   /** Durable tasks created from the structured call outcome. */
   followUpTaskIds?: string[];
-  followUpStatus?: "pending" | "scheduled" | "failed";
+  followUpStatus?: "pending" | "scheduled" | "blocked" | "completed" | "failed";
   followUpErrorCode?: string;
   outcomeStatus?: "pending" | "completed" | "failed";
   outcomeErrorCode?: string;
@@ -632,6 +633,8 @@ export interface PhoneCallTranscriptTurn {
   at: number;
   caller: string;
   assistant: string;
+  /** Opening/recovery entries may contain only the assistant side. */
+  kind?: "opening" | "conversation" | "recovery";
 }
 
 export interface PhoneCallTranscript {
@@ -1376,6 +1379,13 @@ export interface TaskRecord {
   sdkOrganizationId?: string;
   /** Preserve first-party owner-private execution through durable SDK task continuations. */
   sdkOwnerPrivateRun?: boolean;
+  /** Call follow-ups remain linked to the call that produced them. */
+  phoneCallId?: string;
+  /** Durable read marker for the owner-chat task notification. */
+  webNotificationEventId?: string;
+  webNotificationThreadId?: string;
+  webNotificationRunId?: string;
+  webNotificationReadAt?: number;
   /** Admission slot held for an asynchronous SDK run until it settles. */
   quotaReservationId?: string;
   /** Narrow delayed meeting follow-up context; deliberately excludes general chat history and arbitrary tools. */
@@ -7079,7 +7089,9 @@ function normalizePhoneCallTranscript(value: unknown): PhoneCallTranscript | und
     const caller = typeof turn.caller === "string" ? turn.caller.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 2_500) : "";
     const assistant = typeof turn.assistant === "string" ? turn.assistant.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 2_500) : "";
     const at = typeof turn.at === "number" && Number.isFinite(turn.at) ? Math.max(0, Math.floor(turn.at)) : undefined;
-    return id && at !== undefined && caller && assistant ? [{ id, at, caller, assistant }] : [];
+    return id && at !== undefined && (caller || assistant)
+      ? [{ id, at, caller, assistant, ...(turn.kind === "opening" || turn.kind === "conversation" || turn.kind === "recovery" ? { kind: turn.kind } : {}) }]
+      : [];
   }).slice(-80) : [];
   const updatedAt = typeof item.updatedAt === "number" && Number.isFinite(item.updatedAt) ? Math.max(0, Math.floor(item.updatedAt)) : undefined;
   if (!turns.length || updatedAt === undefined) return undefined;
@@ -7313,7 +7325,7 @@ export async function getSession(uid: number, includeSdkTables = false, options?
       ...(Array.isArray(item.timeline) ? { timeline: normalizeVoiceCallEvents(item.timeline) } : {}),
       ...(item.qa && typeof item.qa === "object" && !Array.isArray(item.qa) ? { qa: normalizeVoiceQaScorecard(item.qa) } : {}),
       ...(Array.isArray(item.followUpTaskIds) ? { followUpTaskIds: item.followUpTaskIds.filter((id): id is string => typeof id === "string" && /^task_[A-Za-z0-9_-]{1,160}$/.test(id)).slice(0, 10) } : {}),
-      ...(item.followUpStatus === "pending" || item.followUpStatus === "scheduled" || item.followUpStatus === "failed" ? { followUpStatus: item.followUpStatus } : {}),
+      ...(item.followUpStatus === "pending" || item.followUpStatus === "scheduled" || item.followUpStatus === "blocked" || item.followUpStatus === "completed" || item.followUpStatus === "failed" ? { followUpStatus: item.followUpStatus } : {}),
       ...(typeof item.followUpErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(item.followUpErrorCode) ? { followUpErrorCode: item.followUpErrorCode } : {}),
       ...(item.outcomeStatus === "pending" || item.outcomeStatus === "completed" || item.outcomeStatus === "failed" ? { outcomeStatus: item.outcomeStatus } : {}),
       ...(typeof item.outcomeErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(item.outcomeErrorCode) ? { outcomeErrorCode: item.outcomeErrorCode } : {}),
@@ -8927,12 +8939,12 @@ export async function appendPhoneCallEvent(uid: number, id: string, input: Voice
 export async function appendPhoneCallTranscriptTurn(
   uid: number,
   id: string,
-  input: { turnId: string; caller: string; assistant: string; at?: number },
+  input: { turnId: string; caller?: string; assistant?: string; kind?: "opening" | "conversation" | "recovery"; at?: number },
 ): Promise<PhoneCallRecord | undefined> {
   const turnId = input.turnId.trim().slice(0, 160);
-  const caller = input.caller.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 2_500);
-  const assistant = input.assistant.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 2_500);
-  if (!/^[A-Za-z0-9:_-]{1,160}$/.test(turnId) || !caller || !assistant) throw new Error("A phone transcript turn requires a bounded turn ID and both speaker texts");
+  const caller = String(input.caller ?? "").replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 2_500);
+  const assistant = String(input.assistant ?? "").replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 2_500);
+  if (!/^[A-Za-z0-9:_-]{1,160}$/.test(turnId) || (!caller && !assistant)) throw new Error("A phone transcript entry requires a bounded entry ID and at least one speaker text");
   const updated = await mutateSession(uid, (session) => {
     const current = (session.phoneCalls ?? []).find((item) => item.id === id && item.userId === uid);
     if (!current) return undefined;
@@ -8941,7 +8953,7 @@ export async function appendPhoneCallTranscriptTurn(
     }
     const existing = current.transcript?.turns ?? [];
     if (existing.some((turn) => turn.id === turnId)) return current;
-    const next = [...existing, { id: turnId, at: typeof input.at === "number" && Number.isFinite(input.at) ? Math.max(0, Math.floor(input.at)) : Date.now(), caller, assistant }];
+    const next = [...existing, { id: turnId, at: typeof input.at === "number" && Number.isFinite(input.at) ? Math.max(0, Math.floor(input.at)) : Date.now(), caller, assistant, ...(input.kind ? { kind: input.kind } : {}) }];
     current.transcript = {
       turns: next.slice(-80),
       truncated: Boolean(current.transcript?.truncated) || next.length > 80,
@@ -10091,7 +10103,7 @@ function normalizeTask(task: TaskRecord): TaskRecord {
       ...(task.webSessionReconciliation.telegramUserId !== undefined ? { telegramUserId: task.webSessionReconciliation.telegramUserId } : {}),
     }
     : undefined;
-  return {
+  const normalized: TaskRecord = {
     ...task,
     steps: (task.steps ?? []).slice(0, 20).map((step) => ({ ...step, updatedAt: step.updatedAt ?? task.updatedAt })),
     attempt: task.attempt ?? 0,
@@ -10129,6 +10141,12 @@ function normalizeTask(task: TaskRecord): TaskRecord {
     ...(meetingFollowUp ? { meetingFollowUp } : { meetingFollowUp: undefined }),
     ...(reconciliation ? { taskKind: "web_session_reconciliation" as const, webSessionReconciliation: reconciliation } : { taskKind: undefined, webSessionReconciliation: undefined }),
   };
+  normalized.phoneCallId = typeof task.phoneCallId === "string" && /^twc_[0-9a-f-]{36}$/i.test(task.phoneCallId) ? task.phoneCallId : undefined;
+  normalized.webNotificationEventId = typeof task.webNotificationEventId === "string" && task.webNotificationEventId.length <= 240 ? task.webNotificationEventId : undefined;
+  normalized.webNotificationThreadId = typeof task.webNotificationThreadId === "string" && /^thr_[A-Za-z0-9_-]{1,120}$/.test(task.webNotificationThreadId) ? task.webNotificationThreadId : undefined;
+  normalized.webNotificationRunId = typeof task.webNotificationRunId === "string" && /^run_[A-Za-z0-9_-]{1,160}$/.test(task.webNotificationRunId) ? task.webNotificationRunId : undefined;
+  normalized.webNotificationReadAt = typeof task.webNotificationReadAt === "number" && Number.isFinite(task.webNotificationReadAt) ? task.webNotificationReadAt : undefined;
+  return normalized;
 }
 
 function taskEvent(type: TaskEvent["type"], message: string, attempt: number, at = Date.now()): TaskEvent {
@@ -11454,7 +11472,7 @@ export async function updateTask(userId: number, id: string, patch: Partial<Omit
  * owner-directed repair decides what is safe.
  */
 export async function quarantineExpiredTask(userId: number, id: string, reason: string, nextAction: string): Promise<TaskRecord | undefined> {
-  return mutateTask(userId, id, (task) => {
+  const quarantined = await mutateTask(userId, id, (task) => {
     if (task.status !== "running" || !task.lease || task.lease.expiresAt > Date.now()) return undefined;
     return {
       status: "blocked",
@@ -11464,6 +11482,8 @@ export async function quarantineExpiredTask(userId: number, id: string, reason: 
       events: [...task.events, taskEvent("blocked", reason, task.attempt)],
     };
   });
+  if (quarantined) await finalizeTerminalTaskProjection(quarantined);
+  return quarantined;
 }
 
 export async function scheduleTask(userId: number, id: string, runAt: number): Promise<TaskRecord | undefined> {
@@ -11486,15 +11506,19 @@ export async function checkpointTask(userId: number, id: string, checkpoint: str
 }
 
 export async function blockTask(userId: number, id: string, error: string, nextAction?: string): Promise<TaskRecord | undefined> {
-  return mutateTask(userId, id, (task) => ["completed", "cancel_requested", "cancelled"].includes(task.status)
+  const blocked = await mutateTask(userId, id, (task) => ["completed", "cancel_requested", "cancelled"].includes(task.status)
     ? undefined
-    : { status: "blocked", error, nextAction });
+    : { status: "blocked", error, nextAction, events: [...task.events, taskEvent("blocked", error, task.attempt)] });
+  if (blocked) await finalizeTerminalTaskProjection(blocked);
+  return blocked;
 }
 
 export async function completeTask(userId: number, id: string, result: string): Promise<TaskRecord | undefined> {
-  return mutateTask(userId, id, (task) => ["cancel_requested", "cancelled"].includes(task.status)
+  const completed = await mutateTask(userId, id, (task) => ["cancel_requested", "cancelled"].includes(task.status)
     ? undefined
-    : { status: "completed", result, nextAction: undefined, error: undefined });
+    : { status: "completed", result, nextAction: undefined, error: undefined, events: [...task.events, taskEvent("completed", result, task.attempt)] });
+  if (completed) await finalizeTerminalTaskProjection(completed);
+  return completed;
 }
 
 /** Request cancellation without racing an in-flight worker into a false success. */
@@ -11624,7 +11648,7 @@ export async function recoverTaskAfterWorkflowFailure(
     }
     return undefined;
   }
-  if (task.status === "failed") await reconcileTerminalMissionTask(task);
+  if (task.status === "failed") await finalizeTerminalTaskProjection(task);
   return { task, shouldEnqueue: task.status === "queued" };
 }
 
@@ -11653,6 +11677,34 @@ async function reconcileTerminalMissionTask(task: TaskRecord): Promise<void> {
     const activeStepIds = (current.activeStepIds ?? []).filter((candidate) => candidate !== task.missionStepId);
     return { status: "failed", steps, activeStepIds, currentStepId: activeStepIds[0], error: (task.error ?? "A mission step exhausted its retry budget.").slice(0, 2000), nextAction: "Repair or replan the failed step before resuming the mission.", waiting: undefined, events: [...current.events, missionEvent("step_failed", `Mission step ${step.title} failed after the task retry budget was exhausted.`)] };
   });
+}
+
+/** Keep every terminal task entry point consistent. Worker settlement already
+ * used to project this state, but direct native/task-tool completion and
+ * blocking bypassed that path and left phone follow-ups looking scheduled.
+ * The task remains the source of truth; these are idempotent projections. */
+async function finalizeTerminalTaskProjection(task: TaskRecord): Promise<void> {
+  if (!["blocked", "failed", "completed"].includes(task.status)) return;
+  await reconcileTerminalMissionTask(task);
+  if (task.phoneCallId) {
+    const call = await getPhoneCall(task.userId, task.phoneCallId);
+    if (call) {
+      const followUpTasks = await Promise.all((call.followUpTaskIds ?? []).map((taskId) => getTask(task.userId, taskId)));
+      const currentTasks = followUpTasks.filter((item): item is TaskRecord => Boolean(item));
+      const parentStatus = currentTasks.some((item) => item.status === "blocked")
+        ? "blocked" as const
+        : currentTasks.some((item) => item.status === "failed")
+          ? "failed" as const
+          : currentTasks.length > 0 && currentTasks.every((item) => ["completed", "cancelled"].includes(item.status))
+            ? "completed" as const
+            : "scheduled" as const;
+      await updatePhoneCall(task.userId, task.phoneCallId, {
+        followUpStatus: parentStatus,
+        ...(parentStatus === "blocked" ? { followUpErrorCode: "follow_up_blocked" } : parentStatus === "failed" ? { followUpErrorCode: "follow_up_failed" } : { followUpErrorCode: undefined }),
+      }).catch(() => undefined);
+    }
+  }
+  await ensureTaskWebProjection(task);
 }
 
 /**
@@ -11698,8 +11750,65 @@ export async function settleTaskRun(userId: number, id: string, leaseToken: stri
     ...(status === "queued" && normalized.status === "queued" && normalized.progress ? { attempt: 0 } : {}),
     runAt: retryable ? Date.now() + (delayMs ?? 0) : normalized.status === "queued" ? normalized.runAt : undefined,
   }, taskEvent(eventType, normalized.message, task.attempt));
-  if (settled) await reconcileTerminalMissionTask(settled);
+  if (settled) {
+    await finalizeTerminalTaskProjection(settled);
+  }
   return settled;
+}
+
+/** Materialize terminal task state as a durable owner-chat notification. The
+ * task remains the source of truth; this projection gives the owner a direct
+ * conversation entry point instead of hiding a blocker on a task page. */
+export async function ensureTaskWebProjection(task: TaskRecord): Promise<{ threadId: string; runId: string; eventId: string; created: boolean }> {
+  if (!Number.isSafeInteger(task.userId) || task.userId <= 0 || !/^task_[A-Za-z0-9_-]{1,160}$/.test(task.id) || !["blocked", "failed", "completed"].includes(task.status)) {
+    return { threadId: "thr_task_updates", runId: "", eventId: "", created: false };
+  }
+  const terminalEvent = [...(task.events ?? [])].reverse().find((event) => event.type === task.status);
+  const eventId = terminalEvent?.id ?? `task:${task.id}:${task.status}:${task.version}`;
+  const threadId = "thr_task_updates";
+  const runId = `run_task_${createHash("sha256").update(eventId).digest("hex").slice(0, 32)}`;
+  const now = Date.now();
+  if (task.webNotificationEventId === eventId && task.webNotificationThreadId === threadId && task.webNotificationRunId === runId) {
+    return { threadId, runId, eventId, created: false };
+  }
+  const projection = await mutateSession(task.userId, (session) => {
+    session.sdkThreads = session.sdkThreads ?? [];
+    let thread = session.sdkThreads.find((item) => item.id === threadId && item.metadata.source === "task-notifications");
+    if (!thread) {
+      thread = { id: threadId, externalId: "task-updates", metadata: { source: "task-notifications", title: "Task updates" }, history: [], runs: [], createdAt: now, updatedAt: now };
+      session.sdkThreads.push(thread);
+    }
+    const existing = thread.runs.find((run) => run.metadata?.taskEventId === eventId);
+    if (existing) return { threadId: thread.id, runId: existing.id, eventId, created: false };
+    const statusLabel = task.status === "blocked" ? "Task needs your attention" : task.status === "failed" ? "Task failed" : "Task completed";
+    const detail = task.status === "blocked"
+      ? task.error || task.nextAction || "The task is waiting for owner input."
+      : task.status === "failed"
+        ? task.error || task.nextAction || "The task stopped before completion."
+        : task.result || "The task completed successfully.";
+    const output = `${statusLabel}: ${task.title}\n\n${detail}${task.nextAction && task.nextAction !== detail ? `\n\nNext: ${task.nextAction}` : ""}`.slice(0, 12_000);
+    const run: SdkRunRecord = {
+      id: runId,
+      ownerPrivateRun: true,
+      status: "completed",
+      input: `${statusLabel}: ${task.title}`.slice(0, 1_000),
+      output,
+      model: session.model,
+      metadata: { source: "task", taskId: task.id, taskStatus: task.status, taskEventId: eventId },
+      events: [{ id: `evt_${runId}_started`, type: "run.started", at: now }, { id: `evt_${runId}_completed`, type: "run.completed", at: now, text: output.slice(0, 2_000) }],
+      createdAt: now,
+      updatedAt: now,
+    };
+    thread.runs.push(run);
+    thread.updatedAt = now;
+    return { threadId: thread.id, runId, eventId, created: true };
+  }, { sdkThreadId: threadId });
+  if (!projection) throw new Error("Task notification could not be saved to the owner session.");
+  if (task.webNotificationEventId !== eventId || task.webNotificationThreadId !== projection.threadId || task.webNotificationRunId !== projection.runId) {
+    await updateTask(task.userId, task.id, { webNotificationEventId: eventId, webNotificationThreadId: projection.threadId, webNotificationRunId: projection.runId, webNotificationReadAt: undefined }).catch(() => undefined);
+  }
+  if (projection.created) publishWebNotification({ userId: task.userId, eventId, kind: "task", taskId: task.id, threadId: projection.threadId, runId: projection.runId });
+  return projection;
 }
 
 export async function setTelegramChatId(uid: number, chatId: number): Promise<void> {

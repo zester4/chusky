@@ -2338,7 +2338,9 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
     case "CHUCK_AUTONOMY_RECONCILE": return autonomyReconcileTool(userId, args, runtime);
     case "CHUCK_AUTONOMY_PLAYBOOK": return autonomyPlaybookTool(userId, args, runtime);
     case "CHUCK_START_PHONE_CALL": {
-      const profile = args.profile && typeof args.profile === "object" && !Array.isArray(args.profile) ? args.profile as Record<string, unknown> : undefined;
+      const baseProfile = args.profile && typeof args.profile === "object" && !Array.isArray(args.profile) ? args.profile as Record<string, unknown> : undefined;
+      const suppliedContactName = args.contactName === undefined ? undefined : text(args.contactName, 180);
+      const profile = baseProfile || suppliedContactName ? { ...(baseProfile ?? {}), ...(suppliedContactName ? { contactName: suppliedContactName } : {}) } : undefined;
       const callProfile: "business" | "personal" = args.callProfile === "business" ? "business" : "personal";
       const continuityFromCallId = args.continuityFromCallId === undefined ? undefined : text(args.continuityFromCallId, 128);
       const phoneNumber = text(args.phoneNumber);
@@ -2347,7 +2349,7 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
       // durable agent run. Hash the bounded call intent so the provider side
       // effect is claimed once before either Twilio or Bland is contacted.
       const requestKey = runtime.currentRunId?.trim()
-        ? `pc_${createHash("sha256").update(JSON.stringify({ version: 1, userId, runId: runtime.currentRunId.trim(), phoneNumber: phoneNumber.replace(/[^0-9+]/g, ""), purpose: purpose.replace(/\s+/g, " ").trim().toLowerCase(), callProfile, continuityFromCallId: continuityFromCallId ?? null })).digest("hex")}`
+        ? `pc_${createHash("sha256").update(JSON.stringify({ version: 2, userId, runId: runtime.currentRunId.trim(), phoneNumber: phoneNumber.replace(/[^0-9+]/g, ""), purpose: purpose.replace(/\s+/g, " ").trim().toLowerCase(), callProfile, contactName: suppliedContactName ?? null, continuityFromCallId: continuityFromCallId ?? null })).digest("hex")}`
         : undefined;
       const input = { phoneNumber, purpose, ...(profile ? { profile } : {}), ...(continuityFromCallId ? { continuityFromCallId } : {}), callProfile, ...(requestKey ? { requestKey } : {}) };
       if (phoneCallLauncherForTests) return phoneCallLauncherForTests(userId, input);

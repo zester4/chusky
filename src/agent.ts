@@ -5414,6 +5414,26 @@ async function discoverVoiceCalendarTools(sessionObj: any, sessionTools: any[], 
   } catch (error) {
     logger.debug({ err: error }, "Voice calendar tool discovery unavailable; continuing without calendar actions");
   }
+  // ToolRouter versions can return only gateway cards from search(). That is
+  // useful for discovery but not callable by the voice model. Resolve the
+  // bounded calendar action family by exact slug as a final fallback so a
+  // connected Google Calendar never degrades into owner-chat discovery or a
+  // browser detour simply because the catalogue response was compact.
+  const calendarSlugs = VOICE_COMPOSIO_BUNDLES.calendar;
+  const missing = calendarSlugs.filter((slug) => !discovered.has(slug));
+  if (missing.length && sessionObj) {
+    try {
+      const exact = await resolveExactComposioModelTools(sessionObj, missing, signal);
+      for (const slug of missing) {
+        const resolved = exact.get(composioActionSlug(slug));
+        if (resolved) add(resolved.tool);
+        if (discovered.size >= VOICE_CALENDAR_TOOL_LIMIT) break;
+      }
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      logger.debug({ err: error, count: missing.length }, "Exact voice calendar schema lookup unavailable");
+    }
+  }
   return [...discovered.values()];
 }
 

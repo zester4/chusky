@@ -106,6 +106,31 @@ test("voice history is isolated to finalized turns from this call", () => {
   assert.deepEqual(history.map((message) => message.content), ["The external contact said: I can do nine tomorrow.", "I will check that now."]);
 });
 
+test("voice history includes the transport opening before the first caller turn", () => {
+  const history = twilioVoiceHistory({
+    ...base,
+    direction: "outbound",
+    voiceProfile: { identity: "Chusky", organization: "MedVault", contactName: "Treffley", mode: "scheduling", tone: "professional", facts: [], guardrails: [], capabilities: [] },
+  }, "Hello, this is Chusky from MedVault. May I speak with Treffley?");
+  assert.deepEqual(history.map((message) => message.content), ["Hello, this is Chusky from MedVault. May I speak with Treffley?"]);
+});
+
+test("voice instructions continue after an affirmative transport identity answer", () => {
+  const prompt = twilioVoiceInstructions({
+    ...base,
+    direction: "outbound",
+    voiceProfile: { identity: "Chusky", organization: "MedVault", contactName: "Treffley", mode: "scheduling", tone: "professional", facts: [], guardrails: [], capabilities: [] },
+  });
+  assert.match(prompt, /clear affirmative.*confirmation that the intended person is on the line/i);
+  assert.match(prompt, /address them as Treffley once/i);
+  assert.match(prompt, /do not ask again whether you are speaking to them/i);
+  assert.match(prompt, /BOOKING COMPLETION CONTRACT/i);
+  assert.match(prompt, /collect the appointment subject or service/i);
+  assert.match(prompt, /duration or end time/i);
+  assert.match(prompt, /successful create or update receipt/i);
+  assert.match(prompt, /do not silently send an SMS or email/i);
+});
+
 test("inbound Twilio turns do not inherit an outbound objective", () => {
   const prompt = twilioVoiceInstructions({ ...base, direction: "inbound", purpose: "Inbound phone call" });
   assert.match(prompt, /authorized inbound call/i);

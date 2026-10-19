@@ -14,6 +14,7 @@ import {
 import { logger } from "../logger.js";
 import { twilioWebhookCredentialsForCall } from "./twilioSubaccounts.js";
 import { fallbackPhoneCallOutcome } from "./outcome.js";
+import { twilioVoiceOpening } from "./twilioContext.js";
 import { providerStatusCanAdvance, type VoiceCallEventInput } from "./voiceEvents.js";
 import type { VoiceCallReconciliationRecord } from "./reconciliationTypes.js";
 
@@ -183,7 +184,7 @@ async function reconcileOutcome(record: VoiceCallReconciliationRecord, call: Pho
     const response = await fetch(`${base}/internal/twilio/commit-outcome`, {
       method: "POST",
       headers: { "Authorization": `Bearer ${config.twilioMediaBridgeSecret}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ callId: call.id, userId: call.userId, turns }),
+      body: JSON.stringify({ callId: call.id, userId: call.userId, opening: twilioVoiceOpening(call), turns }),
       signal: AbortSignal.timeout(15_000),
     });
     if (!response.ok) {
