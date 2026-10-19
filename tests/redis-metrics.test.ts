@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { RedisCommandMetrics, instrumentRedisClient, redisOperationFamily, withRedisMetricRoute } from "../src/redisMetrics.js";
+import { RedisCommandMetrics, RedisReadBudgetExceededError, instrumentRedisClient, redisOperationFamily, withRedisMetricRoute } from "../src/redisMetrics.js";
+import { redisOptions } from "../src/redisClient.js";
+
+test("direct Redis clients use explicit bounded policies by purpose", () => {
+  const durable = redisOptions("durable");
+  assert.equal(durable.maxRetriesPerRequest, 3);
+  assert.equal(durable.enableOfflineQueue, true);
+  assert.equal(durable.connectTimeout, 5_000);
+  assert.equal(durable.commandTimeout, 5_000);
+
+  const cache = redisOptions("cache");
+  assert.equal(cache.maxRetriesPerRequest, 1);
+  assert.equal(cache.enableOfflineQueue, false);
+  assert.equal(cache.lazyConnect, false);
+});
 
 test("Redis telemetry groups key families without retaining owner keys", () => {
   assert.equal(redisOperationFamily({ name: "get", args: ["chuck:session:12345"] }), "session");
@@ -59,6 +73,30 @@ test("instrumentation observes commands without changing command outcomes", asyn
 
   assert.equal(metrics.snapshot().missions.commands, 2);
   assert.equal(metrics.snapshot().missions.errors, 1);
+});
+
+test("enforced route budgets stop subsequent Redis commands after a response limit is exceeded", async () => {
+  const metrics = new RedisCommandMetrics();
+  let dispatched = 0;
+  const client = {
+    sendCommand(command: { name: string; args: readonly unknown[]; promise?: Promise<unknown> }) {
+      dispatched += 1;
+      command.promise = Promise.resolve("oversized");
+      return command.promise;
+    },
+  };
+  instrumentRedisClient(client, metrics);
+
+  await withRedisMetricRoute("GET /v1/budget", async () => {
+    await client.sendCommand({ name: "get", args: ["chuck:session:owner"] });
+    await assert.rejects(
+      client.sendCommand({ name: "get", args: ["chuck:session:owner:next"] }),
+      (error: unknown) => error instanceof RedisReadBudgetExceededError,
+    );
+  }, { maxResponseBytes: 1, enforce: true });
+
+  assert.equal(dispatched, 1);
+  assert.equal(metrics.snapshot().session.commands, 1);
 });
 
 test("Redis telemetry attributes bounded route samples without owner identity", async () => {

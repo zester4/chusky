@@ -43,15 +43,31 @@ interface RedisMetricContext {
   responseBytes: number;
   maxCommands?: number;
   maxResponseBytes?: number;
+  enforce?: boolean;
   exceeded: boolean;
+  blockedCommands: number;
   onExceeded?: (context: { route: string; commands: number; responseBytes: number }) => void;
 }
 const redisMetricRoute = new AsyncLocalStorage<RedisMetricContext>();
 
+export class RedisReadBudgetExceededError extends Error {
+  readonly route: string;
+  readonly commands: number;
+  readonly responseBytes: number;
+
+  constructor(context: RedisMetricContext) {
+    super("Redis request read budget exceeded");
+    this.name = "RedisReadBudgetExceededError";
+    this.route = context.route;
+    this.commands = context.commands;
+    this.responseBytes = context.responseBytes;
+  }
+}
+
 /** Attribute Redis traffic to a bounded API/worker surface without retaining owner data. */
-export function withRedisMetricRoute<T>(route: string, work: () => Promise<T>, budget: Pick<RedisMetricContext, "maxCommands" | "maxResponseBytes" | "onExceeded"> = {}): Promise<T> {
+export function withRedisMetricRoute<T>(route: string, work: () => Promise<T>, budget: Pick<RedisMetricContext, "maxCommands" | "maxResponseBytes" | "enforce" | "onExceeded"> = {}): Promise<T> {
   const bounded = route.replace(/[^A-Za-z0-9_ ./:-]/g, "").slice(0, 120) || "unknown";
-  return redisMetricRoute.run({ route: bounded, commands: 0, responseBytes: 0, exceeded: false, ...budget }, work);
+  return redisMetricRoute.run({ route: bounded, commands: 0, responseBytes: 0, exceeded: false, blockedCommands: 0, ...budget }, work);
 }
 
 export type RedisCommandMetricsSnapshot = Record<RedisMetricFamily, RedisCommandFamilyMetrics>;
@@ -275,6 +291,11 @@ export function instrumentRedisClient<T extends RedisClientLike>(client: T, metr
   if (instrumentedClients.has(client)) return;
   const original = client.sendCommand;
   client.sendCommand = function (command: RedisCommandLike, ...args: unknown[]): unknown {
+    const context = redisMetricRoute.getStore();
+    if (context?.enforce && context.exceeded) {
+      context.blockedCommands += 1;
+      return Promise.reject(new RedisReadBudgetExceededError(context));
+    }
     const startedAt = Date.now();
     let observed = false;
     const observe = (error: boolean, result?: unknown) => {

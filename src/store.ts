@@ -20,6 +20,7 @@ import { logger } from "./logger.js";
 import { publishWebNotification } from "./webNotificationBus.js";
 import { MissionWebProjectionError, wrapMissionProjectionError } from "./missionProjectionDiagnostics.js";
 import { instrumentRedisClient, RedisCommandMetrics } from "./redisMetrics.js";
+import { createRedisClient } from "./redisClient.js";
 import { flattenStorageMetricTotals, RedisMetricsPublisher } from "./redisMetricsPublisher.js";
 import { recordFailure, recordVectorFailure } from "./monitoring.js";
 import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channels/contracts.js";
@@ -6426,6 +6427,15 @@ function fresh(): UserSession {
 
 let backend: Backend;
 let redisMetricsFlushTimer: NodeJS.Timeout | undefined;
+let activeRedisClient: Redis | undefined;
+let redisHealthState: {
+  ready: boolean;
+  connectedAt?: number;
+  lastReadyAt?: number;
+  lastErrorAt?: number;
+  reconnects: number;
+  lastPingMs?: number;
+} = { ready: false, reconnects: 0 };
 const memoryVectorBackfillUsers = new Set<number>();
 const memoryVectorBackfillRetryAt = new Map<number, number>();
 
@@ -6495,17 +6505,22 @@ export async function initStore(options: { memoryOnly?: boolean; suppressStorage
   if (!options.memoryOnly && config.durableStorageMetricsEnabled) await durableState!.assertQueryMetricsSchema();
   if (config.redisUrl && !options.memoryOnly) {
     try {
-      const r = new Redis(config.redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
-      let lastRedisErrorLogAt = 0;
-      r.on("error", (error) => {
-        // ioredis includes command arguments on its error object. Never pass
-        // that object to the logger: a failed SETEX would otherwise echo the
-        // complete private session, including message content, into logs.
+      const r = createRedisClient(config.redisUrl, "durable");
+      activeRedisClient = r;
+      redisHealthState = { ready: false, reconnects: 0 };
+      r.on("ready", () => {
+        const wasReady = redisHealthState.ready;
+        redisHealthState.ready = true;
+        redisHealthState.connectedAt ??= Date.now();
+        redisHealthState.lastReadyAt = Date.now();
+        if (wasReady) redisHealthState.reconnects += 1;
+      });
+      r.on("close", () => { redisHealthState.ready = false; });
+      r.on("end", () => { redisHealthState.ready = false; });
+      r.on("error", () => {
         const now = Date.now();
-        if (now - lastRedisErrorLogAt < 30_000) return;
-        lastRedisErrorLogAt = now;
-        const message = error instanceof Error ? error.message.slice(0, 240) : "Redis client error";
-        logger.error({ errorType: error instanceof Error ? error.name : "RedisError", message }, "Redis client error");
+        redisHealthState.lastErrorAt = now;
+        redisHealthState.ready = false;
       });
       await r.connect();
       await r.ping();
@@ -6530,6 +6545,8 @@ export async function initStore(options: { memoryOnly?: boolean; suppressStorage
       logger.info("Store: Redis connected");
       return;
     } catch (e) {
+      activeRedisClient = undefined;
+      redisHealthState = { ready: false, reconnects: 0 };
       if (config.webhookUrl || production) {
         const error = new Error("Redis is unavailable in webhook/production mode; refusing in-memory persistence");
         recordFailure("redis_failure", e, { phase: "startup", reason: "connection_failed" });
@@ -6554,12 +6571,57 @@ export async function closeStore(): Promise<void> {
       await currentBackend.close();
     } finally {
       backend = new MemoryBackend();
+      activeRedisClient = undefined;
+      redisHealthState = { ready: false, reconnects: 0 };
     }
   }
 }
 
 export function isDurableStore(): boolean {
   return backend instanceof RedisBackend;
+}
+
+/**
+ * A live Redis probe for operational health. `isDurableStore()` only tells us
+ * which backend was selected at startup; it cannot detect a later reconnect
+ * loop or provider timeout.
+ */
+export async function redisHealth(): Promise<{
+  status: "ready" | "degraded" | "disabled";
+  ready: boolean;
+  latencyMs?: number;
+  reconnects: number;
+  connectedAt?: string;
+  lastReadyAt?: string;
+  lastErrorAt?: string;
+}> {
+  if (!activeRedisClient || !isDurableStore()) return { status: "disabled", ready: false, reconnects: redisHealthState.reconnects };
+  const started = Date.now();
+  try {
+    await activeRedisClient.ping();
+    const latencyMs = Date.now() - started;
+    redisHealthState.ready = true;
+    redisHealthState.lastPingMs = latencyMs;
+    return {
+      status: "ready",
+      ready: true,
+      latencyMs,
+      reconnects: redisHealthState.reconnects,
+      ...(redisHealthState.connectedAt ? { connectedAt: new Date(redisHealthState.connectedAt).toISOString() } : {}),
+      ...(redisHealthState.lastReadyAt ? { lastReadyAt: new Date(redisHealthState.lastReadyAt).toISOString() } : {}),
+      ...(redisHealthState.lastErrorAt ? { lastErrorAt: new Date(redisHealthState.lastErrorAt).toISOString() } : {}),
+    };
+  } catch {
+    redisHealthState.ready = false;
+    return {
+      status: "degraded",
+      ready: false,
+      reconnects: redisHealthState.reconnects,
+      ...(redisHealthState.connectedAt ? { connectedAt: new Date(redisHealthState.connectedAt).toISOString() } : {}),
+      ...(redisHealthState.lastReadyAt ? { lastReadyAt: new Date(redisHealthState.lastReadyAt).toISOString() } : {}),
+      ...(redisHealthState.lastErrorAt ? { lastErrorAt: new Date(redisHealthState.lastErrorAt).toISOString() } : {}),
+    };
+  }
 }
 
 const memoryCategories: MemoryFact["category"][] = ["profile", "personal", "preference", "business", "relationship", "project", "procedural", "episodic", "document", "negative", "fact", "instruction", "asset"];

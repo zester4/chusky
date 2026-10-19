@@ -863,10 +863,20 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // ── Redis ──────────────────────────────────────────────────────────
   redisUrl: optional("REDIS_URL", ""),
   sessionTtl: positiveInt("SESSION_TTL", 60 * 60 * 24 * 30),
-  // Per-request read guardrails are warnings rather than hard failures: a
-  // diagnostic must not turn a busy dashboard into an outage.
+  // Per-request read guardrails are logged in every environment and enforced
+  // in production by default so pathological fan-outs fail safely.
   redisReadBudgetBytes: boundedInt("REDIS_READ_BUDGET_BYTES", 2_000_000, 64_000, 50_000_000),
   redisReadBudgetCommands: boundedInt("REDIS_READ_BUDGET_COMMANDS", 1_000, 50, 20_000),
+  // Direct Redis clients use bounded network and command deadlines. These are
+  // intentionally deployment-configurable because Upstash region and plan
+  // latency can differ between staging and production.
+  redisConnectTimeoutMs: boundedInt("REDIS_CONNECT_TIMEOUT_MS", 5_000, 1_000, 30_000),
+  redisCommandTimeoutMs: boundedInt("REDIS_COMMAND_TIMEOUT_MS", 5_000, 250, 30_000),
+  redisRetryMaxDelayMs: boundedInt("REDIS_RETRY_MAX_DELAY_MS", 5_000, 500, 30_000),
+  // A production API must stop a pathological read from continuing to fan
+  // out. Non-production keeps the warning-only behavior useful for fixtures.
+  redisReadBudgetEnforced: booleanOption("REDIS_READ_BUDGET_ENFORCED", process.env.NODE_ENV === "production" || Boolean(process.env.WEBHOOK_URL?.trim())),
+  redisDashboardProjectionLimit: boundedInt("REDIS_DASHBOARD_PROJECTION_LIMIT", 100, 20, 500),
   // Full task checkpoints are execution state, not permanent history. Keep
   // compact summaries/indexes after this window while bounding Redis memory.
   taskPayloadRetentionSeconds: boundedInt("TASK_PAYLOAD_RETENTION_SECONDS", 30 * 24 * 60 * 60, 24 * 60 * 60, 365 * 24 * 60 * 60),

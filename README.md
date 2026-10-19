@@ -1709,6 +1709,11 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `ALLOWED_USERS` | — | (all) | Telegram user IDs allowlist |
 | `MAX_HISTORY` | — | `10` | Conversation turns to keep (clamped to 7–12) |
 | `REDIS_URL` | — | (memory) | Redis for persistence |
+| `REDIS_CONNECT_TIMEOUT_MS` | — | `5000` | Redis connection deadline |
+| `REDIS_COMMAND_TIMEOUT_MS` | — | `5000` | Redis command deadline |
+| `REDIS_RETRY_MAX_DELAY_MS` | — | `5000` | Maximum reconnect backoff |
+| `REDIS_READ_BUDGET_ENFORCED` | — | production: `true` | Stop pathological API Redis fan-out safely |
+| `REDIS_DASHBOARD_PROJECTION_LIMIT` | — | `100` | Maximum open-task summaries loaded by dashboard projection |
 | `SESSION_TTL` | — | `2592000` | Redis TTL (30 days) |
 | `BETTER_AUTH_DATABASE_URL` | Neon | — | Production Better Auth PostgreSQL connection string; required when `NODE_ENV=production` and auth is enabled |
 | `BETTER_AUTH_MIGRATION_DATABASE_URL` | Neon | — | Direct PostgreSQL connection used only by `npm run auth:migrate` for Better Auth schema migrations |

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import Redis from "ioredis";
+import { createRedisClient } from "./redisClient.js";
 
 export interface BuilderVoiceControl {
   subaccountManagementEnabled: boolean;
@@ -116,13 +117,17 @@ export function builderRepository(): BuilderRepository {
   if (!repository) {
     const url = process.env.REDIS_URL?.trim();
     if (!url) throw new Error("Builder controls require Redis.");
-    redis = new Redis(url, { lazyConnect: true, maxRetriesPerRequest: 1, connectTimeout: 5000, commandTimeout: 5000 });
+    redis = createRedisClient(url, "control");
     repository = new RedisBuilderRepository(redis);
   }
   return repository;
 }
 export async function closeBuilderControl() {
-  if (redis) { redis.disconnect(); redis = undefined; }
+  if (redis) {
+    const current = redis;
+    redis = undefined;
+    try { await current.quit(); } catch { current.disconnect(); }
+  }
   repository = undefined;
   invalidateBuilderControl();
 }

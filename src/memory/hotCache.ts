@@ -1,12 +1,13 @@
-import Redis from "ioredis";
 import { createHash } from "node:crypto";
+import type Redis from "ioredis";
 import { config } from "../config.js";
+import { createRedisClient } from "../redisClient.js";
 import type { MemoryBrief, MemoryPurpose } from "./types.js";
 
 let client: Redis | undefined;
 function redis(): Redis | undefined {
   if (!config.redisUrl) return undefined;
-  if (!client) client = new Redis(config.redisUrl, { maxRetriesPerRequest: 1, lazyConnect: false, enableOfflineQueue: false });
+  if (!client) client = createRedisClient(config.redisUrl, "cache", { lazyConnect: false });
   return client;
 }
 function key(input: { ownerUserId: number; purpose: MemoryPurpose; query: string; scopeIds: string[]; includeSensitive?: boolean; limit?: number }): string {

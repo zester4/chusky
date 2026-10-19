@@ -10,7 +10,7 @@ import { needsTurnOpening, type TurnOpening } from "./turnOpening.js";
 import { assertAgentExecutionEnabled, getBuilderVoiceControls } from "./builderControl.js";
 import { canonicalSdkFingerprint, stableSdkUserId } from "./sdkIdentity.js";
 import { withNeonQueryMetricRoute, type DurableObjectMetadata } from "./neonDurableState.js";
-import { withRedisMetricRoute } from "./redisMetrics.js";
+import { RedisReadBudgetExceededError, withRedisMetricRoute } from "./redisMetrics.js";
 import { promoteSdkFileUpload } from "./sdkFilePromotion.js";
 import { getAuth } from "./auth.js";
 import { ApprovalRequiredError, createTrigger, createUserOutcomeReadAdapter, deleteTrigger, disconnectConnectedAccount, executeExactComposioAction, fetchModels, getConnectionUrl, getReconnectUrl, getToolkitStatesPage, listConnectedAccounts, listMeetingComposioCapabilities, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, transcriptionFormatForMimeType, updateTriggerInstructions, transcribeAudio, queueVideoWorkflow, type AgentToolActivity } from "./agent.js";
@@ -28,6 +28,7 @@ import { getSdkRunUsage } from "./store.js";
 import { getVoiceCallProfile, setVoiceCallProfile } from "./store.js";
 import { applyVoicePersonaToProfile, listVoicePersonas } from "./calls/personas.js";
 import { getSessionProfile, getSessionWebhooks } from "./store.js";
+import { redisHealth } from "./store.js";
 import { unlinkWebTelegramLink } from "./store.js";
 import { listOpenTaskSummaries } from "./store.js";
 import { listMissionsPage } from "./store.js";
@@ -1892,11 +1893,20 @@ export function registerSdkApi(app: Hono): void {
   app.use("/v1/*", cors({ origin: (origin) => origin && config.betterAuthTrustedOrigins.includes(origin) ? origin : "", credentials: true, allowHeaders: ["Authorization", "Content-Type", "Idempotency-Key", "X-Chusky-User-Id", "X-Chusky-Provider-Proof-Signature"], allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] }));
   app.use("/v1/*", async (c, next) => {
     const route = `${c.req.method} ${routePath(c, -1) || "/v1/*"}`;
-    return withRedisMetricRoute(route, () => withNeonQueryMetricRoute(route, () => next()), {
-      maxCommands: config.redisReadBudgetCommands,
-      maxResponseBytes: config.redisReadBudgetBytes,
-      onExceeded: (budget) => logger.warn({ route: budget.route, commands: budget.commands, responseBytes: budget.responseBytes }, "Redis request read budget exceeded"),
-    });
+    try {
+      return await withRedisMetricRoute(route, () => withNeonQueryMetricRoute(route, () => next()), {
+        maxCommands: config.redisReadBudgetCommands,
+        maxResponseBytes: config.redisReadBudgetBytes,
+        enforce: config.redisReadBudgetEnforced,
+        onExceeded: (budget) => logger.warn({ route: budget.route, commands: budget.commands, responseBytes: budget.responseBytes }, "Redis request read budget exceeded"),
+      });
+    } catch (error) {
+      if (error instanceof RedisReadBudgetExceededError) {
+        c.header("Retry-After", "5");
+        return apiError(c, 503, "storage_read_budget_exceeded", "This request was too large to serve safely. Retry with a smaller page or narrower filter.");
+      }
+      throw error;
+    }
   });
   app.use("/v1/*", async (c, next) => {
     const token = (c.req.header("Authorization") ?? "").replace(/^Bearer\s+/i, "");
@@ -1954,9 +1964,10 @@ export function registerSdkApi(app: Hono): void {
     const xConfigured = !config.xEnabled || Boolean(config.xConsumerSecret && (config.xUserAccessToken || (config.xClientId && config.xRefreshToken)) && Boolean(config.xClientId) === Boolean(config.xRefreshToken) && (process.env.NODE_ENV !== "production" || !(config.xClientId && config.xRefreshToken) || config.xEncryptionKey));
     const xchatConfigured = !config.xchatEnabled || Boolean(config.xchatBotToken && config.xchatConsumerSecret && config.xchatPin);
     const redis = isDurableStore();
+    const redisStatus = await redisHealth();
     const production = process.env.NODE_ENV === "production";
     const checks = {
-      redis: redis ? "ok" : production ? "failed" : "degraded",
+      redis: redisStatus.status === "ready" ? "ok" : redis ? "failed" : production ? "failed" : "degraded",
       qstash: config.qstashToken ? "configured" : "disabled",
       composioTriggers: config.composioWebhookSecret && (config.composioWebhookUrl || config.webhookUrl) ? "configured" : "disabled",
       sendblue: config.sendblueEnabled ? (sendblueConfigured ? "configured" : "misconfigured") : "disabled",
@@ -1980,7 +1991,7 @@ export function registerSdkApi(app: Hono): void {
       const providerMatrix = providerMatrixWithProofs(process.env);
       readiness = { status: "blocked", generatedAt: Date.now(), durableStore: redis, checks: [{ id: "readiness_store", status: "failed", detail: "Readiness evidence could not be loaded from the configured store." }], providerMatrix, blocking: ["readiness_store"], warnings: [] };
     }
-    return c.json({ ok: ok && vectorCheck !== "degraded", status: ok && vectorCheck !== "degraded" ? "operational" : "degraded", persistence: redis ? "redis" : "memory", checks: { ...checks, vector: vectorCheck }, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, x: config.xEnabled, xchat: config.xchatEnabled }, monitoring, readiness });
+    return c.json({ ok: ok && vectorCheck !== "degraded", status: ok && vectorCheck !== "degraded" ? "operational" : "degraded", persistence: redis ? "redis" : "memory", checks: { ...checks, vector: vectorCheck }, redisHealth: redisStatus, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, x: config.xEnabled, xchat: config.xchatEnabled }, monitoring, readiness });
   });
 
   app.get("/v1/account/overview", async (c) => {
@@ -2135,7 +2146,7 @@ export function registerSdkApi(app: Hono): void {
     const [assets, runs, openTasks, threads, health, approvals, workers, activity, autonomy, missions, channels, deliveries, connectedAccounts, mcpConnections] = await Promise.all([
       optional("artifacts", getSession(owner.userId, false, { domains: ["assets"] }), { artifacts: [], sdkFiles: [] } as unknown as Awaited<ReturnType<typeof getSession>>),
       optional("usage", getSdkRunUsage(owner.userId), { count: 0, active: 0 }),
-      optional("tasks", listOpenTaskSummaries(owner.userId, 2000), []),
+      optional("tasks", listOpenTaskSummaries(owner.userId, config.redisDashboardProjectionLimit), []),
       optional("conversations", listSdkThreads(owner.userId).then((items) => items.filter((item) => item.metadata.archived !== true).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 5)), []),
       Promise.resolve({ ok: isDurableStore(), status: isDurableStore() ? "operational" as const : "degraded" as const, persistence: isDurableStore() ? "redis" as const : "memory" as const }),
       optional("approvals", listApprovals(owner.userId, 50).then((items) => visibleApprovalsForDashboard(owner.userId, items)), []),

@@ -10,6 +10,7 @@ import { createAccessControl } from "better-auth/plugins/access";
 import { getMigrations } from "better-auth/db/migration";
 import { redisStorage } from "@better-auth/redis-storage";
 import Redis from "ioredis";
+import { createRedisClient } from "./redisClient.js";
 import { config } from "./config.js";
 import { sendAuthEmail } from "./auth-email.js";
 import { securePostgresConnectionString } from "./postgresConnection.js";
@@ -71,7 +72,7 @@ function authConfig(database: AuthDatabase) {
   const webOrigin = new URL(process.env.CHUSKY_WEB_ORIGIN?.trim() || trustedOrigins.find((origin) => origin.startsWith("https://")) || trustedOrigins[0] || baseURL).origin;
   const redisUrl = process.env.REDIS_URL?.trim();
   const builderAdminIds = (process.env.CHUSKY_BUILDER_ADMIN_IDS ?? "").split(",").map((id) => id.trim()).filter(Boolean);
-  if (redisUrl) redis = new Redis(redisUrl, { lazyConnect: true, maxRetriesPerRequest: 2 });
+  if (redisUrl) redis = createRedisClient(redisUrl, "auth");
 
   return {
     // Better Auth accepts both pg.Pool and better-sqlite3 as built-in Kysely adapters.
