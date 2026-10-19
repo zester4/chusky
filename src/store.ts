@@ -4892,7 +4892,19 @@ class RedisBackend implements Backend {
       if (!raw) { await this.r.unwatch(); return false; }
       let existing: ChannelIdentityRecord;
       try { existing = JSON.parse(raw) as ChannelIdentityRecord; } catch { await this.r.unwatch(); return false; }
-      if (existing.userId !== fromUserId || existing.disabledAt) { await this.r.unwatch(); return false; }
+      if (existing.disabledAt) { await this.r.unwatch(); return false; }
+      // A previous repair may have moved the record but failed before its
+      // source index was cleaned up. Repair that index drift without changing
+      // ownership again. This makes retries safe across worker crashes.
+      if (existing.userId === toUserId) {
+        const result = await this.r.multi()
+          .srem(this.channelIdentityUserKey(fromUserId), key)
+          .sadd(this.channelIdentityUserKey(toUserId), key)
+          .exec();
+        if (result) return true;
+        continue;
+      }
+      if (existing.userId !== fromUserId) { await this.r.unwatch(); return false; }
       const next: ChannelIdentityRecord = { ...existing, userId: toUserId, accountId: `account_${toUserId}`, updatedAt: Date.now() };
       const result = await this.r.multi()
         .set(key, JSON.stringify(next))
@@ -6218,7 +6230,15 @@ class MemoryBackend implements Backend {
     if (!Number.isSafeInteger(fromUserId) || fromUserId <= 0 || !Number.isSafeInteger(toUserId) || toUserId <= 0 || fromUserId === toUserId) return false;
     const key = this.identityKey(provider, externalUserId, workspaceId);
     const existing = this.channelIdentities.get(key);
-    if (!existing || existing.disabledAt || existing.userId !== fromUserId) return false;
+    if (!existing || existing.disabledAt) return false;
+    if (existing.userId === toUserId) {
+      this.channelIdentityUsers.get(fromUserId)?.delete(key);
+      const targetKeys = this.channelIdentityUsers.get(toUserId) ?? new Set<string>();
+      targetKeys.add(key);
+      this.channelIdentityUsers.set(toUserId, targetKeys);
+      return true;
+    }
+    if (existing.userId !== fromUserId) return false;
     const next = { ...existing, userId: toUserId, accountId: `account_${toUserId}`, updatedAt: Date.now() };
     this.channelIdentities.set(key, next);
     this.channelIdentityUsers.get(fromUserId)?.delete(key);
@@ -8508,6 +8528,21 @@ async function migrateLinkedOwnerRecords(sourceUserId: number, canonicalUserId: 
     mergeById((userId) => backend.getJobs(userId), (userId, records) => backend.saveJobs(userId, records as JobRecord[]), (record) => String(record.id)),
     mergeById((userId) => backend.listRecallMeetings(userId, 100), (userId, records) => Promise.all(records.map((record) => backend.saveRecallMeeting(record as RecallMeetingRecord))).then(() => undefined), (record) => String(record.id)).then(() => undefined),
   ]);
+
+  // Channel identities are indexed separately from sessions and the other
+  // owner-scoped records above. Existing Telegram links therefore need an
+  // explicit index transfer or the web dashboard cannot see the connected
+  // channel even though inbound resolution still has a legacy fallback.
+  // Reassign every provider, not only Telegram: the old numeric owner may
+  // also contain Slack, WhatsApp, SMS, or another linked channel.
+  const sourceChannels = await backend.listChannelIdentities(sourceUserId);
+  await Promise.all(sourceChannels.map((identity) => backend.reassignChannelIdentity(
+    identity.provider,
+    identity.externalUserId,
+    identity.workspaceId,
+    sourceUserId,
+    canonicalUserId,
+  )));
 
   const [sourceRuns, targetRuns] = await Promise.all([
     backend.listAgentRuns(sourceUserId, 100),

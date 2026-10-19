@@ -11,6 +11,7 @@ import {
   type DaytonaWorkspaceRecord, type SdkRunRecord, type TriggerEventRecord,
   createTriggerEvent, getTriggerEvent, listTriggerEvents, updateTriggerEvent,
   backfillSdkPrivateRunHistory, createWebTelegramLinkCode, ensureReminderWebProjection, ensureTriggerWebProjection, getTelegramUserIdForWebAuth, markTriggerWebApprovalResuming, mergeLinkedTelegramSession, mergeLinkedWebSession, mutateSession, redeemWebTelegramLinkCode,
+  listChannelIdentities, saveChannelIdentity,
   createVideoJob, getVideoJob, listVideoJobs, updatePhoneCall, updateVideoJob,
   addRecallMeeting, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, updateRecallMeeting, claimRecallCopilotEvaluation,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
@@ -815,6 +816,17 @@ test("link migration rehomes durable work and channel records to the web owner",
   const telegramOwner = 810144;
   const webAccount = `web-durable-merge-${Date.now()}`;
   const now = Date.now();
+  await saveChannelIdentity({
+    accountId: `account_${telegramOwner}`,
+    userId: telegramOwner,
+    provider: "telegram",
+    externalUserId: String(telegramOwner),
+    displayName: "Legacy Telegram",
+    verifiedAt: now,
+    createdAt: now,
+    updatedAt: now,
+    proactiveOptIn: true,
+  });
   await addReminder(telegramOwner, { id: "rem_linked-owner", userId: telegramOwner, text: "Review the imported task", runAt: now + 60_000, status: "scheduled", createdAt: now });
   await addJob(telegramOwner, { id: "job_linked-owner", userId: telegramOwner, text: "Check the imported workspace", cron: "0 9 * * 1", scheduleId: "schedule_linked-owner", status: "active", createdAt: now });
   await createTask(telegramOwner, { id: "task_linked-owner", title: "Imported task", objective: "Continue the Telegram-created task" });
@@ -829,7 +841,33 @@ test("link migration rehomes durable work and channel records to the web owner",
   assert.equal((await listTasks(webOwner)).find((item) => item.id === "task_linked-owner")?.userId, webOwner);
   assert.equal((await getAgentRun(webOwner, "run_linked-owner"))?.userId, webOwner);
   assert.equal((await (await import("../src/store.js")).listTriggerEvents(webOwner, 50)).some((item) => item.eventId === "event_linked-owner"), true);
+  assert.equal((await listChannelIdentities(webOwner)).find((item) => item.provider === "telegram")?.userId, webOwner);
+  assert.equal((await listChannelIdentities(telegramOwner)).some((item) => item.provider === "telegram"), false);
   assert.equal((await listReminders(telegramOwner)).find((item) => item.id === "rem_linked-owner")?.userId, telegramOwner, "legacy source data remains available for rollback");
+});
+
+test("reconciliation repairs a pre-existing channel identity index idempotently", async () => {
+  const telegramOwner = 810145;
+  const webOwner = 810146;
+  const now = Date.now();
+  await saveChannelIdentity({
+    accountId: `account_${telegramOwner}`,
+    userId: telegramOwner,
+    provider: "telegram",
+    externalUserId: String(telegramOwner),
+    displayName: "Legacy Telegram",
+    verifiedAt: now,
+    createdAt: now,
+    updatedAt: now,
+    proactiveOptIn: true,
+  });
+
+  assert.equal(await mergeLinkedTelegramSession(telegramOwner, webOwner), true);
+  assert.equal((await listChannelIdentities(webOwner)).find((item) => item.externalUserId === String(telegramOwner))?.accountId, `account_${webOwner}`);
+  assert.equal((await listChannelIdentities(telegramOwner)).length, 0);
+
+  assert.equal(await mergeLinkedTelegramSession(telegramOwner, webOwner), true);
+  assert.equal((await listChannelIdentities(webOwner)).filter((item) => item.externalUserId === String(telegramOwner)).length, 1);
 });
 
 test("web-to-Telegram linking preserves dashboard threads and repairs legacy imports", async () => {
