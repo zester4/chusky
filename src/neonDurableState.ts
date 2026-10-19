@@ -190,6 +190,28 @@ function safeJsonBytes(value: unknown): number {
 
 const DOMAIN_SET = new Set<string>(DURABLE_SESSION_DOMAINS);
 
+// Run-list views do not need every streamed text delta. Returning the full
+// event history from every list request made the database send the same large
+// transcript repeatedly while the detail/events endpoints already provide the
+// complete record on demand. Keep lifecycle/tool activity and the most recent
+// bounded window, while leaving readSdkRun/readSdkRunById untouched.
+const COMPACT_SDK_RUN_PAYLOAD_SQL = `(
+  (payload - 'events') || jsonb_build_object(
+    'events', COALESCE((
+      SELECT jsonb_agg(compact.event ORDER BY compact.event_at, compact.event_id)
+      FROM (
+        SELECT value AS event,
+          COALESCE((value->>'at')::bigint, 0) AS event_at,
+          COALESCE(value->>'id', '') AS event_id
+        FROM jsonb_array_elements(COALESCE(payload->'events', '[]'::jsonb)) AS event(value)
+        WHERE value->>'type' <> 'run.delta'
+        ORDER BY COALESCE((value->>'at')::bigint, 0) DESC, COALESCE(value->>'id', '') DESC
+        LIMIT 100
+      ) AS compact
+    ), '[]'::jsonb)
+  )
+)`;
+
 /** Hash only the persisted value; local concurrency metadata is not content. */
 export function durableSdkRunHash(payload: unknown): string {
   const value = payload && typeof payload === "object" && !Array.isArray(payload) ? { ...(payload as Record<string, unknown>) } : payload;
@@ -1465,7 +1487,8 @@ export class NeonDurableState {
     if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId)) throw new Error("Durable SDK thread identity is invalid.");
     const boundedLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(200, limit)) : 100;
     const result = await this.measuredQuery<SdkRunRow>(this.database,
-      "SELECT user_id, thread_id, run_id, payload, created_at, updated_at, version FROM chusky_sdk_run WHERE user_id = $1 AND thread_id = $2 ORDER BY created_at ASC, run_id ASC LIMIT $3",
+      `SELECT user_id, thread_id, run_id, ${COMPACT_SDK_RUN_PAYLOAD_SQL} AS payload, created_at, updated_at, version
+       FROM chusky_sdk_run WHERE user_id = $1 AND thread_id = $2 ORDER BY created_at ASC, run_id ASC LIMIT $3`,
       [userId, threadId, boundedLimit],
     );
     return result.rows.map(toSdkRun);
@@ -1478,7 +1501,7 @@ export class NeonDurableState {
     const boundedLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(200, limit)) : 100;
     const normalizedStatus = status && ["queued", "running", "requires_approval", "completed", "failed", "cancelled"].includes(status) ? status : undefined;
     const result = await this.measuredQuery<SdkRunRow>(this.database,
-      `SELECT user_id, thread_id, run_id, payload, created_at, updated_at, version
+      `SELECT user_id, thread_id, run_id, ${COMPACT_SDK_RUN_PAYLOAD_SQL} AS payload, created_at, updated_at, version
        FROM chusky_sdk_run
        WHERE user_id = $1 AND updated_at > to_timestamp($2 / 1000.0)
          AND ($3::text IS NULL OR payload->>'status' = $3)

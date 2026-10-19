@@ -129,7 +129,7 @@ export async function pruneMemoryReflections(beforeMs: number, limit = 5000): Pr
 
 export async function drainMemoryReflectionQueue(limit = 20): Promise<{ processed: number; reviewed: number; failed: number }> {
   if (!durableMemoryConfigured()) return { processed: 0, reviewed: 0, failed: 0 };
-  const claimed = await poolForDurableMemory().query(`WITH next AS (SELECT id FROM chusky_memory_reflections WHERE status IN ('queued','accepted') AND (claimed_at IS NULL OR claimed_at < now()-interval '5 minutes') ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT $1) UPDATE chusky_memory_reflections r SET status='processing',claimed_at=now(),attempts=attempts+1,updated_at=now() FROM next WHERE r.id=next.id RETURNING r.*`, [Math.max(1, Math.min(100, limit))]);
+  const claimed = await poolForDurableMemory().query(`WITH next AS (SELECT id FROM chusky_memory_reflections WHERE status IN ('queued','accepted') AND (claimed_at IS NULL OR claimed_at < now()-interval '5 minutes') ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT $1) UPDATE chusky_memory_reflections r SET status='processing',claimed_at=now(),attempts=attempts+1,updated_at=now() FROM next WHERE r.id=next.id RETURNING r.id, r.owner_user_id, r.source_id, r.scope_id, r.status, r.reviewed_at, r.candidate`, [Math.max(1, Math.min(100, limit))]);
   let processed = 0; let reviewed = 0; let failed = 0;
   for (const row of claimed.rows as Array<Record<string, unknown>>) {
     const item = row.candidate as MemoryCandidate;

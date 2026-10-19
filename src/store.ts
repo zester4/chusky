@@ -2505,6 +2505,7 @@ class RedisBackend implements Backend {
         runsBeforeMs: now - config.durableSdkRunRetentionDays * 24 * 60 * 60_000,
       });
       await this.durableState.pruneQueryMetrics(now - 30 * 24 * 60 * 60_000);
+      await this.durableState.pruneStorageMetrics(now - config.durableStorageMetricsRetentionDays * 24 * 60 * 60_000);
       if (durableMemoryConfigured()) await pruneMemoryReflections(now - config.durableStateRetentionDays * 24 * 60 * 60_000);
     } catch (error) {
       logger.warn({ errorType: error instanceof Error ? error.name : "DurableRetentionError" }, "Durable retention sweep failed");

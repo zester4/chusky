@@ -1,6 +1,10 @@
 import { DURABLE_SESSION_DOMAINS, type DurableSessionDocument, type DurableSessionDomain } from "./neonDurableState.js";
 
-export const SESSION_DOMAIN_CACHE_TTL_SECONDS = 5 * 60;
+// Domain versions are checked during writes, so a longer TTL is safe while it
+// substantially reduces repeated Neon reads during normal dashboard/API use.
+// Writes refresh the domain cache immediately and the CAS guard prevents an
+// older instance from replacing a newer cached version.
+export const SESSION_DOMAIN_CACHE_TTL_SECONDS = 15 * 60;
 export const MAX_SESSION_DOMAIN_CACHE_BYTES = 512 * 1024;
 
 export type CachedSessionDomain = DurableSessionDocument;
