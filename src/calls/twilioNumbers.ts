@@ -180,7 +180,11 @@ function requestedFeatures(input: TwilioNumberFeatures | undefined): Required<Tw
   return features;
 }
 
-/** Search Twilio's live local-number inventory without exposing provider credentials. */
+/**
+ * Search Twilio's live local-number inventory without exposing provider
+ * credentials. Toll-free inventory is intentionally excluded: its monthly
+ * price commonly exceeds Chusky's customer-facing cap.
+ */
 export async function searchTwilioNumbers(input: TwilioNumberSearch, options: TwilioNumberDependencies = defaults()): Promise<TwilioNumberSummary[]> {
   validate(options);
   const country = countryCode(input.countryCode);

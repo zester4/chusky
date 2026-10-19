@@ -1464,7 +1464,8 @@ state—never auth tokens or raw provider errors.
 The initial customer catalog is the United States, Canada, and eight European
 markets: the United Kingdom, Germany, France, Belgium, Austria, Ireland, the
 Netherlands, and Portugal. Region and area-code filters are forwarded
-to Twilio. `TWILIO_MANAGED_NUMBER_PRICE_CENTS` is the customer-facing list price
+to Twilio for local numbers only; toll-free inventory is intentionally excluded.
+`TWILIO_MANAGED_NUMBER_PRICE_CENTS` is the customer-facing list price
 and ledger amount; actual customer payment collection still belongs to the
 platform billing integration and must not be represented as captured merely
 because the Twilio purchase succeeded.
