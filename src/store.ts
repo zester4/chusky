@@ -3627,14 +3627,31 @@ class RedisBackend implements Backend {
   }
 
   async listRecallMeetings(userId: number, limit: number): Promise<RecallMeetingRecord[]> {
-    const recentIds = await this.r.zrevrange(this.recallMeetingsIndexKey(userId), 0, Math.max(0, limit - 1));
-    const activeIds = await this.r.zrevrange(this.recallMeetingsActiveIndexKey(userId), 0, -1);
+    // The caller only returns `limit` records. Reading the complete active
+    // index made a dashboard refresh fan out into one GET per active meeting,
+    // so a stale or busy owner could consume hundreds or thousands of Redis
+    // commands before the final slice was applied. Keep both candidate lists
+    // bounded and fetch their payloads with one MGET below. The active index
+    // is maintained transactionally when a meeting changes lifecycle, so its
+    // newest bounded window is the correct candidate set for this projection.
+    const boundedLimit = Math.max(1, Math.min(20, Math.floor(limit)));
+    const [recentIds, activeIds] = await Promise.all([
+      this.r.zrevrange(this.recallMeetingsIndexKey(userId), 0, boundedLimit - 1),
+      this.r.zrevrange(this.recallMeetingsActiveIndexKey(userId), 0, boundedLimit - 1),
+    ]);
     const ids = [...new Set([...activeIds, ...recentIds])];
     if (!ids.length) return [];
-    const records = await Promise.all(ids.map((id) => this.getRecallMeeting(userId, id)));
-    return records.flatMap((record) => record ? [record] : [])
+    const values = await this.r.mget(...ids.map((id) => this.recallMeetingKey(userId, id)));
+    const records = values.flatMap((raw) => {
+      if (!raw) return [];
+      try {
+        const record = JSON.parse(raw) as RecallMeetingRecord;
+        return record.userId === userId && typeof record.id === "string" ? [record] : [];
+      } catch { return []; }
+    });
+    return records
       .sort((a, b) => Number(recallMeetingNeedsWebhookRetention(b)) - Number(recallMeetingNeedsWebhookRetention(a)) || b.updatedAt - a.updatedAt)
-      .slice(0, limit);
+      .slice(0, boundedLimit);
   }
 
   async saveCompanyRun(projectId: string, run: CompanyRunSummary): Promise<void> {

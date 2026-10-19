@@ -18,6 +18,7 @@
     "provider:webhook-smoke": "tsx scripts/provider-webhook-smoke.ts",
     "voice:canary": "tsx scripts/voice-canary.ts",
     "voice:load": "tsx scripts/voice-load-test.ts",
+    "storage:load": "tsx scripts/storage-load-test.ts",
     "voice:evaluate": "tsx scripts/voice-evaluate.ts",
     "start": "node dist/index.js",
     "cli": "tsx src/cli.ts",
