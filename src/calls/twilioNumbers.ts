@@ -9,7 +9,21 @@ export type TwilioNumberSummary = {
   locality?: string;
   region?: string;
   isoCountry?: string;
+  /** Customer-facing monthly price calculated from the live provider price. */
+  customerPriceCents?: number;
   capabilities: { voice: boolean; sms: boolean; mms: boolean; fax: boolean };
+};
+
+export type TwilioNumberPurchaseSummary = TwilioNumberSummary & {
+  /** Stored server-side for margin and billing reconciliation. */
+  providerCostCents: number;
+};
+
+export type TwilioNumberPricingPolicy = {
+  standardPriceCents: number;
+  providerCostThresholdCents: number;
+  markupCents: number;
+  priceCapCents: number;
 };
 
 export type TwilioNumberFeatures = {
@@ -75,6 +89,52 @@ const defaults = (): TwilioNumberDependencies => ({
   smsEnabled: config.twilioSmsEnabled,
 });
 
+const pricingCache = new Map<string, { providerCostCents: number; expiresAt: number }>();
+const PRICING_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function pricingPolicy(): TwilioNumberPricingPolicy {
+  return {
+    standardPriceCents: config.twilioManagedNumberPriceCents,
+    providerCostThresholdCents: config.twilioManagedNumberPriceThresholdCents,
+    markupCents: config.twilioManagedNumberMarkupCents,
+    priceCapCents: config.twilioManagedNumberPriceCapCents,
+  };
+}
+
+/** Calculate the customer price without ever allowing a result above the cap. */
+export function customerPriceForProviderCost(providerCostCents: number, policy: TwilioNumberPricingPolicy = pricingPolicy()): number | undefined {
+  if (!Number.isSafeInteger(providerCostCents) || providerCostCents < 0) throw new Error("providerCostCents must be a non-negative integer.");
+  const customerPriceCents = providerCostCents <= policy.providerCostThresholdCents
+    ? policy.standardPriceCents
+    : providerCostCents + policy.markupCents;
+  return customerPriceCents <= policy.priceCapCents ? customerPriceCents : undefined;
+}
+
+function cents(value: unknown): number | undefined {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+  const result = Math.round(parsed * 100);
+  return Number.isSafeInteger(result) ? result : undefined;
+}
+
+async function providerNumberPrice(country: string, options: TwilioNumberDependencies): Promise<number> {
+  const cached = pricingCache.get(country);
+  if (cached && cached.expiresAt > Date.now()) return cached.providerCostCents;
+  const client = twilio(options.accountSid, options.authToken);
+  const pricing = await client.pricing.v1.phoneNumbers.countries.get(country).fetch();
+  const local = pricing.phoneNumberPrices?.find((item) => String(item.numberType).toLowerCase() === "local") ?? pricing.phoneNumberPrices?.[0];
+  const providerCostCents = cents(local?.currentPrice ?? local?.basePrice);
+  if (providerCostCents === undefined) throw new Error("Twilio did not return a monthly local-number price for this country.");
+  pricingCache.set(country, { providerCostCents, expiresAt: Date.now() + PRICING_CACHE_TTL_MS });
+  return providerCostCents;
+}
+
+async function priceForCountry(country: string, options: TwilioNumberDependencies): Promise<{ providerCostCents: number; customerPriceCents: number } | undefined> {
+  const providerCostCents = await providerNumberPrice(country, options);
+  const customerPriceCents = customerPriceForProviderCost(providerCostCents);
+  return customerPriceCents === undefined ? undefined : { providerCostCents, customerPriceCents };
+}
+
 function validate(options: TwilioNumberDependencies): void {
   if (!options.enabled) throw new Error("Phone number management is disabled. Enable it after configuring billing and Twilio.");
   if (!options.accountSid || !options.authToken) throw new Error("Twilio account credentials are required for phone number management.");
@@ -93,7 +153,7 @@ function boundedLimit(value: unknown): number {
   return Number.isFinite(parsed) ? Math.max(1, Math.min(30, Math.floor(parsed))) : 10;
 }
 
-function normalize(value: { sid?: string; phoneNumber: string; friendlyName?: string | null; locality?: string | null; region?: string | null; isoCountry?: string | null; capabilities?: { voice?: boolean; sms?: boolean; mms?: boolean; fax?: boolean } }): TwilioNumberSummary {
+function normalize(value: { sid?: string; phoneNumber: string; friendlyName?: string | null; locality?: string | null; region?: string | null; isoCountry?: string | null; capabilities?: { voice?: boolean; sms?: boolean; mms?: boolean; fax?: boolean } }, customerPriceCents?: number): TwilioNumberSummary {
   return {
     ...(value.sid ? { sid: value.sid } : {}),
     phoneNumber: value.phoneNumber,
@@ -101,6 +161,7 @@ function normalize(value: { sid?: string; phoneNumber: string; friendlyName?: st
     ...(value.locality ? { locality: value.locality } : {}),
     ...(value.region ? { region: value.region } : {}),
     ...(value.isoCountry ? { isoCountry: value.isoCountry } : {}),
+    ...(customerPriceCents !== undefined ? { customerPriceCents } : {}),
     capabilities: {
       voice: value.capabilities?.voice !== false,
       sms: value.capabilities?.sms === true,
@@ -142,6 +203,10 @@ export async function searchTwilioNumbers(input: TwilioNumberSearch, options: Tw
   const postalCode = input.postalCode?.replace(/[^A-Za-z0-9 -]/g, "").trim().slice(0, 20);
   const contains = input.contains?.trim();
   if (contains && contains.length > 20) throw new Error("contains is too long.");
+  const pricing = await priceForCountry(country, options);
+  // Fail closed: never display inventory when the provider price is unknown or
+  // the computed customer price exceeds the configured customer ceiling.
+  if (!pricing) return [];
   const client = twilio(options.accountSid, options.authToken);
   const limit = boundedLimit(input.limit);
   const searchAreaCodes = requestedAreaCodes.length ? requestedAreaCodes : [undefined];
@@ -159,24 +224,25 @@ export async function searchTwilioNumbers(input: TwilioNumberSearch, options: Tw
   })));
   const unique = new Map<string, TwilioNumberSummary>();
   for (const batch of results) for (const item of batch) {
-    const normalized = normalize(item);
+    const normalized = normalize(item, pricing.customerPriceCents);
     if (!unique.has(normalized.phoneNumber)) unique.set(normalized.phoneNumber, normalized);
   }
   return [...unique.values()].slice(0, limit);
 }
 
 /** Purchase one number and point its inbound voice webhook at Chusky. */
-export async function purchaseTwilioNumber(input: { phoneNumber: string; countryCode?: string; friendlyName?: string; features?: TwilioNumberFeatures }, options: TwilioNumberDependencies = defaults()): Promise<TwilioNumberSummary> {
+export async function purchaseTwilioNumber(input: { phoneNumber: string; countryCode?: string; friendlyName?: string; features?: TwilioNumberFeatures }, options: TwilioNumberDependencies = defaults()): Promise<TwilioNumberPurchaseSummary> {
   validate(options);
   const features = requestedFeatures(input.features);
   if ((features.sms || features.mms) && options.smsEnabled !== true) throw new Error("Messaging numbers are not enabled for this deployment.");
   if (features.fax) throw new Error("Fax numbers are not enabled for this deployment.");
   if (!/^\+[1-9]\d{7,14}$/.test(input.phoneNumber)) throw new Error("phoneNumber must be a valid E.164 number.");
-  if (input.countryCode) {
-    const country = TWILIO_SUPPORTED_NUMBER_COUNTRIES.find((item) => item.code === String(input.countryCode).trim().toUpperCase());
-    if (!country) throw new Error("That country is not available for number purchasing yet.");
-    if (!input.phoneNumber.startsWith(country.callingCode)) throw new Error("The selected country does not match the phone number.");
-  }
+  if (!input.countryCode) throw new Error("countryCode is required for price verification.");
+  const country = TWILIO_SUPPORTED_NUMBER_COUNTRIES.find((item) => item.code === String(input.countryCode).trim().toUpperCase());
+  if (!country) throw new Error("That country is not available for number purchasing yet.");
+  if (!input.phoneNumber.startsWith(country.callingCode)) throw new Error("The selected country does not match the phone number.");
+  const pricing = await priceForCountry(country.code, options);
+  if (!pricing) throw new Error("This number is not available within Chusky's monthly price limit.");
   const friendlyName = input.friendlyName?.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
   const base = options.webhookBaseUrl.replace(/\/+$/, "");
   const client = twilio(options.accountSid, options.authToken);
@@ -192,7 +258,7 @@ export async function purchaseTwilioNumber(input: { phoneNumber: string; country
     } : {}),
     ...(friendlyName ? { friendlyName } : {}),
   });
-  return normalize(item);
+  return { ...normalize(item, pricing.customerPriceCents), providerCostCents: pricing.providerCostCents };
 }
 
 /** Release a number purchased through Chusky. */

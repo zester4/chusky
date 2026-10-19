@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { purchaseTwilioNumber, searchTwilioNumbers, twilioNumberCatalog } from "../src/calls/twilioNumbers.js";
+import { customerPriceForProviderCost, purchaseTwilioNumber, searchTwilioNumbers, twilioNumberCatalog } from "../src/calls/twilioNumbers.js";
 
 const configured = {
   enabled: true,
@@ -40,4 +40,11 @@ test("number search bounds multi-area-code requests before provider dispatch", a
     searchTwilioNumbers({ countryCode: "US", areaCodes: ["20A"] }, configured),
     /areaCodes must contain only digits/i,
   );
+});
+
+test("number pricing keeps the standard price below the threshold and hides over-cap inventory", () => {
+  const policy = { standardPriceCents: 200, providerCostThresholdCents: 150, markupCents: 25, priceCapCents: 200 };
+  assert.equal(customerPriceForProviderCost(115, policy), 200);
+  assert.equal(customerPriceForProviderCost(160, policy), 185);
+  assert.equal(customerPriceForProviderCost(200, policy), undefined);
 });

@@ -2892,7 +2892,7 @@ export function registerSdkApi(app: Hono): void {
         // country-policy and compliance surface for outbound messaging.
         internationalSms: false,
       },
-      price: { amountCents: config.twilioManagedNumberPriceCents, currency: "USD" as const, interval: "month" as const },
+      price: { amountCents: config.twilioManagedNumberPriceCapCents, currency: "USD" as const, interval: "month" as const },
       data: routes.map((route) => ({
         phoneNumber: route.phoneNumber,
         displayName: route.displayName ?? "",
@@ -2930,7 +2930,7 @@ export function registerSdkApi(app: Hono): void {
           fax: requestedFeatures.has("fax"),
         },
       }, dependencies);
-      return c.json({ data, price: { amountCents: config.twilioManagedNumberPriceCents, currency: "USD" as const, interval: "month" as const } });
+      return c.json({ data, price: { amountCents: config.twilioManagedNumberPriceCapCents, currency: "USD" as const, interval: "month" as const } });
     } catch (error) {
       logger.warn({ errorType: error instanceof Error ? error.name : "TwilioNumberSearchError" }, "Tenant phone-number search failed");
       return apiError(c, 503, "phone_number_search_unavailable", "Phone number search is temporarily unavailable.");
@@ -2969,7 +2969,7 @@ export function registerSdkApi(app: Hono): void {
         features,
       }, tenant.dependencies);
       if (!purchased.sid) throw new Error("The provider did not return a phone-number resource.");
-      const owned = ownershipRecord({ userId: owner.userId, subaccountId: tenant.subaccount.id, phoneNumber: purchased.phoneNumber, providerNumberId: purchased.sid });
+      const owned = ownershipRecord({ userId: owner.userId, subaccountId: tenant.subaccount.id, phoneNumber: purchased.phoneNumber, providerNumberId: purchased.sid, providerCostCents: purchased.providerCostCents, customerPriceCents: purchased.customerPriceCents });
       const route = normalizeVoiceInboundRouteInput({
         provider: "twilio",
         phoneNumber: purchased.phoneNumber,
@@ -2994,7 +2994,7 @@ export function registerSdkApi(app: Hono): void {
         await markNumberOwnershipReleased(purchased.sid, owner.userId);
         return apiError(c, 409, "phone_number_already_claimed", "That phone number was claimed by another workspace.");
       }
-      const response = { data: { phoneNumber: route.phoneNumber, displayName: route.displayName ?? "", source: "managed" as const, callProfile: route.callProfile, provider: route.provider, purpose: route.purpose, capabilities: route.capabilities, updatedAt: route.updatedAt }, price: { amountCents: config.twilioManagedNumberPriceCents, currency: "USD" as const, interval: "month" as const } };
+      const response = { data: { phoneNumber: route.phoneNumber, displayName: route.displayName ?? "", source: "managed" as const, callProfile: route.callProfile, provider: route.provider, purpose: route.purpose, capabilities: route.capabilities, updatedAt: route.updatedAt }, price: { amountCents: purchased.customerPriceCents ?? config.twilioManagedNumberPriceCents, currency: "USD" as const, interval: "month" as const } };
       if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, response);
       return c.json(response, 201);
     } catch (error) {

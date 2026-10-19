@@ -217,9 +217,9 @@ export async function listTwilioSubaccountViews(limit = 100): Promise<TwilioSuba
   }));
 }
 
-export function ownershipRecord(input: { userId: number; subaccountId: string; phoneNumber: string; providerNumberId: string }): TwilioNumberOwnershipRecord {
+export function ownershipRecord(input: { userId: number; subaccountId: string; phoneNumber: string; providerNumberId: string; providerCostCents?: number; customerPriceCents?: number }): TwilioNumberOwnershipRecord {
   const now = Date.now();
-  return { id: `two_${randomUUID().replace(/-/g, "")}`, ...input, status: "active", currency: "USD", customerPriceCents: config.twilioManagedNumberPriceCents, purchasedAt: now, updatedAt: now };
+  return { id: `two_${randomUUID().replace(/-/g, "")}`, ...input, status: "active", currency: "USD", customerPriceCents: input.customerPriceCents ?? config.twilioManagedNumberPriceCents, purchasedAt: now, updatedAt: now };
 }
 
 export async function savePurchasedNumberOwnership(record: TwilioNumberOwnershipRecord): Promise<void> {
