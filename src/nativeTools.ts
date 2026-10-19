@@ -2505,11 +2505,17 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
       if (runtime.sharedConversation || runtime.meetingId) throw new Error("Meeting representative settings can be changed only in a private owner conversation");
       const previous = await getMeetingRepresentativeProfile(userId);
       const updated = await updateMeetingRepresentativeProfile(userId, args);
+      // Confirm the durable value before an approval continuation can attempt
+      // a representative join from a stale profile snapshot.
+      const confirmed = await getMeetingRepresentativeProfile(userId);
+      if (confirmed.updatedAt !== updated.updatedAt || confirmed.enabled !== updated.enabled) {
+        throw new Error("The meeting representative profile could not be confirmed after update; do not join until the profile read-back succeeds");
+      }
       if (!updated.autoJoinCalendar && (previous.autoJoinCalendar || args.autoJoinCalendar === false || args.enabled === false)) {
         const cleanup = await cancelAutomaticCalendarMeetingJoins(userId);
-        return { ...updated, automaticJoinCleanup: cleanup };
+        return { ...confirmed, automaticJoinCleanup: cleanup };
       }
-      return updated;
+      return confirmed;
     }
     case "CHUCK_MEETING_LIST": return listRecallMeetingsForUser(userId, args.limit === undefined ? 10 : Number(args.limit));
     case "CHUCK_MEETING_STATUS": {

@@ -462,6 +462,25 @@ test("meeting representative profile persists per owner and enforces owner-scope
   await assert.rejects(() => updateMeetingRepresentativeProfile(ownerId, { allowedComposioTools: ["COMPOSIO_EXECUTE_TOOL"] }), /not permitted/);
 });
 
+test("concurrent meeting profile patches preserve the committed enabled state", async () => {
+  const ownerId = 810020;
+  await updateMeetingRepresentativeProfile(ownerId, {
+    enabled: false,
+    objective: "Represent approved client meetings",
+    organizationName: "Chusky",
+  });
+
+  await Promise.all([
+    updateMeetingRepresentativeProfile(ownerId, { enabled: true }),
+    updateMeetingRepresentativeProfile(ownerId, { communicationStyle: "Warm, concise, and commercially clear." }),
+  ]);
+
+  const saved = await getMeetingRepresentativeProfile(ownerId);
+  assert.equal(saved.enabled, true);
+  assert.equal(saved.communicationStyle, "Warm, concise, and commercially clear.");
+  assert.equal(saved.organizationName, "Chusky");
+});
+
 test("history trimming creates bounded summaries", async () => {
   const userId = 810002;
   const messages = Array.from({ length: 44 }, (_, i) => ({ role: i % 2 ? "assistant" as const : "user" as const, content: `message-${i}` }));

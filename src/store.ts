@@ -8892,11 +8892,16 @@ export async function getMeetingRepresentativeProfile(uid: number): Promise<Meet
 
 export async function updateMeetingRepresentativeProfile(uid: number, patch: unknown): Promise<MeetingRepresentativeProfile> {
   if (!Number.isSafeInteger(uid) || uid <= 0) throw new Error("Meeting representative owner is invalid");
-  const session = await getSession(uid);
-  const profile = normalizeMeetingRepresentativeProfile(patch, session.meetingRepresentativeProfile ?? defaultMeetingRepresentativeProfile());
-  session.meetingRepresentativeProfile = profile;
-  await saveSession(uid, session);
-  return profile;
+  // Profile updates can arrive from the dashboard, an approval continuation,
+  // and a meeting worker at the same time. A plain read/modify/write loses a
+  // newer enabled profile when two workers read the same session snapshot.
+  // Mutate the durable session under the owner-scoped lease so the following
+  // meeting join always reads the committed profile rather than a stale one.
+  return mutateSession(uid, (session) => {
+    const profile = normalizeMeetingRepresentativeProfile(patch, session.meetingRepresentativeProfile ?? defaultMeetingRepresentativeProfile());
+    session.meetingRepresentativeProfile = profile;
+    return profile;
+  }, { domains: ["profile"] });
 }
 
 function meetingContactText(value: unknown, field: string, maximum: number, required = false): string | undefined {

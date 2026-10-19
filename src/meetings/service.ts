@@ -523,7 +523,7 @@ export async function joinRecallMeeting(userId: number, input: {
     : input.interactionMode;
   if (interactionMode !== "addressed" && interactionMode !== "copilot" && interactionMode !== "representative") throw new Error("interactionMode must be addressed, copilot, or representative");
   if (interactionMode === "representative" && !representativeProfile.enabled) {
-    throw new Error("Configure and enable your meeting representative profile before joining in representative mode");
+    throw new Error("The meeting representative profile is disabled. Enable it and confirm the profile read-back before joining in representative mode");
   }
   const title = typeof input.title === "string" ? input.title.trim().slice(0, 120) : "";
   if (input.calendarPreparationId !== undefined && !/^cmp_[A-Za-z0-9_-]{1,96}$/.test(input.calendarPreparationId)) throw new Error("Invalid calendar automation identity");
