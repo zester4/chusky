@@ -7,6 +7,15 @@ import re
 def normalize_voice_text(value: str) -> str:
     """Convert complete model text into natural speech for Deepgram TTS."""
     text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    # Caller-facing audio must never contain UI icons or internal progress
+    # markers. Keep the prompt rule, but enforce it at the final audio
+    # boundary because tool progress can bypass model text entirely.
+    text = re.sub(
+        r"[\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF\u2300-\u23FF\u2600-\u27BF\u2B00-\u2BFF\U0001F3FB-\U0001F3FF\u200D\uFE0E\uFE0F]",
+        "",
+        text,
+    )
+    text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r"```[^\n]*\n?[\s\S]*?```", " I can share the technical details in writing. ", text)
     text = re.sub(r"!\[([^\]]*)\]\((https?://[^\s)]+)\)", r"\1", text, flags=re.I)
     text = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", r"\1", text, flags=re.I)
@@ -43,3 +52,16 @@ def normalize_voice_text(value: str) -> str:
 def normalize_voice_delta(value: str) -> str:
     """Keep streamed token whitespace intact until a full phrase is ready."""
     return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", str(value or "").replace("\r\n", "\n").replace("\r", "\n"))
+
+
+def normalize_voice_chunk(value: str) -> str:
+    """Normalize one TTS chunk without losing inter-chunk whitespace."""
+    raw = normalize_voice_delta(value)
+    if not raw.strip():
+        return ""
+    leading = " " if raw[:1].isspace() else ""
+    trailing = " " if raw[-1:].isspace() else ""
+    normalized = normalize_voice_text(raw)
+    if not normalized:
+        return ""
+    return f"{leading}{normalized}{trailing}"

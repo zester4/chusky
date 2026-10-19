@@ -625,6 +625,26 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(latency["eagerToFirstAudio"]["count"], 1)
         self.assertEqual(latency["endOfTurnToFirstAudio"]["count"], 1)
 
+    async def test_flux_updates_are_used_when_final_event_has_no_transcript(self):
+        agent_http = FakeAgentHttp()
+        self.call.http = agent_http
+        tts_socket = StreamingFakeTtsSocket()
+
+        async def fake_connect(_url, **_kwargs):
+            return tts_socket
+
+        deepgram = DeepgramTurnSocket([
+            {"type": "TurnInfo", "event": "StartOfTurn", "turn_index": 3, "transcript": ""},
+            {"type": "TurnInfo", "event": "Update", "turn_index": 3, "transcript": "Please book me tomorrow"},
+            {"type": "TurnInfo", "event": "EndOfTurn", "turn_index": 3, "transcript": ""},
+        ])
+        with patch.object(voice_app, "connect", fake_connect):
+            await self.call._receive_transcripts(deepgram)
+            await asyncio.wait_for(self.call.response_task, 1)
+
+        self.assertEqual(agent_http.stream_requests[0]["json"]["transcript"], "Please book me tomorrow")
+        self.assertEqual(agent_http.posts[0]["json"]["turnId"], "turn_1")
+
     async def test_final_turn_commit_retries_the_exact_payload_without_regenerating_speech(self):
         retrying_http = CommitRetryHttp(failures=2)
         self.call.http = retrying_http

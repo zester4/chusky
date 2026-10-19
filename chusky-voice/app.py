@@ -67,7 +67,7 @@ from latency import (
 from recall_auth import valid_recall_ticket, wait_for_media_authorization
 from recall_video import RecallScreenShareSampler, parse_screenshare_frame, valid_visual_handoff_url, verify_recall_websocket_signature, visual_configuration_issue, visual_configuration_status
 from recall_turns import CopilotTurnGate, MeetingContextWindow, MeetingEchoGuard, MeetingMode, build_meeting_outcome_payload, default_meeting_greeting, flux_turn_time_bounds_ms, is_recall_invocation, parse_meeting_language_authorization, parse_meeting_live_captions, parse_meeting_media_authorization, parse_meeting_tts_model, should_checkpoint_mission_state
-from speech_text import normalize_voice_delta, normalize_voice_text
+from speech_text import normalize_voice_chunk, normalize_voice_delta, normalize_voice_text
 from twilio_auth import valid_twilio_ticket, valid_twilio_websocket
 from voice_runtime import AdaptiveTurnPolicy
 
@@ -316,6 +316,13 @@ class TwilioVoiceCall:
         self.draft_transcript = ""
         self.draft_turn_index: int | None = None
         self.finalized_turn_indexes: set[int] = set()
+        # Flux turn indexes are scoped to one Deepgram socket and can repeat
+        # after a reconnect. Keep our own stable IDs and retain the latest
+        # Flux Update so an EndOfTurn without a transcript cannot erase the
+        # caller's last words.
+        self.turn_sequence = 0
+        self.turn_ids_by_provider_index: dict[int, str] = {}
+        self.turn_transcripts: dict[int, str] = {}
         # Bounded post-call context only. Raw audio and provider payloads are
         # never retained; these turns are sent once to the owner-scoped API.
         self.outcome_turns: deque[dict[str, str]] = deque(maxlen=12)
@@ -421,6 +428,8 @@ class TwilioVoiceCall:
         # new connection inherit the old connection's dedupe window.
         self.finalized_turn_indexes.clear()
         self.eager_end_times.clear()
+        self.turn_ids_by_provider_index.clear()
+        self.turn_transcripts.clear()
         url = twilio_deepgram_listen_url(
             self.settings.stt_model,
             self.settings.stt_eager_eot_threshold,
@@ -539,22 +548,49 @@ class TwilioVoiceCall:
                 turn_index = int(event.get("turn_index") or 0)
             except (TypeError, ValueError):
                 continue
-            if turn_event in {"StartOfTurn", "TurnResumed"}:
-                if turn_event == "StartOfTurn":
-                    self.turn_policy.start(turn_index, time.monotonic())
-                else:
-                    self.turn_policy.resumed(turn_index)
-                if turn_event == "TurnResumed":
-                    self.eager_end_times.pop(turn_index, None)
+            if turn_event == "StartOfTurn":
+                self.turn_sequence += 1
+                self.turn_ids_by_provider_index[turn_index] = f"turn_{self.turn_sequence}"
+                self.turn_transcripts.pop(turn_index, None)
+                self.turn_policy.start(turn_index, time.monotonic())
+                if transcript:
+                    self.turn_transcripts[turn_index] = transcript
                 await self._barge_in()
                 continue
-            if turn_event == "EagerEndOfTurn" and transcript:
+            # Flux sends Update events while the caller is speaking. They are
+            # not final turns, but dropping them is what caused missing
+            # openings/words when the final event arrived without text.
+            if turn_event == "Update":
+                if transcript:
+                    self.turn_transcripts[turn_index] = transcript
+                continue
+            if turn_event == "TurnResumed":
+                if transcript:
+                    self.turn_transcripts[turn_index] = transcript
+                if turn_index not in self.turn_ids_by_provider_index:
+                    self.turn_sequence += 1
+                    self.turn_ids_by_provider_index[turn_index] = f"turn_{self.turn_sequence}"
+                self.turn_policy.resumed(turn_index)
+                self.eager_end_times.pop(turn_index, None)
+                await self._barge_in()
+                continue
+            if turn_event == "EagerEndOfTurn":
+                if transcript:
+                    self.turn_transcripts[turn_index] = transcript
+                transcript = transcript or self.turn_transcripts.get(turn_index, "")
+                if not transcript:
+                    continue
                 self.eager_end_times[turn_index] = time.monotonic()
                 if len(self.eager_end_times) > 8:
                     self.eager_end_times.pop(next(iter(self.eager_end_times)))
                 await self._start_draft(transcript, turn_index)
                 continue
-            if turn_event == "EndOfTurn" and transcript:
+            if turn_event == "EndOfTurn":
+                if transcript:
+                    self.turn_transcripts[turn_index] = transcript
+                transcript = transcript or self.turn_transcripts.pop(turn_index, "")
+                if not transcript:
+                    continue
                 adaptive_config = self.turn_policy.complete(turn_index, time.monotonic())
                 if adaptive_config is not None:
                     try:
@@ -570,6 +606,7 @@ class TwilioVoiceCall:
                 if turn_index in self.finalized_turn_indexes:
                     continue
                 self.finalized_turn_indexes.add(turn_index)
+                stable_turn_id = self.turn_ids_by_provider_index.pop(turn_index, f"turn_{turn_index}")
                 matching_draft = bool(
                     self.draft_task
                     and self.draft_turn_index == turn_index
@@ -589,7 +626,7 @@ class TwilioVoiceCall:
                 else:
                     self.eager_response_started_at = 0.0
                     self.tts_first_audio_recorded = False
-                self.response_task = asyncio.create_task(self._respond_final(transcript, turn_index), name=f"twilio-response-{self.call_id}-{turn_index}")
+                self.response_task = asyncio.create_task(self._respond_final(transcript, turn_index, stable_turn_id), name=f"twilio-response-{self.call_id}-{turn_index}")
                 self.response_task.add_done_callback(self._observe_response_task)
 
     async def _start_draft(self, transcript: str, turn_index: int) -> None:
@@ -713,7 +750,7 @@ class TwilioVoiceCall:
                 # The bridge always commits the definitive result itself. Keep
                 # this legacy batch request speculative so it never writes a
                 # second copy before _commit_turn obtains its idempotent lease.
-                json={"callId": self.call_id, "userId": self.user_id, "transcript": transcript, "speculative": True},
+                json={"callId": self.call_id, "userId": self.user_id, "transcript": transcript, "speculative": True, "opening": self.call_greeting or self.fallback_greeting or ""},
                 timeout=httpx.Timeout(45.0, connect=10.0),
             )
             response.raise_for_status()
@@ -1008,6 +1045,7 @@ class TwilioVoiceCall:
                     "userId": self.user_id,
                     "transcript": transcript,
                     "speculative": speculative,
+                    "opening": self.call_greeting or self.fallback_greeting or "",
                     **({"interruptedAssistantSpeech": interrupted_speech} if interrupted_speech else {}),
                 },
                 timeout=httpx.Timeout(60.0, connect=10.0),
@@ -1020,7 +1058,7 @@ class TwilioVoiceCall:
                     if event.get("type") == "tool_start":
                         await self._cancel_tool_progress()
                         if buffer.strip():
-                            await self._send_persistent_tts(normalize_voice_text(buffer), flush=True)
+                            await self._send_persistent_tts(normalize_voice_chunk(buffer), flush=True)
                             buffer = ""
                         await self._speak_tool_start(str(event.get("text") or ""))
                     elif event.get("type") == "delta":
@@ -1034,13 +1072,13 @@ class TwilioVoiceCall:
                         if any(buffer.rstrip().endswith(mark) for mark in (".", "!", "?", ":", ";")):
                             # Speak a complete phrase as soon as its boundary
                             # arrives; don't wait for a large fixed buffer.
-                            await self._send_persistent_tts(normalize_voice_text(buffer))
+                            await self._send_persistent_tts(normalize_voice_chunk(buffer))
                             buffer = ""
                         else:
                             chunk = take_tts_chunk(buffer, hard_limit=180, prefer_clauses=True)
                             if chunk:
                                 spoken, buffer = chunk
-                                await self._send_persistent_tts(normalize_voice_text(spoken))
+                                await self._send_persistent_tts(normalize_voice_chunk(spoken))
                     elif event.get("type") == "done":
                         await self._cancel_tool_progress()
                         cost = max(0, min(float(event.get("cost") or 0), 10))
@@ -1059,7 +1097,7 @@ class TwilioVoiceCall:
                         raise RuntimeError("streaming voice turn failed")
             full_text = normalize_voice_text(full_text)
             if buffer:
-                await self._send_persistent_tts(normalize_voice_text(buffer), flush=True)
+                await self._send_persistent_tts(normalize_voice_chunk(buffer), flush=True)
             elif full_text:
                 await self._send_persistent_tts("", flush=True)
             if full_text:
@@ -1120,7 +1158,7 @@ class TwilioVoiceCall:
             except Exception:
                 pass
 
-    async def _commit_turn(self, transcript: str, result: VoiceTurnResult, turn_index: int) -> None:
+    async def _commit_turn(self, transcript: str, result: VoiceTurnResult, turn_id: str | int) -> None:
         """Commit one completed response without ever asking Chusky to answer twice.
 
         The Chusky endpoint owns idempotency by call and Flux turn index. A
@@ -1131,7 +1169,7 @@ class TwilioVoiceCall:
         url = f"{self.settings.chusky_turn_url[:-len('/turn')]}/commit-turn"
         payload = {
             "callId": self.call_id, "userId": self.user_id, "transcript": transcript,
-            "text": result.text, "cost": result.cost, "turnId": f"{turn_index}", "sessionId": self.bridge_session_id,
+            "text": result.text, "cost": result.cost, "turnId": f"{turn_id}", "sessionId": self.bridge_session_id,
             **({"firstResponseMs": result.first_audio_ms} if result.first_audio_ms is not None else {}),
         }
         last_error: Exception | None = None
@@ -1153,7 +1191,7 @@ class TwilioVoiceCall:
                     await asyncio.sleep(0.15 * (attempt + 1))
         raise RuntimeError("voice turn commit did not complete") from last_error
 
-    async def _respond_final(self, transcript: str, turn_index: int) -> None:
+    async def _respond_final(self, transcript: str, turn_index: int, turn_id: str | None = None) -> None:
         result: VoiceTurnResult | None = None
         try:
             matching_draft = bool(
@@ -1188,10 +1226,14 @@ class TwilioVoiceCall:
                 self.metrics.empty_agent_responses += 1
                 await self._speak_slow_turn_fallback()
                 return
-            await self._commit_turn(transcript, result, turn_index)
+            stable_turn_id = turn_id or f"turn_{turn_index}"
+            # Keep the bounded shutdown payload even if the durable per-turn
+            # commit is temporarily unavailable. The outcome endpoint can
+            # reconcile it idempotently after the bridge has disconnected.
+            self.outcome_turns.append({"id": stable_turn_id, "transcript": transcript[:900], "response": result.text[:900]})
+            await self._commit_turn(transcript, result, stable_turn_id)
             if result.first_audio_ms is not None and self.first_response_ms is None:
                 self.first_response_ms = result.first_audio_ms
-            self.outcome_turns.append({"transcript": transcript[:900], "response": result.text[:900]})
             if result.end_call:
                 self.stop.set()
                 try:
@@ -1213,10 +1255,11 @@ class TwilioVoiceCall:
                     await self._close_persistent_tts()
                     result = await self._request_agent(transcript)
                     if result.text:
-                        await self._commit_turn(transcript, result, turn_index)
+                        stable_turn_id = turn_id or f"turn_{turn_index}"
+                        self.outcome_turns.append({"id": stable_turn_id, "transcript": transcript[:900], "response": result.text[:900]})
+                        await self._commit_turn(transcript, result, stable_turn_id)
                         if result.first_audio_ms is not None and self.first_response_ms is None:
                             self.first_response_ms = result.first_audio_ms
-                        self.outcome_turns.append({"transcript": transcript[:900], "response": result.text[:900]})
                         await self._speak(result.text)
                     elif not self.interrupted:
                         self.metrics.empty_agent_responses += 1
@@ -1235,7 +1278,13 @@ class TwilioVoiceCall:
             return
         marker = "/commit-outcome"
         base = self.settings.chusky_turn_url[:-len("/turn")] if self.settings.chusky_turn_url.endswith("/turn") else self.settings.chusky_turn_url.rstrip("/")
-        payload = {"callId": self.call_id, "userId": self.user_id, "turns": list(self.outcome_turns), **({"firstResponseMs": self.first_response_ms} if self.first_response_ms is not None else {})}
+        payload = {
+            "callId": self.call_id,
+            "userId": self.user_id,
+            "opening": self.call_greeting or self.fallback_greeting or "",
+            "turns": list(self.outcome_turns),
+            **({"firstResponseMs": self.first_response_ms} if self.first_response_ms is not None else {}),
+        }
         last_error: Exception | None = None
         for attempt in range(5):
             try:
