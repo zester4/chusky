@@ -688,17 +688,18 @@ export async function orChat(
   let budgetExhausted = false;
   let attemptsMade = 0;
   const requestStartedAt = Date.now();
-  const maxTotalElapsedMs = routing.maxTotalElapsedMs
+  const requestedTotalElapsedMs = routing.maxTotalElapsedMs
     ? Math.max(1, Math.min(routing.maxTotalElapsedMs, 120_000))
-    : undefined;
-  const deadlineAt = maxTotalElapsedMs ? requestStartedAt + maxTotalElapsedMs : undefined;
+    : Number.POSITIVE_INFINITY;
+  const maxTotalElapsedMs = Math.min(config.openRouterTotalTimeoutMs, requestedTotalElapsedMs);
+  const deadlineAt = requestStartedAt + maxTotalElapsedMs;
   const trace = routing.triggerEventId
     ? { triggerEventId: routing.triggerEventId, round: routing.triggerRound }
     : undefined;
   let streamedOutputExposed = false;
   for (let attempt = 0; attempt < config.openRouterMaxAttempts; attempt++) {
     if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
-    const remainingMs = deadlineAt ? deadlineAt - Date.now() : Number.POSITIVE_INFINITY;
+    const remainingMs = deadlineAt - Date.now();
     if (remainingMs <= 0) {
       budgetExhausted = true;
       break;
@@ -746,17 +747,17 @@ export async function orChat(
     }
     if (attempt + 1 < config.openRouterMaxAttempts) {
       const retryDelayMs = 400 * 2 ** attempt + Math.random() * 250;
-      const retryRemainingMs = deadlineAt ? deadlineAt - Date.now() : Number.POSITIVE_INFINITY;
+      const retryRemainingMs = deadlineAt - Date.now();
       if (retryRemainingMs <= retryDelayMs) {
         budgetExhausted = true;
         break;
       }
-      logger.debug({ model, attempt: attempt + 1, timeoutMs: openRouterAttemptTimeoutMs(attempt + 1) }, "Retrying OpenRouter request after a transient failure");
+      logger.debug({ model, attempt: attempt + 1, timeoutMs: Math.max(1, Math.min(openRouterAttemptTimeoutMs(attempt + 1), retryRemainingMs - retryDelayMs)) }, "Retrying OpenRouter request after a transient failure");
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
   }
   const elapsedMs = Date.now() - requestStartedAt;
-  const exhaustedBudget = budgetExhausted || Boolean(deadlineAt && elapsedMs >= maxTotalElapsedMs!);
+  const exhaustedBudget = budgetExhausted || elapsedMs >= maxTotalElapsedMs;
   if ((timedOut && lastError instanceof Error && lastError.name === "TimeoutError") || exhaustedBudget) {
     logger.warn({
       model: model.slice(0, 160),

@@ -70,7 +70,7 @@ import { chuckTools } from "./agentTools.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 import { daytonaEngine } from "./lib/daytona/engine.js";
 import { requestDelegationCancellation, resumeApprovedDelegation } from "./subagents/executor.js";
-import { SELF_SERVICE_PROJECT_SCOPES } from "./developerProjects.js";
+import { DEFAULT_SELF_SERVICE_PROJECT_SCOPES, SELF_SERVICE_PROJECT_SCOPES } from "./developerProjects.js";
 import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinPreparedCalendarMeeting, joinRecallMeeting, leaveRecallMeeting, lookupRecallMeetingContext, prepareRecallMeetingMission } from "./meetings/service.js";
 import { MEETING_REPRESENTATIVE_NATIVE_TOOLS } from "./meetings/representative.js";
 import { addCustomMcpServer, connectMcpServer, disconnectMcpServer, listMcpCatalogForUser, listMcpConnections } from "./mcp/client.js";
@@ -618,7 +618,6 @@ function isAdminRequest(c: { req: { path: string; url: string } }): boolean {
 }
 
 function accountProjectScopes(value: unknown): string[] | undefined {
-  if (value === undefined) return ["*"];
   if (!Array.isArray(value) || !value.length || value.length > SELF_SERVICE_SCOPES.size || !value.every((scope) => typeof scope === "string" && SELF_SERVICE_SCOPES.has(scope))) return undefined;
   const scopes = [...new Set(value)];
   return scopes.includes("*") && scopes.length !== 1 ? undefined : scopes;
@@ -3356,9 +3355,9 @@ export function registerSdkApi(app: Hono): void {
     const organizationId = c.req.query("organizationId");
     if (organizationId) {
       if (!(await organizationAccessForRequest(c, organizationId))) return apiError(c, 404, "not_found", "Workspace not found.");
-      return c.json({ data: control.sdkProjects!.filter((project) => project.organizationId === organizationId && !project.revokedAt).map(accountProjectView) });
+      return c.json({ data: control.sdkProjects!.filter((project) => project.organizationId === organizationId && !project.revokedAt).map(accountProjectView), availableScopes: SELF_SERVICE_PROJECT_SCOPES, defaultScopes: DEFAULT_SELF_SERVICE_PROJECT_SCOPES });
     }
-    return c.json({ data: control.sdkProjects!.filter((project) => project.ownerWebAuthUserId === owner.id && !project.organizationId).map(accountProjectView) });
+    return c.json({ data: control.sdkProjects!.filter((project) => project.ownerWebAuthUserId === owner.id && !project.organizationId).map(accountProjectView), availableScopes: SELF_SERVICE_PROJECT_SCOPES, defaultScopes: DEFAULT_SELF_SERVICE_PROJECT_SCOPES });
   });
 
   app.get("/v1/account/projects/:projectId/company/runs", async (c) => {
@@ -3390,7 +3389,9 @@ export function registerSdkApi(app: Hono): void {
     if (organizationId && !(await organizationAccessForRequest(c, organizationId).then((access) => access?.role === "owner" || access?.role === "admin"))) {
       return apiError(c, 403, "workspace_admin_required", "Only workspace owners and admins can create company API projects.");
     }
-    const scopes = accountProjectScopes(body.scopes === undefined && organizationId ? COMPANY_PROJECT_DEFAULT_SCOPES : body.scopes);
+    const scopes = accountProjectScopes(body.scopes === undefined
+      ? organizationId ? COMPANY_PROJECT_DEFAULT_SCOPES : DEFAULT_SELF_SERVICE_PROJECT_SCOPES
+      : body.scopes);
     if (!name) return apiError(c, 400, "invalid_project", "Project name is required.");
     if (!scopes) return apiError(c, 400, "invalid_scopes", "Choose supported API scopes.");
     const control = await getSession(0);
@@ -4364,7 +4365,7 @@ export function registerSdkApi(app: Hono): void {
       if (!value || typeof value !== "object") return [];
       const step = value as Record<string, unknown>;
       if (typeof step.title !== "string" || typeof step.objective !== "string") return [];
-      return [{ id: typeof step.id === "string" ? step.id : undefined, title: step.title, objective: step.objective, dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((item): item is string => typeof item === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit), input: step.input && typeof step.input === "object" ? step.input as Record<string, unknown> : undefined, outputSchema: step.outputSchema && typeof step.outputSchema === "object" ? step.outputSchema as Record<string, unknown> : undefined, evidenceRequired: Array.isArray(step.evidenceRequired) ? step.evidenceRequired.filter((item): item is string => typeof item === "string") : undefined, compensationObjective: typeof step.compensationObjective === "string" ? step.compensationObjective : undefined, retryBackoffSeconds: step.retryBackoffSeconds === undefined ? undefined : Number(step.retryBackoffSeconds), parallelGroup: typeof step.parallelGroup === "string" ? step.parallelGroup : undefined }];
+      return [{ id: typeof step.id === "string" ? step.id : undefined, title: step.title, objective: step.objective, dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((item): item is string => typeof item === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit), allowedTools: Array.isArray(step.allowedTools) ? step.allowedTools.filter((item): item is string => typeof item === "string") : undefined, input: step.input && typeof step.input === "object" ? step.input as Record<string, unknown> : undefined, outputSchema: step.outputSchema && typeof step.outputSchema === "object" ? step.outputSchema as Record<string, unknown> : undefined, evidenceRequired: Array.isArray(step.evidenceRequired) ? step.evidenceRequired.filter((item): item is string => typeof item === "string") : undefined, compensationObjective: typeof step.compensationObjective === "string" ? step.compensationObjective : undefined, retryBackoffSeconds: step.retryBackoffSeconds === undefined ? undefined : Number(step.retryBackoffSeconds), parallelGroup: typeof step.parallelGroup === "string" ? step.parallelGroup : undefined }];
     }) : undefined;
     if (!title || !objective || !definitionOfDone || title.length > 240 || objective.length > 8000 || definitionOfDone.length > 4000) return apiError(c, 400, "invalid_mission", "title, objective, and definitionOfDone are required and must be within their size limits.");
     if (body.verificationMode !== undefined && body.verificationMode !== "legacy" && body.verificationMode !== "strict") return apiError(c, 400, "invalid_mission", "verificationMode must be either legacy or strict.");
@@ -4382,7 +4383,11 @@ export function registerSdkApi(app: Hono): void {
         maxToolCalls: body.maxToolCalls === undefined ? undefined : Number(body.maxToolCalls),
         maxCost: body.maxCost === undefined ? undefined : Number(body.maxCost),
       } });
-      const started = mission.status === "queued" ? await startMission(owner.userId, mission.id) : mission.status === "running" ? mission : undefined;
+      const retryableScheduleFailure = mission.status === "blocked" && mission.error?.startsWith("Mission could not be scheduled:");
+      const started = mission.status === "queued" ? await startMission(owner.userId, mission.id)
+        : mission.status === "running" ? mission
+          : retryableScheduleFailure ? await resumeMissionAndSchedule(owner.userId, mission.id, sdkTaskWorkflowEnqueuer)
+            : undefined;
       if (!started) return c.json(mission, mission.status === "queued" ? 409 : 200);
       try {
         const linked = await reconcileMissionExecution(owner.userId, started.id, sdkTaskWorkflowEnqueuer);

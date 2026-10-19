@@ -1208,12 +1208,13 @@ test("SDK autonomous missions are idempotent, owner-scoped, and controllable", a
   assert.equal(malformedPlan.status, 400, "the API must reject rather than silently drop malformed plan steps");
   const oversizedPlan = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body: JSON.stringify({ title: "Oversized plan", objective: "Do the task.", definitionOfDone: "The result is verified.", steps: Array.from({ length: 1001 }, (_, index) => ({ title: `Step ${index}`, objective: "Do work." })) }) }));
   assert.equal(oversizedPlan.status, 400, "the API must reject rather than silently truncate plans over the published maximum");
-  const body = JSON.stringify({ title: "Verify launch brief", objective: "Research and verify the launch brief.", definitionOfDone: "Every required claim has a source and the brief is ready.", steps: [{ id: "research", title: "Research", objective: "Collect verified sources." }, { id: "draft", title: "Draft", objective: "Write the brief.", dependsOn: ["research"] }] });
+  const body = JSON.stringify({ title: "Verify launch brief", objective: "Research and verify the launch brief.", definitionOfDone: "Every required claim has a source and the brief is ready.", steps: [{ id: "research", title: "Research", objective: "Collect verified sources.", allowedTools: [] }, { id: "draft", title: "Draft", objective: "Write the brief.", dependsOn: ["research"] }] });
   const first = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body }));
   assert.equal(first.status, 201);
-  const created = await first.json() as { id: string; status: string; rootTaskId?: string };
+  const created = await first.json() as { id: string; status: string; rootTaskId?: string; steps: Array<{ id: string; allowedTools?: string[] }> };
   assert.equal(created.status, "running");
   assert.ok(created.rootTaskId);
+  assert.deepEqual(created.steps.find((step) => step.id === "research")?.allowedTools, [], "the API must preserve an explicit empty tool fence");
   const replay = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body }));
   assert.equal(replay.status, 200);
   assert.equal((await replay.json() as { id: string }).id, created.id);
@@ -1266,6 +1267,35 @@ test("SDK autonomous missions are idempotent, owner-scoped, and controllable", a
   const verified = await api.fetch(new Request(`http://local/v1/missions/${strictMission.id}/verify`, { method: "POST", headers, body: JSON.stringify({}) }));
   assert.equal(verified.status, 200);
   assert.equal((await verified.json() as { status: string }).status, "completed", "API verification closes a mission when all steps and trusted criteria are satisfied");
+});
+
+test("mission creation retries a durable scheduling failure with the same idempotency key", async () => {
+  let enqueueAttempts = 0;
+  setSdkTaskWorkflowEnqueuerForTests(async () => {
+    enqueueAttempts += 1;
+    if (enqueueAttempts === 1) throw new Error("temporary QStash outage");
+    return "workflow-recovered-mission";
+  });
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "retry-owner", "Content-Type": "application/json", "Idempotency-Key": "retry-after-schedule-failure" };
+  const body = JSON.stringify({ title: "Read-only plan", objective: "Prepare a plan.", definitionOfDone: "A plan is ready.", budgetCeiling: { maxCost: 1, maxToolCalls: 3 }, maxCost: 1, maxToolCalls: 3, steps: [{ id: "plan", title: "Plan", objective: "Prepare a plan.", allowedTools: [] }] });
+  const failed = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body }));
+  assert.equal(failed.status, 503);
+  assert.match(await failed.text(), /temporary QStash outage/);
+
+  const retried = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body }));
+  assert.equal(retried.status, 200, "a recovered existing mission is returned as an idempotent replay");
+  const recovered = await retried.json() as { id: string; status: string; steps: Array<{ allowedTools?: string[] }>; budgetCeiling?: { maxCost?: number; maxToolCalls?: number } };
+  assert.equal(recovered.status, "running");
+  assert.deepEqual(recovered.steps[0]?.allowedTools, []);
+  assert.equal(recovered.budgetCeiling?.maxCost, 1);
+  const overBudget = await api.fetch(new Request(`http://local/v1/missions/${recovered.id}/control`, { method: "POST", headers, body: JSON.stringify({ budget: { maxCost: 2 } }) }));
+  assert.equal(overBudget.status, 400, "a bounded mission cannot raise its creation-time spend ceiling later");
+  assert.equal(enqueueAttempts, 2);
+  const replay = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body }));
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json() as { id: string }).id, recovered.id);
+  assert.equal(enqueueAttempts, 2, "an idempotent replay must not enqueue duplicate work");
 });
 
 test("context, outcome, evidence, and A2A surfaces share the same owner-scoped runtime", async () => {
@@ -1789,6 +1819,13 @@ test("verified dashboard users can only manage their own bounded project keys", 
 
   const root = { Authorization: "Bearer sdk-test-key", "Content-Type": "application/json" };
   await api.fetch(new Request("http://local/v1/admin/projects", { method: "POST", headers: root, body: JSON.stringify({ name: "Operator only" }) }));
+  const catalog = await api.fetch(web("alice", "/account/projects"));
+  assert.equal(catalog.status, 200);
+  const catalogBody = await catalog.json() as { availableScopes: string[]; defaultScopes: string[] };
+  assert.ok(catalogBody.availableScopes.includes("missions:read"));
+  assert.ok(catalogBody.availableScopes.includes("apps:write"));
+  assert.ok(!catalogBody.availableScopes.includes("runs:read"));
+  assert.deepEqual(catalogBody.defaultScopes, ["threads:read", "missions:read"]);
   const create = await api.fetch(web("alice", "/account/projects", { method: "POST", body: JSON.stringify({ name: "Production" }) }));
   assert.equal(create.status, 201);
   const created = await create.json() as { id: string; key: string; keyPrefix: string; scopes: string[] };
@@ -1796,7 +1833,12 @@ test("verified dashboard users can only manage their own bounded project keys", 
   assert.equal(browserHeaderSpoof.status, 201);
   assert.equal((await browserHeaderSpoof.json() as { externalId: string }).externalId, "alice");
   assert.match(created.key, /^chsk_/);
-  assert.deepEqual(created.scopes, ["*"]);
+  assert.deepEqual(created.scopes, catalogBody.defaultScopes);
+  const readOnlyHeaders = { Authorization: `Bearer ${created.key}`, "X-Chusky-User-Id": "readonly-smoke-user", "Content-Type": "application/json" };
+  const missionList = await api.fetch(new Request("http://local/v1/missions", { headers: readOnlyHeaders }));
+  assert.equal(missionList.status, 200, "the default mission read scope should support a safe first API call");
+  const forbiddenMissionCreate = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers: readOnlyHeaders, body: JSON.stringify({ title: "No write access", objective: "Create work.", definitionOfDone: "It exists." }) }));
+  assert.equal(forbiddenMissionCreate.status, 403, "a read-only starter key must not start mission work");
   const control = await getSession(0);
   const stored = control.sdkProjects!.find((project) => project.id === created.id)!;
   assert.equal(stored.ownerWebAuthUserId, "alice");
@@ -1808,6 +1850,15 @@ test("verified dashboard users can only manage their own bounded project keys", 
   assert.equal(otherUser.status, 404);
   const invalidScopes = await api.fetch(web("alice", "/account/projects", { method: "POST", body: JSON.stringify({ name: "Invalid", scopes: ["admin:write"] }) }));
   assert.equal(invalidScopes.status, 400);
+  const invalidLegacyScope = await api.fetch(web("alice", "/account/projects", { method: "POST", body: JSON.stringify({ name: "Invalid legacy scope", scopes: ["runs:read"] }) }));
+  assert.equal(invalidLegacyScope.status, 400);
+  const missionScoped = await api.fetch(web("alice", "/account/projects", { method: "POST", body: JSON.stringify({ name: "Mission automation", scopes: ["missions:read", "missions:write"] }) }));
+  assert.equal(missionScoped.status, 201);
+  const missionScopedProject = await missionScoped.json() as { id: string; scopes: string[] };
+  assert.deepEqual(missionScopedProject.scopes, ["missions:read", "missions:write"]);
+  assert.equal((await api.fetch(web("alice", `/account/projects/${missionScopedProject.id}`, { method: "DELETE" }))).status, 204);
+  const missingPatchScopes = await api.fetch(web("alice", `/account/projects/${created.id}`, { method: "PATCH", body: JSON.stringify({}) }));
+  assert.equal(missingPatchScopes.status, 400, "scope updates must not silently expand to full access");
   const update = await api.fetch(web("alice", `/account/projects/${created.id}`, { method: "PATCH", body: JSON.stringify({ scopes: ["threads:read"] }) }));
   assert.equal(update.status, 200);
   const rotatedResponse = await api.fetch(web("alice", `/account/projects/${created.id}/rotate-key`, { method: "POST" }));
@@ -2023,6 +2074,7 @@ test("company telemetry is visible across project callers but isolated by worksp
 test("linked verified dashboard users can request and list phone calls without exposing destinations", async () => {
   (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
   Object.assign(config as unknown as Record<string, unknown>, { twilioVoiceEnabled: true, twilioAccountSid: "AC123", twilioAuthToken: "token", twilioCallerId: "+16452437121", twilioWebhookBaseUrl: "https://chusky.example", twilioMediaStreamUrl: "wss://voice.example/twilio/stream", twilioMediaBridgeSecret: "bridge-secret" });
+  setSdkTaskWorkflowEnqueuerForTests(async (_userId, taskId) => `workflow-test-${taskId}`);
   setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
   const link = await createWebTelegramLinkCode("alice");
   assert.equal(await redeemWebTelegramLinkCode(link.code, 810099), "linked");

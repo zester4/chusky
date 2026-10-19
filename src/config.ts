@@ -845,6 +845,10 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // Each upstream attempt has a bounded wall-clock deadline. OpenRouter may
   // still choose a healthy provider/model fallback within that deadline.
   openRouterTimeoutMs: positiveInt("OPENROUTER_TIMEOUT_MS", 45_000),
+  // Bound the whole model turn, including transient retries. Without this
+  // ceiling a 45s attempt followed by a 90s retry can hold a user-facing run
+  // open for more than two minutes before it reports a recoverable failure.
+  openRouterTotalTimeoutMs: boundedInt("OPENROUTER_TOTAL_TIMEOUT_MS", 75_000, 30_000, 180_000),
   // Keep provider retries bounded even if deployment configuration is wrong.
   // The workflow/task layers provide the outer retry boundary; a single model
   // turn should never be allowed to spin indefinitely.

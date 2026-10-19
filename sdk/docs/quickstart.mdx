@@ -54,3 +54,23 @@ for await (const event of chusky.threads.runs(thread.id).stream({
 ```
 
 `userId` must be your own application’s authenticated user ID. Chusky uses it to isolate threads, files, memory, approvals, tasks, and connected accounts.
+
+Use a stable identifier from your trusted server-side authentication session.
+Do not accept `userId` from a browser request or expose the API key to client
+code. New personal keys begin read-only with `threads:read` and `missions:read`;
+grant write scopes explicitly when your integration needs to create work.
+The thread-creation example below also requires `threads:write`.
+
+## Verify mission access
+
+This read-only call is a useful first integration check. The default key scopes
+include `missions:read`:
+
+```ts
+const missions = await chusky.missions.list();
+console.log(missions.data);
+```
+
+Creating a mission starts durable asynchronous work. Configure the worker and
+queue for your deployment before creating missions, and send an
+`idempotencyKey` in the request options when retrying a create after a timeout.

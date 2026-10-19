@@ -19,6 +19,12 @@ export const SELF_SERVICE_PROJECT_SCOPES = [
   "mcp:read", "mcp:write",
 ] as const;
 
+/** A useful starter key that can create and inspect owner-scoped missions
+ * without granting unrelated account, app, or provider permissions. */
+export const DEFAULT_SELF_SERVICE_PROJECT_SCOPES = [
+  "threads:read", "missions:read",
+] as const;
+
 export const TELEGRAM_PROJECT_LIMIT = 10;
 export type ProjectKeyView = {
   id: string;
@@ -63,7 +69,7 @@ export async function listTelegramProjects(telegramUserId: number): Promise<Proj
 /**
  * Returns plaintext exactly once. Persistence contains only its SHA-256 hash.
  */
-export async function createTelegramProject(telegramUserId: number, name: string, scopes: readonly string[] = ["*"]): Promise<ProjectKeyView & { key: string }> {
+export async function createTelegramProject(telegramUserId: number, name: string, scopes: readonly string[] = DEFAULT_SELF_SERVICE_PROJECT_SCOPES): Promise<ProjectKeyView & { key: string }> {
   const safeName = name.trim().replace(/\s+/g, " ").slice(0, 100);
   if (!safeName) throw new Error("Project name is required");
   const control = await getSession(0);

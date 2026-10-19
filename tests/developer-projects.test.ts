@@ -16,7 +16,7 @@ test("Telegram project keys are shown once and stored hash-only", async () => {
     id: created.id,
     name: "My backend",
     keyPrefix: created.keyPrefix,
-    scopes: ["*"],
+    scopes: ["threads:read", "missions:read"],
     createdAt: created.createdAt,
   }]);
 });

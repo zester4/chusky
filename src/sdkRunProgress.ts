@@ -4,7 +4,7 @@
  * metadata; provider arguments and results never belong in this contract.
  */
 
-export type SdkRunProgressPhase = "planning" | "researching" | "acting" | "waiting" | "completed";
+export type SdkRunProgressPhase = "planning" | "researching" | "acting" | "waiting" | "completed" | "failed" | "cancelled";
 
 export type SdkRunEvidenceKind = "source" | "artifact" | "step" | "note";
 
@@ -70,7 +70,7 @@ function evidenceKind(value: unknown): SdkRunEvidenceKind | undefined {
 export function normalizeSdkRunProgress(value: unknown): SdkRunProgress | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const raw = value as Record<string, unknown>;
-  const phase = raw.phase === "planning" || raw.phase === "researching" || raw.phase === "acting" || raw.phase === "waiting" || raw.phase === "completed"
+  const phase = raw.phase === "planning" || raw.phase === "researching" || raw.phase === "acting" || raw.phase === "waiting" || raw.phase === "completed" || raw.phase === "failed" || raw.phase === "cancelled"
     ? raw.phase
     : undefined;
   const title = cleanText(raw.title, MAX_TITLE_CHARS);
@@ -298,7 +298,7 @@ export function terminalSdkRunProgress(status: "completed" | "failed" | "cancell
     return normalizeSdkRunProgress({ phase: "completed", title: "Work completed", detail: "Chusky finished the request.", progress: 1, ...(evidence?.length ? { evidence } : options.previous?.evidence ? { evidence: options.previous.evidence } : {}) })!;
   }
   return normalizeSdkRunProgress({
-    phase: "waiting",
+    phase: status,
     title: status === "cancelled" ? "Run cancelled" : "Run needs attention",
     detail: status === "cancelled" ? "Completed steps remain available above." : cleanText(options.error, MAX_DETAIL_CHARS) ?? "The run stopped before completion. Review the details and try again.",
     ...(options.previous?.provider ? { provider: options.previous.provider } : {}),

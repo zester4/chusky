@@ -23,6 +23,13 @@ Inspect `mission.timing` for active milliseconds and extension usage.
 
 Keep the definition of done concrete. If you provide steps, the first dependency-free steps may run in parallel; later steps cannot start until their dependencies are completed.
 
+An optional per-step `allowedTools` array is an execution fence, not a preload
+hint. Omit it to let the mission inherit its normal tool policy; provide an
+empty array to disable provider/native tools for that step. Safe checkpoint
+and lifecycle controls remain available, but provider-read verification is
+disabled and any model-driven replan inherits the current step's fence. Keep
+this separate from approvals: an allowlist does not waive approval requirements.
+
 ```ts
 const mission = await chusky.missions.create({
   title: "Qualified fintech leads",
@@ -31,7 +38,7 @@ const mission = await chusky.missions.create({
   verificationMode: "strict",
   requiredEvidence: ["source URL for every lead", "qualification assertion", "deduplication check"],
   steps: [
-    { id: "research", title: "Research companies", objective: "Collect source-backed company facts." },
+    { id: "research", title: "Research companies", objective: "Collect source-backed company facts.", allowedTools: ["CHUCK_TREG_SEARCH"] },
     { id: "qualify", title: "Qualify and deduplicate", objective: "Apply the ICP and remove duplicates", dependsOn: ["research"] },
     { id: "prepare", title: "Prepare CRM payload", objective: "Draft the bounded CRM import", dependsOn: ["qualify"] },
   ],

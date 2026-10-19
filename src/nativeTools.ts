@@ -5,6 +5,7 @@ import { Client as WorkflowClient } from "@upstash/workflow";
 import { enqueueTaskWorkflow, enqueueTinyFishResearchWorkflow, workflowFailureUrl } from "./triggerWorkflow.js";
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
 import { resumeMissionTaskAfterApproval } from "./missionApproval.js";
+import { constrainMissionReplanTools } from "./missionWorker.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { createHash, randomUUID } from "node:crypto";
 import { classifyMemory } from "./memory/classifier.js";
@@ -2947,6 +2948,10 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
       const missionId = text(args.id);
       const existing = await getMission(userId, missionId);
       if (!existing) throw new Error("Mission not found or not owned by you");
+      const activeStepTools = runtime.missionStepId
+        ? existing.steps.find((step) => step.id === runtime.missionStepId)?.allowedTools
+        : undefined;
+      const constrainedSteps = constrainMissionReplanTools(steps, activeStepTools);
       const rejected = (mission: NonNullable<typeof existing>, completedStepIds: string[], reason: string) => ({
         operation: "mission_replan" as const,
         status: "rejected" as const,
@@ -2961,13 +2966,13 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
         return rejected(existing, existing.steps.filter((step) => step.status === "completed").map((step) => step.id), `This ${existing.status} mission can no longer be replanned.`);
       }
       const completedStepIds = existing.steps.filter((step) => step.status === "completed").map((step) => step.id).sort();
-      const proposedStepIds = new Set(steps.flatMap((step) => step.id ? [step.id] : []));
+      const proposedStepIds = new Set(constrainedSteps.flatMap((step) => step.id ? [step.id] : []));
       const omittedCompletedStepIds = completedStepIds.filter((stepId) => !proposedStepIds.has(stepId));
       if (omittedCompletedStepIds.length) {
         return rejected(existing, omittedCompletedStepIds, "Completed mission steps are immutable and must be preserved.");
       }
       try {
-        const mission = await replanMissionAndSchedule(userId, missionId, steps, text(args.reason, 2000), runtime.enqueueMissionTask ?? enqueueTaskWorkflow, runtime.taskId);
+        const mission = await replanMissionAndSchedule(userId, missionId, constrainedSteps, text(args.reason, 2000), runtime.enqueueMissionTask ?? enqueueTaskWorkflow, runtime.taskId);
         if (mission) return mission;
         const latest = await getMission(userId, missionId);
         if (latest && ["completed", "cancelled"].includes(latest.status)) {

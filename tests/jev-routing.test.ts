@@ -529,6 +529,18 @@ test("gateway route outcomes are tracked separately from Jev predictions", () =>
   resetJevRoutingStats();
 });
 
+test("explicit Treg capability requests route deterministically before Jev", async () => {
+  const captured: Captured[] = [];
+  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["treg"]), tregEnabled: true });
+  resetJevRoutingStats();
+  try {
+    const route = await computeTregTurnRoute("Hey, tell me what you can do with Treg", { client: new JevClient({ apiKey: "k", fetchImpl: fakeJev(captured) }) });
+    assert.deepEqual(route, { tool: "CHUCK_TREG_PLAN", probability: 1, needsLiveData: 0 });
+    assert.equal(captured.length, 0, "the explicit product request must not wait for a second routing model");
+    assert.equal(jevRoutingStats().treg_tool?.fallbacks, 1);
+  } finally { restore(); resetJevRoutingStats(); }
+});
+
 test("routing is inert when JEV_MODE is off", async () => {
   const restore = withConfig({ jevMode: "off" });
   try {
