@@ -13,7 +13,7 @@ test("customer number catalog exposes the initial US, Canada, and ten European m
   const countries = twilioNumberCatalog();
   assert.equal(countries.length, 12);
   assert.deepEqual(countries.slice(0, 2).map((country) => country.code), ["US", "CA"]);
-  assert.deepEqual(countries.slice(2).map((country) => country.code), ["GB", "DE", "FR", "IE", "NL", "ES", "IT", "SE", "NO", "DK"]);
+  assert.deepEqual(countries.slice(2).map((country) => country.code), ["GB", "DE", "FR", "BE", "AT", "IE", "NL", "PT", "NO", "DK"]);
   assert.equal(countries.find((country) => country.code === "US")?.regionLabel, "State");
 });
 
