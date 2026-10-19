@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import twilio from "twilio";
 import { config } from "../config.js";
-import { appendPhoneCallEvent, claimPhoneCallStart, getPhoneCall, persistPhoneCallProviderResult, updatePhoneCall, type PhoneCallRecord } from "../store.js";
+import { appendPhoneCallEvent, claimPhoneCallStart, getPhoneCall, getVoiceCallProfile, listVoiceInboundRoutes, persistPhoneCallProviderResult, updatePhoneCall, type PhoneCallRecord } from "../store.js";
 import { resolveVoiceContinuity } from "./continuity.js";
 import { normalizePhoneCallRequestKey } from "./requestKey.js";
-import { normalizeVoiceCallProfile, voiceCallDialBlockReason, type CallProfile, type VoiceCallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
+import { subaccountNumberDependencies } from "./twilioSubaccounts.js";
+import { normalizeVoiceCallProfile, resolveOutboundVoiceCallProfile, voiceCallDialBlockReason, type CallProfile, type VoiceCallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
 
 export interface TwilioCallInput { phoneNumber: string; purpose: string; profile?: VoiceCallProfileInput; callProfile?: CallProfile; continuityFromCallId?: string; requestKey?: string; }
 export interface TwilioCallDependencies {
@@ -13,6 +14,8 @@ export interface TwilioCallDependencies {
   mediaBridgeSecret?: string;
   machineDetection?: "Enable" | "DetectMessageEnd";
   voicemailMessage?: string;
+  /** Managed workspace account selected from the owned inbound route. */
+  twilioSubaccountId?: string;
   createCall?: (input: { to: string; from: string; url: string; statusCallback: string; machineDetection?: "Enable" | "DetectMessageEnd" }) => Promise<{ sid: string }>;
   updateCall?: (sid: string, input: { status?: "completed"; twiml?: string }) => Promise<void>;
 }
@@ -24,6 +27,35 @@ export type TwilioCallControlInput =
 
 function xmlEscape(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
+}
+
+/**
+ * Resolve the workspace-owned Twilio account for outbound calls. A managed
+ * number is the caller identity the workspace purchased, so it must be paired
+ * with the encrypted child-account credentials that own that number. The
+ * platform account remains the compatibility fallback for legacy or external
+ * routes that do not have a managed number yet.
+ */
+async function resolveOutboundTwilioDependencies(userId: number, fallback: TwilioCallDependencies, call?: PhoneCallRecord): Promise<TwilioCallDependencies> {
+  const routes = await listVoiceInboundRoutes(userId);
+  const route = call?.twilioSubaccountId
+    ? routes.find((item) => item.provider === "twilio" && item.twilioSubaccountId === call.twilioSubaccountId)
+    : routes
+      .filter((item) => item.provider === "twilio" && item.source === "managed" && item.twilioSubaccountId && item.capabilities?.voice !== false)
+      .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+  if (!route?.twilioSubaccountId) {
+    if (call?.twilioSubaccountId) throw new Error("The managed phone number for this call is no longer available.");
+    return fallback;
+  }
+  const tenant = await subaccountNumberDependencies(route.twilioSubaccountId);
+  return {
+    ...fallback,
+    accountSid: tenant.accountSid,
+    authToken: tenant.authToken,
+    callerId: route.phoneNumber,
+    webhookBaseUrl: tenant.webhookBaseUrl,
+    twilioSubaccountId: route.twilioSubaccountId,
+  };
 }
 
 export function validateTwilioCallControl(input: TwilioCallControlInput): TwilioCallControlInput {
@@ -63,11 +95,12 @@ export async function controlTwilioCallForUser(userId: number, callId: string, i
   callerId: config.twilioCallerId, webhookBaseUrl: config.twilioWebhookBaseUrl, mediaStreamUrl: config.twilioMediaStreamUrl,
   mediaBridgeSecret: config.twilioMediaBridgeSecret,
 }): Promise<PhoneCallRecord> {
-  validate(options);
   if (!/^twc_[0-9a-f-]{36}$/i.test(callId)) throw new Error("Invalid Twilio call ID");
   const call = await getPhoneCall(userId, callId);
   if (!call || call.provider !== "twilio") throw new Error("Twilio call not found or not owned by you");
   if (!call.providerCallId || !["starting", "bridging", "active"].includes(call.status)) throw new Error("Twilio call is not active");
+  options = await resolveOutboundTwilioDependencies(userId, options, call);
+  validate(options);
   const control = validateTwilioCallControl(input);
   const update = options.updateCall ?? (async (sid, request) => {
     await twilio(options.accountSid, options.authToken).calls(sid).update(request);
@@ -129,15 +162,17 @@ export async function startTwilioCallForUser(userId: number, input: TwilioCallIn
   mediaBridgeSecret: config.twilioMediaBridgeSecret,
   ...(config.twilioVoicemailEnabled ? { machineDetection: "DetectMessageEnd" as const, voicemailMessage: config.twilioVoicemailMessage } : {}),
 }): Promise<PhoneCallRecord> {
+  options = await resolveOutboundTwilioDependencies(userId, options);
   validate(options, true);
   if (options.voicemailMessage !== undefined && (!options.voicemailMessage.trim() || options.voicemailMessage.length > 500)) throw new Error("voicemailMessage must be 1-500 characters");
-  const { phoneNumber, purpose, profile, callProfile } = validateTwilioCallInput(input);
+  const { phoneNumber, purpose, profile: requestedProfile, callProfile } = validateTwilioCallInput(input);
+  const profile = resolveOutboundVoiceCallProfile(await getVoiceCallProfile(userId), requestedProfile);
   const continuity = await resolveVoiceContinuity(userId, input.continuityFromCallId);
   const dialBlockReason = voiceCallDialBlockReason(profile);
   if (dialBlockReason) throw new Error(dialBlockReason);
   const base = httpsUrl(options.webhookBaseUrl, "TWILIO_WEBHOOK_BASE_URL");
   const requestKey = normalizePhoneCallRequestKey(input.requestKey);
-  const call: PhoneCallRecord = { id: `twc_${randomUUID()}`, userId, ...(requestKey ? { requestKey } : {}), provider: "twilio", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, ...(continuity ? { continuity } : {}), status: "starting", providerStatus: "queued", createdAt: Date.now(), updatedAt: Date.now() };
+  const call: PhoneCallRecord = { id: `twc_${randomUUID()}`, userId, ...(requestKey ? { requestKey } : {}), provider: "twilio", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, ...(options.twilioSubaccountId ? { twilioSubaccountId: options.twilioSubaccountId } : {}), ...(continuity ? { continuity } : {}), status: "starting", providerStatus: "queued", createdAt: Date.now(), updatedAt: Date.now() };
   const claim = await claimPhoneCallStart(userId, call);
   if (!claim.created) return claim.call;
   const claimedCall = claim.call;

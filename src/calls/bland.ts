@@ -1,9 +1,9 @@
 import { config } from "../config.js";
-import { claimPhoneCallStart, getSession, persistPhoneCallProviderResult, updatePhoneCall, type PhoneCallRecord } from "../store.js";
+import { claimPhoneCallStart, getSession, getVoiceCallProfile, persistPhoneCallProviderResult, updatePhoneCall, type PhoneCallRecord } from "../store.js";
 import { createBlandCallToken, isValidBlandToolSecret } from "./blandSecurity.js";
 import { resolveVoiceContinuity, voiceContinuityInstructions } from "./continuity.js";
 import { normalizePhoneCallRequestKey } from "./requestKey.js";
-import { normalizeVoiceCallProfile, voiceCallDialBlockReason, voiceProfileInstructions, type CallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
+import { normalizeVoiceCallProfile, resolveOutboundVoiceCallProfile, voiceCallDialBlockReason, voiceProfileInstructions, type CallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -64,7 +64,7 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
   const phoneNumber = text(input.phoneNumber, "phoneNumber", 16);
   if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber)) throw new Error("phoneNumber must be an E.164 phone number, for example +14155550123");
   const purpose = text(input.purpose, "purpose", 2000);
-  const profile = normalizeVoiceCallProfile(input.profile);
+  const profile = resolveOutboundVoiceCallProfile(await getVoiceCallProfile(userId), input.profile);
   const callProfile = input.callProfile === "business" ? "business" : "personal";
   const dialBlockReason = voiceCallDialBlockReason(profile);
   if (dialBlockReason) throw new Error(dialBlockReason);

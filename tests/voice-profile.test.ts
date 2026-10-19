@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeVoiceCallProfile, voiceProfileInstructions, voiceProfileNativeTools } from "../src/calls/voiceProfile.js";
-import { initStore, getPhoneCall } from "../src/store.js";
+import { normalizeVoiceCallProfile, resolveOutboundVoiceCallProfile, voiceProfileInstructions, voiceProfileNativeTools } from "../src/calls/voiceProfile.js";
+import { initStore, getPhoneCall, getVoiceCallProfile, setVoiceCallProfile } from "../src/store.js";
 import { startTwilioCallForUser } from "../src/calls/twilio.js";
 
 test("voice profiles keep spoken output while private owner calls use full context and tools", () => {
@@ -70,6 +70,63 @@ test("Twilio persists the approved normalized profile with the call", async () =
   assert.deepEqual((await getPhoneCall(502, call.id))?.voiceProfile, {
     identity: "Maya", mode: "general", tone: "warm", facts: [], guardrails: [], capabilities: ["scratchpad_lookup"], disclosure: "assistant",
   });
+});
+
+test("outbound calls use the saved Calls representative as the authoritative profile", async () => {
+  await initStore({ memoryOnly: true });
+  await setVoiceCallProfile(504, {
+    identity: "Maya",
+    organization: "MedVault",
+    mode: "support",
+    tone: "warm",
+    guardrails: ["Record the caller's report exactly."],
+    capabilities: ["call_history"],
+    toolPolicy: { enabled: true, allowedToolkits: ["stripe"], allowedConnectionIds: ["conn_1"], allowExternalWrites: false, version: 1 },
+  });
+
+  const saved = await getVoiceCallProfile(504);
+  const resolved = resolveOutboundVoiceCallProfile(saved, {
+    identity: "Invented caller",
+    organization: "Wrong business",
+    contactName: "Avery",
+    mode: "sales",
+    tone: "direct",
+    toolPolicy: { enabled: true, allowedToolkits: ["gmail"], allowExternalWrites: true },
+  });
+
+  assert.equal(resolved.identity, "Maya");
+  assert.equal(resolved.organization, "MedVault");
+  assert.equal(resolved.mode, "support");
+  assert.equal(resolved.tone, "warm");
+  assert.equal(resolved.contactName, "Avery");
+  assert.deepEqual(resolved.guardrails, ["Record the caller's report exactly."]);
+  assert.deepEqual(resolved.toolPolicy?.allowedToolkits, ["stripe"]);
+  assert.deepEqual(resolved.toolPolicy?.allowedConnectionIds, ["conn_1"]);
+  assert.equal(resolved.toolPolicy?.allowExternalWrites, false);
+});
+
+test("Twilio snapshots the saved representative when chat starts a call", async () => {
+  await initStore({ memoryOnly: true });
+  await setVoiceCallProfile(505, {
+    identity: "Maya",
+    organization: "MedVault",
+    mode: "support",
+    tone: "warm",
+    capabilities: ["call_history"],
+  });
+  const call = await startTwilioCallForUser(505, {
+    phoneNumber: "+15550001",
+    purpose: "Check in",
+    callProfile: "business",
+    profile: { identity: "Wrong identity", organization: "Wrong business", tone: "direct" },
+  }, {
+    enabled: true, accountSid: "AC123", authToken: "auth", callerId: "+16452437121",
+    webhookBaseUrl: "https://chusky.example", mediaStreamUrl: "wss://voice.example/twilio/stream", mediaBridgeSecret: "bridge-secret",
+    createCall: async () => ({ sid: "CA-saved-profile" }),
+  });
+  assert.equal(call.voiceProfile?.identity, "Maya");
+  assert.equal(call.voiceProfile?.organization, "MedVault");
+  assert.equal(call.voiceProfile?.tone, "warm");
 });
 
 test("business calls carry a separate call profile", async () => {

@@ -153,6 +153,26 @@ export function normalizeVoiceCallProfile(value: unknown): VoiceCallProfile {
   };
 }
 
+/**
+ * Resolve the profile for a real outbound call. The dashboard profile is the
+ * server-owned source of truth; a model or SDK caller may provide a contact
+ * name for this specific call, but must not replace the saved identity,
+ * persona, controls, guardrails, or connected-app policy.
+ *
+ * When no saved profile exists, retain the explicit per-call profile for
+ * backwards compatibility with direct SDK callers and legacy integrations.
+ */
+export function resolveOutboundVoiceCallProfile(configured: VoiceCallProfile | undefined, perCall: VoiceCallProfileInput | undefined): VoiceCallProfile {
+  if (!configured) return normalizeVoiceCallProfile(perCall);
+  const saved = normalizeVoiceCallProfile(configured);
+  const input = perCall && typeof perCall === "object" && !Array.isArray(perCall) ? perCall as Record<string, unknown> : {};
+  const contactName = clean(input.contactName, 180);
+  return normalizeVoiceCallProfile({
+    ...saved,
+    ...(contactName ? { contactName } : {}),
+  });
+}
+
 /** Parse a server-owned JSON profile for provider-managed inbound routes. The
  * provider payload never gets to choose this profile. */
 export function parseVoiceCallProfileJson(value: string, fallbackMode: VoiceCallMode = "general"): VoiceCallProfile {
