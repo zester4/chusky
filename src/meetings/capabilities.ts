@@ -2,6 +2,8 @@ export type MeetingCapabilityLevel = "supported" | "limited" | "unsupported";
 
 export interface MeetingCapabilities {
   audio: MeetingCapabilityLevel;
+  /** Phone calls are available only from a trusted owner-private meeting. */
+  outboundPhone: MeetingCapabilityLevel;
   outboundChat: MeetingCapabilityLevel;
   inboundChat: MeetingCapabilityLevel;
   screenShare: MeetingCapabilityLevel;
@@ -23,6 +25,7 @@ export interface MeetingCapabilities {
 export function getMeetingCapabilities(platform: "zoom" | "google_meet" | "microsoft_teams" | "webex"): MeetingCapabilities {
   const common = {
     audio: "supported" as const,
+    outboundPhone: "limited" as const,
     inboundChat: "supported" as const,
     participantEvents: "supported" as const,
     speakerEvents: "supported" as const,
@@ -31,12 +34,12 @@ export function getMeetingCapabilities(platform: "zoom" | "google_meet" | "micro
   };
   switch (platform) {
     case "zoom":
-      return { ...common, outboundChat: "supported", screenShare: "supported", waitingRoom: "supported", admissionControl: "limited", notes: ["Outgoing chat and screen context depend on the meeting host and provider permissions."] };
+      return { ...common, outboundChat: "supported", screenShare: "supported", waitingRoom: "supported", admissionControl: "limited", notes: ["Outgoing chat and screen context depend on the meeting host and provider permissions.", "Phone calls are owner-private only; shared meeting participants cannot start an outbound call."] };
     case "google_meet":
-      return { ...common, outboundChat: "supported", screenShare: "supported", waitingRoom: "limited", admissionControl: "limited", notes: ["Chat, admission, and screen context depend on the Google Meet account and meeting policy."] };
+      return { ...common, outboundChat: "supported", screenShare: "supported", waitingRoom: "limited", admissionControl: "limited", notes: ["Chat, admission, and screen context depend on the Google Meet account and meeting policy.", "Phone calls are owner-private only; shared meeting participants cannot start an outbound call."] };
     case "microsoft_teams":
-      return { ...common, outboundChat: "supported", screenShare: "supported", waitingRoom: "limited", admissionControl: "limited", notes: ["Chat, admission, and screen context depend on tenant policy and meeting permissions."] };
+      return { ...common, outboundChat: "supported", screenShare: "supported", waitingRoom: "limited", admissionControl: "limited", notes: ["Chat, admission, and screen context depend on tenant policy and meeting permissions.", "Phone calls are owner-private only; shared meeting participants cannot start an outbound call."] };
     case "webex":
-      return { ...common, outboundChat: "unsupported", screenShare: "unsupported", waitingRoom: "limited", admissionControl: "limited", notes: ["Webex meetings currently support inbound events and audio, but Chusky does not send outbound meeting chat or inspect shared screens."] };
+      return { ...common, outboundChat: "unsupported", screenShare: "unsupported", waitingRoom: "limited", admissionControl: "limited", notes: ["Webex meetings currently support inbound events and audio, but Chusky does not send outbound meeting chat or inspect shared screens.", "Phone calls are owner-private only; shared meeting participants cannot start an outbound call."] };
   }
 }

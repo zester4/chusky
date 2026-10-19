@@ -754,6 +754,17 @@ async function main(): Promise<void> {
       acquisitionAttempts: 1200,
       retryDelayMs: 100,
     });
+    // Meeting audio is a live session, not a normal owner chat request. A
+    // per-user lock here made one slow calendar/CRM action pause every other
+    // meeting (and the owner's private chat) for up to two minutes. Keep turns
+    // ordered inside one meeting while allowing separate meetings and calls to
+    // make progress independently.
+    const withMeetingAgentLock = <T>(userId: number, meetingId: string, signal: AbortSignal | undefined, work: () => Promise<T>): Promise<T> => withScopedKeyLock(`meeting-agent:${userId}:${meetingId}`, work, {
+      signal,
+      leaseSeconds: 180,
+      acquisitionAttempts: 1200,
+      retryDelayMs: 100,
+    });
 
     type TriggerPreparation = Awaited<ReturnType<typeof getCalendarMeetingPreparationForTrigger>>;
 
@@ -1483,13 +1494,19 @@ async function main(): Promise<void> {
     // Agent context remains per-meeting; private owner chat is never passed.
     app.post("/internal/recall/turn-stream", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.recallMediaBridgeSecret) || !config.recallMeetingsEnabled) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { meetingId?: string; userId?: number; transcript?: string; context?: unknown; interactionMode?: string; speculative?: boolean; evaluationClaimed?: boolean; turnStartedAtMs?: number; turnEndedAtMs?: number };
+      const body = await c.req.json().catch(() => ({})) as { meetingId?: string; userId?: number; transcript?: string; context?: unknown; interactionMode?: string; speculative?: boolean; evaluationClaimed?: boolean; turnStartedAtMs?: number; turnEndedAtMs?: number; turnId?: string; languageMode?: string; language?: string };
       const meetingId = String(body.meetingId ?? "").trim();
       const userId = Number(body.userId);
       const transcript = String(body.transcript ?? "").trim();
       const speculative = body.speculative === true;
       const speculativeEvaluationClaimed = body.evaluationClaimed === true;
-      if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000) return c.json({ ok: false, error: "invalid meeting voice turn" }, 400);
+      const turnId = body.turnId === undefined ? undefined : String(body.turnId).trim();
+      const languageMode = body.languageMode === undefined ? "english" : body.languageMode;
+      const language = body.language === undefined ? undefined : String(body.language).trim();
+      if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000
+        || (turnId !== undefined && !/^[A-Za-z0-9:_-]{1,160}$/.test(turnId))
+        || (languageMode !== "english" && languageMode !== "multilingual")
+        || (language !== undefined && language !== "" && !/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{2,8})?$/.test(language))) return c.json({ ok: false, error: "invalid meeting voice turn" }, 400);
       let context: ReturnType<typeof validateMeetingContext>;
       try { context = validateMeetingContext(body.context); } catch { return c.json({ ok: false, error: "invalid meeting context" }, 400); }
       const meeting = await getRecallMeeting(userId, meetingId);
@@ -1568,7 +1585,7 @@ async function main(): Promise<void> {
                 { type: "image_url", image_url: { url: `data:image/png;base64,${screenFrame}` } },
               ];
             }
-            const result = await withCliLock(userId, c.req.raw.signal, async () => runAgent(
+            const result = await withMeetingAgentLock(userId, meetingId, c.req.raw.signal, async () => runAgent(
               userId,
               meetingMessage,
               (await getRecallMeeting(userId, meetingId))?.history ?? [],
@@ -1579,16 +1596,24 @@ async function main(): Promise<void> {
               undefined,
               { accountId: `meeting:${meetingId}`, provider: "telegram", conversationId: meetingId, scope: trustedOwnerPrivateRun ? "private" : "shared" },
               {
-                instructions: trustedOwnerPrivateRun
+                instructions: [trustedOwnerPrivateRun
                   ? ownerPrivateMeetingInstructions(meetingId, interactionMode, representativeActive ? profile : undefined, meeting.mission)
                   : representativeActive
                     ? meetingRepresentativeInstructions(profile!, meetingId, proactive, meeting.mission)
-                    : meetingRepresentativeCopilotInstructions(meetingId, interactionMode === "copilot" ? "copilot" : "addressed"),
+                    : meetingRepresentativeCopilotInstructions(meetingId, interactionMode === "copilot" ? "copilot" : "addressed")].join("\n\n"),
                   ...(speculative
                     ? { toolAllow: [], speculativeMeetingTurn: true }
                     : trustedOwnerPrivateRun
                       ? { ownerPrivateRun: true }
-                      : { toolAllow: roomPolicy ? meetingRoomToolAllowlist(roomPolicy) : representativeActive ? meetingRepresentativeToolAllowlist(profile, meeting.mission) : [] }),
+                    : {
+                      toolAllow: roomPolicy
+                        ? representativeActive
+                          ? meetingRepresentativeToolAllowlist(profile, meeting.mission, roomPolicy)
+                          : meetingRoomToolAllowlist(roomPolicy)
+                        : representativeActive
+                          ? meetingRepresentativeToolAllowlist(profile, meeting.mission)
+                          : [],
+                    }),
                   meetingComposioAccountAliases: !speculative && representativeActive ? profile!.composioAccountAliases : undefined,
                   meetingCompanyLevelTools: !speculative && trustedOwnerPrivateRun ? profile?.companyLevelTools : undefined,
                   meetingAppAccess: !speculative && !trustedOwnerPrivateRun && representativeActive && !roomPolicy,
@@ -1599,6 +1624,8 @@ async function main(): Promise<void> {
                   } : undefined,
                   sharedMeetingRoomAccess: !speculative && !trustedOwnerPrivateRun && Boolean(roomPolicy),
                   meetingId,
+                  meetingTurnId: turnId,
+                  meetingLanguage: { mode: languageMode, ...(language ? { language } : {}) },
                   meetingHasExternalParticipants: hasExternalMeetingParticipant,
                   ...(currentSpeaker ? { meetingParticipantAssurance: currentSpeaker.assurance, meetingParticipantName: currentSpeaker.name, ...(currentSpeaker.email ? { meetingParticipantEmail: currentSpeaker.email } : {}) } : { meetingParticipantAssurance: "unverified" as const }),
                   // Private Recall runs are live spoken turns, just like the
@@ -1609,6 +1636,19 @@ async function main(): Promise<void> {
                 maxToolCalls: speculative ? 1 : trustedOwnerPrivateRun ? 20 : representativeActive ? 8 : 4,
                 maxCost: speculative ? 0.15 : trustedOwnerPrivateRun ? 1 : representativeActive ? 0.5 : 0.25,
                 ephemeral: true,
+                onToolActivity: async (activity) => {
+                  if (speculative) return;
+                  // The voice bridge uses these bounded lifecycle events to
+                  // give the room a natural progress cue while a connected
+                  // app is working. Result values never cross this stream.
+                  if (activity.status === "started") {
+                    send({ type: "tool_start", toolSlug: activity.toolSlug, text: normalizeVoiceText(activity.actionLabel ?? activity.message).slice(0, 280) });
+                  } else if (activity.status === "completed") {
+                    send({ type: "tool_completed", toolSlug: activity.toolSlug, summary: normalizeVoiceText(activity.summary ?? "Action completed").slice(0, 180) });
+                  } else if (activity.status === "failed") {
+                    send({ type: "tool_failed", toolSlug: activity.toolSlug, summary: "That action could not be verified." });
+                  }
+                },
               },
             ));
             if (proactive) {
@@ -1616,9 +1656,9 @@ async function main(): Promise<void> {
                 send(event.type === "delta" ? { type: event.type, text: normalizeVoiceDelta(event.text) } : { type: event.type });
               }
               const parsed = parseCopilotOutput(result.text);
-              send({ type: "done", text: parsed.text, speak: parsed.speak, cost: result.cost ?? 0, speculative });
+              send({ type: "done", text: parsed.text, speak: parsed.speak, cost: result.cost ?? 0, toolsUsed: result.toolsUsed, toolsSucceeded: result.toolsSucceeded, toolOutcomes: result.toolOutcomes, speculative });
             } else {
-              send({ type: "done", text: normalizeVoiceText(result.text).slice(0, 5000), speak: true, cost: result.cost ?? 0, speculative });
+              send({ type: "done", text: normalizeVoiceText(result.text).slice(0, 5000), speak: true, cost: result.cost ?? 0, toolsUsed: result.toolsUsed, toolsSucceeded: result.toolsSucceeded, toolOutcomes: result.toolOutcomes, speculative });
             }
           } catch (error) {
             if (error instanceof ApprovalRequiredError && trustedOwnerPrivateRun && !speculative) {
@@ -1771,7 +1811,24 @@ async function main(): Promise<void> {
 
     app.post("/internal/recall/commit-turn", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.recallMediaBridgeSecret) || !config.recallMeetingsEnabled) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { meetingId?: string; userId?: number; transcript?: string; text?: string; cost?: number; turnId?: string; speak?: boolean; runtimeState?: string; eventType?: string; summary?: string; toolsUsed?: unknown; recordsReturned?: boolean; verifiedParticipantCount?: number; turn?: { firstAudioMs?: number; finalResponseMs?: number; completed?: boolean; failed?: boolean; fallback?: boolean; resumed?: boolean; eager?: boolean; errorCode?: string } };
+      const body = await c.req.json().catch(() => ({})) as {
+        meetingId?: string;
+        userId?: number;
+        transcript?: string;
+        text?: string;
+        cost?: number;
+        turnId?: string;
+        speak?: boolean;
+        runtimeState?: string;
+        eventType?: string;
+        summary?: string;
+        toolsUsed?: unknown;
+        toolsSucceeded?: unknown;
+        toolOutcomes?: unknown;
+        recordsReturned?: boolean;
+        verifiedParticipantCount?: number;
+        turn?: { firstAudioMs?: number; finalResponseMs?: number; completed?: boolean; failed?: boolean; fallback?: boolean; resumed?: boolean; eager?: boolean; errorCode?: string };
+      };
       const meetingId = String(body.meetingId ?? "").trim();
       const userId = Number(body.userId);
       const transcript = String(body.transcript ?? "").trim();
@@ -1784,6 +1841,16 @@ async function main(): Promise<void> {
       const runtimeEventTypes = new Set(["created", "joining", "waiting_room", "in_call", "reconnecting", "degraded", "audio_received", "speech_detected", "eager_transcript", "final_transcript", "agent_first_token", "first_audio", "final_audio", "turn", "ended", "failed", "outcome"]);
       const turn = body.turn;
       const toolsUsed = Array.isArray(body.toolsUsed) ? body.toolsUsed.filter((tool): tool is string => typeof tool === "string" && /^[A-Za-z0-9_:-]{1,160}$/.test(tool)).slice(0, 30) : [];
+      const toolsSucceeded = Array.isArray(body.toolsSucceeded) ? body.toolsSucceeded.filter((tool): tool is string => typeof tool === "string" && /^[A-Za-z0-9_:-]{1,160}$/.test(tool)).slice(0, 30) : [];
+      const toolOutcomes: Array<{ toolSlug: string; status: "succeeded" | "failed" | "uncertain"; receiptId?: string }> = Array.isArray(body.toolOutcomes) ? body.toolOutcomes.flatMap((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+        const record = item as Record<string, unknown>;
+        const toolSlug = typeof record.toolSlug === "string" && /^[A-Za-z0-9_:-]{1,160}$/.test(record.toolSlug) ? record.toolSlug : "";
+        const status = record.status === "succeeded" || record.status === "failed" || record.status === "uncertain" ? record.status : undefined;
+        if (!toolSlug || !status) return [];
+        const receiptId = typeof record.receiptId === "string" && /^[A-Za-z0-9_:-]{1,240}$/.test(record.receiptId) ? record.receiptId : undefined;
+        return [{ toolSlug, status: status as "succeeded" | "failed" | "uncertain", ...(receiptId ? { receiptId } : {}) }];
+      }).slice(0, 30) : [];
       if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0 || (speak && (!transcript || transcript.length > 5000 || !text || text.length > 5000)) || (!speak && (transcript || text)) || !/^[A-Za-z0-9:_-]{1,160}$/.test(turnId) || !Number.isFinite(cost) || cost < 0 || cost > 10 || !["healthy", "degraded", "reconnecting", "voice_unavailable", "ended"].includes(runtimeState) || !runtimeEventTypes.has(eventType) || (body.summary !== undefined && (typeof body.summary !== "string" || body.summary.length > 280)) || (body.verifiedParticipantCount !== undefined && (!Number.isSafeInteger(body.verifiedParticipantCount) || body.verifiedParticipantCount < 0 || body.verifiedParticipantCount > 40)) || (turn !== undefined && (!turn || typeof turn !== "object" || Object.values(turn).some((value) => typeof value === "number" && (!Number.isFinite(value) || value < 0 || value > 120_000))))) return c.json({ ok: false, error: "invalid meeting voice commit" }, 400);
       const meeting = await getRecallMeeting(userId, meetingId);
       if (!meeting || meeting.status !== "in_call") return c.json({ ok: false, error: "unknown or inactive meeting" }, 404);
@@ -1802,7 +1869,7 @@ async function main(): Promise<void> {
           state: runtimeState as "healthy" | "degraded" | "reconnecting" | "voice_unavailable" | "ended",
           eventType: eventType as Parameters<typeof recordRecallMeetingRuntime>[2]["eventType"],
           summary: body.summary?.trim() || (runtimeState === "degraded" ? "Meeting turn used a natural latency fallback" : "Meeting turn completed"),
-          ...(turn ? { turn } : {}),
+          ...(turn ? { turn: { ...turn, toolsUsed, toolsSucceeded, toolOutcomes } } : { turn: { toolsUsed, toolsSucceeded, toolOutcomes } }),
         });
         await completeDelivery(key, 7 * 24 * 60 * 60);
         return c.json({ ok: true });
@@ -3929,7 +3996,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
               const prompt = buildMeetingInput(context, command.text, (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ name, identityStatus, isHost, email, providerUserId, assurance }) => ({ name, identityStatus, ...(isHost ? { isHost } : {}), ...(email ? { email } : {}), ...(providerUserId ? { providerUserId } : {}), ...(assurance ? { assurance } : {}) })), event.senderName);
               let result: Awaited<ReturnType<typeof runAgent>>;
               try {
-                result = await withCliLock(event.userId, undefined, () => runAgent(
+                result = await withMeetingAgentLock(event.userId, event.meetingId, undefined, () => runAgent(
                   event.userId,
                   prompt,
                   meeting.history ?? [],
@@ -3952,6 +4019,8 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                       toolAllow: roomPolicy ? meetingRoomToolAllowlist(roomPolicy) : representativeActive ? meetingRepresentativeToolAllowlist(representativeProfile, meeting.mission) : [],
                     }),
                     meetingId: event.meetingId,
+                    meetingTurnId: event.eventId,
+                    meetingLanguage: { mode: meeting.languageMode === "multilingual" ? "multilingual" : "english", ...(meeting.languageHints?.[0] ? { language: meeting.languageHints[0] } : {}) },
                     meetingComposioAccountAliases: representativeActive ? representativeProfile!.composioAccountAliases : undefined,
                     meetingCompanyLevelTools: ownerPrivateMeeting ? representativeProfile?.companyLevelTools : undefined,
                     meetingAppAccess: !ownerPrivateMeeting && representativeActive && !roomPolicy,

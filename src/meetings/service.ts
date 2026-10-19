@@ -639,11 +639,23 @@ export async function joinRecallMeeting(userId: number, input: {
       ...(joinAt ? { joinAt } : {}),
     });
 
+    // Recall caches POST results by Idempotency-Key for one hour. Reuse the
+    // key across ambiguous 409/5xx retries so a timed-out Create Bot cannot
+    // create two bots; Recall specifically requires a fresh key after a 507
+    // ad-hoc-pool rejection, so rotate only for that response.
+    let createIdempotencyKey = `chusky-meeting-${id}-${randomUUID()}`;
     const response = await createRecallBotWithRetry({
       signal,
-      create: () => recallApiRequest(config.recallRegion, config.recallApiKey, "/bot/", {
-        method: "POST", body: request, signal, timeoutMs: 25_000,
-      }),
+      create: async () => {
+        try {
+          return await recallApiRequest(config.recallRegion, config.recallApiKey, "/bot/", {
+            method: "POST", body: request, signal, timeoutMs: 25_000, idempotencyKey: createIdempotencyKey,
+          });
+        } catch (error) {
+          if (error instanceof RecallApiError && error.status === 507) createIdempotencyKey = `chusky-meeting-${id}-${randomUUID()}`;
+          throw error;
+        }
+      },
     });
     providerBotId = String(response.id ?? "");
     if (!isValidRecallBotId(providerBotId)) throw new Error("Recall returned an invalid bot identifier");

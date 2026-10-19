@@ -2337,6 +2337,9 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
     case "CHUCK_AUTONOMY_RECONCILE": return autonomyReconcileTool(userId, args, runtime);
     case "CHUCK_AUTONOMY_PLAYBOOK": return autonomyPlaybookTool(userId, args, runtime);
     case "CHUCK_START_PHONE_CALL": {
+      if (runtime.meetingId && !runtime.ownerPrivateRun) {
+        throw new Error("Outbound phone calls cannot be initiated from a shared live meeting; ask the owner to start that call from a private control.");
+      }
       const profile = args.profile && typeof args.profile === "object" && !Array.isArray(args.profile) ? args.profile as Record<string, unknown> : undefined;
       const callProfile: "business" | "personal" = args.callProfile === "business" ? "business" : "personal";
       const continuityFromCallId = args.continuityFromCallId === undefined ? undefined : text(args.continuityFromCallId, 128);

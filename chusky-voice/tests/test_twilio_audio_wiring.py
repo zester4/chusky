@@ -362,7 +362,7 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         self.call.settings.chusky_context_url = "http://chusky.example/internal/twilio/context"
         self.call.http = ContextHttp()
         greeting = await self.call._load_call_greeting()
-        self.assertEqual(greeting, "Hello, this is Chusky, an AI voice assistant. May I ask who I’m speaking with?")
+        self.assertEqual(greeting, "Hello, this is Chusky calling. May I ask who I’m speaking with?")
 
     async def test_twilio_ingress_is_sent_to_flux_without_transcoding(self):
         sent_audio = []

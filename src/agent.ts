@@ -2319,6 +2319,10 @@ export interface AgentRunOptions {
   composioAccount?: string;
   /** Authenticated meeting identity for scoped native meeting tools. */
   meetingId?: string;
+  /** Stable occurrence identity for one live meeting turn or chat event. */
+  meetingTurnId?: string;
+  /** Language selected by the live meeting bridge; used to keep spoken replies aligned with the room. */
+  meetingLanguage?: { mode: "english" | "multilingual"; language?: string };
   /** Internal speculative Recall draft; suppresses tool discovery and owner context. */
   speculativeMeetingTurn?: boolean;
   /** Current Recall speaker assurance; display-name matches never authorize record reads. */
@@ -2691,17 +2695,17 @@ async function executeAgent(
   if (options?.meetingAppAccess && sessionObj && (allow || ownerPrivateRun)) {
     try {
       const discovery = await discoverMeetingMissionTools(userId, sessionObj, options.meetingCapabilityContext, meetingComposioAccountAliases);
-      discoveredMeetingTools = discovery.tools;
-      // Shared representative runs expand only their explicit grant. A
-      // private owner run already has its ordinary full tool surface; these
-      // schema-backed discoveries are additive context, never an allowlist.
-      if (allow) {
-        allow = new Set(allow);
-        for (const tool of discoveredMeetingTools) {
-          const slug = String(tool?.function?.name ?? tool?.name ?? "").trim().toUpperCase();
-          if (slug) allow.add(slug);
-        }
-      }
+      // Discovery is schema lookup, never authorization. In a shared
+      // representative run the profile/room grant is the complete active
+      // surface; a search result must not widen it just because it looks
+      // relevant to the meeting objective. Private owner runs may still use
+      // their ordinary owner surface, but they do not need discovery to
+      // manufacture a new shared grant.
+      discoveredMeetingTools = discovery.tools.filter((tool) => {
+        if (!allow) return true;
+        const slug = String(tool?.function?.name ?? tool?.name ?? "").trim().toUpperCase();
+        return Boolean(slug && allow.has(slug));
+      });
       meetingComposioAccountAliases = { ...discovery.accountAliases, ...(meetingComposioAccountAliases ?? {}) };
     } catch (error) {
       // App discovery is optional for the spoken meeting turn. Keep the
@@ -2878,7 +2882,7 @@ async function executeAgent(
     && /\b(?:pdf|playbook|report|document|presentation|spreadsheet|artifact|chart|graph)\b/i.test(userMessage)
     && availableTools.some((tool) => ["CHUCK_CREATE_PDF", "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_PRESENTATION", "CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"].includes(toolName(tool)));
   let malformedToolCallPending = false;
-  let meetingCalendarAvailabilityChecked = false;
+  let meetingCalendarAvailabilityState: "unchecked" | "available" | "unavailable" = "unchecked";
   let imageComposioDirectActionGuidanceAdded = false;
 
   if (!options?.ephemeral && !voiceTurn && requiredModality(userMessage)) {
@@ -3556,6 +3560,11 @@ async function executeAgent(
   const shoppingPromptRelevant = /\b(?:shop|shopping|retailer|cart|checkout|order|purchase|buy|restock|delivery)\b/i.test(routingQuery);
   const meetingPromptRelevant = Boolean(options?.meetingId) || /\b(?:meeting|zoom|teams|webex|call|interview|participant|transcript)\b/i.test(routingQuery);
   const currentTurnContract = "Current-turn execution boundary: treat the newest user request as the only active objective. Use earlier messages only to resolve an explicit reference such as 'it' or 'that' and to preserve confirmed facts. Do not resume, retry, or complete an older request merely because it appears in history or because an old tool result is visible. Every tool call must directly advance the newest request; if it does not, do not call it. Runtime route and approval fences are authoritative.";
+  const meetingLanguageInstruction = options?.meetingLanguage
+    ? options.meetingLanguage.mode === "multilingual"
+      ? `Live meeting language: match the participant's language${options.meetingLanguage.language ? ` (${options.meetingLanguage.language})` : " when it is detected"}. Keep replies natural for spoken conversation and do not translate unless asked.`
+      : "Live meeting language: use the configured English voice language for spoken replies."
+    : undefined;
   const staticSystemPrompt = composeSystemPrompt({
     customizablePrompt: noToolTurn
       ? compactConversationalCustomization(config.chuckSystemPrompt)
@@ -3570,7 +3579,9 @@ async function executeAgent(
           ? [AUTONOMY_OPERATING_KERNEL, CAPABILITY_ROUTING_KERNEL, ...(shoppingPromptRelevant ? [SHOPPING_AGENT_PLAYBOOK] : []), ...(meetingPromptRelevant ? [MEETING_MISSION_PLAYBOOK] : []), ...(triggerAutonomy ? [triggerAutonomy] : [])]
           : []),
     ],
-    developerInstructions: options?.instructions ? `Developer instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : undefined,
+    developerInstructions: (options?.instructions || meetingLanguageInstruction)
+      ? `Developer instructions (follow only when compatible with Chusky safety rules):\n${[options?.instructions, meetingLanguageInstruction].filter(Boolean).join("\n\n").slice(0, 8000)}`
+      : undefined,
   });
   // Keep provider-specific implementation names out of every trusted context
   // block, not only the static system prompt. Memory, route cards, upgrade
@@ -4116,8 +4127,14 @@ async function executeAgent(
             validateToolArgumentsAgainstSchema(slug, args, validationSchema);
           }
         }
-        if (options?.meetingId && isMeetingCalendarWriteTool(slug) && !meetingCalendarAvailabilityChecked) {
-          throw new Error("Check real calendar availability first with a successful calendar availability or event-list action; only then create or reschedule the event.");
+        const meetingCalendarTargets = meetingCalendarToolTargets(slug, args);
+        if (options?.meetingId && meetingCalendarTargets.some(isMeetingCalendarWriteTool)) {
+          if (meetingCalendarAvailabilityState === "unchecked") {
+            throw new Error("Check real calendar availability first with a successful calendar availability or event-list action; only then create or reschedule the event.");
+          }
+          if (meetingCalendarAvailabilityState === "unavailable") {
+            throw new Error("The latest calendar check found no available slot; do not create or reschedule an event until the meeting participants agree on another time and availability is checked again.");
+          }
         }
         if (options?.meetingId && options.meetingHasExternalParticipants && isMeetingRecordLookupTool(slug, options.meetingCompanyLevelTools)) {
           if (!meetingRecordLookupIsScoped(slug, args, options.meetingParticipantEmail, options.meetingParticipantAssurance)) {
@@ -4191,6 +4208,8 @@ async function executeAgent(
               ? { kind: "task", id: options.taskId }
               : channelContext?.triggerEventId
                 ? { kind: "trigger", id: channelContext.triggerEventId }
+              : options?.meetingId && options?.meetingTurnId
+                ? { kind: "meeting", id: options.meetingId, occurrenceId: options.meetingTurnId }
               : undefined;
         if (autonomySource && isExternalWriteTool(slug)) {
           externalClaim = await beginExternalAction({ userId, provider: slug.startsWith("MCP_") ? "mcp" : slug.startsWith("CHUCK_") ? "native" : "composio", tool: slug, args: executionArgs, runId: options?.runId ?? durableRunId, source: autonomySource });
@@ -4610,8 +4629,8 @@ async function executeAgent(
           });
           if (execResult === undefined) execResult = await composioExecute(sessionObj, slug, executionArgs, signal);
         }
-        if (options?.meetingId && isMeetingCalendarAvailabilityTool(slug) && isSuccessfulCalendarResult(execResult)) {
-          meetingCalendarAvailabilityChecked = true;
+        if (options?.meetingId && meetingCalendarTargets.some(isMeetingCalendarAvailabilityTool) && isSuccessfulCalendarResult(execResult)) {
+          meetingCalendarAvailabilityState = calendarResultHasNoAvailability(execResult) ? "unavailable" : "available";
         }
         const modelResult = execResult && typeof execResult === "object" && "__chuskyImageAsset" in execResult
           ? (() => {
@@ -4654,15 +4673,13 @@ async function executeAgent(
             toolFailed = true;
           }
         }
-        if (slug.startsWith("COMPOSIO_") && execResult && typeof execResult === "object" && !Array.isArray(execResult)
-          && (execResult as Record<string, unknown>).successful === false) {
+        if (slug.startsWith("COMPOSIO_") && providerResultExplicitlyFailed(execResult)) {
           providerRejected = true;
           toolFailed = true;
         }
         const directProviderTool = !slug.startsWith("CHUCK_") && !slug.startsWith("COMPOSIO_") && !slug.startsWith("MCP_");
         if (directProviderTool && execResult && typeof execResult === "object" && !Array.isArray(execResult)) {
-          const providerResult = execResult as Record<string, unknown>;
-          if (providerResult.successful === false || providerResult.success === false || providerResult.error != null) {
+          if (providerResultExplicitlyFailed(execResult)) {
             providerRejected = true;
             toolFailed = true;
           }
@@ -5002,11 +5019,70 @@ export async function listConnectedAccounts(userId: number, toolkit?: string): P
 
 type MeetingMissionToolDiscovery = { tools: any[]; accountAliases: Record<string, string> };
 
-function isSuccessfulCalendarResult(value: unknown): boolean {
+function hasCalendarEvidence(value: unknown, depth = 0): boolean {
+  if (depth > 2 || value === null || value === undefined) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (typeof value === "number" || typeof value === "boolean") return true;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return Object.entries(record).some(([key, nested]) => {
+    if (["error", "errors", "message", "status", "successful", "success"].includes(key.toLowerCase())) return false;
+    if (["events", "items", "slots", "available_slots", "free_busy", "availability", "calendars"].includes(key.toLowerCase()) && Array.isArray(nested)) return true;
+    return hasCalendarEvidence(nested, depth + 1);
+  });
+}
+
+function providerResultExplicitlyFailed(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const result = value as Record<string, unknown>;
   const status = typeof result.status === "string" ? result.status.toLowerCase() : "";
-  return result.successful !== false && result.error === undefined && status !== "error" && status !== "failed";
+  return result.successful === false || result.success === false || result.error != null || result.errors != null || ["error", "failed", "failure", "cancelled", "canceled"].includes(status);
+}
+
+/**
+ * Calendar writes in a live meeting need a real provider-shaped read result,
+ * not merely `{ status: "success" }` from a wrapper. Empty/opaque responses
+ * stay untrusted so the model cannot book from a failed or incomplete check.
+ */
+export function isSuccessfulCalendarResult(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const result = value as Record<string, unknown>;
+  if (providerResultExplicitlyFailed(result)) return false;
+  const evidenceKeys = ["data", "result", "output", "events", "items", "slots", "available_slots", "free_busy", "availability", "calendars"];
+  return evidenceKeys.some((key) => Object.prototype.hasOwnProperty.call(result, key) && hasCalendarEvidence(result[key]));
+}
+
+/** A provider can successfully answer a calendar query while saying that the
+ * requested window has no slot. Keep that result authoritative until another
+ * availability read clears it; a live agent must not book against stale state.
+ */
+function calendarResultHasNoAvailability(value: unknown, depth = 0): boolean {
+  if (depth > 3 || value === null || value === undefined) return false;
+  if (Array.isArray(value)) return value.some((item) => calendarResultHasNoAvailability(item, depth + 1));
+  if (typeof value !== "object") return false;
+  return Object.entries(value as Record<string, unknown>).some(([key, nested]) => {
+    const normalized = key.toLowerCase().replace(/[-\s]/g, "_");
+    if (["slots", "available_slots", "free_slots"].includes(normalized) && Array.isArray(nested) && nested.length === 0) return true;
+    if (["available", "is_available", "has_availability", "bookable", "can_book"].includes(normalized) && nested === false) return true;
+    return typeof nested === "object" && nested !== null && calendarResultHasNoAvailability(nested, depth + 1);
+  });
+}
+
+function meetingCalendarToolTargets(slug: string, args: Record<string, unknown>): string[] {
+  if (slug === "COMPOSIO_EXECUTE_TOOL") {
+    const target = typeof args.tool_slug === "string" ? args.tool_slug : typeof args.slug === "string" ? args.slug : "";
+    return target ? [target.toUpperCase()] : [slug];
+  }
+  if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") {
+    const targets = Array.isArray(args.tools)
+      ? args.tools.flatMap((item) => item && typeof item === "object" && !Array.isArray(item)
+        ? [typeof (item as Record<string, unknown>).tool_slug === "string" ? String((item as Record<string, unknown>).tool_slug).toUpperCase() : typeof (item as Record<string, unknown>).name === "string" ? String((item as Record<string, unknown>).name).toUpperCase() : ""]
+        : [])
+      : [];
+    return targets.filter(Boolean);
+  }
+  return [slug];
 }
 
 /** Discover concrete mission-relevant actions, pinned to an unambiguous owner-connected account per toolkit. */

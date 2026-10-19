@@ -102,6 +102,16 @@ function safeRecallDisplayName(value: unknown): string | undefined {
   return name || undefined;
 }
 
+function recallTranscriptLanguage(languageMode: "english" | "multilingual", languageHints: string[]): string {
+  if (languageMode === "english") return "en";
+  // Recall's retained transcript provider accepts one language code, while
+  // the live Flux bridge can detect and switch languages dynamically. Use a
+  // supplied ISO-style hint when one is available and keep English as the
+  // deterministic artifact fallback for true auto-detection sessions.
+  const code = languageHints.find((hint) => /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})?$/.test(hint.trim()));
+  return (code ?? "en").toLowerCase();
+}
+
 const RECALL_REGIONS = new Set(["us-east-1", "us-west-2", "eu-central-1", "ap-northeast-1"]);
 
 /** Provider IDs are opaque; validate them before placing them into a URL path. */
@@ -235,7 +245,7 @@ export function buildRecallCreateBotRequest(input: {
       participant_events: realtimeWebhookUrl ? {} : null,
       meeting_metadata: null,
       transcript: transcriptCaptureEnabled ? {
-        provider: { recallai_streaming: { mode: "prioritize_low_latency", language_code: "en" } },
+        provider: { recallai_streaming: { mode: "prioritize_low_latency", language_code: recallTranscriptLanguage(languageMode, languageHints) } },
         diarization: { use_separate_streams_when_available: true },
       } : null,
       ...(realtimeEndpoints.length ? { realtime_endpoints: realtimeEndpoints } : {}),
@@ -265,6 +275,8 @@ export function buildRecallCreateBotRequest(input: {
 export interface RecallApiRequestOptions {
   method: "GET" | "POST" | "DELETE";
   body?: unknown;
+  /** Recall idempotency key for retry-safe POST/PATCH/PUT operations. */
+  idempotencyKey?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
@@ -272,7 +284,7 @@ export interface RecallApiRequestOptions {
 
 /** A sanitized provider error that retains the HTTP status and a safe machine error code. */
 export class RecallApiError extends Error {
-  constructor(readonly status: number, readonly code?: string) {
+  constructor(readonly status: number, readonly code?: string, readonly retryAfterMs?: number) {
     super(`Recall API request failed (${status}${code ? `: ${code}` : ""})`);
     this.name = "RecallApiError";
   }
@@ -294,21 +306,28 @@ function waitForRecallRetry(milliseconds: number, signal?: AbortSignal): Promise
   });
 }
 
-/** Recall asks clients to retry capacity-related 507 responses every 30 seconds, at most ten times. */
+/** Recall asks clients to retry transient responses with Retry-After plus jitter. */
 export async function createRecallBotWithRetry<T>(input: {
   create: () => Promise<T>;
   signal?: AbortSignal;
   wait?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+  jitter?: () => number;
 }): Promise<T> {
   const wait = input.wait ?? waitForRecallRetry;
+  const jitter = input.jitter ?? (() => Math.floor(Math.random() * 5_001));
   for (let attempt = 1; attempt <= 10; attempt++) {
     if (input.signal?.aborted) throw input.signal.reason ?? new Error("Recall meeting creation was cancelled");
     try {
       return await input.create();
     } catch (error) {
-      if (!(error instanceof RecallApiError) || error.status !== 507) throw error;
-      if (attempt === 10) throw new Error("Recall API returned 507 after 10 attempts");
-      await wait(30_000, input.signal);
+      if (!(error instanceof RecallApiError) || ![409, 429, 502, 503, 504, 507].includes(error.status)) throw error;
+      if (attempt === 10) throw new Error(`Recall API returned ${error.status} after 10 attempts`);
+      const retryBase = error.status === 507
+        ? 30_000
+        : Math.min(60_000, Math.max(1_000, error.retryAfterMs ?? 1_000 * (2 ** Math.min(attempt - 1, 4))));
+      const retryJitter = Math.max(0, Math.min(5_000, Math.floor(jitter())));
+      const retryDelay = Math.min(60_000, retryBase + retryJitter);
+      await wait(retryDelay, input.signal);
     }
   }
   throw new Error("Recall Create Bot retry loop ended unexpectedly");
@@ -344,7 +363,7 @@ export async function recallApiRequest(
   try {
     const response = await (options.fetchImpl ?? fetch)(`https://${region}.recall.ai/api/v1${path}`, {
       method: options.method,
-      headers: { Authorization: `Token ${apiKey}`, Accept: "application/json", ...(options.body === undefined ? {} : { "Content-Type": "application/json" }) },
+      headers: { Authorization: `Token ${apiKey}`, Accept: "application/json", ...(options.body === undefined ? {} : { "Content-Type": "application/json" }), ...(options.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : {}) },
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
       signal: controller.signal,
     });
@@ -357,7 +376,9 @@ export async function recallApiRequest(
           if (typeof candidate === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(candidate)) code = candidate;
         }
       } catch { /* Keep the status-only error if Recall did not return JSON. */ }
-      throw new RecallApiError(response.status, code);
+      const retryAfter = response.headers.get("Retry-After");
+      const retryAfterSeconds = retryAfter && /^\d+(?:\.\d+)?$/.test(retryAfter) ? Number(retryAfter) : undefined;
+      throw new RecallApiError(response.status, code, retryAfterSeconds !== undefined ? Math.min(60_000, Math.max(0, Math.round(retryAfterSeconds * 1_000))) : undefined);
     }
     if (response.status === 204) return {};
     let result: unknown;

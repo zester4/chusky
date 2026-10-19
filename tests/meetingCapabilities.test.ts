@@ -7,6 +7,7 @@ test("meeting capability matrix is conservative about Webex gaps", () => {
   assert.equal(webex.audio, "supported");
   assert.equal(webex.outboundChat, "unsupported");
   assert.equal(webex.screenShare, "unsupported");
+  assert.equal(webex.outboundPhone, "limited");
   assert.equal(webex.inboundChat, "supported");
 });
 test("meeting capability matrix exposes provider-limited controls", () => {
@@ -14,5 +15,6 @@ test("meeting capability matrix exposes provider-limited controls", () => {
   assert.equal(zoom.audio, "supported");
   assert.equal(zoom.screenShare, "supported");
   assert.equal(zoom.admissionControl, "limited");
+  assert.equal(zoom.outboundPhone, "limited");
   assert.ok(zoom.notes.length > 0);
 });

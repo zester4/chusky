@@ -663,10 +663,15 @@ export interface RecallMeetingTurnMetrics {
   completedTurns: number;
   failedTurns: number;
   fallbackTurns: number;
+  /** Aggregate connected/native actions observed in live turns. */
+  toolCalls: number;
+  toolSuccesses: number;
   firstAudio: { count: number; averageMs?: number; p50Ms?: number; p95Ms?: number };
   finalResponse: { count: number; averageMs?: number; p50Ms?: number; p95Ms?: number };
   /** Bounded numeric samples used to keep p50/p95 meaningful across turns. */
   latencySamples?: { firstAudioMs: number[]; finalResponseMs: number[] };
+  /** Last bounded tool result set; receipt IDs are opaque and safe to display. */
+  lastToolOutcomes?: Array<{ toolSlug: string; status: "succeeded" | "failed" | "uncertain"; receiptId?: string }>;
   lastErrorCode?: string;
   updatedAt: number;
 }
@@ -6745,7 +6750,7 @@ function normalizeMeetingCapabilities(value: unknown): MeetingCapabilities | und
   const input = value as Record<string, unknown>;
   const level = (item: unknown): "supported" | "limited" | "unsupported" => item === "supported" || item === "limited" ? item : "unsupported";
   return {
-    audio: level(input.audio), outboundChat: level(input.outboundChat), inboundChat: level(input.inboundChat),
+    audio: level(input.audio), outboundPhone: level(input.outboundPhone), outboundChat: level(input.outboundChat), inboundChat: level(input.inboundChat),
     screenShare: level(input.screenShare), participantEvents: level(input.participantEvents),
     speakerEvents: level(input.speakerEvents), scheduledJoin: level(input.scheduledJoin),
     waitingRoom: level(input.waitingRoom), admissionControl: level(input.admissionControl),
@@ -6822,8 +6827,19 @@ function normalizeMeetingTurnMetrics(value: unknown): RecallMeetingTurnMetrics |
   return {
     turns: number(input.turns), eagerTurns: number(input.eagerTurns), resumedTurns: number(input.resumedTurns),
     completedTurns: number(input.completedTurns), failedTurns: number(input.failedTurns), fallbackTurns: number(input.fallbackTurns),
+    toolCalls: number(input.toolCalls), toolSuccesses: number(input.toolSuccesses),
     firstAudio: summary(input.firstAudio), finalResponse: summary(input.finalResponse),
     ...(latencySamples ? { latencySamples: { firstAudioMs: samples(latencySamples.firstAudioMs), finalResponseMs: samples(latencySamples.finalResponseMs) } } : {}),
+    ...(Array.isArray(input.lastToolOutcomes) ? {
+      lastToolOutcomes: input.lastToolOutcomes.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+        .flatMap((item) => {
+          const toolSlug = typeof item.toolSlug === "string" && /^[A-Za-z0-9_:-]{1,160}$/.test(item.toolSlug) ? item.toolSlug : "";
+          const status = item.status === "succeeded" || item.status === "failed" || item.status === "uncertain" ? item.status : undefined;
+          if (!toolSlug || !status) return [];
+          const receiptId = typeof item.receiptId === "string" && /^[A-Za-z0-9_:-]{1,240}$/.test(item.receiptId) ? item.receiptId : undefined;
+          return [{ toolSlug, status: status as "succeeded" | "failed" | "uncertain", ...(receiptId ? { receiptId } : {}) }];
+        }).slice(-30),
+    } : {}),
     ...(typeof input.lastErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(input.lastErrorCode) ? { lastErrorCode: input.lastErrorCode } : {}),
     updatedAt: Number(input.updatedAt),
   };
@@ -9221,7 +9237,19 @@ async function recordRecallMeetingRuntimeUnlocked(userId: number, meetingId: str
   state?: RecallMeetingRuntimeState;
   eventType?: RecallMeetingTimelineEvent["type"];
   summary?: string;
-  turn?: { firstAudioMs?: number; finalResponseMs?: number; completed?: boolean; failed?: boolean; fallback?: boolean; resumed?: boolean; eager?: boolean; errorCode?: string };
+  turn?: {
+    firstAudioMs?: number;
+    finalResponseMs?: number;
+    completed?: boolean;
+    failed?: boolean;
+    fallback?: boolean;
+    resumed?: boolean;
+    eager?: boolean;
+    errorCode?: string;
+    toolsUsed?: string[];
+    toolsSucceeded?: string[];
+    toolOutcomes?: Array<{ toolSlug: string; status: "succeeded" | "failed" | "uncertain"; receiptId?: string }>;
+  };
 }): Promise<RecallMeetingRecord | undefined> {
   const meeting = await getRecallMeeting(userId, meetingId);
   if (!meeting) return undefined;
@@ -9243,6 +9271,9 @@ async function recordRecallMeetingRuntimeUnlocked(userId: number, meetingId: str
   const finalResponseMs = Number.isFinite(turn?.finalResponseMs) ? turn!.finalResponseMs : undefined;
   const nextFirstAudioSamples = firstAudioMs === undefined ? priorSamples.firstAudioMs : [...priorSamples.firstAudioMs, firstAudioMs].slice(-100);
   const nextFinalResponseSamples = finalResponseMs === undefined ? priorSamples.finalResponseMs : [...priorSamples.finalResponseMs, finalResponseMs].slice(-100);
+  const toolOutcomes = (turn?.toolOutcomes ?? []).filter((item) => /^[A-Za-z0-9_:-]{1,160}$/.test(item.toolSlug)).slice(-30);
+  const toolCalls = turn ? Math.max(0, turn.toolsUsed?.length ?? toolOutcomes.length) : 0;
+  const toolSuccesses = turn ? Math.max(0, turn.toolsSucceeded?.length ?? toolOutcomes.filter((item) => item.status === "succeeded").length) : 0;
   const metrics = turn ? {
     turns: (prior?.turns ?? 0) + 1,
     eagerTurns: (prior?.eagerTurns ?? 0) + (turn.eager ? 1 : 0),
@@ -9250,9 +9281,12 @@ async function recordRecallMeetingRuntimeUnlocked(userId: number, meetingId: str
     completedTurns: (prior?.completedTurns ?? 0) + (turn.completed ? 1 : 0),
     failedTurns: (prior?.failedTurns ?? 0) + (turn.failed ? 1 : 0),
     fallbackTurns: (prior?.fallbackTurns ?? 0) + (turn.fallback ? 1 : 0),
+    toolCalls: (prior?.toolCalls ?? 0) + toolCalls,
+    toolSuccesses: (prior?.toolSuccesses ?? 0) + toolSuccesses,
     firstAudio: average(prior?.firstAudio ?? { count: 0 }, firstAudioMs, priorSamples.firstAudioMs),
     finalResponse: average(prior?.finalResponse ?? { count: 0 }, finalResponseMs, priorSamples.finalResponseMs),
     latencySamples: { firstAudioMs: nextFirstAudioSamples, finalResponseMs: nextFinalResponseSamples },
+    ...(toolOutcomes.length ? { lastToolOutcomes: toolOutcomes } : {}),
     ...(turn.errorCode ? { lastErrorCode: turn.errorCode } : prior?.lastErrorCode ? { lastErrorCode: prior.lastErrorCode } : {}),
     updatedAt: Date.now(),
   } : prior;

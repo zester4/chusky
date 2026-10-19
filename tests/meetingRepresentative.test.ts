@@ -49,7 +49,9 @@ test("calendar capability discovery admits only schema-backed routine calendar r
   ]);
   assert.equal(isMeetingCalendarToolkit("outlook_calendar"), true);
   assert.equal(isMeetingCalendarAvailabilityTool("OUTLOOK_CALENDAR_LIST_EVENTS"), true);
+  assert.equal(isMeetingCalendarAvailabilityTool("GOOGLECALENDAR_EVENTS_LIST"), true);
   assert.equal(isMeetingCalendarWriteTool("GOOGLECALENDAR_UPDATE_EVENT"), true);
+  assert.equal(isMeetingCalendarWriteTool("GOOGLECALENDAR_EVENTS_CREATE"), true);
   assert.equal(isMeetingCalendarWriteTool("GOOGLECALENDAR_DELETE_EVENT"), false);
 });
 

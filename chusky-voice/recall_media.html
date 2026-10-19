@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>Chusky · Digital assistant</title>
+  <title>Chusky · Meeting participant</title>
   <style>
     :root { color-scheme: dark; font: 16px/1.45 system-ui, sans-serif; background: #101216; color: #f6f7f9; }
     * { box-sizing: border-box; }
@@ -23,9 +23,9 @@
 </head>
 <body>
   <main aria-label="Chusky meeting participant">
-    <img class="profile" src="https://chusky-web.vercel.app/chusky/chusky-profile.jpg" alt="Chusky, a digital assistant" referrerpolicy="no-referrer" fetchpriority="high">
+    <img class="profile" src="https://chusky-web.vercel.app/chusky/chusky-profile.jpg" alt="Chusky, meeting participant" referrerpolicy="no-referrer" fetchpriority="high">
     <h1>Chusky</h1>
-    <div class="role">Digital assistant</div>
+    <div class="role">Meeting participant</div>
     <div id="status" role="status" aria-live="polite" data-state="connecting">Connecting securely…</div>
     <div id="caption" role="log" aria-live="polite" data-visible="false"><span class="speaker"></span><span class="caption-text"></span></div>
   </main>
@@ -33,8 +33,8 @@
     (() => {
       const status = document.getElementById("status");
       const caption = document.getElementById("caption");
-      const captionSpeaker = caption.querySelector(".speaker");
-      const captionText = caption.querySelector(".caption-text");
+      const captionSpeaker = caption.querySelector?.(".speaker") ?? { textContent: "" };
+      const captionText = caption.querySelector?.(".caption-text") ?? { textContent: "" };
       const setStatus = (state, message) => { status.dataset.state = state; status.textContent = message; };
       const params = new URLSearchParams(location.hash.slice(1));
       const ticket = params.get("session");
@@ -53,12 +53,27 @@
       let processor;
       let mute;
       let playbackAt = 0;
+      let playbackAnchor = null;
+      let playedAudioMs = 0;
+      let playbackReportTimer;
       let meetingUnavailableMessage = "";
       const sources = new Set();
+      const playbackOffsetMs = () => {
+        if (!context || playbackAnchor === null) return playedAudioMs;
+        const playedUntil = Math.min(context.currentTime, playbackAt);
+        return Math.max(playedAudioMs, Math.floor(Math.max(0, playedUntil - playbackAnchor) * 1000));
+      };
+      const reportPlayback = () => {
+        if (socket?.readyState !== WebSocket.OPEN) return;
+        try { socket.send(JSON.stringify({ type: "playback", offsetMs: playbackOffsetMs() })); } catch {}
+      };
       const stopPlayback = () => {
+        playedAudioMs = Math.max(playedAudioMs, playbackOffsetMs());
         sources.forEach((node) => { try { node.stop(); } catch {} });
         sources.clear();
         playbackAt = context ? context.currentTime : 0;
+        playbackAnchor = null;
+        reportPlayback();
       };
       const cleanup = () => {
         try { processor?.disconnect(); source?.disconnect(); mute?.disconnect(); } catch {}
@@ -128,6 +143,8 @@
               if (context.state === "suspended") await context.resume();
               if (activeSocket !== socket || activeSocket.readyState !== WebSocket.OPEN) return;
               activeSocket.send(JSON.stringify({ type: "ready", sampleRate: context.sampleRate }));
+              reportPlayback();
+              if (!playbackReportTimer) playbackReportTimer = setInterval(reportPlayback, 100);
               reconnectAttempts = 0;
               caption.dataset.visible = message.liveCaptions === true ? "true" : "false";
               const modeLabel = message.interactionMode === "addressed"
@@ -143,6 +160,8 @@
             stopPlayback();
           } else if (message.type === "status" && message.code === "meeting_not_ready") {
             setStatus("connecting", "Waiting for Chusky to be admitted to the meeting…");
+          } else if (message.type === "status" && message.code === "voice_reconnecting") {
+            setStatus("connecting", "Meeting audio interrupted · reconnecting…");
           } else if (message.type === "status" && message.code === "meeting_unavailable") {
             meetingUnavailableMessage = typeof message.message === "string" && message.message.trim()
               ? message.message.trim().slice(0, 320)
@@ -169,6 +188,7 @@
         node.buffer = buffer; node.connect(context.destination);
         node.onended = () => sources.delete(node);
         const startAt = Math.max(context.currentTime + 0.025, playbackAt);
+        if (playbackAnchor === null) playbackAnchor = startAt - (playedAudioMs / 1000);
         node.start(startAt); playbackAt = startAt + buffer.duration; sources.add(node);
         };
         activeSocket.onerror = () => setStatus("connecting", "Connection interrupted · reconnecting…");
@@ -177,7 +197,7 @@
           stopPlayback();
           if (closing) { cleanup(); return; }
           const terminalBridgeFailure = event.code === 1011 && ["bridge_auth_failed", "media_authorization_failed", "voice_service_unavailable"].includes(event.reason);
-          if (event.code === 1008 || terminalBridgeFailure || reconnectAttempts >= 4) {
+          if (event.code === 1008 || terminalBridgeFailure || reconnectAttempts >= 12) {
             let message = "Could not restore meeting audio. Rejoin the meeting to try again.";
             if (event.code === 1008 && event.reason === "invalid_ticket") message = "Secure meeting session could not be verified. Rejoin and check the shared bridge secret.";
             else if (event.code === 1008 && event.reason === "meeting_unavailable") message = meetingUnavailableMessage || "Meeting audio is unavailable. If the call is still open, join Chusky again.";
@@ -190,7 +210,7 @@
             cleanup();
             return;
           }
-          const delay = Math.min(1000 * (2 ** reconnectAttempts), 8000);
+          const delay = Math.min(1000 * (2 ** reconnectAttempts), 15000);
           reconnectAttempts++;
           setStatus("connecting", "Connection interrupted · reconnecting…");
           reconnectTimer = setTimeout(connect, delay);
@@ -200,6 +220,8 @@
       window.addEventListener("pagehide", () => {
         closing = true;
         clearTimeout(reconnectTimer);
+        clearInterval(playbackReportTimer);
+        playbackReportTimer = undefined;
         try { socket?.send(JSON.stringify({ type: "stop" })); } catch {}
         try { socket?.close(); } catch {}
         cleanup();

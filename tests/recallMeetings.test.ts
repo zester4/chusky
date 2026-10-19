@@ -85,6 +85,7 @@ test("Recall meeting voice profiles carry bounded multilingual hints and keyterm
   assert.equal(request.metadata.chusky_language_mode, "multilingual");
   assert.equal(request.metadata.chusky_language_hints, "en,es");
   assert.equal(request.metadata.chusky_keyterms, "Chusky,Recall Runtime");
+  assert.equal(request.recording_config.transcript, null);
   assert.throws(() => buildRecallCreateBotRequest({
     meetingUrl: "https://meet.google.com/abc-defg-hij",
     botName: "Chusky",
@@ -93,6 +94,21 @@ test("Recall meeting voice profiles carry bounded multilingual hints and keyterm
     userId: 42,
     languageHints: Array.from({ length: 9 }, () => "en"),
   }), /language hints/i);
+});
+
+test("retained multilingual transcript uses the first ISO-style hint while live Flux remains dynamic", () => {
+  const request = buildRecallCreateBotRequest({
+    meetingUrl: "https://meet.google.com/abc-defg-hij",
+    botName: "Chusky Meeting Assistant",
+    mediaPageUrl: "https://voice.example/recall/media",
+    meetingId: "mtg_language_transcript_123",
+    userId: 42,
+    languageMode: "multilingual",
+    languageHints: ["Spanish", "es"],
+    interactionMode: "copilot",
+    realtimeWebhookUrl: "https://chusky.example/recall/realtime-webhook",
+  });
+  assert.equal(request.recording_config.transcript?.provider.recallai_streaming.language_code, "es");
 });
 
 test("Recall bot subscribes to chat and live roster events without enabling retained participant artifacts", () => {
@@ -308,18 +324,29 @@ test("Recall real-time chat payload parser rejects unrelated and malformed event
 test("Recall API client uses documented token auth and does not leak provider error bodies", async () => {
   let requestUrl = "";
   let authorization = "";
+  let idempotencyKey = "";
   const result = await recallApiRequest("us-west-2", "secret-key", "/bot/", {
     method: "POST",
     body: { meeting_url: "https://meet.google.com/abc-defg-hij" },
     fetchImpl: async (input, init) => {
       requestUrl = String(input);
       authorization = new Headers(init?.headers).get("Authorization") ?? "";
+      idempotencyKey = new Headers(init?.headers).get("Idempotency-Key") ?? "";
       return new Response(JSON.stringify({ id: "bot-123", status: { code: "ready" } }), { status: 201 });
     },
   });
   assert.equal(requestUrl, "https://us-west-2.recall.ai/api/v1/bot/");
   assert.equal(authorization, "Token secret-key");
+  assert.equal(idempotencyKey, "");
   assert.equal(result.id, "bot-123");
+
+  await recallApiRequest("us-west-2", "secret-key", "/bot/", {
+    method: "POST", body: {}, idempotencyKey: "meeting-create-once",
+    fetchImpl: async (_input, init) => {
+      assert.equal(new Headers(init?.headers).get("Idempotency-Key"), "meeting-create-once");
+      return new Response(JSON.stringify({ id: "bot-idempotent" }), { status: 201 });
+    },
+  });
 
   assert.equal(isValidRecallBotId("bot-123"), true);
   assert.equal(isValidRecallBotId("../other-endpoint"), false);
@@ -336,7 +363,7 @@ test("Recall API client uses documented token auth and does not leak provider er
   }), /Unsupported Recall API method/);
 });
 
-test("Recall Create Bot retries only 507 responses every 30 seconds and stops after ten attempts", async () => {
+test("Recall Create Bot retries transient responses and stops after ten attempts", async () => {
   let attempts = 0;
   const waits: number[] = [];
   const result = await createRecallBotWithRetry({
@@ -346,6 +373,7 @@ test("Recall Create Bot retries only 507 responses every 30 seconds and stops af
       return { id: "bot-after-retry" };
     },
     wait: async (milliseconds) => { waits.push(milliseconds); },
+    jitter: () => 0,
   });
   assert.equal(result.id, "bot-after-retry");
   assert.equal(attempts, 3);
@@ -356,10 +384,42 @@ test("Recall Create Bot retries only 507 responses every 30 seconds and stops af
   await assert.rejects(() => createRecallBotWithRetry({
     create: async () => { attempts++; throw new RecallApiError(507); },
     wait: async (milliseconds) => { waits.push(milliseconds); },
+    jitter: () => 0,
   }), /507.*10 attempts/i);
   assert.equal(attempts, 10);
   assert.equal(waits.length, 9);
   assert.ok(waits.every((milliseconds) => milliseconds === 30_000));
+});
+
+test("Recall Create Bot retries transient provider conflicts while preserving the operation key", async () => {
+  let attempts = 0;
+  const waits: number[] = [];
+  const result = await createRecallBotWithRetry({
+    create: async () => {
+      attempts++;
+      if (attempts === 1) throw new RecallApiError(503);
+      if (attempts === 2) throw new RecallApiError(409);
+      return { id: "bot-after-transient-errors" };
+    },
+    wait: async (milliseconds) => { waits.push(milliseconds); },
+    jitter: () => 0,
+  });
+  assert.equal(result.id, "bot-after-transient-errors");
+  assert.deepEqual(waits, [1_000, 2_000]);
+
+  waits.length = 0;
+  attempts = 0;
+  const rateLimited = await createRecallBotWithRetry({
+    create: async () => {
+      attempts++;
+      if (attempts === 1) throw new RecallApiError(429, undefined, 5_000);
+      return { id: "bot-after-rate-limit" };
+    },
+    wait: async (milliseconds) => { waits.push(milliseconds); },
+    jitter: () => 0,
+  });
+  assert.equal(rateLimited.id, "bot-after-rate-limit");
+  assert.deepEqual(waits, [5_000]);
 });
 
 test("Recall Create Bot does not retry permanent API errors and cancellation interrupts the retry delay", async () => {

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { addRecallMeeting, claimAgentUpgrade, completeMissionStep, createMission, createWebTelegramLinkCode, finalizeMissionIfReady, getApproval, getMission, getSession, initStore, listAgentRuns, listMissions, listTasks, redeemWebTelegramLinkCode, saveSession, setApprovalStatus, startMission, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { stableSdkUserId } from "../src/sdkIdentity.js";
-import { appendPreviewLinks, cleanModelText, getReconnectUrl, getToolkitStatesPage, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, OpenRouterTimeoutError, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, searchTools, transcriptionFormatForMimeType, voiceComposioToolSlugs, voiceFastLaneEligible, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
+import { appendPreviewLinks, cleanModelText, getReconnectUrl, getToolkitStatesPage, invalidateSession, isSuccessfulCalendarResult, listConnectedAccounts, openRouterAttemptTimeoutMs, OpenRouterTimeoutError, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, searchTools, transcriptionFormatForMimeType, voiceComposioToolSlugs, voiceFastLaneEligible, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { formatAgentUpgradeNotice, loadAgentUpgrade } from "../src/upgradeNotice.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -45,6 +45,16 @@ test("voice fast lane only applies to ordinary conversation", () => {
   assert.equal(voiceFastLaneEligible("Please book an appointment for tomorrow."), false);
   assert.equal(voiceFastLaneEligible("Can you check my calendar?"), false);
   assert.equal(voiceFastLaneEligible("Follow up with the client about tomorrow's meeting."), false);
+});
+
+test("meeting calendar writes require provider-shaped availability evidence", () => {
+  assert.equal(isSuccessfulCalendarResult({ status: "success" }), false);
+  assert.equal(isSuccessfulCalendarResult({ successful: true, data: [] }), false);
+  assert.equal(isSuccessfulCalendarResult({ successful: true, data: { events: [] } }), true);
+  assert.equal(isSuccessfulCalendarResult({ successful: true, data: { available: false, slots: [] } }), true);
+  assert.equal(isSuccessfulCalendarResult({ successful: true, data: { slots: [{ start: "2026-10-20T10:00:00Z" }] } }), true);
+  assert.equal(isSuccessfulCalendarResult({ successful: false, data: { slots: [{ start: "2026-10-20T10:00:00Z" }] } }), false);
+  assert.equal(isSuccessfulCalendarResult({ status: "success", error: "provider unavailable", data: { events: [] } }), false);
 });
 
 test("browser audio MIME types map to the transcription container formats", () => {

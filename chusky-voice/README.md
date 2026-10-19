@@ -514,12 +514,16 @@ create/cancel contract, additionally set `RECALL_STAGING_CONFIRM` exactly to
 That opt-in test contacts Recall and creates then cancels a bot; run it only
 with a dedicated staging meeting URL that you are authorized to use.
 
-Recall's 507 capacity behavior is verified deterministically by
-`tests/recallMeetings.test.ts`: it simulates 507 responses and checks the
-30-second backoff, ten-attempt cap, and cancellation. Do not try to induce a
-real 507 against a customer or production meeting. Unit coverage does not
-substitute for the staging lifecycle checks above; mark those complete only
-after observing callbacks from an actual staging bot.
+Recall Create Bot retries the documented transient `429`, `503`, and `507`
+responses with `Retry-After` support and bounded jitter; idempotency-keyed
+`409`/`502`/`504` responses are also retried because they can represent an
+ambiguous create. Capacity `507` retries wait 30 seconds and rotate the
+idempotency key before trying again. The bounded loop stops after ten attempts
+and remains cancellation-aware. This behavior is verified deterministically by
+`tests/recallMeetings.test.ts`; do not try to induce a real 507 against a
+customer or production meeting. Unit coverage does not substitute for the
+staging lifecycle checks above; mark those complete only after observing
+callbacks from an actual staging bot.
 
 The tool supports `addressed`, `copilot`, and owner-configured `representative`
 modes. An omitted mode defaults to the enabled representative profile, or to

@@ -114,6 +114,47 @@ class RecallMediaAuthorizationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RecallMeetingBargeInTests(unittest.IsolatedAsyncioTestCase):
+    async def test_flux_interrupt_reconciles_only_provider_confirmed_spoken_text(self):
+        class WebSocket:
+            async def send_text(self, _message):
+                pass
+
+        class TtsSocket:
+            def __init__(self):
+                self.sent = []
+
+            async def send(self, message):
+                self.sent.append(json.loads(message))
+
+        session = voice_app.RecallVoiceSession(
+            {"meetingId": "mtg_interrupt", "userId": 42, "interactionMode": "addressed"},
+            WebSocket(),
+            SimpleNamespace(tts_model="flux-hannah-en", stt_model="flux-general-en", copilot_min_interval_seconds=0),
+            voice_app.RecallMetrics(),
+            play_intro=False,
+        )
+        session.tts_socket = TtsSocket()
+        session.tts_playback_offset_ms = 640
+        session._update_browser_playback_offset(1_200)
+        session._update_browser_playback_offset(900)  # stale browser reports cannot move Flux backwards
+        session.response_task = asyncio.create_task(asyncio.Event().wait())
+
+        async def provider_interrupt():
+            await asyncio.sleep(0)
+            session._handle_flux_tts_event({
+                "type": "SpeechInterrupted",
+                "text_spoken": "I checked the calendar",
+                "text_remaining": " and found two times.",
+            })
+
+        provider_task = asyncio.create_task(provider_interrupt())
+        spoken = await session._interrupt()
+        await provider_task
+
+        self.assertEqual(spoken, "I checked the calendar")
+        self.assertEqual(session.context.snapshot()[-1], {"role": "chusky", "text": "I checked the calendar"})
+        self.assertEqual(session.tts_socket.sent[0], {"type": "Interrupt", "playback_offset": {"type": "time_ms", "value": 1_200}})
+
     async def test_addressed_mode_still_interrupts_for_a_wake_word(self):
         class WebSocket:
             async def send_text(self, _message):

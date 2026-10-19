@@ -29,7 +29,7 @@ class RecallMediaPageTests(unittest.IsolatedAsyncioTestCase):
         ):
             await session._speak_agent_failure_fallback()
 
-        session.tts_socket.send.assert_awaited_once_with('{"type": "Interrupt"}')
+        session.tts_socket.send.assert_awaited_once_with('{"type": "Interrupt", "playback_offset": {"type": "time_ms", "value": 0}}')
         send_text.assert_awaited_once_with({"type": "clear"})
         speak.assert_awaited_once_with(
             "I’m having trouble responding right now. Please ask me again in a moment."
@@ -45,7 +45,7 @@ class RecallMediaPageTests(unittest.IsolatedAsyncioTestCase):
             response = await voice_app.recall_media_page()
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Digital assistant", response.body)
+        self.assertIn(b"Meeting participant", response.body)
         self.assertIn("https://chusky-web.vercel.app", response.headers["content-security-policy"])
         self.assertIn("no-store", response.headers["cache-control"])
 
@@ -73,7 +73,7 @@ class RecallMediaPageTests(unittest.IsolatedAsyncioTestCase):
             response = await voice_app.recall_media_page()
 
         self.assertEqual(response.status_code, 503)
-        self.assertIn(b"digital assistant", response.body.lower())
+        self.assertIn(b"meeting participant", response.body.lower())
         self.assertIn(b"temporarily unavailable", response.body.lower())
         self.assertNotIn(b"private filesystem detail", response.body)
         self.assertNotIn(b"Meeting assistant unavailable", response.body)
