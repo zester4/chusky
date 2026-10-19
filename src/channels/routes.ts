@@ -26,7 +26,14 @@ interface ChannelRouteOptions {
   slack?: { adapter: SlackAdapter; signingSecret: string };
   whatsapp?: { adapter: WhatsAppAdapter; appSecret: string; verifyToken: string };
   sendblue?: { adapter: SendblueAdapter; webhookSecret: string; enqueue?: (eventId: string) => Promise<void>; processInline?: (eventId: string) => Promise<void> };
-  twilioSms?: { adapter: TwilioSmsAdapter; authToken: string; webhookUrl?: string; statusWebhookUrl?: string };
+  twilioSms?: {
+    adapter: TwilioSmsAdapter;
+    authToken?: string;
+    webhookUrl?: string;
+    statusWebhookUrl?: string;
+    /** Resolve the signing token for a managed sender number. */
+    resolveAuthToken?: (phoneNumber: string) => Promise<string | undefined>;
+  };
   x?: { adapter: XAdapter };
   xchat?: { adapter: XchatAdapter };
 }
@@ -226,7 +233,10 @@ export function registerChannelRoutes(app: Hono, options: ChannelRouteOptions): 
       try {
         const form = await c.req.parseBody();
         const params = Object.fromEntries(Object.entries(form).map(([key, value]) => [key, String(value)]));
-        verifyTwilioSignature(twilioSms.statusWebhookUrl || c.req.url, params, c.req.header("X-Twilio-Signature") ?? "", twilioSms.authToken);
+        const senderNumber = String(params.From ?? "").trim() || String(params.To ?? "").trim();
+        const authToken = (senderNumber && twilioSms.resolveAuthToken ? await twilioSms.resolveAuthToken(senderNumber) : undefined) ?? twilioSms.authToken;
+        if (!authToken) throw new ChannelVerificationError("Twilio SMS account is not configured", 503);
+        verifyTwilioSignature(twilioSms.statusWebhookUrl || c.req.url, params, c.req.header("X-Twilio-Signature") ?? "", authToken);
         const sid = String(params.MessageSid ?? "").trim();
         if (sid) {
           const record = await getOutboxByProviderMessageId("sms", sid);
@@ -242,7 +252,10 @@ export function registerChannelRoutes(app: Hono, options: ChannelRouteOptions): 
       try {
         const form = await c.req.parseBody();
         const params = Object.fromEntries(Object.entries(form).map(([key, value]) => [key, String(value)]));
-        verifyTwilioSignature(twilioSms.webhookUrl || c.req.url, params, c.req.header("X-Twilio-Signature") ?? "", twilioSms.authToken);
+        const destinationNumber = String(params.To ?? "").trim();
+        const authToken = (destinationNumber && twilioSms.resolveAuthToken ? await twilioSms.resolveAuthToken(destinationNumber) : undefined) ?? twilioSms.authToken;
+        if (!authToken) throw new ChannelVerificationError("Twilio SMS account is not configured", 503);
+        verifyTwilioSignature(twilioSms.webhookUrl || c.req.url, params, c.req.header("X-Twilio-Signature") ?? "", authToken);
         const message = normalizeTwilioMessage(params);
         if (!message) return c.text("<Response></Response>", 200, { "Content-Type": "text/xml" });
         void twilioSms.adapter.hydrateInbound(message).then((hydrated) => gateway.processInbound(hydrated)).catch((error) => logger.error({ err: error, eventId: message.providerEventId }, "Twilio SMS processing failed"));

@@ -5,6 +5,7 @@ import { getBuilderVoiceControls } from "../builderControl.js";
 import { decryptCredential, encryptCredential } from "../vault/crypto.js";
 import {
   appendTwilioBillingEntry,
+  getVoiceInboundRoute,
   getTwilioNumberOwnership,
   getTwilioSubaccount,
   getTwilioSubaccountByUserId,
@@ -75,7 +76,13 @@ function dependenciesFor(record: TwilioSubaccountRecord, numberManagementEnabled
   const value = credentials(record);
   if (record.status !== "active" || record.providerStatus === "suspended" || record.providerStatus === "closed") throw new Error("This workspace phone account is not active.");
   if (!/^https:\/\//i.test(config.twilioWebhookBaseUrl)) throw new Error("The voice webhook is not configured.");
-  return { enabled: numberManagementEnabled, accountSid: value.accountSid, authToken: value.authToken, webhookBaseUrl: config.twilioWebhookBaseUrl };
+  return {
+    enabled: numberManagementEnabled,
+    accountSid: value.accountSid,
+    authToken: value.authToken,
+    webhookBaseUrl: config.twilioWebhookBaseUrl,
+    smsEnabled: config.twilioSmsEnabled,
+  };
 }
 
 function view(record: TwilioSubaccountRecord, numberCount = 0): TwilioSubaccountView {
@@ -105,6 +112,16 @@ export async function customerNumberSearchDependencies(): Promise<TwilioNumberDe
   // enablement after that state has been saved.
   const dependencies = { ...platformTwilioNumberDependencies(), enabled: true };
   return isTwilioNumberManagementConfigured(dependencies) ? dependencies : undefined;
+}
+
+/** Resolve the credentials and tenant account for a managed number's SMS/MMS
+ * webhook or outbound reply. The route lookup is the ownership boundary; the
+ * encrypted child token never leaves this server module. */
+export async function twilioSmsCredentialsForNumber(phoneNumber: string): Promise<(TwilioWebhookCredentials & { twilioSubaccountId?: string }) | undefined> {
+  const route = await getVoiceInboundRoute("twilio", phoneNumber);
+  if (!route || route.capabilities?.sms === false) return undefined;
+  const credentials = await twilioWebhookCredentialsForRoute(route);
+  return credentials ? { ...credentials, ...(route?.twilioSubaccountId ? { twilioSubaccountId: route.twilioSubaccountId } : {}) } : undefined;
 }
 
 /** Provisioning is lazy: the first purchase creates the isolated Twilio

@@ -9,7 +9,14 @@ export type TwilioNumberSummary = {
   locality?: string;
   region?: string;
   isoCountry?: string;
-  capabilities: { voice: boolean; sms: boolean; mms: boolean };
+  capabilities: { voice: boolean; sms: boolean; mms: boolean; fax: boolean };
+};
+
+export type TwilioNumberFeatures = {
+  voice?: boolean;
+  sms?: boolean;
+  mms?: boolean;
+  fax?: boolean;
 };
 
 export type TwilioNumberSearch = {
@@ -21,6 +28,7 @@ export type TwilioNumberSearch = {
   postalCode?: string;
   contains?: string;
   limit?: number;
+  features?: TwilioNumberFeatures;
 };
 
 export type TwilioNumberCountry = {
@@ -55,6 +63,8 @@ export type TwilioNumberDependencies = {
   accountSid: string;
   authToken: string;
   webhookBaseUrl: string;
+  /** SMS/MMS is enabled only when the tenant webhook adapter is running. */
+  smsEnabled?: boolean;
 };
 
 const defaults = (): TwilioNumberDependencies => ({
@@ -62,6 +72,7 @@ const defaults = (): TwilioNumberDependencies => ({
   accountSid: config.twilioAccountSid,
   authToken: config.twilioAuthToken,
   webhookBaseUrl: config.twilioWebhookBaseUrl,
+  smsEnabled: config.twilioSmsEnabled,
 });
 
 function validate(options: TwilioNumberDependencies): void {
@@ -82,7 +93,7 @@ function boundedLimit(value: unknown): number {
   return Number.isFinite(parsed) ? Math.max(1, Math.min(30, Math.floor(parsed))) : 10;
 }
 
-function normalize(value: { sid?: string; phoneNumber: string; friendlyName?: string | null; locality?: string | null; region?: string | null; isoCountry?: string | null; capabilities?: { voice?: boolean; sms?: boolean; mms?: boolean } }): TwilioNumberSummary {
+function normalize(value: { sid?: string; phoneNumber: string; friendlyName?: string | null; locality?: string | null; region?: string | null; isoCountry?: string | null; capabilities?: { voice?: boolean; sms?: boolean; mms?: boolean; fax?: boolean } }): TwilioNumberSummary {
   return {
     ...(value.sid ? { sid: value.sid } : {}),
     phoneNumber: value.phoneNumber,
@@ -94,14 +105,32 @@ function normalize(value: { sid?: string; phoneNumber: string; friendlyName?: st
       voice: value.capabilities?.voice !== false,
       sms: value.capabilities?.sms === true,
       mms: value.capabilities?.mms === true,
+      fax: value.capabilities?.fax === true,
     },
   };
 }
 
-/** Search voice-capable local numbers without exposing Twilio to the client. */
+function requestedFeatures(input: TwilioNumberFeatures | undefined): Required<TwilioNumberFeatures> {
+  const features = {
+    voice: input?.voice !== false,
+    sms: input?.sms === true,
+    mms: input?.mms === true,
+    fax: input?.fax === true,
+  };
+  if (!features.voice && !features.sms && !features.mms && !features.fax) throw new Error("At least one number capability is required.");
+  return features;
+}
+
+/** Search Twilio's live local-number inventory without exposing provider credentials. */
 export async function searchTwilioNumbers(input: TwilioNumberSearch, options: TwilioNumberDependencies = defaults()): Promise<TwilioNumberSummary[]> {
   validate(options);
   const country = countryCode(input.countryCode);
+  const features = requestedFeatures(input.features);
+  if ((features.sms || features.mms) && options.smsEnabled !== true) throw new Error("Messaging numbers are not enabled for this deployment.");
+  // Twilio exposes fax-capable inventory, but Chusky does not yet have a
+  // durable fax receive/send channel. Never advertise a number as fax-ready
+  // until that transport is implemented end to end.
+  if (features.fax) throw new Error("Fax numbers are not enabled for this deployment.");
   const requestedAreaCodes = [...new Set([
     ...(input.areaCodes ?? []),
     ...(input.areaCode ? [input.areaCode] : []),
@@ -118,7 +147,9 @@ export async function searchTwilioNumbers(input: TwilioNumberSearch, options: Tw
   const searchAreaCodes = requestedAreaCodes.length ? requestedAreaCodes : [undefined];
   const perSearchLimit = Math.max(1, Math.ceil(limit / searchAreaCodes.length));
   const results = await Promise.all(searchAreaCodes.map((areaCode) => client.availablePhoneNumbers(country).local.list({
-    voiceEnabled: true,
+    voiceEnabled: features.voice,
+    ...(features.sms ? { smsEnabled: true } : {}),
+    ...(features.mms ? { mmsEnabled: true } : {}),
     ...(areaCode ? { areaCode: Number(areaCode) } : {}),
     ...(region ? { inRegion: region } : {}),
     ...(locality ? { inLocality: locality } : {}),
@@ -135,8 +166,11 @@ export async function searchTwilioNumbers(input: TwilioNumberSearch, options: Tw
 }
 
 /** Purchase one number and point its inbound voice webhook at Chusky. */
-export async function purchaseTwilioNumber(input: { phoneNumber: string; countryCode?: string; friendlyName?: string }, options: TwilioNumberDependencies = defaults()): Promise<TwilioNumberSummary> {
+export async function purchaseTwilioNumber(input: { phoneNumber: string; countryCode?: string; friendlyName?: string; features?: TwilioNumberFeatures }, options: TwilioNumberDependencies = defaults()): Promise<TwilioNumberSummary> {
   validate(options);
+  const features = requestedFeatures(input.features);
+  if ((features.sms || features.mms) && options.smsEnabled !== true) throw new Error("Messaging numbers are not enabled for this deployment.");
+  if (features.fax) throw new Error("Fax numbers are not enabled for this deployment.");
   if (!/^\+[1-9]\d{7,14}$/.test(input.phoneNumber)) throw new Error("phoneNumber must be a valid E.164 number.");
   if (input.countryCode) {
     const country = TWILIO_SUPPORTED_NUMBER_COUNTRIES.find((item) => item.code === String(input.countryCode).trim().toUpperCase());
@@ -150,6 +184,12 @@ export async function purchaseTwilioNumber(input: { phoneNumber: string; country
     phoneNumber: input.phoneNumber,
     voiceUrl: `${base}/twilio/inbound`,
     voiceMethod: "POST",
+    ...(features.sms || features.mms ? {
+      smsUrl: `${base}/twilio/sms`,
+      smsMethod: "POST",
+      statusCallback: `${base}/twilio/sms/status`,
+      statusCallbackMethod: "POST",
+    } : {}),
     ...(friendlyName ? { friendlyName } : {}),
   });
   return normalize(item);

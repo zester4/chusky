@@ -22,6 +22,10 @@ export interface TwilioSmsAdapterOptions {
   phoneNumber?: string;
   messagingServiceSid?: string;
   statusCallbackUrl?: string;
+  /** Resolve the sender account for a tenant-managed number. */
+  resolveSender?: (message: OutboundMessage) => Promise<{ accountSid: string; authToken: string; phoneNumber?: string; messagingServiceSid?: string; statusCallbackUrl?: string }>;
+  /** Resolve the account used to download inbound MMS media. */
+  resolveInboundCredentials?: (message: InboundMessage) => Promise<{ accountSid: string; authToken: string } | undefined>;
   fetchImpl?: typeof fetch;
 }
 
@@ -34,21 +38,23 @@ export class TwilioSmsAdapter implements ChannelAdapter {
   constructor(private readonly options: TwilioSmsAdapterOptions) {
     this.fetchImpl = options.fetchImpl ?? fetch;
     if (!options.accountSid || !options.authToken) throw new Error("Twilio SMS requires an account SID and auth token");
-    if (!options.phoneNumber && !options.messagingServiceSid) throw new Error("Twilio SMS requires a phone number or messaging service SID");
+    if (!options.phoneNumber && !options.messagingServiceSid && !options.resolveSender) throw new Error("Twilio SMS requires a phone number, messaging service SID, or a tenant sender resolver");
   }
 
   async send(message: OutboundMessage): Promise<DeliveryReceipt> {
+    const sender = this.options.resolveSender ? await this.options.resolveSender(message) : this.options;
+    if (!sender.phoneNumber && !sender.messagingServiceSid) throw new Error("No Twilio sender is configured for this destination");
     const body = new URLSearchParams();
     body.set("To", message.target.conversationId);
-    if (this.options.messagingServiceSid) body.set("MessagingServiceSid", this.options.messagingServiceSid);
-    else body.set("From", this.options.phoneNumber!);
+    if (sender.messagingServiceSid) body.set("MessagingServiceSid", sender.messagingServiceSid);
+    else body.set("From", sender.phoneNumber!);
     if (message.text) body.set("Body", message.text.slice(0, this.capabilities.maxTextLength));
     for (const attachment of message.attachments ?? []) if (attachment.url?.startsWith("https://")) body.append("MediaUrl", attachment.url);
-    if (this.options.statusCallbackUrl) body.set("StatusCallback", this.options.statusCallbackUrl);
-    const response = await this.fetchImpl(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(this.options.accountSid)}/Messages.json`, {
+    if (sender.statusCallbackUrl) body.set("StatusCallback", sender.statusCallbackUrl);
+    const response = await this.fetchImpl(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sender.accountSid)}/Messages.json`, {
       method: "POST",
       headers: {
-        Authorization: `Basic ${Buffer.from(`${this.options.accountSid}:${this.options.authToken}`).toString("base64")}`,
+        Authorization: `Basic ${Buffer.from(`${sender.accountSid}:${sender.authToken}`).toString("base64")}`,
         "Content-Type": "application/x-www-form-urlencoded",
         "Idempotency-Key": message.idempotencyKey,
       },
@@ -60,11 +66,13 @@ export class TwilioSmsAdapter implements ChannelAdapter {
   }
 
   async hydrateInbound(message: InboundMessage): Promise<InboundMessage> {
+    const credentials = this.options.resolveInboundCredentials ? await this.options.resolveInboundCredentials(message) : this.options;
+    if (!credentials) throw new Error("No Twilio account is configured for this inbound number");
     const attachments = await Promise.all(message.attachments.slice(0, 10).map(async (attachment) => {
       if (!attachment.url || attachment.url.startsWith("data:")) return attachment;
       try {
         const response = await this.fetchImpl(attachment.url, {
-          headers: { Authorization: `Basic ${Buffer.from(`${this.options.accountSid}:${this.options.authToken}`).toString("base64")}` },
+          headers: { Authorization: `Basic ${Buffer.from(`${credentials.accountSid}:${credentials.authToken}`).toString("base64")}` },
         });
         if (!response.ok) return { ...attachment, mediaError: "download_failed" as const };
         const bytes = Buffer.from(await response.arrayBuffer());
@@ -101,7 +109,8 @@ export function normalizeTwilioMessage(input: Record<string, string>, receivedAt
     const mimeType = String(input[`MediaContentType${index}`] ?? "").trim() || undefined;
     return { id: `${messageId}:${index}`, kind: attachmentKind(mimeType ?? "application/octet-stream"), mimeType, url };
   }).filter((item) => item.url);
-  return { provider: "sms", providerEventId: messageId, providerUserId: from, providerConversationId: from, text: String(input.Body ?? "").trim() || undefined, attachments, receivedAt, scope: "private", displayName: String(input.FromCity ?? "").trim() || undefined };
+  const to = String(input.To ?? "").trim() || undefined;
+  return { provider: "sms", providerEventId: messageId, providerUserId: from, ...(to ? { providerAgentId: to } : {}), providerConversationId: from, text: String(input.Body ?? "").trim() || undefined, attachments, receivedAt, scope: "private", displayName: String(input.FromCity ?? "").trim() || undefined };
 }
 
 export function normalizeSmsMessage(input: { messageId: string; from: string; body?: string; receivedAt?: number }): InboundMessage {

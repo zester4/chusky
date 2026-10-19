@@ -43,12 +43,21 @@ export function normalizeVoiceInboundRouteInput(input: Record<string, unknown>, 
   const displayName = typeof input.displayName === "string"
     ? input.displayName.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120) || undefined
     : existing?.displayName;
+  const capabilities = input.capabilities && typeof input.capabilities === "object" && !Array.isArray(input.capabilities)
+    ? {
+      voice: (input.capabilities as Record<string, unknown>).voice !== false,
+      sms: (input.capabilities as Record<string, unknown>).sms === true,
+      mms: (input.capabilities as Record<string, unknown>).mms === true,
+      fax: (input.capabilities as Record<string, unknown>).fax === true,
+    }
+    : existing?.capabilities;
   return {
     provider,
     phoneNumber,
     userId,
     ...(providerNumberId ? { providerNumberId } : {}),
     ...(displayName ? { displayName } : {}),
+    ...(capabilities ? { capabilities } : {}),
     source: providerNumberId ? "managed" : existing?.source ?? "external",
     callProfile,
     purpose: boundedText(input.purpose ?? existing?.purpose, "purpose", 2_000, "Handle an inbound caller request"),

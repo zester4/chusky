@@ -2878,6 +2878,20 @@ export function registerSdkApi(app: Hono): void {
     return c.json({
       available: Boolean(searchDependencies),
       countries: twilioNumberCatalog(),
+      capabilities: {
+        voice: true,
+        sms: config.twilioSmsEnabled,
+        mms: config.twilioSmsEnabled,
+        // Twilio can sell fax-capable inventory, but Chusky does not expose
+        // fax until its receive/send transport is durable and audited.
+        fax: false,
+        emergency: false,
+        localCalling: true,
+        // International SMS is a destination/account policy, not a distinct
+        // Twilio number capability. Keep it gated until Chusky has a durable
+        // country-policy and compliance surface for outbound messaging.
+        internationalSms: false,
+      },
       price: { amountCents: config.twilioManagedNumberPriceCents, currency: "USD" as const, interval: "month" as const },
       data: routes.map((route) => ({
         phoneNumber: route.phoneNumber,
@@ -2886,6 +2900,7 @@ export function registerSdkApi(app: Hono): void {
         callProfile: route.callProfile,
         provider: route.provider,
         purpose: route.purpose,
+        ...(route.capabilities ? { capabilities: route.capabilities } : {}),
         ...(route.twilioSubaccountId ? { managedAccount: true } : {}),
         updatedAt: route.updatedAt,
       })),
@@ -2898,6 +2913,7 @@ export function registerSdkApi(app: Hono): void {
     const dependencies = await customerNumberSearchDependencies();
     if (!dependencies) return apiError(c, 503, "phone_number_search_unavailable", "Phone number search is temporarily unavailable.");
     try {
+      const requestedFeatures = new Set((c.req.queries("feature") ?? []).flatMap((value) => value.split(",")).map((value) => value.trim().toLowerCase()).filter(Boolean));
       const data = await searchTwilioNumbers({
         countryCode: c.req.query("countryCode") ?? "",
         areaCode: c.req.query("areaCode") ?? undefined,
@@ -2907,6 +2923,12 @@ export function registerSdkApi(app: Hono): void {
         postalCode: c.req.query("postalCode") ?? undefined,
         contains: c.req.query("contains"),
         limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
+        features: {
+          voice: !requestedFeatures.size || requestedFeatures.has("voice"),
+          sms: requestedFeatures.has("sms"),
+          mms: requestedFeatures.has("mms"),
+          fax: requestedFeatures.has("fax"),
+        },
       }, dependencies);
       return c.json({ data, price: { amountCents: config.twilioManagedNumberPriceCents, currency: "USD" as const, interval: "month" as const } });
     } catch (error) {
@@ -2918,7 +2940,7 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/account/calls/numbers/purchase", async (c) => {
     const owner = await callOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before purchasing a phone number.");
-    const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; displayName?: unknown; countryCode?: unknown };
+    const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; displayName?: unknown; countryCode?: unknown; features?: unknown };
     const phoneNumber = normalizeInboundPhone(body.phoneNumber);
     if (!phoneNumber) return apiError(c, 400, "invalid_phone_number", "phoneNumber must be a valid E.164 number.");
     const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
@@ -2929,6 +2951,13 @@ export function registerSdkApi(app: Hono): void {
     if (existing && existing.userId !== owner.userId) return apiError(c, 409, "phone_number_already_claimed", "That phone number is already assigned to another workspace.");
     if (existing?.providerNumberId) return apiError(c, 409, "phone_number_already_owned", "That phone number is already in your workspace.");
     try {
+      const rawFeatures = body.features && typeof body.features === "object" && !Array.isArray(body.features) ? body.features as Record<string, unknown> : undefined;
+      const features = rawFeatures ? {
+        voice: rawFeatures.voice !== false,
+        sms: rawFeatures.sms === true,
+        mms: rawFeatures.mms === true,
+        fax: rawFeatures.fax === true,
+      } : undefined;
       // Lazy customer provisioning: the customer only clicks Buy. The child
       // account is created automatically and remains under the platform
       // parent, which is the Twilio billing owner.
@@ -2937,6 +2966,7 @@ export function registerSdkApi(app: Hono): void {
         phoneNumber,
         countryCode: typeof body.countryCode === "string" ? body.countryCode : undefined,
         friendlyName: typeof body.displayName === "string" ? body.displayName : undefined,
+        features,
       }, tenant.dependencies);
       if (!purchased.sid) throw new Error("The provider did not return a phone-number resource.");
       const owned = ownershipRecord({ userId: owner.userId, subaccountId: tenant.subaccount.id, phoneNumber: purchased.phoneNumber, providerNumberId: purchased.sid });
@@ -2947,6 +2977,7 @@ export function registerSdkApi(app: Hono): void {
         displayName: typeof body.displayName === "string" ? body.displayName : purchased.friendlyName,
         callProfile: "business",
         purpose: "Handle inbound caller requests",
+        capabilities: purchased.capabilities,
         voiceProfile: (await getVoiceCallProfile(owner.userId)) ?? { identity: "Chusky", mode: "support", tone: "professional", disclosure: "assistant" },
       }, owner.userId);
       route.twilioSubaccountId = tenant.subaccount.id;
@@ -2963,7 +2994,7 @@ export function registerSdkApi(app: Hono): void {
         await markNumberOwnershipReleased(purchased.sid, owner.userId);
         return apiError(c, 409, "phone_number_already_claimed", "That phone number was claimed by another workspace.");
       }
-      const response = { data: { phoneNumber: route.phoneNumber, displayName: route.displayName ?? "", source: "managed" as const, callProfile: route.callProfile, provider: route.provider, purpose: route.purpose, updatedAt: route.updatedAt }, price: { amountCents: config.twilioManagedNumberPriceCents, currency: "USD" as const, interval: "month" as const } };
+      const response = { data: { phoneNumber: route.phoneNumber, displayName: route.displayName ?? "", source: "managed" as const, callProfile: route.callProfile, provider: route.provider, purpose: route.purpose, capabilities: route.capabilities, updatedAt: route.updatedAt }, price: { amountCents: config.twilioManagedNumberPriceCents, currency: "USD" as const, interval: "month" as const } };
       if (prior.key) await recordSdkIdempotency(owner.userId, prior.key, fingerprint, response);
       return c.json(response, 201);
     } catch (error) {

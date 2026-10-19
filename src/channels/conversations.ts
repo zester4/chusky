@@ -41,6 +41,10 @@ export function buildReplyTarget(message: InboundMessage): ReplyTarget {
         messageHandle: message.providerEventId,
         ...(message.providerReplyToId ? { replyToHandle: message.providerReplyToId } : {}),
       },
+    } : message.provider === "sms" ? {
+      // For tenant-managed SMS/MMS, this is the authenticated destination
+      // number whose child Twilio account must send the reply.
+      metadata: message.providerAgentId ? { fromNumber: message.providerAgentId } : undefined,
     } : photonTarget ? {
       metadata: Object.fromEntries(Object.entries(photonTarget).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0)),
     } : {}),

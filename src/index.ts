@@ -71,7 +71,7 @@ import { isBlandInboundConfigured, normalizeBlandInboundNumber, parseBlandInboun
 import { parseVoiceCallProfileJson } from "./calls/voiceProfile.js";
 import { listBlandCuratedVoices } from "./calls/blandVoices.js";
 import { FLUX_TTS_VOICES } from "./voiceSettings.js";
-import { twilioWebhookCredentialsForCall, twilioWebhookCredentialsForRoute } from "./calls/twilioSubaccounts.js";
+import { twilioSmsCredentialsForNumber, twilioWebhookCredentialsForCall, twilioWebhookCredentialsForRoute } from "./calls/twilioSubaccounts.js";
 import { nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow, syncDefaultProactiveWatchesForConnectedAccounts } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { executeClaimedDelegation, executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
@@ -577,8 +577,30 @@ async function main(): Promise<void> {
     }
     const twilioSmsWebhookUrl = config.twilioSmsWebhookUrl || `${config.webhookUrl.replace(/\/+$/, "")}/twilio/sms`;
     const twilioSmsStatusCallbackUrl = config.twilioSmsStatusCallbackUrl || `${config.webhookUrl.replace(/\/+$/, "")}/twilio/sms/status`;
-    const twilioSmsAdapter = config.twilioSmsEnabled && config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid)
-      ? new TwilioSmsAdapter({ accountSid: config.twilioAccountSid, authToken: config.twilioAuthToken, phoneNumber: config.twilioPhoneNumber, messagingServiceSid: config.twilioMessagingServiceSid, statusCallbackUrl: twilioSmsStatusCallbackUrl })
+    const twilioSmsAdapter = config.twilioSmsEnabled && config.twilioAccountSid && config.twilioAuthToken
+      ? new TwilioSmsAdapter({
+        accountSid: config.twilioAccountSid,
+        authToken: config.twilioAuthToken,
+        phoneNumber: config.twilioPhoneNumber || undefined,
+        messagingServiceSid: config.twilioMessagingServiceSid || undefined,
+        statusCallbackUrl: twilioSmsStatusCallbackUrl,
+        // Managed numbers are purchased in tenant subaccounts. The reply
+        // target carries the authenticated destination number, so the adapter
+        // can select the matching child account without a global sender.
+        resolveSender: async (message) => {
+          const number = message.target.metadata?.fromNumber;
+          if (!number || number === config.twilioPhoneNumber) return { accountSid: config.twilioAccountSid, authToken: config.twilioAuthToken, phoneNumber: config.twilioPhoneNumber || undefined, messagingServiceSid: config.twilioMessagingServiceSid || undefined, statusCallbackUrl: twilioSmsStatusCallbackUrl };
+          const credentials = await twilioSmsCredentialsForNumber(number);
+          if (!credentials) throw new Error("The managed SMS number is not connected to an active workspace account");
+          return { accountSid: credentials.accountSid, authToken: credentials.authToken, phoneNumber: number, statusCallbackUrl: twilioSmsStatusCallbackUrl };
+        },
+        resolveInboundCredentials: async (message) => {
+          const number = message.providerAgentId;
+          if (!number || number === config.twilioPhoneNumber) return { accountSid: config.twilioAccountSid, authToken: config.twilioAuthToken };
+          const credentials = await twilioSmsCredentialsForNumber(number);
+          return credentials ? { accountSid: credentials.accountSid, authToken: credentials.authToken } : undefined;
+        },
+      })
       : undefined;
     const sendblueEventDependencies = {
       getEvent: getChannelInboundEvent,
@@ -677,7 +699,15 @@ async function main(): Promise<void> {
           await workflowClient().trigger({ url, body: { eventId }, workflowRunId: `sendblue-${eventId}`, retries: 3 });
         },
       } } : {}),
-      ...(twilioSmsAdapter ? { twilioSms: { adapter: twilioSmsAdapter, authToken: config.twilioAuthToken, webhookUrl: twilioSmsWebhookUrl, statusWebhookUrl: twilioSmsStatusCallbackUrl } } : {}),
+      ...(twilioSmsAdapter ? {
+        twilioSms: {
+          adapter: twilioSmsAdapter,
+          authToken: config.twilioAuthToken || undefined,
+          webhookUrl: twilioSmsWebhookUrl,
+          statusWebhookUrl: twilioSmsStatusCallbackUrl,
+          resolveAuthToken: async (phoneNumber: string) => (await twilioSmsCredentialsForNumber(phoneNumber))?.authToken,
+        },
+      } : {}),
       ...(xAdapter ? { x: { adapter: xAdapter } } : {}),
       ...(xchatAdapter ? { xchat: { adapter: xchatAdapter } } : {}),
     });

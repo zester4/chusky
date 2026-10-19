@@ -9,6 +9,7 @@ import {
   saveSendblueGroupAuthorization,
   consumeSendblueGroupLinkCode,
   getWebAuthUserIdForTelegram,
+  getVoiceInboundRoute,
   type SendblueGroupAuthorizationRecord,
   type ChannelIdentityRecord,
 } from "../store.js";
@@ -20,7 +21,29 @@ export function identityKey(provider: ChannelProvider, externalUserId: string, w
   return `${provider}:${workspaceId ?? "-"}:${externalUserId}`;
 }
 
-export async function resolveIdentity(message: Pick<InboundMessage, "provider" | "providerUserId" | "providerWorkspaceId">): Promise<ChannelIdentityRecord | undefined> {
+export async function resolveIdentity(message: Pick<InboundMessage, "provider" | "providerUserId" | "providerWorkspaceId" | "providerAgentId">): Promise<ChannelIdentityRecord | undefined> {
+  // A managed Twilio SMS/MMS number is a public business channel. The caller
+  // is not required to link their own phone to Chusky: the authenticated
+  // destination-number route establishes the workspace owner. This keeps the
+  // channel neutral while preserving the existing linked-identity behavior
+  // for personal SMS routes and every other provider.
+  if (message.provider === "sms" && message.providerAgentId) {
+    const route = await getVoiceInboundRoute("twilio", message.providerAgentId);
+    const allowed = route && route.capabilities?.sms !== false && (route.callProfile === "business" || route.allowedCallers.includes(message.providerUserId));
+    if (allowed) {
+      const now = Date.now();
+      return {
+        accountId: accountIdForUser(route.userId),
+        userId: route.userId,
+        provider: "sms",
+        externalUserId: message.providerUserId,
+        verifiedAt: now,
+        createdAt: now,
+        updatedAt: now,
+        proactiveOptIn: true,
+      };
+    }
+  }
   // Group identity is intentionally strict. A private Sendblue link proves
   // ownership of the sender, not authorization to inject that account into a
   // shared conversation. Groups must have their own explicit authorization.

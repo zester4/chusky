@@ -563,6 +563,8 @@ export interface VoiceInboundRouteRecord {
   twilioSubaccountId?: string;
   /** Durable ownership record for billing and safe release. */
   twilioOwnershipId?: string;
+  /** Capabilities selected when a managed Twilio number was purchased. */
+  capabilities?: { voice: boolean; sms: boolean; mms: boolean; fax: boolean };
   updatedAt: number;
 }
 
