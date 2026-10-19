@@ -61,7 +61,11 @@ export function providerStatusCanAdvance(current: PhoneCallRecord["providerStatu
   const terminal = new Set<NonNullable<PhoneCallRecord["providerStatus"]>>(["machine", "busy", "no-answer", "failed", "canceled", "completed"]);
   if (terminal.has(current)) return false;
   const rank: Record<NonNullable<PhoneCallRecord["providerStatus"]>, number> = { queued: 0, initiated: 1, ringing: 2, "in-progress": 3, answered: 3, machine: 4, busy: 4, "no-answer": 4, failed: 4, canceled: 4, completed: 5, unknown: -1 };
-  return rank[next] >= rank[current];
+  // Twilio retries callbacks and may report both `in-progress` and
+  // `answered`. They represent the same answered phase for Chusky. Equal
+  // ranks are therefore not new lifecycle transitions; accepting them here
+  // creates repeated "Call answered" rows and causes needless session writes.
+  return rank[next] > rank[current];
 }
 
 function boundedText(value: unknown, maximum: number): string {

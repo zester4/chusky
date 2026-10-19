@@ -312,8 +312,15 @@ export const VOICE_TURN_NATIVE_TOOLS = [
   "CHUCK_TASK_LIST",
   "CHUCK_TASK_GET",
   "CHUCK_LIST_PHONE_CALLS",
+  "CHUCK_CONTROL_PHONE_CALL",
 ] as const;
 const VOICE_TURN_TOOL_NAMES = new Set<string>(VOICE_TURN_NATIVE_TOOLS);
+// Live calls may control their own active call (for example, a requested
+// handoff), but must never receive owner-chat tools such as browser access or
+// connected-account discovery. Those tools caused the model to leave the
+// external conversation and speak as if it were still chatting with the
+// owner.
+const VOICE_TURN_SAFE_NATIVE_TOOLS = new Set<string>(VOICE_TURN_NATIVE_TOOLS);
 
 /** Pure capability fence used by the live voice payload and its contract tests. */
 export function voiceToolIsWithinCapabilityFence(name: string, capabilityNames: Iterable<string>, explicitAllow: Iterable<string> = []): boolean {
@@ -2651,7 +2658,10 @@ async function executeAgent(
   // The trusted outbound purpose selects the capability preload, but it must
   // not make ordinary greetings pay for action routing on every turn.
   const voiceFastLane = voiceTurn && ownerPrivateRun && !approvedApprovalId && !options?.meetingId && !options?.toolAllow?.length
-    && voiceFastLaneEligible(voiceRoutingText);
+    // The trusted call objective is part of the routing decision. A caller
+    // saying only “Hey” must not put a scheduling/email call into the tool-
+    // free lane when the objective requires Calendar or Gmail.
+    && voiceFastLaneEligible(`${voiceRoutingText}\n${options?.voiceRoutingHint ?? ""}`);
   const sharedMeetingRoomAccess = sharedScope && options?.sharedMeetingRoomAccess === true && Boolean(options?.meetingId);
   const existingRun = options?.ephemeral || voiceTurn ? undefined : await getAgentRun(userId, durableRunId);
   let durableRunRecord = existingRun;
@@ -2791,6 +2801,19 @@ async function executeAgent(
       if (name.startsWith("COMPOSIO_")) return voiceToolPolicy.enabled;
       return voiceToolkitAllowed(name, voiceToolPolicy);
     });
+  }
+  if (voiceTurn) {
+    availableTools = availableTools.filter((tool) => {
+      const name = toolName(tool);
+      return !name.startsWith("CHUCK_") || VOICE_TURN_SAFE_NATIVE_TOOLS.has(name);
+    });
+  }
+  // A normal chat turn may see the durable-wait schema, but only a worker
+  // owning an active task can execute it. Keeping it out of interactive runs
+  // prevents a phone-call request from trying to park itself with a durable
+  // timer and surfacing “only available inside an active durable task.”
+  if (!options?.taskId) {
+    availableTools = availableTools.filter((tool) => toolName(tool) !== "CHUCK_TASK_WAIT");
   }
   // A bounded voice preload may resolve an exact action through Composio's
   // catalogue without that action appearing in session.tools(). Treat that

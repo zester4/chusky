@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { blandRouteFromRecord, normalizeInboundPhone, normalizeVoiceInboundRouteInput, twilioRouteCallerAllowed } from "../src/calls/inboundRoutes.js";
 import { providerStatusCanAdvance } from "../src/calls/voiceEvents.js";
-import { deleteVoiceInboundRoute, getVoiceInboundRoute, hasVoiceInboundRoutes, initStore, listVoiceInboundRoutes, saveVoiceInboundRoute } from "../src/store.js";
+import { addPhoneCall, appendPhoneCallEvent, deleteVoiceInboundRoute, getPhoneCall, getVoiceInboundRoute, hasVoiceInboundRoutes, initStore, listVoiceInboundRoutes, saveVoiceInboundRoute } from "../src/store.js";
 
 test("durable inbound routes normalize phones and reject unsafe personal defaults", () => {
   assert.equal(normalizeInboundPhone("+1 (555) 010-0123"), "+15550100123");
@@ -23,10 +23,36 @@ test("durable inbound routes normalize phones and reject unsafe personal default
 
 test("provider lifecycle event projection never regresses after a terminal callback", () => {
   assert.equal(providerStatusCanAdvance("ringing", "in-progress"), true);
+  assert.equal(providerStatusCanAdvance("in-progress", "answered"), false);
+  assert.equal(providerStatusCanAdvance("answered", "in-progress"), false);
   assert.equal(providerStatusCanAdvance("completed", "ringing"), false);
   assert.equal(providerStatusCanAdvance("no-answer", "in-progress"), false);
   assert.equal(providerStatusCanAdvance("unknown", "initiated"), true);
   assert.equal(providerStatusCanAdvance(undefined, "initiated"), true);
+});
+
+test("duplicate provider lifecycle callbacks produce one visible call event", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 7003;
+  const call = {
+    id: "twc_00000000-0000-0000-0000-000000000703",
+    userId,
+    provider: "twilio" as const,
+    direction: "outbound" as const,
+    phoneNumber: "+15550100703",
+    purpose: "Confirm an appointment",
+    status: "active" as const,
+    providerStatus: "in-progress" as const,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  await addPhoneCall(userId, call);
+  await Promise.all([
+    appendPhoneCallEvent(userId, call.id, { type: "call_answered", summary: "The call was answered." }),
+    appendPhoneCallEvent(userId, call.id, { type: "call_answered", summary: "The call was answered." }),
+    appendPhoneCallEvent(userId, call.id, { type: "call_answered", summary: "The call was answered." }),
+  ]);
+  assert.equal((await getPhoneCall(userId, call.id))?.timeline?.filter((event) => event.type === "call_answered").length, 1);
 });
 
 test("durable inbound routes are tenant-owned and public provider indexes stay accurate", async () => {

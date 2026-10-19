@@ -8874,17 +8874,49 @@ export async function persistPhoneCallProviderResult(
 }
 
 /** Append one bounded lifecycle fact atomically, without exposing provider payloads. */
+const phoneCallEventMutationQueues = new Map<string, Promise<void>>();
+
 export async function appendPhoneCallEvent(uid: number, id: string, input: VoiceCallEventInput): Promise<PhoneCallRecord | undefined> {
-  const updated = await mutateSession(uid, (session) => {
-    const current = (session.phoneCalls ?? []).find((item) => item.id === id && item.userId === uid);
-    if (!current) return undefined;
-    const event = createVoiceCallEvent(input);
-    current.timeline = [...(current.timeline ?? []), event].slice(-200);
-    current.updatedAt = Date.now();
-    return current;
+  // A Twilio status callback, stream callback, and bridge status report can
+  // arrive at the same time on the same process. Serialize only this call's
+  // event appends locally before taking the cross-replica Redis lease. This
+  // prevents a burst of observational writes from racing each other into the
+  // session mutation lease while preserving the distributed lock for other
+  // replicas.
+  const queueKey = `${uid}:${id}`;
+  const prior = phoneCallEventMutationQueues.get(queueKey) ?? Promise.resolve();
+  const work = prior.catch(() => undefined).then(async () => {
+    const updated = await mutateSession(uid, (session) => {
+      const current = (session.phoneCalls ?? []).find((item) => item.id === id && item.userId === uid);
+      if (!current) return undefined;
+      const lifecycleEvents = new Set<VoiceCallEventInput["type"]>([
+        "call_started", "call_initiated", "call_ringing", "call_answered",
+        "voicemail_detected", "call_busy", "call_no_answer", "call_cancelled",
+        "call_unknown", "call_ended", "call_failed",
+      ]);
+      // Lifecycle facts are state projections, not a raw provider callback
+      // feed. Provider retries and equivalent bridge callbacks must not create
+      // another visible row. Tool and turn events intentionally remain
+      // append-only because the same tool/turn can legitimately occur more
+      // than once in one call.
+      if (lifecycleEvents.has(input.type) && (current.timeline ?? []).some((event) => event.type === input.type)) return current;
+      const event = createVoiceCallEvent(input);
+      current.timeline = [...(current.timeline ?? []), event].slice(-200);
+      current.updatedAt = Date.now();
+      return current;
+    });
+    if (updated) publishPhoneCallNotification(updated);
+    return updated;
   });
-  if (updated) publishPhoneCallNotification(updated);
-  return updated;
+  const settled = work.then(() => undefined, () => undefined);
+  phoneCallEventMutationQueues.set(queueKey, settled);
+  try {
+    return await work;
+  } finally {
+    if (phoneCallEventMutationQueues.get(queueKey) === settled) {
+      phoneCallEventMutationQueues.delete(queueKey);
+    }
+  }
 }
 
 /**
