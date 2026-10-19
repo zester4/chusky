@@ -5153,17 +5153,22 @@ export async function getToolkitStatesPage(
     if (options.enrich !== false) {
       try { detail = await composio.toolkits.get(slug); } catch { /* preserve the connection row if metadata is temporarily unavailable */ }
     }
+    // The Tool Router session response has historically exposed `logo` at the
+    // top level, while some SDK releases retain the same provider metadata
+    // under `meta`. Accept both shapes so the fast, non-enriched dashboard
+    // response does not silently drop Composio's official branding.
+    const sessionMeta = t?.meta && typeof t.meta === "object" ? t.meta : {};
     const meta = detail?.meta ?? {};
     const matching = byToolkit.get(slug.toLowerCase()) ?? [];
     return {
       slug,
       name: String(t.name ?? detail?.name ?? slug),
-      logo: String(t.logo ?? meta.logo ?? "") || undefined,
-      description: typeof meta.description === "string" ? meta.description : undefined,
-      appUrl: typeof meta.appUrl === "string" ? meta.appUrl : undefined,
-      categories: Array.isArray(meta.categories) ? meta.categories.map((category: any) => String(category?.name ?? category?.slug ?? "")).filter(Boolean) : undefined,
-      toolsCount: typeof meta.toolsCount === "number" ? meta.toolsCount : undefined,
-      triggersCount: typeof meta.triggersCount === "number" ? meta.triggersCount : undefined,
+      logo: String(t.logo ?? sessionMeta.logo ?? meta.logo ?? "") || undefined,
+      description: typeof (meta.description ?? sessionMeta.description) === "string" ? (meta.description ?? sessionMeta.description) : undefined,
+      appUrl: typeof (meta.appUrl ?? sessionMeta.appUrl) === "string" ? (meta.appUrl ?? sessionMeta.appUrl) : undefined,
+      categories: Array.isArray(meta.categories ?? sessionMeta.categories) ? (meta.categories ?? sessionMeta.categories).map((category: any) => String(category?.name ?? category?.slug ?? "")).filter(Boolean) : undefined,
+      toolsCount: typeof (meta.toolsCount ?? sessionMeta.toolsCount) === "number" ? (meta.toolsCount ?? sessionMeta.toolsCount) : undefined,
+      triggersCount: typeof (meta.triggersCount ?? sessionMeta.triggersCount) === "number" ? (meta.triggersCount ?? sessionMeta.triggersCount) : undefined,
       authSchemes: Array.isArray(detail?.composioManagedAuthSchemes) ? detail.composioManagedAuthSchemes.map((scheme: unknown) => String(scheme)) : undefined,
       noAuth: Boolean(t.isNoAuth),
       connected: matching.length > 0,
