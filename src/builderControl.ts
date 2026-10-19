@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import Redis from "ioredis";
-import { createRedisClient } from "./redisClient.js";
+import { createRedisClient, withRedisReady } from "./redisClient.js";
 
 export interface BuilderVoiceControl {
   subaccountManagementEnabled: boolean;
@@ -99,24 +99,24 @@ return cjson.encode(next)
 
 export class RedisBuilderRepository implements BuilderRepository {
   constructor(private readonly redis: Redis) {}
-  async read() { return parseBuilderControl(await this.redis.get(STATE_KEY)); }
+  async read() { return parseBuilderControl(await withRedisReady(this.redis, () => this.redis.get(STATE_KEY))); }
   async change(expected: number, enabled: boolean, event: BuilderAuditEvent) {
-    const raw = await this.redis.eval(CHANGE_BUILDER_CONTROL, 2, STATE_KEY, AUDIT_KEY, expected, String(enabled), event.at, JSON.stringify(event));
+    const raw = await withRedisReady(this.redis, () => this.redis.eval(CHANGE_BUILDER_CONTROL, 2, STATE_KEY, AUDIT_KEY, expected, String(enabled), event.at, JSON.stringify(event)));
     return typeof raw === "string" ? parseBuilderControl(raw) : undefined;
   }
   async changeVoice(expected: number, voice: BuilderVoiceControl, event: BuilderAuditEvent) {
-    const raw = await this.redis.eval(CHANGE_BUILDER_VOICE_CONTROL, 2, STATE_KEY, AUDIT_KEY, expected, JSON.stringify(voice), event.at, JSON.stringify(event));
+    const raw = await withRedisReady(this.redis, () => this.redis.eval(CHANGE_BUILDER_VOICE_CONTROL, 2, STATE_KEY, AUDIT_KEY, expected, JSON.stringify(voice), event.at, JSON.stringify(event)));
     return typeof raw === "string" ? parseBuilderControl(raw) : undefined;
   }
-  async events() { return (await this.redis.lrange(AUDIT_KEY, 0, 99)).map((item) => JSON.parse(item) as BuilderAuditEvent); }
+  async events() { return (await withRedisReady(this.redis, () => this.redis.lrange(AUDIT_KEY, 0, 99))).map((item) => JSON.parse(item) as BuilderAuditEvent); }
   async record(event: BuilderAuditEvent) {
-    const result = await this.redis.multi().lpush(AUDIT_KEY, JSON.stringify(event)).ltrim(AUDIT_KEY, 0, 999).exec();
+    const result = await withRedisReady(this.redis, () => this.redis.multi().lpush(AUDIT_KEY, JSON.stringify(event)).ltrim(AUDIT_KEY, 0, 999).exec());
     if (!result || result.some(([error]) => error)) throw new Error("Builder audit persistence failed.");
   }
-  async verified(token: string) { return Boolean(await this.redis.get(`chuck:builder:verified:${digest(token)}`)); }
-  async verify(token: string) { await this.redis.set(`chuck:builder:verified:${digest(token)}`, "1", "EX", 900); }
+  async verified(token: string) { return Boolean(await withRedisReady(this.redis, () => this.redis.get(`chuck:builder:verified:${digest(token)}`))); }
+  async verify(token: string) { await withRedisReady(this.redis, () => this.redis.set(`chuck:builder:verified:${digest(token)}`, "1", "EX", 900)); }
   async admit(actorId: string) {
-    const value = await this.redis.eval(`local n=redis.call("INCR",KEYS[1]); if n==1 then redis.call("EXPIRE",KEYS[1],60) end; return n`, 1, `chuck:builder:rate:${digest(actorId)}`);
+    const value = await withRedisReady(this.redis, () => this.redis.eval(`local n=redis.call("INCR",KEYS[1]); if n==1 then redis.call("EXPIRE",KEYS[1],60) end; return n`, 1, `chuck:builder:rate:${digest(actorId)}`));
     return typeof value === "number" && value <= 30;
   }
 }

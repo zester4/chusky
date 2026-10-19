@@ -9,6 +9,57 @@ import { logger } from "./logger.js";
  */
 export type RedisClientPurpose = "durable" | "auth" | "control" | "cache";
 
+/**
+ * Wait for a client whose offline queue is disabled to become usable.  This
+ * matters for control-plane clients: a command issued during the small
+ * connecting/reconnecting window otherwise fails synchronously with
+ * ioredis' "Stream isn't writable" error.
+ */
+export async function waitForRedisReady(client: Redis, timeoutMs = Math.max(1_000, config.redisConnectTimeoutMs)): Promise<void> {
+  if (client.status === "ready") return;
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      client.removeListener("ready", onReady);
+      client.removeListener("end", onEnd);
+    };
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    };
+    const onReady = () => finish();
+    const onEnd = () => finish(new Error("Redis connection ended before it became ready."));
+    client.once("ready", onReady);
+    client.once("end", onEnd);
+    timer = setTimeout(() => finish(new Error("Redis did not become ready before the timeout.")), timeoutMs);
+    if (client.status === "wait") void client.connect().catch(() => undefined);
+    if (client.status === "ready") onReady();
+  });
+}
+
+export function isRedisNotReadyError(error: unknown): boolean {
+  return error instanceof Error && /stream\s+isn['’]?t\s+writable|enableOfflineQueue|redis.*not ready|connection ended/i.test(error.message);
+}
+
+/** Run a bounded control-plane operation across a Redis reconnect window. */
+export async function withRedisReady<T>(client: Redis, operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await waitForRedisReady(client);
+    try {
+      return await operation();
+    } catch (error) {
+      if (attempt === 0 && isRedisNotReadyError(error)) continue;
+      throw error;
+    }
+  }
+  throw new Error("Redis control operation could not be completed.");
+}
+
 export function redisOptions(purpose: RedisClientPurpose, overrides: RedisOptions = {}): RedisOptions {
   const disposable = purpose === "cache";
   const controlPlane = purpose === "control";
