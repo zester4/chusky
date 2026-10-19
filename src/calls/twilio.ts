@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import twilio from "twilio";
 import { config } from "../config.js";
-import { appendPhoneCallEvent, claimPhoneCallStart, getPhoneCall, getVoiceCallProfile, listVoiceInboundRoutes, persistPhoneCallProviderResult, updatePhoneCall, type PhoneCallRecord } from "../store.js";
+import { appendPhoneCallEvent, claimPhoneCallStart, enqueueVoiceCallReconciliation, getPhoneCall, getVoiceCallProfile, hasVoiceCallOptOut, listVoiceInboundRoutes, persistPhoneCallProviderResult, updatePhoneCall, type PhoneCallRecord } from "../store.js";
 import { resolveVoiceContinuity } from "./continuity.js";
 import { normalizePhoneCallRequestKey } from "./requestKey.js";
 import { subaccountNumberDependencies } from "./twilioSubaccounts.js";
@@ -170,9 +170,10 @@ export async function startTwilioCallForUser(userId: number, input: TwilioCallIn
   const continuity = await resolveVoiceContinuity(userId, input.continuityFromCallId);
   const dialBlockReason = voiceCallDialBlockReason(profile);
   if (dialBlockReason) throw new Error(dialBlockReason);
+  if (profile.controls?.optOutEnabled !== false && await hasVoiceCallOptOut(userId, phoneNumber)) throw new Error("This contact has opted out of further calls. No call was placed.");
   const base = httpsUrl(options.webhookBaseUrl, "TWILIO_WEBHOOK_BASE_URL");
   const requestKey = normalizePhoneCallRequestKey(input.requestKey);
-  const call: PhoneCallRecord = { id: `twc_${randomUUID()}`, userId, ...(requestKey ? { requestKey } : {}), provider: "twilio", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, ...(options.twilioSubaccountId ? { twilioSubaccountId: options.twilioSubaccountId } : {}), ...(continuity ? { continuity } : {}), status: "starting", providerStatus: "queued", createdAt: Date.now(), updatedAt: Date.now() };
+  const call: PhoneCallRecord = { id: `twc_${randomUUID()}`, userId, ...(requestKey ? { requestKey } : {}), provider: "twilio", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, transcriptRetentionDays: profile.controls?.retentionDays ?? 30, ...(options.twilioSubaccountId ? { twilioSubaccountId: options.twilioSubaccountId } : {}), ...(continuity ? { continuity } : {}), status: "starting", providerStatus: "queued", createdAt: Date.now(), updatedAt: Date.now() };
   const claim = await claimPhoneCallStart(userId, call);
   if (!claim.created) return claim.call;
   const claimedCall = claim.call;
@@ -195,6 +196,7 @@ export async function startTwilioCallForUser(userId: number, input: TwilioCallIn
     if (!providerCallId) throw new Error("Twilio returned no call receipt");
     const persisted = await persistPhoneCallProviderResult(userId, claimedCall, { status: "bridging", providerCallId });
     if (!persisted) throw new Error("Twilio accepted the call, but Chusky could not confirm its durable call record. Do not retry this request.");
+    await enqueueVoiceCallReconciliation(userId, claimedCall.id, "provider");
     return persisted;
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 500) : "Twilio call setup failed";
@@ -211,6 +213,7 @@ export async function startTwilioCallForUser(userId: number, input: TwilioCallIn
         error: "Twilio accepted the call, but Chusky is still reconciling its durable call record. Do not retry this request.",
         terminalReason: "provider_accepted_reconciliation_pending",
       }).catch(() => undefined);
+      await enqueueVoiceCallReconciliation(userId, claimedCall.id, "provider").catch(() => undefined);
       throw new Error("Twilio accepted the call, but Chusky could not confirm its durable call record. Do not retry this request.");
     }
     await updatePhoneCall(userId, claimedCall.id, { status: "failed", error: message });

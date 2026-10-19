@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { addPhoneCall, getBlandPhoneCallByProviderId, getPhoneCall, updatePhoneCall, type PhoneCallRecord } from "../store.js";
 import { isValidBlandToolSecret } from "./blandSecurity.js";
-import type { CallProfile, VoiceCallProfile } from "./voiceProfile.js";
+import { voiceRecordingBlockReason, type CallProfile, type VoiceCallProfile } from "./voiceProfile.js";
 
 const E164 = /^\+[1-9]\d{7,14}$/;
 
@@ -103,6 +103,8 @@ export async function registerBlandInboundCall(input: {
   from?: unknown;
 }): Promise<PhoneCallRecord> {
   if (!/^[A-Za-z0-9_-]{6,160}$/.test(input.providerCallId)) throw new Error("Invalid Bland inbound provider call ID");
+  const recordingBlock = input.route.voiceProfile ? voiceRecordingBlockReason(input.route.voiceProfile) : undefined;
+  if (recordingBlock) throw new Error(recordingBlock);
   const existingByProvider = await getBlandPhoneCallByProviderId(input.providerCallId);
   if (existingByProvider) {
     if (existingByProvider.userId !== input.route.userId) throw new Error("Bland inbound call is linked to another owner");
@@ -122,6 +124,7 @@ export async function registerBlandInboundCall(input: {
     direction: "inbound",
     callProfile: input.route.callProfile,
     ...(input.route.voiceProfile ? { voiceProfile: input.route.voiceProfile } : {}),
+    transcriptRetentionDays: input.route.voiceProfile?.controls?.retentionDays ?? 30,
     callVerification: verified ? "verified" : input.route.callProfile === "business" ? "identified" : "public",
     // Bland's live event payload may omit `from`; retain the configured line
     // until the post-call payload provides the caller number.

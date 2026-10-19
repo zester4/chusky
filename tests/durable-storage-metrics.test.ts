@@ -9,8 +9,14 @@ import { RedisMetricsPublisher } from "../src/redisMetricsPublisher.js";
 class MetricClient {
   calls: Array<{ text: string; values?: unknown[] }> = [];
   returnedRows: Array<Record<string, unknown>> = [];
+  failQueryMetricInsert = false;
+  blockQueryMetricInsert?: Promise<void>;
   async query(text: string, values?: unknown[]) {
     this.calls.push({ text, values });
+    if (text.includes("INSERT INTO chusky_query_metric_sample")) {
+      if (this.blockQueryMetricInsert) await this.blockQueryMetricInsert;
+      if (this.failQueryMetricInsert) throw new Error("Neon query metrics unavailable");
+    }
     return { rows: this.returnedRows as never[] };
   }
   release() { /* fake */ }
@@ -95,6 +101,40 @@ test("query telemetry records bounded transfer counters without retaining SQL or
     commands: 1, errors: 0, request_bytes: 10, response_bytes: 20,
     duration_ms: 1, max_value_bytes: 20,
   }]);
+});
+
+test("query telemetry keeps a failed batch and retries the same id after Neon recovers", async () => {
+  const pool = new MetricPool();
+  const state = new NeonDurableState(pool as never);
+  await (state as unknown as { measuredQuery: (queryable: unknown, text: string) => Promise<unknown> }).measuredQuery(pool.client, "SELECT 1");
+
+  pool.client.failQueryMetricInsert = true;
+  await assert.rejects(() => state.flushQueryMetrics(), /Neon query metrics unavailable/);
+  const failedInsert = pool.client.calls.find((call) => call.text.includes("INSERT INTO chusky_query_metric_sample"));
+  assert.ok(failedInsert);
+
+  pool.client.failQueryMetricInsert = false;
+  (state as unknown as { queryMetricFlushRetryAt: number }).queryMetricFlushRetryAt = 0;
+  await state.flushQueryMetrics();
+  const inserts = pool.client.calls.filter((call) => call.text.includes("INSERT INTO chusky_query_metric_sample"));
+  assert.equal(inserts.length, 2);
+  assert.equal(inserts[0]?.values?.[1], inserts[1]?.values?.[1], "a retry must be idempotent for the same batch");
+});
+
+test("query telemetry flushes are single-flight", async () => {
+  const pool = new MetricPool();
+  const state = new NeonDurableState(pool as never);
+  await (state as unknown as { measuredQuery: (queryable: unknown, text: string) => Promise<unknown> }).measuredQuery(pool.client, "SELECT 1");
+
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  pool.client.blockQueryMetricInsert = blocked;
+  const first = state.flushQueryMetrics();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const second = state.flushQueryMetrics();
+  release();
+  await Promise.all([first, second]);
+  assert.equal(pool.client.calls.filter((call) => call.text.includes("INSERT INTO chusky_query_metric_sample")).length, 1);
 });
 
 test("query telemetry attributes transfer counters to a bounded API route", async () => {

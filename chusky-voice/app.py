@@ -85,6 +85,7 @@ class Settings:
     max_active_calls: int
     twilio_auth_token: str
     twilio_media_stream_url: str
+    chusky_stream_authorize_url: str
     stt_model: str
     stt_eager_eot_threshold: float
     stt_eot_threshold: float
@@ -115,8 +116,11 @@ class Settings:
         if not context_url and turn_url.endswith("/turn"):
             context_url = f"{turn_url[:-len('/turn')]}/context"
         status_url = os.getenv("CHUSKY_VOICE_STATUS_URL", "http://127.0.0.1:3003/internal/twilio/status").strip()
-        if not secret or not deepgram or not turn_url.startswith(("http://", "https://")) or not turn_url.endswith("/turn") or not context_url.startswith(("http://", "https://")) or not status_url.startswith(("http://", "https://")):
-            raise RuntimeError("TWILIO_MEDIA_BRIDGE_SECRET, DEEPGRAM_API_KEY, CHUSKY_VOICE_TURN_URL ending in /turn, CHUSKY_VOICE_CONTEXT_URL, and CHUSKY_VOICE_STATUS_URL are required")
+        authorize_url = os.getenv("CHUSKY_VOICE_STREAM_AUTHORIZE_URL", "").strip()
+        if not authorize_url and turn_url.endswith("/turn"):
+            authorize_url = f"{turn_url[:-len('/turn')]}/stream-authorize"
+        if not secret or not deepgram or not turn_url.startswith(("http://", "https://")) or not turn_url.endswith("/turn") or not context_url.startswith(("http://", "https://")) or not status_url.startswith(("http://", "https://")) or not authorize_url.startswith(("http://", "https://")):
+            raise RuntimeError("TWILIO_MEDIA_BRIDGE_SECRET, DEEPGRAM_API_KEY, CHUSKY_VOICE_TURN_URL ending in /turn, CHUSKY_VOICE_CONTEXT_URL, CHUSKY_VOICE_STATUS_URL, and CHUSKY_VOICE_STREAM_AUTHORIZE_URL are required")
         elevenlabs_enabled = os.getenv("VOICE_ELEVENLABS_ENABLED", "false").strip().lower() == "true"
         elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "").strip()
         elevenlabs_voice_id = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
@@ -132,6 +136,7 @@ class Settings:
             max(1, min(int(os.getenv("VOICE_BRIDGE_MAX_ACTIVE_CALLS", "4")), 20)),
             os.getenv("TWILIO_AUTH_TOKEN", "").strip(),
             os.getenv("TWILIO_MEDIA_STREAM_URL", "").strip().rstrip("/"),
+            authorize_url,
             os.getenv("VOICE_STT_MODEL", "flux-general-en").strip(),
             max(0.3, min(float(os.getenv("VOICE_STT_EAGER_EOT_THRESHOLD", "0.45")), 0.9)),
             max(0.5, min(float(os.getenv("VOICE_STT_EOT_THRESHOLD", "0.65")), 0.9)),
@@ -267,6 +272,7 @@ class VoiceTurnResult:
     text: str
     cost: float
     first_audio_ms: int | None = None
+    end_call: bool = False
 
 
 class ProviderStreamEnded(RuntimeError):
@@ -281,7 +287,7 @@ class TwilioVoiceCall:
     resample work. The legacy PCM route remains an explicit configuration
     rollback; Chusky remains the sole agent/LLM runtime.
     """
-    def __init__(self, call_id: str, user_id: int, stream_sid: str, websocket: WebSocket, settings: Settings, metrics: "BridgeMetrics", tts_model: str | None = None) -> None:
+    def __init__(self, call_id: str, user_id: int, stream_sid: str, websocket: WebSocket, settings: Settings, metrics: "BridgeMetrics", tts_model: str | None = None, fallback_greeting: str | None = None) -> None:
         self.call_id, self.user_id, self.stream_sid = call_id, user_id, stream_sid
         self.websocket, self.settings = websocket, settings
         self.bridge_session_id = f"{stream_sid}-{uuid.uuid4().hex[:12]}"
@@ -314,6 +320,7 @@ class TwilioVoiceCall:
         self.outcome_turns: deque[dict[str, str]] = deque(maxlen=12)
         self.outcome_committed = False
         self.call_greeting: str | None = None
+        self.fallback_greeting = normalize_voice_text(fallback_greeting or "").strip()[:1_000] or None
         self.greeting_sent = False
         self.eager_end_times: dict[int, float] = {}
         self.response_started_at = 0.0
@@ -475,7 +482,7 @@ class TwilioVoiceCall:
             raise RuntimeError("call context did not include a greeting")
         except Exception as error:
             LOG.warning("Call context unavailable; using neutral opening: %s", type(error).__name__, extra={"call_id": self.call_id})
-            return "Hello, this is Chusky, an AI voice assistant. May I ask who I’m speaking with?"
+            return self.fallback_greeting or "Hello, this is Chusky calling on behalf of the person or business who asked me to reach you. May I ask who I’m speaking with?"
 
     async def _receive_twilio(self) -> None:
         while not self.stop.is_set():
@@ -984,6 +991,7 @@ class TwilioVoiceCall:
         buffer = ""
         full_text = ""
         cost = 0.0
+        end_call = False
         first_delta_recorded = False
         interrupted_speech = await self._take_interrupted_speech_context()
         self.tts_done_event = asyncio.Event()
@@ -1043,6 +1051,7 @@ class TwilioVoiceCall:
                             if done_text:
                                 full_text = done_text
                                 buffer = done_text
+                        end_call = event.get("endCall") is True
                     elif event.get("type") == "error":
                         await self._cancel_tool_progress()
                         raise RuntimeError("streaming voice turn failed")
@@ -1056,7 +1065,7 @@ class TwilioVoiceCall:
             self.metrics.agent_turn_ms_total += int((time.monotonic() - started) * 1000)
             self.metrics.agent_turns += 1
             first_audio_ms = max(0, round((self.turn_first_audio_at - started) * 1000)) if self.turn_first_audio_at else None
-            return VoiceTurnResult(text=normalize_voice_text(full_text)[:5000], cost=cost, first_audio_ms=first_audio_ms)
+            return VoiceTurnResult(text=normalize_voice_text(full_text)[:5000], cost=cost, first_audio_ms=first_audio_ms, end_call=end_call)
         except asyncio.CancelledError:
             await self._cancel_tool_progress()
             raise
@@ -1181,6 +1190,12 @@ class TwilioVoiceCall:
             if result.first_audio_ms is not None and self.first_response_ms is None:
                 self.first_response_ms = result.first_audio_ms
             self.outcome_turns.append({"transcript": transcript[:900], "response": result.text[:900]})
+            if result.end_call:
+                self.stop.set()
+                try:
+                    await self.websocket.close(code=1000, reason="caller_opted_out")
+                except Exception:
+                    pass
         except Exception:
             # The caller may already have heard the completed streamed answer.
             # Never generate or speak another answer merely because durable
@@ -2410,6 +2425,37 @@ _recall_probe_lock = asyncio.Lock()
 _recall_probe_cache: tuple[float, str] | None = None
 
 
+async def authorize_twilio_stream_with_root(
+    websocket: WebSocket,
+    settings: Settings,
+    call_id: str,
+    user_id: int,
+    ticket: str,
+    tts_model: str | None,
+) -> bool:
+    """Authorize a managed-number stream without receiving tenant secrets.
+
+    Twilio signs the WebSocket with the account that owns the number. The root
+    service resolves that account from the owner-scoped call record and
+    validates the signature. The bridge only forwards the signature and its
+    short-lived Chusky ticket over the already authenticated bridge boundary.
+    """
+    try:
+        signature = str(websocket.headers.get("x-twilio-signature", "") or "").strip()
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=1.5)) as client:
+            response = await client.post(
+                settings.chusky_stream_authorize_url,
+                headers={
+                    "Authorization": f"Bearer {settings.bridge_secret}",
+                    "X-Twilio-Signature": signature,
+                },
+                json={"callId": call_id, "userId": user_id, "ticket": ticket, **({"ttsModel": tts_model} if tts_model else {})},
+            )
+        return response.status_code == 200
+    except (httpx.HTTPError, OSError, asyncio.TimeoutError):
+        return False
+
+
 async def probe_recall_media_authorization(settings: RecallSettings) -> str:
     """Verify the root media route without exposing secrets or meeting data."""
     global _recall_probe_cache
@@ -2838,7 +2884,8 @@ async def twilio_stream(websocket: WebSocket) -> None:
     except RuntimeError:
         await websocket.close(code=1011)
         return
-    if not valid_twilio_websocket(websocket, settings):
+    local_twilio_signature = valid_twilio_websocket(websocket, settings, require_signature=True)
+    if not local_twilio_signature and not valid_twilio_websocket(websocket, settings, require_signature=False):
         await websocket.close(code=1008)
         return
     await websocket.accept()
@@ -2861,6 +2908,7 @@ async def twilio_stream(websocket: WebSocket) -> None:
             user_id = 0
         ticket = str(params.get("ticket") or "")
         tts_model = str(params.get("ttsModel") or "").strip() or None
+        fallback_greeting = normalize_voice_text(str(params.get("fallbackGreeting") or "")).strip()[:1_000] or None
         stream_sid = str(start.get("streamSid") or start_event.get("streamSid") or "").strip()
         media_format = start.get("mediaFormat") or {}
         if (not call_id.startswith("twc_") or user_id <= 0 or not stream_sid
@@ -2871,12 +2919,19 @@ async def twilio_stream(websocket: WebSocket) -> None:
                 or (tts_model is not None and not re.fullmatch(r"flux-[a-z]+-en", tts_model))):
             await websocket.close(code=1008)
             return
+        # Always ask the root service for the final authorization. Besides
+        # validating the owning tenant's Twilio signature, this is where the
+        # distributed active-call lease is claimed. A locally valid parent
+        # signature must not bypass that cross-replica capacity control.
+        if not await authorize_twilio_stream_with_root(websocket, settings, call_id, user_id, ticket, tts_model):
+            await websocket.close(code=1008)
+            return
         if not await calls.reserve_twilio(call_id, settings):
             await websocket.close(code=1013)
             return
         metrics.twilio_started += 1
         try:
-            await TwilioVoiceCall(call_id, user_id, stream_sid, websocket, settings, metrics, tts_model=tts_model).run()
+            await TwilioVoiceCall(call_id, user_id, stream_sid, websocket, settings, metrics, tts_model=tts_model, fallback_greeting=fallback_greeting).run()
         finally:
             await calls.release_twilio(call_id)
     except (WebSocketDisconnect, asyncio.TimeoutError, json.JSONDecodeError):

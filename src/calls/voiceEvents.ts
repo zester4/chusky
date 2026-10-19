@@ -22,6 +22,8 @@ export type VoiceCallEventType =
   | "turn_started"
   | "turn_completed"
   | "turn_interrupted"
+  | "transcript_expired"
+  | "transcript_deleted"
   | "call_ended"
   | "call_failed";
 
@@ -47,7 +49,7 @@ export interface VoiceCallEventInput {
 
 const EVENT_TYPES = new Set<VoiceCallEventType>([
   "call_started", "call_initiated", "call_ringing", "call_answered", "voicemail_detected", "voicemail_left", "call_busy", "call_no_answer", "call_cancelled", "call_unknown", "handoff_requested", "handoff_started", "handoff_failed",
-  "tool_started", "tool_completed", "tool_failed", "turn_started", "turn_completed", "turn_interrupted", "call_ended", "call_failed",
+  "tool_started", "tool_completed", "tool_failed", "turn_started", "turn_completed", "turn_interrupted", "transcript_expired", "transcript_deleted", "call_ended", "call_failed",
 ]);
 
 /** Provider callbacks are at-least-once and may arrive out of order. Timeline

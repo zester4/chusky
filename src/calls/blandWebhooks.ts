@@ -1,11 +1,15 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { config } from "../config.js";
 import {
   claimDeliveryLease,
+  claimVoiceCapacity,
   completeDeliveryLease,
+  enqueueVoiceCallReconciliation,
   finalizeBlandPhoneCall,
   getBlandPhoneCallByProviderId,
   getPhoneCall,
   releaseDeliveryLease,
+  releaseVoiceCapacity,
   appendPhoneCallEvent,
   updatePhoneCall,
   type Message,
@@ -238,6 +242,10 @@ export async function processBlandWebhook(input: {
         return fail(404, "unknown Bland call");
       }
       const saved = await getPhoneCall(identity.userId, identity.callId);
+      if (saved && (["ended", "failed"].includes(saved.status) || ["completed", "busy", "no-answer", "failed", "canceled", "machine"].includes(saved.providerStatus ?? ""))) {
+        await releaseVoiceCapacity(saved.id).catch(() => false);
+        await enqueueVoiceCallReconciliation(saved.userId, saved.id, "outcome").catch(() => undefined);
+      }
       if (saved?.outcome && saved.followUpStatus !== "scheduled") {
         try {
           const followUp = await schedulePhoneCallFollowUps(saved, saved.outcome);
@@ -261,6 +269,14 @@ export async function processBlandWebhook(input: {
       await updatePhoneCall(identity.userId, identity.callId, { providerCallId: callId, ...(providerStatus ? { providerStatus } : {}) });
     } else {
       await updatePhoneCall(identity.userId, identity.callId, { providerCallId: callId, ...(status ? { status } : {}), ...(providerStatus ? { providerStatus } : {}) });
+    }
+    if (status === "bridging" || status === "active" || providerStatus === "initiated" || providerStatus === "ringing" || providerStatus === "in-progress" || providerStatus === "answered") {
+      await claimVoiceCapacity(identity.callId, config.twilioVoiceMaxActiveCalls, config.twilioVoiceMaxCallSeconds * 1000).catch(() => false);
+    }
+    const latest = await getPhoneCall(identity.userId, identity.callId);
+    if (latest && (["ended", "failed"].includes(latest.status) || ["completed", "busy", "no-answer", "failed", "canceled", "machine"].includes(latest.providerStatus ?? ""))) {
+      await releaseVoiceCapacity(latest.id).catch(() => false);
+      await enqueueVoiceCallReconciliation(latest.userId, latest.id, "outcome").catch(() => undefined);
     }
     if (!(await completeDeliveryLease(deliveryKey, leaseToken, DELIVERY_TTL_SECONDS))) return fail(503, "Bland callback lease expired before completion");
     return { status: 200, body: { ok: true } };

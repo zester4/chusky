@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { customerPriceForProviderCost, purchaseTwilioNumber, searchTwilioNumbers, twilioNumberCatalog } from "../src/calls/twilioNumbers.js";
+import { customerPriceForProviderCost, isTwilioVoiceBridgeConfigured, purchaseTwilioNumber, searchTwilioNumbers, twilioNumberCatalog } from "../src/calls/twilioNumbers.js";
 
 const configured = {
   enabled: true,
@@ -47,4 +47,21 @@ test("number pricing keeps the standard price below the threshold and hides over
   assert.equal(customerPriceForProviderCost(115, policy), 200);
   assert.equal(customerPriceForProviderCost(160, policy), 185);
   assert.equal(customerPriceForProviderCost(200, policy), undefined);
+});
+
+test("tenant number sales require a complete Twilio voice bridge", () => {
+  const base = {
+    enabled: true,
+    inboundEnabled: true,
+    accountSid: configured.accountSid,
+    authToken: configured.authToken,
+    webhookBaseUrl: configured.webhookBaseUrl,
+    mediaStreamUrl: "wss://voice.example.com/twilio-stream",
+    mediaBridgeSecret: "bridge-secret",
+  };
+  assert.equal(isTwilioVoiceBridgeConfigured(base), true);
+  assert.equal(isTwilioVoiceBridgeConfigured({ ...base, enabled: false }), false);
+  assert.equal(isTwilioVoiceBridgeConfigured({ ...base, inboundEnabled: false }), false);
+  assert.equal(isTwilioVoiceBridgeConfigured({ ...base, mediaStreamUrl: "https://voice.example.com/twilio-stream" }), false);
+  assert.equal(isTwilioVoiceBridgeConfigured({ ...base, mediaBridgeSecret: "" }), false);
 });

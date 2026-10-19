@@ -18,7 +18,7 @@ import { assertPublicHttpUrl, createTinyFishClient } from "./tinyfish.js";
 import { receiveTinyFishMonitorWebhook, tinyFishMonitorSignature, tinyFishMonitorSnapshotHash, validateTinyFishMonitorSchedule } from "./tinyfishMonitors.js";
 import { reconcileTinyFishResearchRun } from "./tinyfishResearch.js";
 import {
-  addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, listJobs, listJobOccurrences, createJobOccurrence, updateJobOccurrence, listReminders, claimHandoffBudget, searchConversationMessages, getConversationMessage, isDurableStore,
+  addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, getVoiceCallProfile, listJobs, listJobOccurrences, createJobOccurrence, updateJobOccurrence, listReminders, claimHandoffBudget, searchConversationMessages, getConversationMessage, isDurableStore,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
   upsertMeetingContact, listMeetingContacts, deleteMeetingContact, getMeetingContact, updateMeetingContact,
   readScratchpad, updateJob, updateReminder, transitionReminderStatus, writeScratchpad,
@@ -2350,12 +2350,19 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
         : undefined;
       const input = { phoneNumber, purpose, ...(profile ? { profile } : {}), ...(continuityFromCallId ? { continuityFromCallId } : {}), callProfile, ...(requestKey ? { requestKey } : {}) };
       if (phoneCallLauncherForTests) return phoneCallLauncherForTests(userId, input);
-      // Prefer Bland when it is fully configured, but fall back to a healthy
-      // Twilio transport when Bland is enabled but unavailable. Do not fail
-      // over after an ambiguous provider request: that could place two calls.
-      return config.blandVoiceEnabled && isBlandVoiceConfigured()
-        ? startBlandCallForUser(userId, input)
-        : startTwilioCallForUser(userId, input);
+      // Provider choice is pinned by deployment configuration. Never switch
+      // transports implicitly: a fallback can change caller ID/billing and
+      // can place a duplicate call after an ambiguous provider response.
+      const savedVoiceProfile = await getVoiceCallProfile(userId);
+      const selectedProvider = savedVoiceProfile?.provider ?? config.voiceCallProvider;
+      if (selectedProvider === "bland") {
+        if (!config.blandVoiceEnabled || !isBlandVoiceConfigured()) {
+          throw new Error("The configured voice provider is Bland, but Bland is not fully configured. No alternate provider was selected.");
+        }
+        return startBlandCallForUser(userId, input);
+      }
+      if (!config.twilioVoiceEnabled) throw new Error("The configured voice provider is Twilio, but Twilio calling is disabled. No alternate provider was selected.");
+      return startTwilioCallForUser(userId, input);
     }
     case "CHUCK_LIST_PHONE_CALLS": return listPhoneCalls(userId);
     case "CHUCK_CONTROL_PHONE_CALL": {

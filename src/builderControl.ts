@@ -27,7 +27,9 @@ export const builderEnabled = () => process.env.CHUSKY_BUILDER_ADMIN_ENABLED ===
 export function defaultBuilderVoiceControl(): BuilderVoiceControl {
   return {
     subaccountManagementEnabled: process.env.TWILIO_SUBACCOUNT_MANAGEMENT_ENABLED === "true",
-    numberManagementEnabled: process.env.TWILIO_NUMBER_MANAGEMENT_ENABLED === "true",
+    numberManagementEnabled: process.env.TWILIO_NUMBER_MANAGEMENT_ENABLED === "true"
+      && process.env.TWILIO_CUSTOMER_BILLING_READY === "true"
+      && process.env.TWILIO_REGULATORY_READY === "true",
     // The persona catalogue is safe to expose by default. It does not grant
     // provider credentials or external-write permissions.
     personaLibraryEnabled: process.env.CHUSKY_VOICE_PERSONA_LIBRARY_ENABLED !== "false",
@@ -35,7 +37,15 @@ export function defaultBuilderVoiceControl(): BuilderVoiceControl {
 }
 
 export function builderVoiceControl(state?: BuilderControl): BuilderVoiceControl {
-  return state?.voice ? { ...defaultBuilderVoiceControl(), ...state.voice } : defaultBuilderVoiceControl();
+  const voice = state?.voice ? { ...defaultBuilderVoiceControl(), ...state.voice } : defaultBuilderVoiceControl();
+  // A stale persisted enablement must not reopen number sales after an
+  // operator removes either production-readiness attestation.
+  return {
+    ...voice,
+    numberManagementEnabled: voice.numberManagementEnabled
+      && process.env.TWILIO_CUSTOMER_BILLING_READY === "true"
+      && process.env.TWILIO_REGULATORY_READY === "true",
+  };
 }
 
 export async function getBuilderVoiceControls(): Promise<BuilderVoiceControl> {

@@ -362,7 +362,18 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         self.call.settings.chusky_context_url = "http://chusky.example/internal/twilio/context"
         self.call.http = ContextHttp()
         greeting = await self.call._load_call_greeting()
-        self.assertEqual(greeting, "Hello, this is Chusky, an AI voice assistant. May I ask who I’m speaking with?")
+        self.assertEqual(greeting, "Hello, this is Chusky calling on behalf of the person or business who asked me to reach you. May I ask who I’m speaking with?")
+
+    async def test_context_failure_uses_signed_persona_fallback(self):
+        class ContextHttp:
+            async def get(self, _url, **_kwargs):
+                raise RuntimeError("context unavailable")
+
+        self.call.fallback_greeting = "Hello, this is Amina, an assistant from United Cars. May I speak with Jordan?"
+        self.call.settings.chusky_context_url = "http://chusky.example/internal/twilio/context"
+        self.call.http = ContextHttp()
+        greeting = await self.call._load_call_greeting()
+        self.assertEqual(greeting, self.call.fallback_greeting)
 
     async def test_twilio_ingress_is_sent_to_flux_without_transcoding(self):
         sent_audio = []

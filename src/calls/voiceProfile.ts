@@ -11,6 +11,9 @@ export type VoiceGreetingMode = "dynamic" | "static" | "human_first";
 export type VoiceRecordingPolicy = "disabled" | "announce" | "enabled";
 /** How the caller-facing introduction identifies the automated service. */
 export type VoiceDisclosureMode = "assistant" | "explicit_ai";
+/** Provider pinned by the saved workspace profile. The deployment setting is
+ * only the default; a call must never silently move between providers. */
+export type VoiceCallProvider = "twilio" | "bland";
 
 export interface VoiceQuietHours {
   timezone: string;
@@ -35,6 +38,9 @@ export interface VoiceCallProfile {
   personaVersion?: number;
   identity: string;
   organization?: string;
+  /** Optional workspace-level provider pin. Inbound numbers pin their own
+   * provider through the durable route record. */
+  provider?: VoiceCallProvider;
   /** Optional verified display name of the person the call is for. */
   contactName?: string;
   mode: VoiceCallMode;
@@ -51,7 +57,7 @@ export interface VoiceCallProfile {
 }
 
 export interface VoiceCallProfileInput {
-  personaId?: unknown; personaVersion?: unknown; identity?: unknown; organization?: unknown; contactName?: unknown; mode?: unknown; tone?: unknown; opening?: unknown;
+  personaId?: unknown; personaVersion?: unknown; identity?: unknown; organization?: unknown; provider?: unknown; contactName?: unknown; mode?: unknown; tone?: unknown; opening?: unknown;
   facts?: unknown; guardrails?: unknown; capabilities?: unknown; disclosure?: unknown; controls?: unknown; toolPolicy?: VoiceToolPolicyInput;
 }
 
@@ -110,8 +116,15 @@ export function normalizeVoiceCallControls(value: unknown): VoiceCallControls | 
   };
 }
 
+export function voiceRecordingBlockReason(profile: VoiceCallProfile): string | undefined {
+  if (profile.controls?.recording && profile.controls.recording !== "disabled") return "Call recording is not enabled on this deployment. Disable recording before placing the call.";
+  return undefined;
+}
+
 /** Returns a reason when a new outbound call must not be dialled now. */
 export function voiceCallDialBlockReason(profile: VoiceCallProfile, now = new Date()): string | undefined {
+  const recordingBlock = voiceRecordingBlockReason(profile);
+  if (recordingBlock) return recordingBlock;
   const quietHours = profile.controls?.quietHours;
   if (!quietHours) return undefined;
   const formatter = new Intl.DateTimeFormat("en-US", { timeZone: quietHours.timezone, hour: "2-digit", minute: "2-digit", weekday: "short", hourCycle: "h23" });
@@ -124,6 +137,14 @@ export function voiceCallDialBlockReason(profile: VoiceCallProfile, now = new Da
   const end = parse(quietHours.end);
   const blocked = start <= end ? minutes >= start && minutes < end : minutes >= start || minutes < end;
   return blocked ? `Outbound calling is paused during the configured quiet hours (${quietHours.timezone}).` : undefined;
+}
+
+/** Conservative, explicit do-not-contact phrases for transport-level opt-out
+ * enforcement. The model still handles softer objections conversationally,
+ * but these phrases must not depend on model compliance. */
+export function isVoiceOptOutRequest(value: unknown): boolean {
+  const text = typeof value === "string" ? value.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().toLowerCase() : "";
+  return /\b(?:stop calling|do not call|don't call|dont call|do not contact|don't contact|dont contact|remove me|take me off|unsubscribe|opt out|opt-out|never call me again)\b/.test(text);
 }
 
 /** Normalize before persistence; capability selections are retained as profile hints. */
@@ -140,6 +161,7 @@ export function normalizeVoiceCallProfile(value: unknown): VoiceCallProfile {
     ...(isVoicePersonaId(input.personaId) ? { personaId: input.personaId, personaVersion: getVoicePersona(input.personaId)?.version ?? (Number.isSafeInteger(input.personaVersion) ? Number(input.personaVersion) : 1) } : {}),
     identity: safeVoiceIdentity(input.identity),
     ...(organization ? { organization } : {}),
+    ...(input.provider === "twilio" || input.provider === "bland" ? { provider: input.provider } : {}),
     ...(contactName ? { contactName } : {}),
     mode: typeof input.mode === "string" && MODES.includes(input.mode as VoiceCallMode) ? input.mode as VoiceCallMode : "general",
     tone: typeof input.tone === "string" && TONES.includes(input.tone as VoiceCallTone) ? input.tone as VoiceCallTone : "professional",

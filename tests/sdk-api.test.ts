@@ -2118,11 +2118,11 @@ test("applying a persona propagates to the owner's managed inbound routes", asyn
 });
 
 test("Bland readiness controls dashboard call availability and the selected provider", async () => {
-  const keys = ["betterAuthEnabled", "blandVoiceEnabled", "blandApiKey", "blandWebhookSecret", "blandWebhookUrl", "blandConsultToolId", "blandConsultToolSecret", "twilioVoiceEnabled"] as const;
+  const keys = ["betterAuthEnabled", "voiceCallProvider", "blandVoiceEnabled", "blandApiKey", "blandWebhookSecret", "blandWebhookUrl", "blandConsultToolId", "blandConsultToolSecret", "twilioVoiceEnabled"] as const;
   const original = Object.fromEntries(keys.map((key) => [key, config[key]]));
   try {
     Object.assign(config, {
-      betterAuthEnabled: true, blandVoiceEnabled: true, blandApiKey: "bland-key",
+      betterAuthEnabled: true, voiceCallProvider: "bland", blandVoiceEnabled: true, blandApiKey: "bland-key",
       blandWebhookSecret: "a-distinct-webhook-signing-secret-with-entropy",
       blandWebhookUrl: "https://chusky.example/bland/webhook",
       blandConsultToolId: "TL-1234567890", blandConsultToolSecret: "a-distinct-url-safe-tool-secret-with-entropy",
@@ -2135,7 +2135,7 @@ test("Bland readiness controls dashboard call availability and the selected prov
     const headers = { "X-Test-Web-User": "bland-user", "Content-Type": "application/json" };
     const listed = await api.fetch(new Request("http://local/v1/account/calls", { headers }));
     assert.equal(listed.status, 200);
-    assert.deepEqual(await listed.json(), { available: true, provider: "bland", data: [] });
+    assert.deepEqual(await listed.json(), { available: true, provider: "bland", capabilities: { rawAudioRecording: false, transcriptRetention: true, transcriptDeletion: true }, data: [] });
     const requested = await api.fetch(new Request("http://local/v1/account/calls", { method: "POST", headers, body: JSON.stringify({ phoneNumber: "+15550001", purpose: "Follow up on the demo" }) }));
     assert.equal(requested.status, 201);
   } finally {

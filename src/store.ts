@@ -39,6 +39,7 @@ import type { ShoppingRun, ShoppingSite } from "./shopping/types.js";
 import type { CompanyAgentProfile, CompanyPolicy } from "./companyPlatform.js";
 import type { RecallChatCommand } from "./meetings/recall.js";
 import type { MeetingCapabilities } from "./meetings/capabilities.js";
+import type { VoiceCallReconciliationRecord } from "./calls/reconciliationTypes.js";
 
 export interface SessionReadOptions {
   /** Read only the durable domains needed by this operation. */
@@ -523,6 +524,11 @@ export interface PhoneCallRecord {
   summary?: string;
   /** Final Deepgram turns retained as the owner-scoped call transcript. */
   transcript?: PhoneCallTranscript;
+  /** Retention is snapshotted at call creation so later profile edits do not
+   * unexpectedly extend or shorten an existing caller's data lifetime. */
+  transcriptRetentionDays?: 1 | 7 | 30;
+  transcriptExpiresAt?: number;
+  transcriptStatus?: PhoneCallTranscriptStatus;
   /** Structured owner-private outcome generated from bounded completed turns. */
   outcome?: import("./calls/outcome.js").PhoneCallOutcome;
   /** Bounded provider-neutral lifecycle facts for the call page and QA. */
@@ -633,6 +639,8 @@ export interface PhoneCallTranscript {
   truncated: boolean;
   updatedAt: number;
 }
+
+export type PhoneCallTranscriptStatus = "active" | "expired" | "deleted";
 
 export type RecallMeetingStatus = "creating" | "scheduled" | "joining" | "waiting_room" | "in_call" | "leaving" | "ended" | "failed";
 
@@ -2184,6 +2192,13 @@ interface Backend {
   listTwilioNumberOwnership(userId: number, limit: number): Promise<TwilioNumberOwnershipRecord[]>;
   appendTwilioBillingEntry(entry: TwilioBillingLedgerEntry): Promise<void>;
   listTwilioBillingEntries(userId: number, limit: number): Promise<TwilioBillingLedgerEntry[]>;
+  enqueueVoiceCallReconciliation(record: VoiceCallReconciliationRecord): Promise<void>;
+  claimVoiceCallReconciliations(nowMs: number, limit: number, leaseMs: number, leaseToken: string): Promise<VoiceCallReconciliationRecord[]>;
+  completeVoiceCallReconciliation(id: string, leaseToken: string): Promise<boolean>;
+  retryVoiceCallReconciliation(id: string, leaseToken: string, nextAttemptAt: number, errorMessage: string): Promise<boolean>;
+  /** Distributed active-call lease shared by every voice bridge replica. */
+  claimVoiceCapacity(callId: string, limit: number, leaseMs: number, nowMs?: number): Promise<boolean>;
+  releaseVoiceCapacity(callId: string): Promise<boolean>;
   claimRecallMeetingCreation(userId: number, instanceHash: string, token: string, leaseMs: number): Promise<boolean>;
   releaseRecallMeetingCreation(userId: number, instanceHash: string, token: string): Promise<boolean>;
   putRecallVisualFrame(userId: number, meetingId: string, encryptedFrame: string, ttlSeconds: number, minIntervalSeconds: number): Promise<boolean>;
@@ -2482,12 +2497,22 @@ class RedisBackend implements Backend {
   /** Coalesce concurrent reads from dashboard/CLI fan-out without serving stale sessions. */
   private readonly sessionReadsInFlight = new Map<string, Promise<UserSession>>();
   private retentionLastRunAt = 0;
+  private storageMetricsFlushInFlight?: Promise<void>;
   constructor(private r: Redis, private readonly durableState?: NeonDurableState, private readonly durableSdkRunsEnabled = false, private readonly durableSdkTablesEnabled = false, private readonly durableStateMissionsEnabled = false, private readonly redisCommandMetrics = new RedisCommandMetrics(), private readonly redisMetricsPublisher?: RedisMetricsPublisher) {}
 
   private async missionOwnerUsesNeon(userId: number): Promise<boolean> {
     return this.durableStateMissionsEnabled && Boolean(this.durableState) && await this.durableState!.isMissionOwnerMigrated(userId);
   }
   async flushStorageMetrics(): Promise<void> {
+    if (this.storageMetricsFlushInFlight) return this.storageMetricsFlushInFlight;
+    const inFlight = this.flushStorageMetricsInternal();
+    this.storageMetricsFlushInFlight = inFlight;
+    try { await inFlight; }
+    finally {
+      if (this.storageMetricsFlushInFlight === inFlight) this.storageMetricsFlushInFlight = undefined;
+    }
+  }
+  private async flushStorageMetricsInternal(): Promise<void> {
     await this.redisMetricsPublisher?.flush();
     if (!this.durableState) return;
     try {
@@ -2497,7 +2522,6 @@ class RedisBackend implements Backend {
     }
     const now = Date.now();
     if (now - this.retentionLastRunAt < 60 * 60_000) return;
-    this.retentionLastRunAt = now;
     try {
       await this.durableState.pruneDurableStateRetention({
         messagesBeforeMs: now - config.durableStateRetentionDays * 24 * 60 * 60_000,
@@ -2508,6 +2532,7 @@ class RedisBackend implements Backend {
       await this.durableState.pruneQueryMetrics(now - 30 * 24 * 60 * 60_000);
       await this.durableState.pruneStorageMetrics(now - config.durableStorageMetricsRetentionDays * 24 * 60 * 60_000);
       if (durableMemoryConfigured()) await pruneMemoryReflections(now - config.durableStateRetentionDays * 24 * 60 * 60_000);
+      this.retentionLastRunAt = now;
     } catch (error) {
       logger.warn({ errorType: error instanceof Error ? error.name : "DurableRetentionError" }, "Durable retention sweep failed");
     }
@@ -2631,6 +2656,10 @@ class RedisBackend implements Backend {
   private twilioOwnershipSubaccountIndexKey = (subaccountId: string) => `chuck:voice:twilio-subaccount-numbers:${createHash("sha256").update(subaccountId).digest("hex")}`;
   private twilioBillingKey = (id: string) => `chuck:voice:twilio-billing:${createHash("sha256").update(id).digest("hex")}`;
   private twilioBillingIndexKey = (userId: number) => `chuck:user:${userId}:twilio-billing`;
+  private voiceReconciliationKey = (id: string) => `chuck:voice:reconciliation:${createHash("sha256").update(id).digest("hex")}`;
+  private voiceReconciliationIndexKey = () => "chuck:voice:reconciliation:due";
+  private voiceReconciliationLeaseKey = (id: string) => `chuck:voice:reconciliation-lease:${createHash("sha256").update(id).digest("hex")}`;
+  private voiceCapacityKey = () => "chuck:voice:active-capacity";
   private runKey = (id: string) => `chuck:run:${id}`;
   // Bind cancellation markers to the owner so the hot-path check does not
   // need to re-read the full agent-run checkpoint for authorization.
@@ -3782,6 +3811,82 @@ class RedisBackend implements Backend {
       try { return JSON.parse(raw) as TwilioBillingLedgerEntry; } catch { return undefined; }
     }));
     return records.filter((record): record is TwilioBillingLedgerEntry => record !== undefined && record.userId === userId);
+  }
+  async enqueueVoiceCallReconciliation(record: VoiceCallReconciliationRecord): Promise<void> {
+    if (this.durableState) return this.durableState.enqueueVoiceCallReconciliation(record);
+    const key = this.voiceReconciliationKey(record.id);
+    const priorRaw = await this.r.get(key);
+    let next = record;
+    if (priorRaw) {
+      try {
+        const prior = JSON.parse(priorRaw) as VoiceCallReconciliationRecord;
+        if (prior.userId !== record.userId || prior.callId !== record.callId || prior.phase !== record.phase) throw new Error("Voice reconciliation identity conflict");
+        next = { ...prior, providerCallId: record.providerCallId ?? prior.providerCallId, nextAttemptAt: Math.min(prior.nextAttemptAt, record.nextAttemptAt), status: prior.status === "running" && (prior.leaseUntil ?? 0) > Date.now() ? "running" : "pending", updatedAt: Date.now() };
+      } catch (error) {
+        if (error instanceof Error && error.message === "Voice reconciliation identity conflict") throw error;
+      }
+    }
+    await this.r.multi().set(key, JSON.stringify(next)).zadd(this.voiceReconciliationIndexKey(), next.nextAttemptAt, next.id).exec();
+  }
+  async claimVoiceCallReconciliations(nowMs: number, limit: number, leaseMs: number, leaseToken: string): Promise<VoiceCallReconciliationRecord[]> {
+    if (this.durableState) return this.durableState.claimVoiceCallReconciliations(nowMs, limit, leaseMs, leaseToken);
+    const ids = await this.r.zrangebyscore(this.voiceReconciliationIndexKey(), 0, nowMs, "LIMIT", 0, limit);
+    const claimed: VoiceCallReconciliationRecord[] = [];
+    for (const id of ids) {
+      if (claimed.length >= limit) break;
+      const lease = await this.claimDeliveryLease(this.voiceReconciliationLeaseKey(id), `${leaseToken}_${id}`.slice(0, 120), leaseMs);
+      if (lease !== "acquired") continue;
+      const key = this.voiceReconciliationKey(id);
+      const raw = await this.r.get(key);
+      if (!raw) { await this.r.zrem(this.voiceReconciliationIndexKey(), id); await this.releaseDeliveryLease(this.voiceReconciliationLeaseKey(id), `${leaseToken}_${id}`.slice(0, 120)); continue; }
+      try {
+        const record = JSON.parse(raw) as VoiceCallReconciliationRecord;
+        if (record.nextAttemptAt > nowMs || (record.status === "running" && (record.leaseUntil ?? 0) > nowMs)) { await this.releaseDeliveryLease(this.voiceReconciliationLeaseKey(id), `${leaseToken}_${id}`.slice(0, 120)); continue; }
+        const running = { ...record, status: "running" as const, leaseToken: `${leaseToken}_${id}`.slice(0, 120), leaseUntil: nowMs + leaseMs, attempts: Math.min(100, record.attempts + 1), updatedAt: nowMs };
+        await this.r.set(key, JSON.stringify(running));
+        claimed.push(running);
+      } catch {
+        await this.releaseDeliveryLease(this.voiceReconciliationLeaseKey(id), `${leaseToken}_${id}`.slice(0, 120));
+      }
+    }
+    return claimed;
+  }
+  async completeVoiceCallReconciliation(id: string, leaseToken: string): Promise<boolean> {
+    if (this.durableState) return this.durableState.completeVoiceCallReconciliation(id, leaseToken);
+    const key = this.voiceReconciliationKey(id);
+    const raw = await this.r.get(key);
+    if (!raw) return false;
+    let record: VoiceCallReconciliationRecord;
+    try { record = JSON.parse(raw) as VoiceCallReconciliationRecord; } catch { return false; }
+    if (record.leaseToken !== leaseToken) return false;
+    await this.r.multi().del(key).zrem(this.voiceReconciliationIndexKey(), id).exec();
+    await this.releaseDeliveryLease(this.voiceReconciliationLeaseKey(id), leaseToken);
+    return true;
+  }
+  async retryVoiceCallReconciliation(id: string, leaseToken: string, nextAttemptAt: number, errorMessage: string): Promise<boolean> {
+    if (this.durableState) return this.durableState.retryVoiceCallReconciliation(id, leaseToken, nextAttemptAt, errorMessage);
+    const key = this.voiceReconciliationKey(id);
+    const raw = await this.r.get(key);
+    if (!raw) return false;
+    let record: VoiceCallReconciliationRecord;
+    try { record = JSON.parse(raw) as VoiceCallReconciliationRecord; } catch { return false; }
+    if (record.leaseToken !== leaseToken) return false;
+    const next = { ...record, status: "pending" as const, nextAttemptAt, leaseToken: undefined, leaseUntil: undefined, lastError: errorMessage.slice(0, 500), updatedAt: Date.now() };
+    await this.r.multi().set(key, JSON.stringify(next)).zadd(this.voiceReconciliationIndexKey(), nextAttemptAt, id).exec();
+    await this.releaseDeliveryLease(this.voiceReconciliationLeaseKey(id), leaseToken);
+    return true;
+  }
+  async claimVoiceCapacity(callId: string, limit: number, leaseMs: number, nowMs = Date.now()): Promise<boolean> {
+    if (!/^(twc|blc)_[A-Za-z0-9_-]{1,120}$/.test(callId) || !Number.isSafeInteger(limit) || limit < 1 || limit > 10_000 || !Number.isSafeInteger(leaseMs) || leaseMs < 60_000 || leaseMs > 24 * 60 * 60_000) return false;
+    const result = await this.r.eval(
+      "redis.call('ZREMRANGEBYSCORE',KEYS[1],'-inf',ARGV[1]); local prior=redis.call('ZSCORE',KEYS[1],ARGV[2]); if prior then redis.call('ZADD',KEYS[1],ARGV[3],ARGV[2]); return 1 end; if redis.call('ZCARD',KEYS[1]) >= tonumber(ARGV[4]) then return 0 end; redis.call('ZADD',KEYS[1],ARGV[3],ARGV[2]); return 1",
+      1, this.voiceCapacityKey(), String(nowMs), callId, String(nowMs + leaseMs), String(limit),
+    );
+    return Number(result) === 1;
+  }
+  async releaseVoiceCapacity(callId: string): Promise<boolean> {
+    if (!/^(twc|blc)_[A-Za-z0-9_-]{1,120}$/.test(callId)) return false;
+    return Number(await this.r.zrem(this.voiceCapacityKey(), callId)) === 1;
   }
   async getApproval(userId: number, id: string): Promise<ApprovalRecord | undefined> {
     const raw = await this.r.get(this.approvalKey(id));
@@ -5376,6 +5481,8 @@ class MemoryBackend implements Backend {
   private approvals = new Map<string, ApprovalRecord>();
   private blandProviderCalls = new Map<string, { userId: number; callId: string; expiresAt: number }>();
   private voiceInboundRoutes = new Map<string, VoiceInboundRouteRecord>();
+  private voiceReconciliations = new Map<string, VoiceCallReconciliationRecord>();
+  private voiceCapacity = new Map<string, number>();
 
   async close(): Promise<void> {}
 
@@ -5653,6 +5760,46 @@ class MemoryBackend implements Backend {
   }
   async listTwilioBillingEntries(userId: number, limit: number) {
     return (this.twilioBillingEntries.get(userId) ?? []).slice(0, Math.max(1, Math.min(500, Math.floor(limit)))).map((entry) => structuredClone(entry));
+  }
+  async enqueueVoiceCallReconciliation(record: VoiceCallReconciliationRecord) {
+    const key = `${record.userId}:${record.callId}:${record.phase}`;
+    const prior = this.voiceReconciliations.get(key);
+    if (!prior) this.voiceReconciliations.set(key, structuredClone(record));
+    else this.voiceReconciliations.set(key, structuredClone({ ...prior, providerCallId: record.providerCallId ?? prior.providerCallId, nextAttemptAt: Math.min(prior.nextAttemptAt, record.nextAttemptAt), status: prior.status === "running" && (prior.leaseUntil ?? 0) > Date.now() ? "running" : "pending", updatedAt: Date.now() }));
+  }
+  async claimVoiceCallReconciliations(nowMs: number, limit: number, leaseMs: number, leaseToken: string) {
+    const claimed: VoiceCallReconciliationRecord[] = [];
+    for (const [key, value] of [...this.voiceReconciliations.entries()].sort((left, right) => left[1].nextAttemptAt - right[1].nextAttemptAt)) {
+      if (claimed.length >= limit || value.nextAttemptAt > nowMs || (value.status === "running" && (value.leaseUntil ?? 0) > nowMs)) continue;
+      const running = { ...value, status: "running" as const, leaseToken, leaseUntil: nowMs + leaseMs, attempts: Math.min(100, value.attempts + 1), updatedAt: nowMs };
+      this.voiceReconciliations.set(key, structuredClone(running));
+      claimed.push(running);
+    }
+    return claimed;
+  }
+  async completeVoiceCallReconciliation(id: string, leaseToken: string) {
+    const entry = [...this.voiceReconciliations.entries()].find(([, value]) => value.id === id);
+    if (!entry || entry[1].leaseToken !== leaseToken) return false;
+    this.voiceReconciliations.delete(entry[0]);
+    return true;
+  }
+  async retryVoiceCallReconciliation(id: string, leaseToken: string, nextAttemptAt: number, errorMessage: string) {
+    const entry = [...this.voiceReconciliations.entries()].find(([, value]) => value.id === id);
+    if (!entry || entry[1].leaseToken !== leaseToken) return false;
+    this.voiceReconciliations.set(entry[0], structuredClone({ ...entry[1], status: "pending" as const, nextAttemptAt, leaseToken: undefined, leaseUntil: undefined, lastError: errorMessage.slice(0, 500), updatedAt: Date.now() }));
+    return true;
+  }
+  async claimVoiceCapacity(callId: string, limit: number, leaseMs: number, nowMs = Date.now()) {
+    if (!/^(twc|blc)_[A-Za-z0-9_-]{1,120}$/.test(callId) || !Number.isSafeInteger(limit) || limit < 1 || !Number.isSafeInteger(leaseMs) || leaseMs < 60_000) return false;
+    for (const [id, expiresAt] of this.voiceCapacity) if (expiresAt <= nowMs) this.voiceCapacity.delete(id);
+    const prior = this.voiceCapacity.get(callId);
+    if (prior !== undefined) { this.voiceCapacity.set(callId, nowMs + leaseMs); return true; }
+    if (this.voiceCapacity.size >= limit) return false;
+    this.voiceCapacity.set(callId, nowMs + leaseMs);
+    return true;
+  }
+  async releaseVoiceCapacity(callId: string) {
+    return this.voiceCapacity.delete(callId);
   }
   async getApproval(userId: number, id: string) { const approval = this.approvals.get(id); return approval?.userId === userId ? approval : undefined; }
   async saveApproval(record: ApprovalRecord) { this.approvals.set(record.id, record); const session = this.sessions.get(record.userId) ?? fresh(); session.approvals = [...session.approvals.filter((item) => item.id !== record.id), record].slice(-20); this.sessions.set(record.userId, session); return record; }
@@ -6495,6 +6642,8 @@ export async function initStore(options: { memoryOnly?: boolean; suppressStorage
     throw new Error("REDIS_URL is required when DURABLE_STORAGE_METRICS_ENABLED=true.");
   }
   if (!options.memoryOnly && config.durableStateEnabled) await durableState!.assertSessionSchema();
+  const voiceProviderEnabled = config.twilioVoiceEnabled || config.blandVoiceEnabled;
+  if (!options.memoryOnly && config.durableStateEnabled && voiceProviderEnabled) await durableState!.assertVoiceCallReconciliationSchema();
   if (!options.memoryOnly && config.durableStateSdkRunsEnabled) await durableState!.assertSdkRunSchema();
   if (!options.memoryOnly && config.durableStateSdkTablesEnabled) await durableState!.assertSdkTablesSchema();
   if (!options.memoryOnly && config.durableObjectCatalogEnabled) await durableState!.assertObjectMetadataSchema();
@@ -7113,6 +7262,14 @@ export async function getSession(uid: number, includeSdkTables = false, options?
     if (typeof item.id !== "string" || !item.id || item.userId !== uid || typeof item.phoneNumber !== "string" || typeof item.purpose !== "string") return [];
     const status = ["starting", "bridging", "active", "ended", "failed"].includes(String(item.status)) ? item.status as PhoneCallRecord["status"] : "failed";
     const providerStatuses = ["queued", "initiated", "ringing", "in-progress", "answered", "completed", "busy", "no-answer", "failed", "canceled", "machine", "unknown"] as const;
+    const transcriptRetentionDays = item.transcriptRetentionDays === 1 || item.transcriptRetentionDays === 7 || item.transcriptRetentionDays === 30 ? item.transcriptRetentionDays : 30;
+    const createdAt = typeof item.createdAt === "number" && Number.isFinite(item.createdAt) ? item.createdAt : Date.now();
+    const updatedAt = typeof item.updatedAt === "number" && Number.isFinite(item.updatedAt) ? item.updatedAt : Date.now();
+    const explicitTranscriptExpiry = typeof item.transcriptExpiresAt === "number" && Number.isFinite(item.transcriptExpiresAt) && item.transcriptExpiresAt > 0 ? item.transcriptExpiresAt : undefined;
+    const transcriptExpiresAt = explicitTranscriptExpiry ?? (["ended", "failed"].includes(status) ? updatedAt + transcriptRetentionDays * 24 * 60 * 60_000 : undefined);
+    const transcriptDeleted = item.transcriptStatus === "deleted";
+    const transcriptExpired = transcriptDeleted || (transcriptExpiresAt !== undefined && transcriptExpiresAt <= Date.now());
+    const transcript = transcriptExpired ? undefined : normalizePhoneCallTranscript(item.transcript);
     return [{
       id: item.id.slice(0, 128), userId: uid,
       ...(typeof item.requestKey === "string" && /^pc_[a-f0-9]{64}$/.test(item.requestKey) ? { requestKey: item.requestKey } : {}),
@@ -7138,7 +7295,10 @@ export async function getSession(uid: number, includeSdkTables = false, options?
       ...(typeof item.terminalReason === "string" ? { terminalReason: item.terminalReason.slice(0, 240) } : {}),
       ...(typeof item.error === "string" ? { error: item.error.slice(0, 500) } : {}),
       ...(typeof item.summary === "string" ? { summary: item.summary.slice(0, 2000) } : {}),
-      ...(normalizePhoneCallTranscript(item.transcript) ? { transcript: normalizePhoneCallTranscript(item.transcript) } : {}),
+      ...(transcript ? { transcript } : {}),
+      transcriptRetentionDays,
+      ...(transcriptExpiresAt !== undefined ? { transcriptExpiresAt } : {}),
+      ...(transcriptDeleted ? { transcriptStatus: "deleted" as const } : transcriptExpired ? { transcriptStatus: "expired" as const } : transcript ? { transcriptStatus: "active" as const } : {}),
       ...(item.outcome && typeof item.outcome === "object" && !Array.isArray(item.outcome) ? { outcome: normalizePhoneCallOutcome(item.outcome) } : {}),
       ...(Array.isArray(item.timeline) ? { timeline: normalizeVoiceCallEvents(item.timeline) } : {}),
       ...(item.qa && typeof item.qa === "object" && !Array.isArray(item.qa) ? { qa: normalizeVoiceQaScorecard(item.qa) } : {}),
@@ -7149,8 +7309,8 @@ export async function getSession(uid: number, includeSdkTables = false, options?
       ...(typeof item.outcomeErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(item.outcomeErrorCode) ? { outcomeErrorCode: item.outcomeErrorCode } : {}),
       ...(typeof item.callLengthSeconds === "number" && Number.isFinite(item.callLengthSeconds) && item.callLengthSeconds >= 0 ? { callLengthSeconds: Math.min(item.callLengthSeconds, 86_400) } : {}),
       ...(typeof item.postCallProcessedAt === "number" && Number.isFinite(item.postCallProcessedAt) ? { postCallProcessedAt: item.postCallProcessedAt } : {}),
-      createdAt: typeof item.createdAt === "number" && Number.isFinite(item.createdAt) ? item.createdAt : Date.now(),
-      updatedAt: typeof item.updatedAt === "number" && Number.isFinite(item.updatedAt) ? item.updatedAt : Date.now(),
+      createdAt,
+      updatedAt,
     }];
   }).slice(0, 50);
   const approvals = (Array.isArray(s.approvals) ? s.approvals : []).map((approval) => ({
@@ -7877,7 +8037,7 @@ export async function addPhoneCall(uid: number, record: PhoneCallRecord): Promis
   return (await claimPhoneCallStart(uid, record)).call;
 }
 
-type PhoneCallPatch = Partial<Pick<PhoneCallRecord, "status" | "runtimeState" | "bridgeSessionId" | "lastCommittedTurnId" | "continuity" | "providerCallId" | "providerStatus" | "terminalReason" | "phoneNumber" | "error" | "summary" | "callLengthSeconds" | "postCallProcessedAt" | "outcome" | "outcomeStatus" | "outcomeErrorCode" | "timeline" | "qa" | "followUpTaskIds" | "followUpStatus" | "followUpErrorCode">>;
+type PhoneCallPatch = Partial<Pick<PhoneCallRecord, "status" | "runtimeState" | "bridgeSessionId" | "lastCommittedTurnId" | "continuity" | "providerCallId" | "providerStatus" | "terminalReason" | "phoneNumber" | "error" | "summary" | "callLengthSeconds" | "postCallProcessedAt" | "outcome" | "outcomeStatus" | "outcomeErrorCode" | "timeline" | "qa" | "followUpTaskIds" | "followUpStatus" | "followUpErrorCode" | "transcriptRetentionDays" | "transcriptExpiresAt" | "transcriptStatus">>;
 
 function nextPhoneCallStatus(current: PhoneCallRecord["status"], next: PhoneCallRecord["status"], _provider?: PhoneCallRecord["provider"]): PhoneCallRecord["status"] {
   // Twilio and Bland callbacks are at-least-once and can arrive out of order
@@ -7922,6 +8082,10 @@ function applyPhoneCallPatch(current: PhoneCallRecord, patch: PhoneCallPatch): v
     ...(providerStatus ? { providerStatus: nextPhoneProviderStatus(current.providerStatus, providerStatus) } : {}),
     updatedAt: Date.now(),
   });
+  if ((current.status === "ended" || current.status === "failed") && current.transcriptRetentionDays && !current.transcriptExpiresAt) {
+    current.transcriptExpiresAt = Date.now() + current.transcriptRetentionDays * 24 * 60 * 60_000;
+    if (current.transcript) current.transcriptStatus = "active";
+  }
 }
 
 function appendSessionHistory(session: UserSession, messages: Message[]): Message[] {
@@ -8730,6 +8894,9 @@ export async function appendPhoneCallTranscriptTurn(
   const updated = await mutateSession(uid, (session) => {
     const current = (session.phoneCalls ?? []).find((item) => item.id === id && item.userId === uid);
     if (!current) return undefined;
+    if (current.transcriptStatus === "deleted" || current.transcriptStatus === "expired" || (current.transcriptExpiresAt !== undefined && current.transcriptExpiresAt <= Date.now())) {
+      throw new Error("This call transcript is no longer available under the retention policy.");
+    }
     const existing = current.transcript?.turns ?? [];
     if (existing.some((turn) => turn.id === turnId)) return current;
     const next = [...existing, { id: turnId, at: typeof input.at === "number" && Number.isFinite(input.at) ? Math.max(0, Math.floor(input.at)) : Date.now(), caller, assistant }];
@@ -8738,6 +8905,7 @@ export async function appendPhoneCallTranscriptTurn(
       truncated: Boolean(current.transcript?.truncated) || next.length > 80,
       updatedAt: Date.now(),
     };
+    current.transcriptStatus = "active";
     current.updatedAt = Date.now();
     return current;
   });
@@ -8773,8 +8941,62 @@ export async function finalizeBlandPhoneCall(
   return result;
 }
 
+/** Remove expired phone transcripts from the persisted owner session. The
+ * read normalizer already withholds expired text; this bounded write sweep
+ * makes the deletion durable and records a non-content privacy audit event. */
+async function purgeExpiredPhoneCallTranscripts(uid: number): Promise<number> {
+  const snapshot = await getSession(uid);
+  const candidates = (snapshot.phoneCalls ?? []).filter((call) =>
+    call.transcriptStatus === "expired"
+    && !(call.timeline ?? []).some((event) => event.type === "transcript_expired"),
+  );
+  if (!candidates.length) return 0;
+  const purged = await mutateSession(uid, (session) => {
+    let count = 0;
+    for (const call of session.phoneCalls ?? []) {
+      if (call.transcriptStatus !== "expired" || (call.timeline ?? []).some((event) => event.type === "transcript_expired")) continue;
+      call.transcript = undefined;
+      call.timeline = [...(call.timeline ?? []), createVoiceCallEvent({ type: "transcript_expired", summary: "The call transcript expired under the configured retention policy." })].slice(-200);
+      call.updatedAt = Date.now();
+      count += 1;
+    }
+    return count;
+  });
+  return purged ?? 0;
+}
+
+/** Owner-authorized immediate transcript deletion. This keeps the call
+ * outcome and lifecycle audit intact while removing caller speech. */
+export async function deletePhoneCallTranscript(uid: number, id: string): Promise<boolean> {
+  await purgeExpiredPhoneCallTranscripts(uid);
+  const deleted = await mutateSession(uid, (session) => {
+    const current = (session.phoneCalls ?? []).find((item) => item.id === id && item.userId === uid);
+    if (!current || (!current.transcript && current.transcriptStatus === "deleted")) return false;
+    current.transcript = undefined;
+    current.transcriptExpiresAt = undefined;
+    current.transcriptStatus = "deleted";
+    current.timeline = [...(current.timeline ?? []), createVoiceCallEvent({ type: "transcript_deleted", summary: "The owner deleted the call transcript." })].slice(-200);
+    current.updatedAt = Date.now();
+    return true;
+  });
+  if (deleted) {
+    const updated = await getSession(uid);
+    const call = updated.phoneCalls?.find((item) => item.id === id && item.userId === uid);
+    if (call) publishPhoneCallNotification(call);
+  }
+  return Boolean(deleted);
+}
+
 export async function listPhoneCalls(uid: number): Promise<PhoneCallRecord[]> {
+  await purgeExpiredPhoneCallTranscripts(uid);
   return (await getSession(uid)).phoneCalls ?? [];
+}
+
+/** A contact's explicit voice opt-out is a durable suppression decision. It is
+ * derived from the owner-scoped call ledger so future provider attempts can
+ * fail closed without introducing a second, divergent phone-number table. */
+export async function hasVoiceCallOptOut(uid: number, phoneNumber: string): Promise<boolean> {
+  return (await listPhoneCalls(uid)).some((call) => call.phoneNumber === phoneNumber && call.terminalReason === "opt_out");
 }
 
 export async function saveHandoffRecord(uid: number, record: HandoffRecord): Promise<HandoffRecord> {
@@ -8798,7 +9020,55 @@ export async function getHandoffRecord(uid: number, id: string): Promise<Handoff
 }
 
 export async function getPhoneCall(uid: number, id: string): Promise<PhoneCallRecord | undefined> {
+  await purgeExpiredPhoneCallTranscripts(uid);
   return (await getSession(uid)).phoneCalls?.find((item) => item.id === id && item.userId === uid);
+}
+
+/** Enqueue provider reconciliation or outcome persistence without ever
+ * granting the worker permission to create another provider call. */
+export async function enqueueVoiceCallReconciliation(
+  userId: number,
+  callId: string,
+  phase: VoiceCallReconciliationRecord["phase"] = "provider",
+  nextAttemptAt = Date.now(),
+): Promise<boolean> {
+  const call = await getPhoneCall(userId, callId);
+  if (!call || (call.provider !== "twilio" && call.provider !== "bland") || !/^(twc|blc)_[A-Za-z0-9_-]{1,120}$/.test(call.id)) return false;
+  const record: VoiceCallReconciliationRecord = {
+    id: `vcr_${createHash("sha256").update(`${call.id}:${phase}`).digest("hex").slice(0, 40)}`,
+    userId,
+    callId: call.id,
+    provider: call.provider,
+    ...(call.providerCallId ? { providerCallId: call.providerCallId } : {}),
+    phase,
+    status: "pending",
+    attempts: 0,
+    nextAttemptAt: Math.max(Date.now(), Math.floor(nextAttemptAt)),
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  await backend.enqueueVoiceCallReconciliation(record);
+  return true;
+}
+
+export function claimVoiceCallReconciliations(nowMs: number, limit: number, leaseMs: number, leaseToken: string): Promise<VoiceCallReconciliationRecord[]> {
+  return backend.claimVoiceCallReconciliations(nowMs, Math.max(1, Math.min(100, Math.floor(limit))), leaseMs, leaseToken);
+}
+
+export function completeVoiceCallReconciliation(id: string, leaseToken: string): Promise<boolean> {
+  return backend.completeVoiceCallReconciliation(id, leaseToken);
+}
+
+export function retryVoiceCallReconciliation(id: string, leaseToken: string, nextAttemptAt: number, errorMessage: string): Promise<boolean> {
+  return backend.retryVoiceCallReconciliation(id, leaseToken, nextAttemptAt, errorMessage);
+}
+
+export function claimVoiceCapacity(callId: string, limit: number, leaseMs: number, nowMs = Date.now()): Promise<boolean> {
+  return backend.claimVoiceCapacity(callId, limit, leaseMs, nowMs);
+}
+
+export function releaseVoiceCapacity(callId: string): Promise<boolean> {
+  return backend.releaseVoiceCapacity(callId);
 }
 
 /** Resolve Bland's provider call ID through a short-lived, owner-checked index. */

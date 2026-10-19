@@ -1,5 +1,5 @@
 import { config } from "../config.js";
-import { claimPhoneCallStart, getSession, getVoiceCallProfile, persistPhoneCallProviderResult, updatePhoneCall, type PhoneCallRecord } from "../store.js";
+import { claimPhoneCallStart, claimVoiceCapacity, enqueueVoiceCallReconciliation, getSession, getVoiceCallProfile, hasVoiceCallOptOut, persistPhoneCallProviderResult, releaseVoiceCapacity, updatePhoneCall, type PhoneCallRecord } from "../store.js";
 import { createBlandCallToken, isValidBlandToolSecret } from "./blandSecurity.js";
 import { resolveVoiceContinuity, voiceContinuityInstructions } from "./continuity.js";
 import { normalizePhoneCallRequestKey } from "./requestKey.js";
@@ -68,12 +68,18 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
   const callProfile = input.callProfile === "business" ? "business" : "personal";
   const dialBlockReason = voiceCallDialBlockReason(profile);
   if (dialBlockReason) throw new Error(dialBlockReason);
+  if (profile.controls?.optOutEnabled !== false && await hasVoiceCallOptOut(userId, phoneNumber)) throw new Error("This contact has opted out of further calls. No call was placed.");
   const continuity = await resolveVoiceContinuity(userId, input.continuityFromCallId);
   const requestKey = normalizePhoneCallRequestKey(input.requestKey);
-  const call: PhoneCallRecord = { id: `blc_${crypto.randomUUID()}`, userId, ...(requestKey ? { requestKey } : {}), provider: "bland", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, ...(continuity ? { continuity } : {}), status: "starting", providerStatus: "queued", createdAt: Date.now(), updatedAt: Date.now() };
+  const call: PhoneCallRecord = { id: `blc_${crypto.randomUUID()}`, userId, ...(requestKey ? { requestKey } : {}), provider: "bland", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, transcriptRetentionDays: profile.controls?.retentionDays ?? 30, ...(continuity ? { continuity } : {}), status: "starting", providerStatus: "queued", createdAt: Date.now(), updatedAt: Date.now() };
   const claim = await claimPhoneCallStart(userId, call);
   if (!claim.created) return claim.call;
   const claimedCall = claim.call;
+  if (!(await claimVoiceCapacity(claimedCall.id, config.twilioVoiceMaxActiveCalls, config.twilioVoiceMaxCallSeconds * 1000))) {
+    await updatePhoneCall(userId, claimedCall.id, { status: "failed", providerStatus: "failed", terminalReason: "voice_capacity_full", error: "Voice capacity is temporarily full." });
+    await enqueueVoiceCallReconciliation(userId, claimedCall.id, "outcome").catch(() => undefined);
+    throw new Error("Voice capacity is temporarily full. No call was placed.");
+  }
   let providerCallId: string | undefined;
   try {
     const callbackToken = createBlandCallToken({ userId, callId: claimedCall.id }, options.webhookSecret);
@@ -98,6 +104,7 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
     providerCallId = payload.call_id.slice(0, 100);
     const persisted = await persistPhoneCallProviderResult(userId, claimedCall, { status: "bridging", providerCallId });
     if (!persisted) throw new Error("Bland accepted the call, but Chusky could not confirm its durable call record. Do not retry this request.");
+    await enqueueVoiceCallReconciliation(userId, claimedCall.id, "provider");
     return persisted;
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 500) : "Bland call setup failed";
@@ -112,9 +119,12 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
         error: "Bland accepted the call, but Chusky is still reconciling its durable call record. Do not retry this request.",
         terminalReason: "provider_accepted_reconciliation_pending",
       }).catch(() => undefined);
+      await enqueueVoiceCallReconciliation(userId, claimedCall.id, "provider").catch(() => undefined);
       throw new Error("Bland accepted the call, but Chusky could not confirm its durable call record. Do not retry this request.");
     }
-    await updatePhoneCall(userId, claimedCall.id, { status: "failed", error: message });
+    await releaseVoiceCapacity(claimedCall.id).catch(() => false);
+    await updatePhoneCall(userId, claimedCall.id, { status: "failed", providerStatus: "failed", terminalReason: "provider_setup_failed", error: message });
+    await enqueueVoiceCallReconciliation(userId, claimedCall.id, "outcome").catch(() => undefined);
     throw new Error(`Bland call could not be started: ${message}`);
   }
 }
