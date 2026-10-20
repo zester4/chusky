@@ -36,7 +36,7 @@ function withJev<T>(run: (calls: Array<Record<string, unknown>>) => Promise<T>, 
         answers[key] = { type: "noul", noul: 0.9 };
       }
     }
-    return new Response(JSON.stringify({ model: "typesafe/jev-1.13", answers, usage: { cost: 0.0001 } }), { status: 200 });
+    return new Response(JSON.stringify({ model: "typesafe/jev-1.14", answers, usage: { cost: 0.0001 } }), { status: 200 });
   }) as typeof fetch;
   setJevClientForTests(new JevClient({ provider: "openrouter", apiKey: "test-key", fetchImpl }));
   return run(calls).finally(() => {

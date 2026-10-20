@@ -9,7 +9,7 @@
  *
  * Contract references:
  *   TypeSafe API   POST https://api.typesafe.ai/v1/systemone
- *   OpenRouter     POST https://openrouter.ai/api/alpha/decisions (model typesafe/jev-1.13)
+ *   OpenRouter     POST https://openrouter.ai/api/alpha/decisions (model typesafe/jev-1.14)
  * Questions in one request are evaluated in parallel against the same state
  * and cannot see each other's answers. A Choice must pick one of the supplied
  * options, so callers always add an explicit abstain option.
@@ -126,9 +126,9 @@ type Breaker = { failures: number; openUntil: number };
 
 function modelForProvider(provider: "openrouter" | "typesafe", configured: string): string {
   const value = configured.trim();
-  if (provider === "typesafe" && value === "typesafe/jev-1.13") return "jev-1.13.0";
-  if (provider === "openrouter" && value === "jev-1.13.0") return "typesafe/jev-1.13";
-  return value || (provider === "typesafe" ? "jev-1.13.0" : "typesafe/jev-1.13");
+  if (provider === "typesafe" && value === "typesafe/jev-1.14") return "jev-1.14.0";
+  if (provider === "openrouter" && value === "jev-1.14.0") return "typesafe/jev-1.14";
+  return value || (provider === "typesafe" ? "jev-1.14.0" : "typesafe/jev-1.14");
 }
 
 export class JevClient {

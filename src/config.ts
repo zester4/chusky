@@ -305,7 +305,7 @@ export const config = {
   jevProvider: oneOf("JEV_PROVIDER", "openrouter", ["openrouter", "typesafe"] as const),
   // Only required for JEV_PROVIDER=typesafe; OpenRouter reuses OPENROUTER_API_KEY.
   jevApiKey: optional("JEV_API_KEY", ""),
-  // Pin a versioned model. Defaults: typesafe/jev-1.13 (OpenRouter), jev-1.13.0 (TypeSafe).
+  // Pin a versioned model. Defaults: typesafe/jev-1.14 (OpenRouter), jev-1.14.0 (TypeSafe).
   jevModel: optional("JEV_MODEL", ""),
   jevSurfaces: new Set(optional("JEV_SURFACES", "skills,composio,treg,monid,autonomy,browser,memory").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean)),
   memoryClassificationEnabled: optional("MEMORY_CLASSIFICATION_ENABLED", "false") === "true",

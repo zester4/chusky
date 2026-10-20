@@ -84,7 +84,7 @@ test("Jev client sends the OpenRouter decisions contract and validates answers",
     urgent: { type: "noul", instructions: "Is it urgent?" },
   }, { sessionId: "run_1" });
   assert.equal(captured[0].url, "https://openrouter.ai/api/alpha/decisions");
-  assert.equal(captured[0].body.model, "typesafe/jev-1.13");
+  assert.equal(captured[0].body.model, "typesafe/jev-1.14");
   assert.match(captured[0].body.session_id, /^[a-f0-9]{64}$/, "session id is hashed, never raw");
   assert.equal((result.answers.team as any).choice, "billing");
   assert.equal(result.costUsd, 0.000004);
@@ -92,7 +92,7 @@ test("Jev client sends the OpenRouter decisions contract and validates answers",
   const typesafe: Captured[] = [];
   await new JevClient({ provider: "typesafe", apiKey: "k", fetchImpl: fakeJev(typesafe) }).evaluate("x", { q: { type: "noul", instructions: "?" } });
   assert.equal(typesafe[0].url, "https://api.typesafe.ai/v1/systemone");
-  assert.equal(typesafe[0].body.model, "jev-1.13.0");
+  assert.equal(typesafe[0].body.model, "jev-1.14.0");
 });
 
 test("Jev coalesces independent same-turn routes and fans answers and cost back safely", async () => {
