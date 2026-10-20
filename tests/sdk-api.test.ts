@@ -643,7 +643,8 @@ test("SDK run streams the same human-readable tool progress used by Telegram", a
     const response = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/stream`, { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "status-owner", "Content-Type": "application/json" }, body: JSON.stringify({ input: "Find the relevant sales guidance." }) }));
     assert.equal(response.status, 200);
     const events = (await response.text()).trim().split("\n").map((line) => JSON.parse(line) as { type: string; text?: string; id?: string; at?: number; toolSlug?: string; status?: string; message?: string; summary?: string; durationMs?: number; arguments?: unknown; result?: unknown });
-    assert.equal(events.some((item) => item.type === "run.status" && item.text === "🧭 I’m bringing in the relevant guidance…"), true);
+    const statusEvent = events.find((item) => item.type === "run.status" && item.text === "🧭 I’m bringing in the relevant guidance…");
+    assert.ok(statusEvent?.id && typeof statusEvent.at === "number", "status frames must carry durable event identity");
     const progressEvents = events.filter((item) => item.type === "run.progress") as Array<{ type: string; progress?: { phase?: string; title?: string; provider?: string; evidence?: unknown[] } }>;
     assert.ok(progressEvents.length >= 3, "initial, tool, and terminal progress should be streamed");
     assert.equal(progressEvents[0]?.progress?.phase, "planning");
@@ -658,8 +659,9 @@ test("SDK run streams the same human-readable tool progress used by Telegram", a
     assert.match(activity[1].summary ?? "", /returned/);
     assert.equal(activity.some((item) => "arguments" in item || "result" in item), false);
     const persistedResponse = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs`, { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "status-owner" } }));
-    const persisted = await persistedResponse.json() as { data: Array<{ progress?: { phase?: string }; events: Array<{ type: string; status?: string; progress?: { phase?: string } }> }> };
+    const persisted = await persistedResponse.json() as { data: Array<{ progress?: { phase?: string }; events: Array<{ type: string; status?: string; text?: string; progress?: { phase?: string } }> }> };
     assert.equal(persisted.data[0].events.filter((item) => item.type === "run.tool_activity").length, 2);
+    assert.equal(persisted.data[0].events.some((item) => item.type === "run.status" && item.text === "🧭 I’m bringing in the relevant guidance…"), true, "human-readable status updates must survive reconnects");
     assert.equal(persisted.data[0].progress?.phase, "completed");
     assert.equal(persisted.data[0].events.some((item) => item.type === "run.progress" && item.progress?.phase === "completed"), true);
   } finally {

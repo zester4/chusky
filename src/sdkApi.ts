@@ -3926,7 +3926,7 @@ export function registerSdkApi(app: Hono): void {
             // The opening is the latency-critical user-facing frame. Enqueue
             // durable recovery after it is on the wire; waiting for Neon here
             // turns a bounded 600 ms opening into a database round trip.
-            send({ type: "run.status", runId: run.id, text });
+            send({ type: "run.status", runId: run.id, id: openingEvent.id, at: openingEvent.at, text });
             if (!openingFrameSent) {
               openingFrameSent = true;
               logger.info({ runId: run.id, model: config.turnOpeningModel, streamElapsedMs: performance.now() - streamStartedAt, requestElapsedMs: performance.now() - requestStartedAt }, "Agent first response frame sent");
@@ -3941,8 +3941,11 @@ export function registerSdkApi(app: Hono): void {
           // Reuse the policy-owned status vocabulary that Telegram already
           // presents. Web and SDK consumers should not have to infer meaning
           // from internal CHUCK_/COMPOSIO_ tool slugs.
+          const statusEvent = event("run.status", text);
+          run.events.push(statusEvent);
+          run.updatedAt = statusEvent.at;
           await publishProgress(progressFromSdkStatus(text, run.progress));
-          send({ type: "run.status", runId: run.id, text: text.slice(0, 4000) });
+          send({ type: "run.status", runId: run.id, id: statusEvent.id, at: statusEvent.at, text: statusEvent.text ?? "" });
         }, abort.signal, (text) => { run.events.push(event("run.delta", text)); send({ type: "run.delta", runId: run.id, text }); }, undefined, undefined, {
           ...await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions, dashboardRequest(c), undefined, triggerEvent),
           opening,
