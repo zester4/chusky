@@ -3925,7 +3925,9 @@ async function executeAgent(
     const imageSafeTools = roundMediaSelection
       ? routedToolsWithApproval.filter((tool) => toolSchemaName(tool) !== "COMPOSIO_MULTI_EXECUTE_TOOL")
       : routedToolsWithApproval;
-    const modelAvailableTools = roundMediaSelection
+    const modelAvailableTools = noToolTurn
+      ? []
+      : roundMediaSelection
       ? imageSafeTools.map((tool) => {
         const slug = toolSchemaName(tool);
         const schema = tool?.function?.parameters;

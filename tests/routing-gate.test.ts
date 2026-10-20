@@ -17,7 +17,7 @@ const tools = [
 ].map((name) => ({ type: "function", function: { name, description: name.replaceAll("_", " "), parameters: { type: "object", properties: {} } } }));
 
 test("only explicit pleasantries enter the clearly conversational gate", () => {
-  const chat = ["hey", "thanks!", "good morning", "how are you", "lol", "okay"];
+  const chat = ["hey", "thanks!", "good morning", "how are you", "lol", "okay", "What you got in mind?", "What can I do for you?"];
   const action = ["any new emails?", "show my tasks", "yes do it", "continue", "approve", "what's the weather in Accra", "who is the CEO of Stripe", "text John I'm late"];
   assert.ok(chat.every((message) => isClearlyConversational(message)), "pleasantries should remain compact candidates");
   assert.ok(action.every((message) => !isClearlyConversational(message)), "action and knowledge requests must not be compact candidates");
