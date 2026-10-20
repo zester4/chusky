@@ -1724,6 +1724,9 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `DAYTONA_DOMAIN_ALLOW_LIST` | — | — | Comma-separated domains for a restricted browser/network allowlist on new workspaces |
 | `DAYTONA_AUTO_PAUSE_INTERVAL` | — | `0` | Pause interval in minutes; use only with a pausable Daytona target such as `linux-vm` |
 | `MAX_TOOL_ROUNDS` | — | `70` | Max model/tool cycles per run (bounded to 1-100; durable tool-call and cost budgets still apply) |
+| `INTERACTIVE_INITIAL_TOOL_ROUNDS` | — | `12` | Initial model/tool window for interactive runs; productive runs receive bounded continuation windows |
+| `INTERACTIVE_MAX_TOOL_ROUNDS` | — | `48` | Maximum interactive model/tool cycles after productive continuation (bounded to 12-70) |
+| `INTERACTIVE_ROUND_EXTENSION` | — | `8` | Additional interactive cycles granted after a productive window (bounded to 2-16) |
 | `MAX_BROWSER_TOOL_CALLS` | — | `24` | Max browser tool calls per run before Chusky stops the browser loop and reports the verified state |
 | `OPENROUTER_TIMEOUT_MS` | — | `45000` | First-attempt OpenRouter timeout in milliseconds; transient retries expand up to 120s |
 | `OPENROUTER_MAX_ATTEMPTS` | — | `2` | Maximum OpenRouter attempts for a model turn (hard-bounded to 1-5) |

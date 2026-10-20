@@ -105,7 +105,10 @@ WI-6: Rounds, tool results, history, memory
 
 Files: src/config.ts (~L609 maxToolRounds), src/agent.ts (round loop, promptHistory, memoryContext), src/skills/catalog.ts.
 
-Split MAX_TOOL_ROUNDS: chat turns ~15-20, mission and worker slices keep the high value.
+Split the round budget by execution mode: interactive chat starts at 12 rounds and
+receives bounded continuation windows only while verified progress is being made,
+up to the configured interactive ceiling; mission and worker slices keep the high
+value `MAX_TOOL_ROUNDS` budget.
 Truncate large tool results when re-sent in later rounds (keep head and tail, store the full result durably) and collapse completed rounds.
 Cap each history message (~1,500 characters) and the knowledge and memory blocks (per-chunk and total).
 Lower the skill context cap from 24,000 to ~9,000 characters. Skills are already routed, and the model can read more on demand.

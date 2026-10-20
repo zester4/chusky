@@ -2366,6 +2366,42 @@ test("agent executes a safe tool and feeds its result into the next model round"
   });
 });
 
+test("interactive runs extend after verified progress instead of stopping at the initial window", async () => {
+  const userId = 830003;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const previous = {
+    interactiveInitialToolRounds: config.interactiveInitialToolRounds,
+    interactiveMaxToolRounds: config.interactiveMaxToolRounds,
+    interactiveRoundExtension: config.interactiveRoundExtension,
+  };
+  const requests: Array<Record<string, any>> = [];
+  const executed: any[] = [];
+  Object.assign(config, {
+    interactiveInitialToolRounds: 2,
+    interactiveMaxToolRounds: 4,
+    interactiveRoundExtension: 1,
+  });
+  try {
+    await withAgentMocks([
+      toolResponse("TEST_SAFE_TOOL", JSON.stringify({ value: 7 }), "continuation-1"),
+      toolResponse("TEST_SAFE_TOOL", JSON.stringify({ value: 7 }), "continuation-2"),
+      toolResponse("TEST_SAFE_TOOL", JSON.stringify({ value: 7 }), "continuation-3"),
+      chatResponse({ role: "assistant", content: "The extended workflow is complete." }),
+    ], async (slug, args) => { executed.push({ slug, args }); return { ok: true }; }, async () => {
+      const result = await runAgent(userId, "Complete the extended workflow.", [], "test/model", undefined, undefined, undefined, undefined, undefined, {
+        ephemeral: true,
+        toolAllow: ["TEST_SAFE_TOOL"],
+      });
+      assert.equal(result.text, "The extended workflow is complete.");
+      assert.equal(executed.length, 3);
+      assert.equal(requests.length, 4, "the run must continue beyond its initial two-round window");
+    }, false, undefined, (body) => requests.push(body));
+  } finally {
+    Object.assign(config, previous);
+  }
+});
+
 test("agent distinguishes a failed tool attempt from a successful side effect", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830021);

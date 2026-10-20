@@ -3742,13 +3742,23 @@ async function executeAgent(
   };
 
   const durableExecution = Boolean(options?.taskId || options?.missionId);
-  const maxModelRounds = durableExecution
+  const interactiveExecution = !durableExecution && !options?.voiceTurn;
+  const interactiveInitialRounds = options?.voiceTurn
+    ? Math.min(config.interactiveInitialToolRounds, 8)
+    : config.interactiveInitialToolRounds;
+  // Interactive work starts small so ordinary chat stays responsive, then
+  // grows only after a productive round. Durable tasks/missions retain their
+  // larger fixed supervisor budget, while voice keeps its low-latency cap.
+  let maxModelRounds = durableExecution
     ? config.maxToolRounds
-    : options?.voiceTurn
-      ? Math.min(config.interactiveMaxToolRounds, 8)
-      : config.interactiveMaxToolRounds;
+    : interactiveInitialRounds;
+  const interactiveRoundCeiling = interactiveExecution
+    ? Math.max(interactiveInitialRounds, config.interactiveMaxToolRounds)
+    : maxModelRounds;
   const maxInteractiveToolCalls = options?.maxToolCalls ?? (durableExecution ? undefined : config.interactiveMaxToolCalls);
   let checkpointPersistenceUnavailable = false;
+  let interactiveContinuationExtensions = 0;
+  let successfulToolCalls = 0;
 
   const persistRun = async (status: AgentRunRecord["status"], eventType: string, output?: string, eventData?: Record<string, unknown>): Promise<void> => {
     if (options?.ephemeral || voiceTurn) return;
@@ -3805,6 +3815,7 @@ async function executeAgent(
     await assertAgentExecutionEnabled();
     logger.debug({ round, model: requestModel, messageCount: messages.length }, "Agent round");
     await persistRun("running", "run.round_started");
+    const successfulCallsBeforeRound = successfulToolCalls;
 
     await throwIfDurablyCancelled();
     const roundMediaSelection = selectMediaForAction(generatedReferenceImages.length);
@@ -4966,7 +4977,10 @@ async function executeAgent(
         durationMs: Math.max(0, Date.now() - toolStartedAt),
       });
 
-      if (!toolFailed && !toolsSucceeded.includes(slug)) toolsSucceeded.push(slug);
+      if (!toolFailed) {
+        successfulToolCalls += 1;
+        if (!toolsSucceeded.includes(slug)) toolsSucceeded.push(slug);
+      }
 
       if (!toolFailed && slug === "CHUCK_FIND_TOOLS" && execResult && typeof execResult === "object" && !Array.isArray(execResult)) {
         const found = (execResult as { tools?: unknown }).tools;
@@ -5020,6 +5034,22 @@ async function executeAgent(
       await persistRun("completed", "run.mission_started", message, { missionId: missionStartHandoff.id, status: missionStartHandoff.status, ...(missionStartHandoff.rootTaskId ? { rootTaskId: missionStartHandoff.rootTaskId } : {}) });
       return { text: await addUpgradeNotice(message), toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionRoutingCache: missionRoutingResult, ...(privateLinks.length ? { privateLinks } : {}) };
     }
+
+    // A round that reached the current interactive window with at least one
+    // verified tool result is making forward progress. Extend the same run
+    // in a bounded chunk instead of forcing a premature "may be incomplete"
+    // response. Failed-only rounds do not extend the budget, which preserves
+    // the circuit-breaker behavior for provider loops and repeated retries.
+    if (interactiveExecution && round + 1 >= maxModelRounds && maxModelRounds < interactiveRoundCeiling) {
+      const verifiedProgress = successfulToolCalls > successfulCallsBeforeRound;
+      if (verifiedProgress) {
+        const previousBudget = maxModelRounds;
+        maxModelRounds = Math.min(interactiveRoundCeiling, maxModelRounds + config.interactiveRoundExtension);
+        interactiveContinuationExtensions += 1;
+        logger.info({ round, previousBudget, maxModelRounds, interactiveRoundCeiling, interactiveContinuationExtensions }, "Extended interactive tool budget after verified progress");
+        if (onStatus) await onStatus(humanProgressStatus("preparing"));
+      }
+    }
   }
 
   // ── Max rounds exhausted — force final answer ─────────────────────────
@@ -5036,7 +5066,10 @@ async function executeAgent(
 
   posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: maxModelRounds, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
   const closeout = typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks);
-  const finalText = `${await addUpgradeNotice(closeout)}\n\nI reached the ${maxModelRounds}-round tool limit, so this run may be incomplete. Verify the results above before treating it as done.`.trim();
+  const continuationNote = interactiveContinuationExtensions > 0
+    ? `I used ${interactiveContinuationExtensions} continuation window${interactiveContinuationExtensions === 1 ? "" : "s"} because the work was still making progress.`
+    : `I reached the ${maxModelRounds}-round tool limit, so this run may be incomplete.`;
+  const finalText = `${await addUpgradeNotice(closeout)}\n\n${continuationNote} Verify the results above before treating them as complete.`.trim();
   await persistRun("completed", "run.completed_after_round_limit", finalText);
   recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: noToolTurn ? turnActionDecision.reason : "round_limit", noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision), capabilityFailureReply: isCapabilityFailureReply(finalText) });
   return { text: finalText, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionRoutingCache: missionRoutingResult, ...(privateLinks.length ? { privateLinks } : {}) };
