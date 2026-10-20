@@ -148,6 +148,62 @@ function likelyNeedsActionRouting(query: string): boolean {
   return /\b(?:call|send|email|message|post|publish|create|make|build|generate|edit|upload|download|search|find|look up|research|check|review|open|visit|browse|click|fill|book|schedule|remind|remember|save|update|delete|cancel|run|execute|deploy|push|commit|meeting|calendar|invoice|order|buy|purchase|image|video|file|pdf|spreadsheet|presentation|code|github|slack|gmail|notion|crm|browser|website|company|person|seo|mission|task|accounts?)\b/i.test(query);
 }
 
+const EMAIL_READ_ACTION_PATTERN = /^(?:GMAIL|OUTLOOK)_(?:FETCH|LIST|SEARCH|GET|READ|FIND|THREAD|MESSAGE|MAIL|INBOX)[A-Z0-9_]*$/;
+const DIRECT_WRITE_ACTION_PATTERN = /(^|_)(CREATE|UPDATE|SET|ADD|SEND|POST|PUBLISH|WRITE|UPLOAD|MOVE|ARCHIVE|CLOSE|ENABLE|DISABLE|CHANGE|MODIFY|SUBSCRIBE|UNSUBSCRIBE|MARK|STAR|TRASH|RESTORE)(_|$)/i;
+const EMAIL_READ_PAGINATION_KEYS = new Set([
+  "page", "page_number", "page_token", "next_page_token", "nextPageToken", "cursor", "offset", "start", "start_index",
+  "limit", "max_results", "maxResults", "page_size", "pageSize",
+]);
+
+/**
+ * A passive inbox question is a read request, not an invitation to inspect
+ * the owner's memory, reminders, calendar, or scratchpad. Keep this test
+ * deliberately narrow so explicit email writes and mixed workflows retain
+ * the full Jev capability planner.
+ */
+export function isPassiveEmailReadRequest(query: string): boolean {
+  const text = query.trim();
+  if (!/\b(?:email|emails|e-mail|e-mails|gmail|inbox|mailbox)\b/i.test(text)) return false;
+  if (/\b(?:connected|linked|available)\s+(?:email|emails|e-mail|e-mails|gmail|outlook)\s+accounts?\b/i.test(text)
+    || /\b(?:email|emails|e-mail|e-mails|gmail|outlook)\s+accounts?\s+(?:are|is)\s+(?:connected|linked|available)\b/i.test(text)) return false;
+  return !/\b(?:send|reply|forward|draft|compose|write|create|schedule|book|delete|remove|trash|archive|label|mark|star|unstar|move|download|attach|remember|save|note|remind|task|calendar|meeting|call|message|notify|share|update)\b/i.test(text);
+}
+
+export function isPassiveEmailReadToolSlug(slug: string): boolean {
+  const normalized = canonicalNativeToolSlug(slug);
+  return EMAIL_READ_ACTION_PATTERN.test(normalized) && isReadOnlyToolSlug(normalized);
+}
+
+function passiveEmailModelToolAllowed(slug: string, hasExactReadAction: boolean): boolean {
+  const normalized = canonicalNativeToolSlug(slug);
+  if (isPassiveEmailReadToolSlug(normalized)) return true;
+  // If Jev has already resolved the exact Gmail/Outlook read action, there is
+  // no reason to expose any discovery or native side channel at all.
+  if (hasExactReadAction) return false;
+  // Recovery remains possible when the provider returned no exact schema. The
+  // model may search the connected-app catalogue and load a schema, but it
+  // still cannot see native writes, memory, reminders, or calendar tools.
+  if (COMPOSIO_DISCOVERY_TOOLS.has(normalized) || normalized === "COMPOSIO_EXECUTE_TOOL") return true;
+  // Preserve an explicitly routed, read-only connected-app action when Jev
+  // has already supplied it under a provider-specific or test/injected slug.
+  // The exact Gmail/Outlook actions above still win and all native CHUCK_*
+  // side channels remain excluded.
+  return !normalized.startsWith("CHUCK_")
+    && !normalized.startsWith("COMPOSIO_")
+    && !DIRECT_WRITE_ACTION_PATTERN.test(normalized)
+    && !isRiskyToolSlug(normalized);
+}
+
+function normalizedReadArguments(slug: string, args: Record<string, unknown>): Record<string, unknown> {
+  const normalized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args).sort(([left], [right]) => left.localeCompare(right))) {
+    if (slug === "CHUCK_FIND_TOOLS" && EMAIL_READ_PAGINATION_KEYS.has(key)) continue;
+    if (typeof value === "string") normalized[key] = value.trim().replace(/\s+/g, " ");
+    else normalized[key] = value;
+  }
+  return normalized;
+}
+
 type MissionRoutingSnapshot = {
   at: number;
   skillRoute: Awaited<ReturnType<typeof routeSkillsForTurn>> | undefined;
@@ -1045,8 +1101,8 @@ function toolSchemaName(tool: any): string {
 
 function inTurnReadCacheKey(slug: string, args: Record<string, unknown>): string | undefined {
   const normalized = canonicalNativeToolSlug(slug);
-  return IN_TURN_READ_CACHE_TOOLS.has(normalized)
-    ? `${normalized}:${externalArgumentsHash(args)}`
+  return (IN_TURN_READ_CACHE_TOOLS.has(normalized) || isPassiveEmailReadToolSlug(normalized))
+    ? `${normalized}:${externalArgumentsHash(normalized === "CHUCK_FIND_TOOLS" || isPassiveEmailReadToolSlug(normalized) ? normalizedReadArguments(normalized, args) : args)}`
     : undefined;
 }
 
@@ -3200,6 +3256,7 @@ async function executeAgent(
     ? options.missionStepObjective.trim().slice(0, 2_000)
     : baseRoutingQuery;
   const routingQuery = [missionRoutingQuery, voiceTurn && voiceRoutingHint ? `Trusted call objective: ${voiceRoutingHint}` : ""].filter(Boolean).join("\n");
+  const passiveEmailReadTurn = !voiceTurn && !options?.taskId && !options?.missionId && isPassiveEmailReadRequest(baseRoutingQuery);
   const mediaRequest = isMediaGenerationRequest(routingQuery);
   const routingRecentContext = sharedScope ? undefined : history.slice(-4)
     .map((message) => `${message.role}: ${typeof message.content === "string" ? message.content.slice(0, 400) : ""}`)
@@ -3635,6 +3692,9 @@ async function executeAgent(
   const shoppingPromptRelevant = /\b(?:shop|shopping|retailer|cart|checkout|order|purchase|buy|restock|delivery)\b/i.test(routingQuery);
   const meetingPromptRelevant = Boolean(options?.meetingId) || /\b(?:meeting|zoom|teams|webex|call|interview|participant|transcript)\b/i.test(routingQuery);
   const currentTurnContract = "Current-turn execution boundary: treat the newest user request as the only active objective. Use earlier messages only to resolve an explicit reference such as 'it' or 'that' and to preserve confirmed facts. Do not resume, retry, or complete an older request merely because it appears in history or because an old tool result is visible. Every tool call must directly advance the newest request; if it does not, do not call it. Runtime route and approval fences are authoritative.";
+  const passiveEmailReadInstruction = passiveEmailReadTurn
+    ? "Passive inbox read boundary: this turn only answers the user's email/inbox question. Use one exact connected Gmail or Outlook read capability and inspect its result. Do not call reminders, tasks, calendar, meetings, memory, scratchpad, context, connected-account listing, browser, web research, or any write/send/save tool. Do not persist a summary or create a follow-up unless the user explicitly asks for that. Do not repeat an equivalent inbox read; only request another page when the provider returned a real pagination cursor."
+    : "";
   const meetingLanguageInstruction = options?.meetingLanguage
     ? options.meetingLanguage.mode === "multilingual"
       ? `Live meeting language: match the participant's language${options.meetingLanguage.language ? ` (${options.meetingLanguage.language})` : " when it is detected"}. Keep replies natural for spoken conversation and do not translate unless asked.`
@@ -3662,7 +3722,7 @@ async function executeAgent(
   // block, not only the static system prompt. Memory, route cards, upgrade
   // notes, and prior assistant messages can all contain old implementation
   // vocabulary from before the provider-neutral boundary was introduced.
-  const dynamicSystemContext = sanitizeModelFacingText(`${currentTurnContract}\n\n${temporalContext}${accountContext ? `\n\n${accountContext}` : ""}${composioRouteContext ? `\n\n${composioRouteContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\n${mediaRequest ? "Media skill preflight" : "Relevant project skill guidance"} (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}${imageRetryContext}`);
+  const dynamicSystemContext = sanitizeModelFacingText(`${currentTurnContract}${passiveEmailReadInstruction ? `\n\n${passiveEmailReadInstruction}` : ""}\n\n${temporalContext}${accountContext ? `\n\n${accountContext}` : ""}${composioRouteContext ? `\n\n${composioRouteContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\n${mediaRequest ? "Media skill preflight" : "Relevant project skill guidance"} (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}${imageRetryContext}`);
   const promptHistory = (voiceTurn ? boundedVoiceHistory(history) : history).map((message) => ({
     ...message,
     // Preserve the user's exact wording while preventing prior assistant
@@ -3895,6 +3955,7 @@ async function executeAgent(
     const missionControlTools = options?.missionId
       ? availableTools.filter((tool) => MISSION_WORKER_CONTROL_TOOLS.includes(toolSchemaName(tool) as typeof MISSION_WORKER_CONTROL_TOOLS[number]))
       : [];
+    const hasExactEmailReadAction = passiveEmailReadTurn && availableTools.some((tool) => isPassiveEmailReadToolSlug(toolSchemaName(tool)));
     const routedTools = (
       (voiceFastLane || voiceToolFreeTurn)
         ? []
@@ -3913,7 +3974,8 @@ async function executeAgent(
         if (name.startsWith("CHUCK_")) return true;
         if (name.startsWith("COMPOSIO_")) return voiceToolPolicy.enabled;
         return voiceToolkitAllowed(name, voiceToolPolicy);
-      });
+      })
+      .filter((tool) => !passiveEmailReadTurn || passiveEmailModelToolAllowed(toolSchemaName(tool), hasExactEmailReadAction));
     // A routed turn may intentionally expose only meta-tools or a small
     // capability slice. Approval resume is different: it must replay the
     // exact already-approved action, using a schema from the trusted catalog,
@@ -4203,6 +4265,9 @@ async function executeAgent(
         // supplied (an empty allowlist means no tools at all).
         const toolIsAllowed = modelAvailableTools.some((tool) => toolSchemaName(tool) === slug)
           && (!allow || allow.has(slug));
+        if (passiveEmailReadTurn && !passiveEmailModelToolAllowed(slug, hasExactEmailReadAction)) {
+          throw new Error("This email-only read turn allows only the exact connected inbox read capability; no unrelated read or write tool was attempted.");
+        }
         if (executionScope && !toolBelongsToCapabilityScope(slug, executionScope)) {
           throw new Error(`Tool ${slug} is outside this run's ${capabilityScopeLabel(executionScope)} scope.`);
         }
