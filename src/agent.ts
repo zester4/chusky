@@ -32,6 +32,7 @@ import { assertAgentExecutionEnabled } from "./builderControl.js";
 import { getTriggerTypeBySlug, getTriggerTypeByToken, listTriggerToolkits as listCatalogueToolkits, listTriggerTypesForToolkit, requiredTriggerConfigFields, triggerTypeForAgent, type TriggerCatalogueItem, type TriggerToolkit } from "./triggerCatalog.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { logger } from "./logger.js";
+import { RedisReadBudgetExceededError } from "./redisMetrics.js";
 import { createApproval, createVideoJob, getAgentRun, getApproval, getImageAsset, getSession, isAgentRunCancellationRequested, listLinkedWebSessionSourceUserIds, readScratchpad, recordTrustedMissionEvidence, saveAgentRun, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
 import type { AgentRunRecord, Message } from "./store.js";
 import { nativeTool, type MissionWaitRequest, type NativeToolRuntime } from "./nativeTools.js";
@@ -207,6 +208,38 @@ const COMPOSIO_GATEWAY_TOOLS = new Set([
   "COMPOSIO_MULTI_EXECUTE_TOOL",
   "COMPOSIO_MANAGE_CONNECTIONS",
 ]);
+const COMPOSIO_DISCOVERY_TOOLS = new Set([
+  "COMPOSIO_SEARCH_TOOLS",
+  "COMPOSIO_GET_TOOL_SCHEMAS",
+]);
+const COMPOSIO_EXECUTION_TOOLS = new Set([
+  "COMPOSIO_EXECUTE_TOOL",
+  "COMPOSIO_MULTI_EXECUTE_TOOL",
+  "COMPOSIO_MANAGE_CONNECTIONS",
+]);
+// These reads are safe to reuse inside one agent turn. Repeating them does
+// not make the answer more current, but it does expand the prompt, spend
+// provider time, and make a model loop look like progress.
+const IN_TURN_READ_CACHE_TOOLS = new Set([
+  "CHUCK_FIND_TOOLS",
+  "CHUCK_SEARCH_SKILLS",
+  "CHUCK_LIST_CONNECTED_ACCOUNTS",
+  "CHUCK_SCRATCHPAD_READ",
+  "CHUCK_SEARCH_MEMORY",
+  "CHUCK_MEMORY_BRIEF",
+  "CHUCK_TASK_LIST",
+  "CHUCK_TASK_GET",
+  "CHUCK_CONVERSATION_SEARCH",
+  "CHUCK_CONTEXT_SEARCH",
+  "CHUCK_INTEGRATION_HEALTH",
+  "CHUCK_MEETING_CONTEXT_LOOKUP",
+  "CHUCK_MEETING_TRANSCRIPT_SEARCH",
+  "CHUCK_LIST_PHONE_CALLS",
+  "CHUCK_LIST_JOBS",
+  "COMPOSIO_SEARCH_TOOLS",
+  "COMPOSIO_GET_TOOL_SCHEMAS",
+]);
+const APP_INTENT_PATTERN = /\b(?:email|gmail|outlook|calendar|slack|notion|github|crm|connected app|connected account|integration|send|reply|schedule|book|appointment|message|inbox)\b/i;
 const VOICE_CALENDAR_TOOL_LIMIT = 32;
 const VOICE_COMPOSIO_TOOL_LIMIT = 24;
 const GOOGLE_CALENDAR_TOOL_PATTERN = /^(?:googlecalendar:)?GOOGLECALENDAR_[A-Z0-9_]+$/i;
@@ -1008,6 +1041,13 @@ export async function dispatchComposioActionWithImageContext(
 
 function toolSchemaName(tool: any): string {
   return canonicalNativeToolSlug(String(tool?.function?.name ?? tool?.name ?? ""));
+}
+
+function inTurnReadCacheKey(slug: string, args: Record<string, unknown>): string | undefined {
+  const normalized = canonicalNativeToolSlug(slug);
+  return IN_TURN_READ_CACHE_TOOLS.has(normalized)
+    ? `${normalized}:${externalArgumentsHash(args)}`
+    : undefined;
 }
 
 function nestedComposioActionSlugs(args: Record<string, unknown>): string[] {
@@ -2902,6 +2942,14 @@ async function executeAgent(
       logger.info({ meetingId: options.meetingId, requested: loaded.length + unavailable.length, loaded, unavailable }, "Meeting Composio actions prepared");
     }
   }
+  // An explicit run allowlist is already a capability decision made by the
+  // caller (for example a shared meeting grant or an approved task action).
+  // Keep those exact schemas visible even when Jev correctly omits the broad
+  // Composio/native route. This is still narrow: only the granted slugs are
+  // added, never the surrounding toolkit or gateway catalog.
+  const explicitAllowedTools = allow?.size
+    ? availableTools.filter((tool) => allow!.has(toolName(tool)))
+    : [];
   const composioToolPresentations = collectComposioToolPresentations(fullComposioTools);
   const structuredArtifactRequest = typeof userMessage === "string"
     && /\b(?:pdf|playbook|report|document|presentation|spreadsheet|artifact|chart|graph)\b/i.test(userMessage)
@@ -3516,6 +3564,8 @@ async function executeAgent(
   const noToolTurn = voiceFastLane || voiceToolFreeTurn || turnActionDecision.noActionNeeded;
   recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: turnActionDecision.reason, noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision) });
   const revealedNativeTools = new Set<string>();
+  const maxRevealedNativeTools = 32;
+  const inTurnReadResults = new Map<string, unknown>();
   routingDeadline.dispose();
   // Project skills are trusted, versioned operating guidance. Select a small
   // relevant subset before the first model call so the agent does not have to
@@ -3691,8 +3741,18 @@ async function executeAgent(
     return `${formatAgentUpgradeNotice(pendingUpgrade)}\n\n${text}`.trim();
   };
 
+  const durableExecution = Boolean(options?.taskId || options?.missionId);
+  const maxModelRounds = durableExecution
+    ? config.maxToolRounds
+    : options?.voiceTurn
+      ? Math.min(config.interactiveMaxToolRounds, 8)
+      : config.interactiveMaxToolRounds;
+  const maxInteractiveToolCalls = options?.maxToolCalls ?? (durableExecution ? undefined : config.interactiveMaxToolCalls);
+  let checkpointPersistenceUnavailable = false;
+
   const persistRun = async (status: AgentRunRecord["status"], eventType: string, output?: string, eventData?: Record<string, unknown>): Promise<void> => {
     if (options?.ephemeral || voiceTurn) return;
+    if (checkpointPersistenceUnavailable) return;
     // Model-request/completion and round-start events are useful logs but do
     // not change the resumable checkpoint. Persisting each of them caused a
     // WATCH/GET/MULTI cycle on Redis for every model round. Tool boundaries,
@@ -3722,13 +3782,26 @@ async function executeAgent(
        events: [...(durableRunRecord?.events ?? []), { id: `evt_${randomUUID()}`, type: eventType, at: Date.now(), data: { toolCallsExecuted, toolsUsed: toolsUsed.slice(-50), ...eventData } }].slice(-200),
       updatedAt: Date.now(),
     };
-    const saved = await saveAgentRun(record, durableRunVersion);
-    durableRunVersion = saved.version;
-    durableRunRecord = saved;
+    try {
+      const saved = await saveAgentRun(record, durableRunVersion);
+      durableRunVersion = saved.version;
+      durableRunRecord = saved;
+    } catch (error) {
+      // A storage guard must never turn into an unhandled rejection that
+      // takes down the process and leaves the client spinner running forever.
+      // The route-level guard normally prevents this for interactive streams;
+      // this remains a defensive fallback for other execution contexts.
+      if (error instanceof RedisReadBudgetExceededError) {
+        checkpointPersistenceUnavailable = true;
+        logger.error({ err: error, userId, runId: durableRunId, eventType }, "Agent checkpoint persistence disabled after Redis read budget exceeded");
+        return;
+      }
+      throw error;
+    }
   };
   await persistRun("running", existingRun ? "run.resumed" : "run.started");
 
-  for (let round = 0; round < config.maxToolRounds; round++) {
+  for (let round = 0; round < maxModelRounds; round++) {
     await assertAgentExecutionEnabled();
     logger.debug({ round, model: requestModel, messageCount: messages.length }, "Agent round");
     await persistRun("running", "run.round_started");
@@ -3757,6 +3830,54 @@ async function executeAgent(
     const routedComposioTools = routedComposioNames.size
       ? availableTools.filter((tool) => routedComposioNames.has(toolSchemaName(tool)))
       : [];
+    const selectedNativeNames = new Set([
+      ...nativeToolRoute.selected,
+      ...revealedNativeTools,
+      "CHUCK_FIND_TOOLS",
+    ]);
+    // Enforce mode is the production exact-capability boundary. Shadow/off
+    // remain compatibility modes by design so operators can observe or roll
+    // back routing without changing the model catalog. Durable workers and
+    // meeting grants are always exact because their scopes are already
+    // explicit. In enforce mode, uncertainty goes to discovery; it never
+    // silently reopens the full native or Composio catalog.
+    const strictCapabilityExposure = config.jevMode === "enforce"
+      || Boolean(options?.taskId || options?.missionId || options?.meetingId);
+    // The native router preserves non-native schemas for callers that need
+    // to compose routing themselves. The supervisor must not pass that
+    // preserved catalog straight to the model, or a native route silently
+    // re-exposes every Composio action.
+    const routedNativeTools = availableTools.filter((tool) => {
+      const name = toolSchemaName(tool);
+      return name.startsWith("CHUCK_") && selectedNativeNames.has(name);
+    });
+    // Shadow/off are compatibility modes. Keep the pre-Jev native catalogue
+    // available there so an operator can roll routing out without changing
+    // the behavior of existing SDK callers. Enforce mode uses the exact
+    // Jev-selected slice above and never falls back to this catalogue.
+    // Include non-native schemas as well: the legacy path may contain an
+    // explicitly injected MCP/test capability or a connected-app action.
+    // Strict Jev mode never uses this compatibility catalogue.
+    const legacyCompatibleTools = availableTools;
+    const appIntent = APP_INTENT_PATTERN.test(`${routingQuery}\n${routingRecentContext ?? ""}`);
+    const composioHasExactRoute = routedComposioNames.size > 0 || Boolean(composioDecision?.directTools?.length);
+    const composioNeedsDiscovery = appIntent && !composioDecision?.noAppNeeded && (
+      !composioDecision
+      || Boolean(composioDecision.fallbackReason)
+      || !composioHasExactRoute
+      || Boolean(composioDecision.actions.length && !composioHasExactRoute)
+    );
+    const composioDiscoveryTools = composioNeedsDiscovery
+      ? availableTools.filter((tool) => {
+        const name = toolSchemaName(tool);
+        if (COMPOSIO_DISCOVERY_TOOLS.has(name)) return true;
+        if (!composioDecision?.actions.length) return COMPOSIO_EXECUTION_TOOLS.has(name);
+        // Jev already supplied candidate actions in the route context. Load
+        // their schemas and execute only those exact candidates; broad search
+        // is reserved for a route miss or an explicit recovery path.
+        return name === "COMPOSIO_MULTI_EXECUTE_TOOL";
+      })
+      : [];
     const requiredWorkerTools = (options?.taskId || options?.missionId) && options.toolAllow?.length
       ? availableTools.filter((tool) => options.toolAllow!.includes(toolSchemaName(tool)))
       : [];
@@ -3767,10 +3888,12 @@ async function executeAgent(
       (voiceFastLane || voiceToolFreeTurn)
         ? []
         : noToolTurn
-          ? [...availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS" || revealedNativeTools.has(toolSchemaName(tool))), ...meetingPreloadedTools, ...preloadedVoiceCapabilityTools]
+          ? [...availableTools.filter((tool) => strictCapabilityExposure
+            ? toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || (appIntent && toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS") || revealedNativeTools.has(toolSchemaName(tool))
+            : toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS" || revealedNativeTools.has(toolSchemaName(tool))), ...explicitAllowedTools, ...meetingPreloadedTools, ...preloadedVoiceCapabilityTools]
           : missionHintPreload
-            ? [...missionRoutedNativeTools, ...preloadedMissionTools, ...missionDiscoveryTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools]
-            : [...nativeToolRoute.tools, ...preloadedMissionTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools, ...preloadedVoiceMcpTools]
+            ? [...(strictCapabilityExposure ? routedNativeTools : missionRoutedNativeTools), ...preloadedMissionTools, ...(strictCapabilityExposure ? composioDiscoveryTools : missionDiscoveryTools), ...explicitAllowedTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools]
+            : [...(strictCapabilityExposure ? routedNativeTools : legacyCompatibleTools), ...composioDiscoveryTools, ...preloadedMissionTools, ...explicitAllowedTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools, ...preloadedVoiceMcpTools]
     )
       .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index)
       .filter((tool) => {
@@ -3830,7 +3953,18 @@ async function executeAgent(
       counts.schemaChars += JSON.stringify(tool).length;
       return counts;
     }, { native: 0, composio: 0, mcp: 0, other: 0, schemaChars: 0 });
-    logger.info({ round, ...(options?.meetingId ? { meetingId: options.meetingId } : {}), finalModelToolCount: modelAvailableTools.length, ...toolCounts }, "Model tool payload prepared");
+    logger.info({
+      round,
+      ...(options?.meetingId ? { meetingId: options.meetingId } : {}),
+      finalModelToolCount: modelAvailableTools.length,
+      ...toolCounts,
+      capabilityExposure: strictCapabilityExposure ? "jev_exact" : "legacy_compatible",
+      nativeRouteSource: nativeToolRoute.source,
+      nativeSelectedCount: routedNativeTools.length,
+      explicitGrantCount: explicitAllowedTools.length,
+      composioDiscovery: composioDiscoveryTools.map((tool) => toolSchemaName(tool)),
+      composioExactCount: routedComposioTools.length,
+    }, "Model tool payload prepared");
     const compactedContext = inTurnContextSummary
       ? { messages: compactModelMessages(messages, undefined, undefined, `[ScaleDown in-turn context summary]\n${inTurnContextSummary}`), summary: inTurnContextSummary }
       : await compactModelMessagesWithSummary(messages);
@@ -3976,7 +4110,7 @@ async function executeAgent(
         logger.error({ round, model: requestModel }, "Voice model returned repeated empty completions");
         return { text: recovery, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionRoutingCache: missionRoutingResult, ...(privateLinks.length ? { privateLinks } : {}) };
       }
-      if (!rawText && round < config.maxToolRounds - 1) {
+      if (!rawText && round < maxModelRounds - 1) {
         logger.warn({ round, model: requestModel }, "Empty model completion — injecting nudge and retrying");
         messages.push({ role: "assistant", content: "(no response)" });
         messages.push({ role: "user", content: "Your previous response was empty. Please reply with a helpful message or continue your task." });
@@ -3985,7 +4119,7 @@ async function executeAgent(
       // Internal/unit runs intentionally omit a channel/run context and may
       // provide only one mocked completion. Real Telegram/CLI/SDK runs get the
       // closeout guard; ephemeral voice/shared paths remain latency-sensitive.
-      if ((channelContext || options?.runId) && needsAutonomyCloseoutNudge(rawText, toolsSucceeded.length) && round < config.maxToolRounds - 1) {
+      if ((channelContext || options?.runId) && needsAutonomyCloseoutNudge(rawText, toolsSucceeded.length) && round < maxModelRounds - 1) {
         messages.push({ role: "assistant", content: rawText });
         messages.push({ role: "user", content: "Close out this tool-bearing run professionally. State the verified result, what remains (if anything), and the exact next action or durable owner. Do not claim completion without evidence." });
         continue;
@@ -4088,7 +4222,7 @@ async function executeAgent(
           messages.push({ role: "tool", tool_call_id: call.id, content: previousResult });
           continue;
         }
-        if ((options?.maxToolCalls !== undefined && toolCallsExecuted >= options.maxToolCalls) || (options?.maxCost !== undefined && totalCost >= options.maxCost)) {
+        if ((maxInteractiveToolCalls !== undefined && toolCallsExecuted >= maxInteractiveToolCalls) || (options?.maxCost !== undefined && totalCost >= options.maxCost)) {
           result = options?.maxCost !== undefined && totalCost >= options.maxCost
             ? "This run reached its configured cost budget. Resume it with a larger budget to continue."
             : "This run reached its configured tool-call budget. Resume it with a larger budget to continue.";
@@ -4103,6 +4237,9 @@ async function executeAgent(
           browserToolCallsExecuted += 1;
         }
         const args = parseToolArguments(call.function.arguments);
+        const readCacheKey = inTurnReadCacheKey(slug, args);
+        const hasCachedRead = readCacheKey !== undefined && inTurnReadResults.has(readCacheKey);
+        const cachedReadResult = hasCachedRead ? inTurnReadResults.get(readCacheKey!) : undefined;
         if (startsNewBrowserVisualObservation(slug, args)) {
           // A prior screenshot describes the page before this observation or
           // action. Remove it even if the new call fails or cannot capture a
@@ -4248,6 +4385,9 @@ async function executeAgent(
         if (externalClaim?.state === "succeeded") {
           toolReceiptId = externalClaim.receipt?.providerId ?? externalClaim.receipt?.id;
           execResult = { idempotentReplay: true, priorResult: externalClaim.receipt?.resultSummary ?? "The same external action was already confirmed successful." };
+        } else if (hasCachedRead) {
+          execResult = cachedReadResult;
+          logger.debug({ tool: slug, runId: durableRunId }, "Reused in-turn read result");
         } else if (slug === "CHUCK_EMAIL_ARTIFACT") {
           execResult = await sendArtifactEmail(userId, sessionObj, fullComposioTools, executionArgs, generatedFiles, signal);
         } else if (slug === "CHUCK_FILE_BRIDGE") {
@@ -4654,6 +4794,7 @@ async function executeAgent(
           });
           if (execResult === undefined) execResult = await composioExecute(sessionObj, slug, executionArgs, signal);
         }
+        if (readCacheKey && !hasCachedRead) inTurnReadResults.set(readCacheKey, execResult);
         if (options?.meetingId && meetingCalendarTargets.some(isMeetingCalendarAvailabilityTool) && isSuccessfulCalendarResult(execResult)) {
           meetingCalendarAvailabilityState = calendarResultHasNoAvailability(execResult) ? "unavailable" : "available";
         }
@@ -4829,7 +4970,7 @@ async function executeAgent(
         const found = (execResult as { tools?: unknown }).tools;
         if (Array.isArray(found)) for (const item of found) {
           const foundSlug = item && typeof item === "object" && typeof (item as { slug?: unknown }).slug === "string" ? (item as { slug: string }).slug.toUpperCase() : "";
-          if (foundSlug && availableTools.some((tool) => toolSchemaName(tool) === foundSlug)) revealedNativeTools.add(foundSlug);
+          if (foundSlug && revealedNativeTools.size < maxRevealedNativeTools && availableTools.some((tool) => toolSchemaName(tool) === foundSlug)) revealedNativeTools.add(foundSlug);
         }
       }
 
@@ -4885,15 +5026,15 @@ async function executeAgent(
 
   messages.push({
     role: "user",
-    content: `The configured limit of ${config.maxToolRounds} model/tool rounds has been reached. No more tools can be called in this run. Give a concise, truthful status based only on verified results already in this conversation. Do not claim unfinished work succeeded; state what remains and the next safe action.`,
+    content: `The configured limit of ${maxModelRounds} model/tool rounds has been reached. No more tools can be called in this run. Give a concise, truthful status based only on verified results already in this conversation. Do not claim unfinished work succeeded; state what remains and the next safe action.`,
   });
   const final = await orChat(requestModel, compactModelMessages(messages), [], signal, onDelta);
   if (final.usage?.cost) totalCost += final.usage.cost;
   const text = final.choices[0]?.message?.content ?? "";
 
-  posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: config.maxToolRounds, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
+  posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: maxModelRounds, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
   const closeout = typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks);
-  const finalText = `${await addUpgradeNotice(closeout)}\n\nI reached the ${config.maxToolRounds}-round tool limit, so this run may be incomplete. Verify the results above before treating it as done.`.trim();
+  const finalText = `${await addUpgradeNotice(closeout)}\n\nI reached the ${maxModelRounds}-round tool limit, so this run may be incomplete. Verify the results above before treating it as done.`.trim();
   await persistRun("completed", "run.completed_after_round_limit", finalText);
   recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: noToolTurn ? turnActionDecision.reason : "round_limit", noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision), capabilityFailureReply: isCapabilityFailureReply(finalText) });
   return { text: finalText, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionRoutingCache: missionRoutingResult, ...(privateLinks.length ? { privateLinks } : {}) };

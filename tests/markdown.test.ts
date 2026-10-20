@@ -87,6 +87,11 @@ test("voice text removes Markdown syntax before speech", () => {
   assert.doesNotMatch(normalizeVoiceText("**Chusky** #ready *now*"), /[*#]/);
 });
 
+test("voice text removes emojis and bracket markers before speech", () => {
+  assert.equal(normalizeVoiceText("That is great! 😊 [Looking up your appointment...]"), "That is great! Looking up your appointment...");
+  assert.doesNotMatch(normalizeVoiceText("**Important** [check]"), /[\[\]*]/);
+});
+
 test("voice text keeps streamed word boundaries and speaks prices naturally", () => {
   assert.equal(normalizeVoiceDelta(" clarify"), " clarify");
   assert.equal(normalizeVoiceText("The price is $4.99. plan1.clarify your idea."), "The price is 4 dollars and 99 cents. plan 1. clarify your idea.");

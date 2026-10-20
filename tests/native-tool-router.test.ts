@@ -100,6 +100,15 @@ test("native tool discovery returns bounded searchable metadata", () => {
   assert.ok(found.every((item) => !Object.hasOwn(item, "parameters")));
 });
 
+test("native discovery searches the full compact catalog and can return a complete large family", () => {
+  assert.ok(nativeToolManifest.length >= 200, "the test catalog should represent the production-scale native surface");
+  const autonomyCount = nativeToolManifest.filter((item) => item.bundle === "autonomy").length;
+  const found = searchNativeToolManifest("autonomy tools", "autonomy");
+  assert.equal(found.length, autonomyCount);
+  assert.ok(found.every((item) => item.bundle === "autonomy"));
+  assert.ok(found.every((item) => !Object.hasOwn(item, "parameters")));
+});
+
 test("structured data requests can discover Monid without naming the provider", () => {
   for (const query of ["census demographics", "weather forecast", "onchain wallet data", "public dataset API", "verified business contacts", "AI citation visibility", "YouTube transcripts", "compare customer reviews", "local service prospects", "videos outperforming for creators", "SEO keyword evidence", "competitor ad intelligence", "scrape public product pages"]) {
     const found = searchDiscoveredToolManifest(query);

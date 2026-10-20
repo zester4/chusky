@@ -1895,11 +1895,17 @@ export function registerSdkApi(app: Hono): void {
   app.use("/v1/*", cors({ origin: (origin) => origin && config.betterAuthTrustedOrigins.includes(origin) ? origin : "", credentials: true, allowHeaders: ["Authorization", "Content-Type", "Idempotency-Key", "X-Chusky-User-Id", "X-Chusky-Provider-Proof-Signature"], allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] }));
   app.use("/v1/*", async (c, next) => {
     const route = `${c.req.method} ${routePath(c, -1) || "/v1/*"}`;
+    // Agent runs are long-lived requests. Their durable checkpoints and tool
+    // lifecycle events legitimately perform many small Redis reads/writes;
+    // applying the ordinary bounded-read response guard to the whole stream
+    // can kill an otherwise healthy run mid-turn. Individual paginated reads
+    // remain protected by the normal route budget.
+    const isAgentRunRoute = c.req.method === "POST" && /\/v1\/threads\/[^/]+\/runs(?:\/stream)?$/.test(route);
     try {
       return await withRedisMetricRoute(route, () => withNeonQueryMetricRoute(route, () => next()), {
         maxCommands: config.redisReadBudgetCommands,
         maxResponseBytes: config.redisReadBudgetBytes,
-        enforce: config.redisReadBudgetEnforced,
+        enforce: config.redisReadBudgetEnforced && !isAgentRunRoute,
         onExceeded: (budget) => logger.warn({ route: budget.route, commands: budget.commands, responseBytes: budget.responseBytes }, "Redis request read budget exceeded"),
       });
     } catch (error) {
@@ -3989,7 +3995,19 @@ export function registerSdkApi(app: Hono): void {
         await snapshotWrites;
         if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; await publishProgress({ phase: "waiting", title: "Approval needed to continue", detail: "Review the requested action and approve it before Chusky continues.", provider: run.progress?.provider, requiresApproval: true, evidence: run.progress?.evidence }); run.events.push(event("run.approval_required")); const approval = await getApproval(owner.userId, error.approvalId); send({ type: "run.approval_required", run: runView(thread.id, run), approval }); }
         else if (abort.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) { run.status = "cancelled"; await publishProgress(terminalSdkRunProgress("cancelled", { previous: run.progress })); run.events.push(event("run.cancelled")); send({ type: "run.cancelled", run: runView(thread.id, run) }); }
-        else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; await publishProgress(terminalSdkRunProgress("failed", { previous: run.progress, error: run.error.message })); run.events.push(event("run.failed", run.error.message)); send({ type: "run.failed", run: runView(thread.id, run), error: run.error }); }
+        else {
+          const storageBudgetFailure = error instanceof RedisReadBudgetExceededError;
+          run.status = "failed";
+          run.error = {
+            code: storageBudgetFailure ? "storage_read_budget_exceeded" : "agent_error",
+            message: storageBudgetFailure
+              ? "Chusky stopped this run because the storage request became too large to continue safely. No completion is claimed; retry with a narrower request."
+              : error instanceof Error ? error.message : "Agent failed",
+          };
+          await publishProgress(terminalSdkRunProgress("failed", { previous: run.progress, error: run.error.message }));
+          run.events.push(event("run.failed", run.error.message));
+          send({ type: "run.failed", run: runView(thread.id, run), error: run.error });
+        }
       } finally {
         opening?.close();
         c.req.raw.signal.removeEventListener("abort", markClientDisconnected);

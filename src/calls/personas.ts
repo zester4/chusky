@@ -109,7 +109,7 @@ export const VOICE_PERSONAS: readonly VoicePersonaDefinition[] = [
     category: "business",
     mode: "support",
     tone: "warm",
-    opening: "Identify yourself as the configured assistant for the healthcare organization, confirm the intended person, and explain the administrative purpose of the call.",
+    opening: "Identify yourself as the configured assistant for the healthcare organization, briefly explain the administrative purpose of the call, and ask whether the person has a moment.",
     guardrails: [
       "Do not diagnose, prescribe, change a dose, or claim to be a nurse, doctor, pharmacist, or licensed professional.",
       "Record what the patient or contact reports as a reported fact; do not accuse them or treat a variance as proof of deception.",

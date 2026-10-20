@@ -27,7 +27,8 @@ test("Twilio opening reflects outbound caller role and objective", () => {
     direction: "outbound",
     voiceProfile: { identity: "Amina", organization: "Chusky Labs", mode: "scheduling", tone: "professional", facts: [], guardrails: [], capabilities: [] },
   });
-  assert.equal(opening, "Hello, this is Amina, an assistant from Chusky Labs. May I confirm I’m speaking with the intended person?");
+  assert.equal(opening, "Hi, this is Amina, an assistant from Chusky Labs. I'm calling to confirm the implementation meeting. Is now a good time to talk for a minute?");
+  assert.doesNotMatch(opening, /intended person|may I speak/i);
   assert.doesNotMatch(opening, /How may I help/i);
 });
 
@@ -37,14 +38,16 @@ test("outbound opening names the supplied contact without inventing identity", (
     direction: "outbound",
     voiceProfile: { identity: "Amina", organization: "Chusky Labs", contactName: "Collins", mode: "support", tone: "professional", facts: [], guardrails: [], capabilities: [] },
   });
-  assert.equal(opening, "Hello, this is Amina, an assistant from Chusky Labs. May I speak with Collins?");
+  assert.equal(opening, "Hi Collins, this is Amina, an assistant from Chusky Labs. I'm calling to confirm the implementation meeting. Is now a good time to talk for a minute?");
 });
 
 test("outbound opening never speaks private follow-up instructions", () => {
   const purpose = "Confirm if they’ll be available for the meeting about the car deal tomorrow at 10:00am, if they agree book it in our calendar";
   assert.equal(callerFacingCallTopic(purpose), "your availability for the meeting about the car deal tomorrow at 10:00am");
   const opening = twilioVoiceOpening({ ...base, direction: "outbound", purpose });
-  assert.match(opening, /confirm I’m speaking with the intended person/i);
+  assert.match(opening, /calling about your availability for the meeting about the car deal tomorrow at 10:00am/i);
+  assert.match(opening, /good time to talk for a minute/i);
+  assert.doesNotMatch(opening, /intended person|may I speak/i);
   assert.doesNotMatch(opening, /if they agree|book it|our calendar/i);
 });
 
@@ -57,8 +60,8 @@ test("voice instructions explicitly keep the outbound objective private", () => 
 test("business outbound opening remains business-oriented without an organization name", () => {
   const opening = twilioVoiceOpening({ ...base, direction: "outbound", callProfile: "business", purpose: "Follow up on your service request" });
   assert.match(opening, /assistant for the business I represent/i);
-  assert.match(opening, /confirm I’m speaking with the intended person/i);
-  assert.doesNotMatch(opening, /service request/i);
+  assert.match(opening, /calling to follow up on your service request/i);
+  assert.doesNotMatch(opening, /intended person|may I speak/i);
 });
 
 test("Twilio opening reflects inbound support role", () => {
@@ -72,7 +75,7 @@ test("explicit AI disclosure is opt-in for a caller-facing opening", () => {
     direction: "outbound",
     voiceProfile: { identity: "Maya", organization: "MedVault", disclosure: "explicit_ai", mode: "support", tone: "warm", facts: [], guardrails: [], capabilities: [] },
   });
-  assert.equal(opening, "Hello, this is Maya, an AI assistant from MedVault. May I confirm I’m speaking with the intended person?");
+  assert.equal(opening, "Hi, this is Maya, an AI assistant from MedVault. I'm calling to confirm the implementation meeting. Is now a good time to talk for a minute?");
 });
 
 test("Twilio transcript identifies the external speaker separately from owner history", () => {
@@ -111,8 +114,8 @@ test("voice history includes the transport opening before the first caller turn"
     ...base,
     direction: "outbound",
     voiceProfile: { identity: "Chusky", organization: "MedVault", contactName: "Treffley", mode: "scheduling", tone: "professional", facts: [], guardrails: [], capabilities: [] },
-  }, "Hello, this is Chusky from MedVault. May I speak with Treffley?");
-  assert.deepEqual(history.map((message) => message.content), ["Hello, this is Chusky from MedVault. May I speak with Treffley?"]);
+  }, "Hi Treffley, this is Chusky, an assistant from MedVault. I'm calling about your refill tomorrow. Is now a good time to talk for a minute?");
+  assert.deepEqual(history.map((message) => message.content), ["Hi Treffley, this is Chusky, an assistant from MedVault. I'm calling about your refill tomorrow. Is now a good time to talk for a minute?"]);
 });
 
 test("voice instructions continue after an affirmative transport identity answer", () => {
@@ -121,9 +124,9 @@ test("voice instructions continue after an affirmative transport identity answer
     direction: "outbound",
     voiceProfile: { identity: "Chusky", organization: "MedVault", contactName: "Treffley", mode: "scheduling", tone: "professional", facts: [], guardrails: [], capabilities: [] },
   });
-  assert.match(prompt, /clear affirmative.*confirmation that the intended person is on the line/i);
-  assert.match(prompt, /address them as Treffley once/i);
-  assert.match(prompt, /do not ask again whether you are speaking to them/i);
+  assert.match(prompt, /transport greeting has already addressed Treffley/i);
+  assert.match(prompt, /do not ask who they are/i);
+  assert.match(prompt, /short and caller-facing/i);
   assert.match(prompt, /BOOKING COMPLETION CONTRACT/i);
   assert.match(prompt, /collect the appointment subject or service/i);
   assert.match(prompt, /duration or end time/i);

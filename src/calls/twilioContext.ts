@@ -35,9 +35,18 @@ export function callerFacingCallTopic(purpose: unknown): string {
   return topic || "the reason for this call";
 }
 
-/** Direction-aware first sentence for the transport layer. This runs before
- * the first caller transcript, so it cannot depend on the model inferring the
- * call role from a generic greeting. */
+function callerFacingReason(topic: string): string {
+  const value = topic.trim();
+  if (!value) return "I'm calling about the reason for this call.";
+  const lower = value.charAt(0).toLowerCase() + value.slice(1);
+  return /^(?:confirm|check|follow up|ask|verify|schedule|book|discuss|find out)\b/i.test(value)
+    ? `I'm calling to ${lower}.`
+    : `I'm calling about ${lower}.`;
+}
+
+/** Direction-aware short opening for the transport layer. This runs before the
+ * first caller transcript, so it cannot depend on the model inferring the call
+ * role, configured identity, or purpose from a generic greeting. */
 export function twilioVoiceOpening(call: PhoneCallRecord): string {
   const profile = call.voiceProfile;
   const identity = spoken(safeVoiceIdentity(profile?.identity), 180);
@@ -46,12 +55,13 @@ export function twilioVoiceOpening(call: PhoneCallRecord): string {
   const explicitAi = profile?.disclosure === "explicit_ai";
   const role = explicitAi ? "an AI assistant" : "an assistant";
   if (call.direction === "outbound") {
-    const introduction = organization
-      ? `this is ${identity}, ${role} from ${organization}`
+    const representation = organization
+      ? `${role} from ${organization}`
       : call.callProfile === "business"
-        ? `this is ${identity}, ${role} for the business I represent`
-        : `this is ${identity}, ${role} calling on behalf of the person who asked me to reach you`;
-    return `Hello, ${introduction}. ${contactName ? `May I speak with ${contactName}?` : "May I confirm I’m speaking with the intended person?"}`;
+        ? `${role} for the business I represent`
+        : `${role} calling on behalf of the person who asked me to reach you`;
+    const greeting = contactName ? `Hi ${contactName},` : "Hi,";
+    return `${greeting} this is ${identity}, ${representation}. ${callerFacingReason(callerFacingCallTopic(call.purpose))} Is now a good time to talk for a minute?`;
   }
   return organization
     ? `Hello, this is ${identity}, ${role} from ${organization}. How may I help you today?`
@@ -119,7 +129,7 @@ export function twilioVoiceInstructions(call: PhoneCallRecord): string {
   const bookingContract = voiceActionNeedsProviderReceipt(call)
     ? " BOOKING COMPLETION CONTRACT: This call includes a booking objective. Treat booking as unfinished until the calendar provider returns a successful create or update receipt. While the caller is available, collect the appointment subject or service, the exact date and time with timezone, and the duration or end time; use a configured service duration when one exists. Ask for one missing detail at a time. Ask for a location or meeting link only when the appointment type or provider requires it. Check real calendar availability, offer only available times, let the caller choose, then create the event and wait for the provider receipt. Never say booked, confirmed, scheduled, updated, or all set after only a free/busy check or a spoken intention. If the caller will not supply a required detail or the provider is unavailable, say plainly that it remains unbooked and leave a verified follow-up for the owner; do not silently send an SMS or email unless that action is explicitly authorized and a valid channel is available."
     : "";
-  return `${voiceProfileInstructions(call.voiceProfile, call.direction, purpose)} ${voiceCallPlanInstructions(plan)} ${voicePolicyInstructions(call.voiceProfile?.toolPolicy)} Caller-facing topic after identity confirmation: ${callerTopic}. ${contactName ? `The transport greeting has already asked for ${contactName}. If the caller confirms, address them as ${contactName} once and continue the purpose; do not repeat a generic intended-person question unless identity is denied or uncertain.` : "No contact name was supplied; do not invent one. If the transport greeting asked for the intended person, confirm identity once and then continue."} When the caller answers the transport greeting with a clear affirmative such as yes, right, or speaking, treat that as confirmation that the intended person is on the line. Do not ask again whether you are speaking to them, whether this is a call, or why you called; continue from the approved purpose. If the opening is already in the conversation history, do not restart it. Call profile: ${profile}. Inbound verification tier: ${verification} (public → identified → verified). Use only this call's transcript and the approved call context as working context; do not consult unrelated chat messages, files, images, or prior conversations. In a business call, do not volunteer unrelated personal information; in a personal call, do not reveal unrelated confidential business information. Never disclose sensitive account information before the configured verification tier is satisfied. UI icons, emoji, tool labels, and internal progress messages are not caller-facing language and must never be spoken.${bookingContract}${continuity}`;
+  return `${voiceProfileInstructions(call.voiceProfile, call.direction, purpose)} ${voiceCallPlanInstructions(plan)} ${voicePolicyInstructions(call.voiceProfile?.toolPolicy)} Caller-facing topic stated in the opening: ${callerTopic}. ${contactName ? `The transport greeting has already addressed ${contactName}. Continue with the reason for the call; do not ask who they are or repeat their name.` : "No contact name was supplied; do not invent one."} The transport greeting already identifies the configured representative, organization, and reason for calling, then asks whether this is a good time. Do not ask who the caller is, whether this is a call, or why you called. If the caller says this is the wrong number or the wrong contact, do not disclose private details; politely end or ask whether the correct contact is available. If the opening is already in the conversation history, do not restart it. Call profile: ${profile}. Inbound verification tier: ${verification} (public → identified → verified). Use only this call's transcript and the approved call context as working context; do not consult unrelated chat messages, files, images, or prior conversations. In a business call, do not volunteer unrelated personal information; in a personal call, do not reveal unrelated confidential business information. Never disclose sensitive account information before the configured verification tier is satisfied. UI icons, emoji, tool labels, and internal progress messages are not caller-facing language and must never be spoken.${bookingContract}${continuity}`;
 }
 
 /** Scheduling answers are buffered until the provider returns a write receipt.

@@ -2,6 +2,9 @@
 export function normalizeVoiceText(input: string): string {
   let text = String(input ?? '').replace(/\r\n?/g, '\n');
   text = text
+    // TTS must never read UI icons or their Unicode names aloud.
+    .replace(/[\u{1F1E6}-\u{1F1FF}\u{1F300}-\u{1FAFF}\u2300-\u23FF\u2600-\u27BF\u2B00-\u2BFF\u{1F3FB}-\u{1F3FF}\u200D\uFE0E\uFE0F]/gu, '')
+    .replace(/[ \t]{2,}/g, ' ')
     .replace(/```(?:[^\n]*)\n?[\s\S]*?```/g, ' I can share the technical details in writing. ')
     .replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/gi, '$1')
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gi, '$1')
@@ -17,6 +20,10 @@ export function normalizeVoiceText(input: string): string {
     .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '$1')
     .replace(/(?<!_)_([^_\n]+)_(?!_)/g, '$1')
     .replace(/[\*#]/g, '')
+    // Remove remaining bracket markers after Markdown links are handled.
+    // Keep the words inside them, but never make the TTS provider say
+    // "bracket" or "close bracket".
+    .replace(/[\[\]]/g, '')
     // Prices should be spoken as money rather than a character sequence.
     .replace(/\$(\d{1,7})(?:\.(\d{1,2}))?/g, (_match, dollars: string, cents?: string) => {
       const whole = Number(dollars);

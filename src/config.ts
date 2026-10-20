@@ -833,6 +833,12 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // Give the supervisor room for longer tool workflows while keeping a hard
   // ceiling; per-run tool-call, cost, and durable-work budgets still apply.
   maxToolRounds: boundedInt("MAX_TOOL_ROUNDS", 70, 1, 100),
+  // User-facing chat turns must finish within a bounded interaction window.
+  // Durable task and mission workers keep the larger supervisor budget above;
+  // this prevents an interactive run from spending minutes discovering tools
+  // while the client remains stuck in "Working".
+  interactiveMaxToolRounds: boundedInt("INTERACTIVE_MAX_TOOL_ROUNDS", 12, 3, 30),
+  interactiveMaxToolCalls: boundedInt("INTERACTIVE_MAX_TOOL_CALLS", 24, 4, 100),
   // Browser work gets a tighter per-run ceiling than the general agent loop.
   // Dynamic retail pages must not be allowed to consume an unbounded model
   // retry loop while the user is waiting for a result.

@@ -1234,7 +1234,7 @@ test("turn-wide Jev none keeps irrelevant connected-app schemas out of a convers
     assert.ok(Object.keys(jevRequests[0].questions).includes("action_required"), "the batched Jev request must include the turn-wide action check");
     assert.equal(connectedAccountLookups, 0, "no-app turns must skip connected-account lookup");
     const visibleTools = modelRequests[0]?.tools?.map((tool: any) => tool.function.name).sort() ?? [];
-    assert.deepEqual(visibleTools, ["CHUCK_FIND_TOOLS", "COMPOSIO_SEARCH_TOOLS"], "generic native and connected-app discovery remain available as recovery paths");
+    assert.deepEqual(visibleTools, ["CHUCK_FIND_TOOLS"], "a no-action turn keeps only native discovery as a recovery path");
   } finally {
     globalThis.fetch = originalFetch;
     Object.assign(config, previous);

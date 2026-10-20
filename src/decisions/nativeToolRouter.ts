@@ -63,18 +63,8 @@ export type NativeToolSearchResult = Pick<NativeToolDescriptor, "slug" | "descri
 
 const CORE_TOOLS = new Set([
   "CHUCK_FIND_TOOLS",
-  "CHUCK_SEARCH_SKILLS",
-  "CHUCK_LIST_SKILL_FILES",
-  "CHUCK_READ_SKILL_FILE",
   "CHUCK_TOOL_PREFLIGHT",
   "CHUCK_TOOL_RECOVERY",
-  "CHUCK_INTEGRATION_HEALTH",
-  "CHUCK_CONTEXT_SEARCH",
-  "CHUCK_MEMORY_BRIEF",
-  "CHUCK_LIST_IMAGE_MODELS",
-  "CHUCK_LIST_VIDEO_MODELS",
-  "CHUCK_AUTONOMY_STATUS",
-  "CHUCK_TASK_WAIT",
   // The owner and scheduled attention worker must be able to inspect the
   // durable preference that governs whether and how a pulse is delivered.
   "CHUCK_ATTENTION_STATE",
@@ -112,6 +102,7 @@ function compactDescription(tool: ToolSchema): string {
 
 function inferBundle(slug: string, description: string): NativeToolBundle {
   const name = slug.toUpperCase();
+  if (CORE_TOOLS.has(name)) return "core";
   // Call-control is intentionally not part of meeting preparation/search.
   // It remains discoverable for an explicit phone-call request, but must not
   // be exposed as an unrelated high-impact side effect during a meeting flow.
@@ -262,8 +253,11 @@ function noNativeToolRoute(tools: ToolSchema[], reason: string, confidence = 1, 
 export function searchNativeToolManifest(query: string, bundle?: NativeToolBundle, limit?: number, allowed?: ReadonlySet<string>): NativeToolSearchResult[] {
   const queryText = query.trim();
   const family = bundle ?? inferredFamily(queryText);
-  const defaultLimit = family ? 30 : 10;
-  const bounded = Math.max(1, Math.min(30, Math.floor(limit ?? defaultLimit) || defaultLimit));
+  // Family discovery is still compact metadata, but it must be able to return
+  // the complete family. The largest current family is 51 tools; 64 leaves
+  // room for growth without allowing an unbounded schema dump.
+  const defaultLimit = family ? 64 : 10;
+  const bounded = Math.max(1, Math.min(64, Math.floor(limit ?? defaultLimit) || defaultLimit));
   const entries = nativeToolManifest
     .filter((item) => !family || item.bundle === family)
     .filter((item) => !allowed || allowed.has(item.slug))
@@ -292,8 +286,8 @@ export function searchComposioGatewayManifest(query: string, allowed?: ReadonlyS
 /** Return connected-app gateway capabilities first so native keyword matches cannot truncate them. */
 export function searchDiscoveredToolManifest(query: string, bundle?: NativeToolBundle, limit?: number, allowed?: ReadonlySet<string>): NativeToolSearchResult[] {
   const family = bundle ?? inferredFamily(query);
-  const defaultLimit = family ? 30 : 20;
-  const bounded = Math.max(1, Math.min(30, Math.floor(limit ?? defaultLimit) || defaultLimit));
+  const defaultLimit = family ? 64 : 20;
+  const bounded = Math.max(1, Math.min(64, Math.floor(limit ?? defaultLimit) || defaultLimit));
   const gateway = bundle === undefined || bundle === "workspace" ? searchComposioGatewayManifest(query, allowed) : [];
   const native = searchNativeToolManifest(query, bundle, undefined, allowed);
   return [...gateway, ...native].slice(0, bounded);
