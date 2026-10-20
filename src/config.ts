@@ -311,17 +311,19 @@ export const config = {
   memoryClassificationEnabled: optional("MEMORY_CLASSIFICATION_ENABLED", "false") === "true",
   meetingDisclosureGateEnabled: optional("MEETING_DISCLOSURE_GATE", "false") === "true",
   meetingDisclosureGateMode: oneOf("MEETING_DISCLOSURE_GATE_MODE", "shadow", ["shadow", "enforce"] as const),
-  // Jev-native ranking remains separately opt-in. Progressive bundle loading
-  // below is independent of Jev and keeps ordinary model requests small.
+  // Jev-native ranking remains separately opt-in. Ordinary interactive turns
+  // keep the full available capability surface; progressive bundle loading is
+  // reserved for explicitly scoped durable/meeting runs.
   jevNativeToolRouting: optional("JEV_NATIVE_TOOL_ROUTING", "false") === "true",
-  // `bundle` is the production default: core tools plus keyword/Jev-matched
-  // bundles and progressive discovery. `full` is an explicit compatibility
-  // switch for operators that need the legacy all-native-schema surface.
+  // `bundle` is the production default for explicitly scoped runs: core tools
+  // plus keyword/Jev-matched bundles and progressive discovery. `full` is an
+  // explicit compatibility switch for operators that need every native schema
+  // in a scoped run.
   nativeToolLoading: oneOf("NATIVE_TOOL_LOADING", "bundle", ["full", "bundle"] as const),
   // Compact conversational turns are opt-out so operators can immediately
   // restore the full capability surface during rollout.
   conversationalFastPath: oneOf("CONVERSATIONAL_FAST_PATH", "on", ["on", "off"] as const) === "on",
-  jevNativeToolMaxCandidates: boundedInt("JEV_NATIVE_TOOL_MAX_CANDIDATES", 16, 4, 32),
+  jevNativeToolMaxCandidates: boundedInt("JEV_NATIVE_TOOL_MAX_CANDIDATES", 32, 4, 64),
   jevNativeToolMinConfidence: unitInterval("JEV_NATIVE_TOOL_MIN_CONFIDENCE", 0.6),
   jevNativeToolMinProbability: unitInterval("JEV_NATIVE_TOOL_MIN_PROBABILITY", 0.12),
   jevTimeoutMs: boundedInt("JEV_TIMEOUT_MS", 1_500, 200, 10_000),
@@ -834,13 +836,15 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // hard ceiling; per-run tool-call, cost, and durable-work budgets still
   // apply.
   maxToolRounds: boundedInt("MAX_TOOL_ROUNDS", 70, 1, 100),
-  // User-facing chat turns start within a bounded interaction window. A run
-  // that is making verified progress can receive continuation windows below;
-  // durable task and mission workers keep the larger supervisor budget above.
-  interactiveInitialToolRounds: boundedInt("INTERACTIVE_INITIAL_TOOL_ROUNDS", 12, 3, 30),
-  interactiveMaxToolRounds: boundedInt("INTERACTIVE_MAX_TOOL_ROUNDS", 48, 12, 70),
-  interactiveRoundExtension: boundedInt("INTERACTIVE_ROUND_EXTENSION", 8, 2, 16),
-  interactiveMaxToolCalls: boundedInt("INTERACTIVE_MAX_TOOL_CALLS", 24, 4, 100),
+  // Interactive work is model-led. Keep a generous emergency ceiling for a
+  // runaway provider loop, but do not make ordinary chat stop after a small
+  // discovery window or require a successful call before it can continue.
+  // Clamp legacy deployments that still carry the former twelve-round values
+  // upward on boot instead of refusing to start the service.
+  interactiveInitialToolRounds: clampedInt("INTERACTIVE_INITIAL_TOOL_ROUNDS", 50, 50, 100),
+  interactiveMaxToolRounds: clampedInt("INTERACTIVE_MAX_TOOL_ROUNDS", 70, 70, 150),
+  interactiveRoundExtension: clampedInt("INTERACTIVE_ROUND_EXTENSION", 10, 10, 30),
+  interactiveMaxToolCalls: clampedInt("INTERACTIVE_MAX_TOOL_CALLS", 100, 100, 300),
   // Browser work gets a tighter per-run ceiling than the general agent loop.
   // Dynamic retail pages must not be allowed to consume an unbounded model
   // retry loop while the user is waiting for a result.

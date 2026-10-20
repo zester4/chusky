@@ -3691,7 +3691,8 @@ async function executeAgent(
   const triggerAutonomy = triggerAutonomyInstructions(channelContext?.triggerEventId);
   const shoppingPromptRelevant = /\b(?:shop|shopping|retailer|cart|checkout|order|purchase|buy|restock|delivery)\b/i.test(routingQuery);
   const meetingPromptRelevant = Boolean(options?.meetingId) || /\b(?:meeting|zoom|teams|webex|call|interview|participant|transcript)\b/i.test(routingQuery);
-  const currentTurnContract = "Current-turn execution boundary: treat the newest user request as the only active objective. Use earlier messages only to resolve an explicit reference such as 'it' or 'that' and to preserve confirmed facts. Do not resume, retry, or complete an older request merely because it appears in history or because an old tool result is visible. Every tool call must directly advance the newest request; if it does not, do not call it. Runtime route and approval fences are authoritative.";
+  const missionPromptRelevant = Boolean(options?.missionId) || /\b(?:mission|durable\s+(?:task|work)|autonomous\s+work|long[-\s]?running\s+task)\b/i.test(routingQuery);
+  const currentTurnContract = "Current-turn execution boundary: treat the newest user request as the active objective. Use earlier messages only to resolve an explicit reference such as 'it' or 'that' and to preserve confirmed facts. Do not resume, retry, or complete an older request merely because it appears in history or because an old tool result is visible. Every tool call must directly advance a named part of the newest request; if it does not, do not call it. Do not repeat an equivalent discovery or read after its result is available in this turn. Chain multiple relevant tools when the objective requires them and stop naturally when the objective is complete or genuinely blocked. Runtime route and approval fences are authoritative.";
   const passiveEmailReadInstruction = passiveEmailReadTurn
     ? "Passive inbox read boundary: this turn only answers the user's email/inbox question. Use one exact connected Gmail or Outlook read capability and inspect its result. Do not call reminders, tasks, calendar, meetings, memory, scratchpad, context, connected-account listing, browser, web research, or any write/send/save tool. Do not persist a summary or create a follow-up unless the user explicitly asks for that. Do not repeat an equivalent inbox read; only request another page when the provider returned a real pagination cursor."
     : "";
@@ -3803,12 +3804,11 @@ async function executeAgent(
 
   const durableExecution = Boolean(options?.taskId || options?.missionId);
   const interactiveExecution = !durableExecution && !options?.voiceTurn;
-  const interactiveInitialRounds = options?.voiceTurn
-    ? Math.min(config.interactiveInitialToolRounds, 8)
-    : config.interactiveInitialToolRounds;
-  // Interactive work starts small so ordinary chat stays responsive, then
-  // grows only after a productive round. Durable tasks/missions retain their
-  // larger fixed supervisor budget, while voice keeps its low-latency cap.
+  const interactiveInitialRounds = config.interactiveInitialToolRounds;
+  // Interactive work gets a generous model-led window. The model can stop
+  // naturally at any point; this ceiling is only an emergency circuit breaker
+  // for a provider loop. Durable tasks/missions retain their larger budget,
+  // while live voice keeps a smaller latency-oriented window.
   let maxModelRounds = durableExecution
     ? config.maxToolRounds
     : interactiveInitialRounds;
@@ -3887,6 +3887,7 @@ async function executeAgent(
       imageComposioDirectActionGuidanceAdded = true;
     }
     const revealed = availableTools.filter((tool) => revealedNativeTools.has(toolSchemaName(tool)));
+    const nativeDiscoveryAlreadyUsed = toolsUsed.includes("CHUCK_FIND_TOOLS");
     const composioGateway = COMPOSIO_GATEWAY_TOOLS;
     const missionPreloadNames = new Set(options?.missionToolHints ?? []);
     const preloadedMissionTools = missionPreloadNames.size
@@ -3895,34 +3896,37 @@ async function executeAgent(
     const missionHintPreload = Boolean(options?.missionId && !options.toolAllow?.length && options.missionToolHints);
     const missionRoutedNativeTools = missionHintPreload && nativeToolRoute.source !== "jev" ? [] : nativeToolRoute.tools;
     const missionDiscoveryTools = missionHintPreload
-      ? availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || composioGateway.has(toolSchemaName(tool)))
+      ? availableTools.filter((tool) => (!nativeDiscoveryAlreadyUsed && toolSchemaName(tool) === "CHUCK_FIND_TOOLS") || composioGateway.has(toolSchemaName(tool)))
       : [];
     const routedComposioNames = new Set((composioDecision?.directTools ?? []).map((tool) => toolName(tool)).filter(Boolean));
     const routedComposioTools = routedComposioNames.size
       ? availableTools.filter((tool) => routedComposioNames.has(toolSchemaName(tool)))
       : [];
     const selectedNativeNames = new Set([
-      ...nativeToolRoute.selected,
+      ...nativeToolRoute.selected.filter((name) => !nativeDiscoveryAlreadyUsed || name !== "CHUCK_FIND_TOOLS"),
       ...revealedNativeTools,
-      "CHUCK_FIND_TOOLS",
+      ...(nativeDiscoveryAlreadyUsed ? [] : ["CHUCK_FIND_TOOLS"]),
     ]);
-    // A normal production turn is capability-scoped. Enforce mode is one
-    // route source, while bundle loading supplies the deterministic fallback.
-    // Shadow/off must not reopen the full native catalog in production.
-    const strictCapabilityExposure = config.jevMode === "enforce"
-      || (config.nativeToolLoading === "bundle" && !options?.toolAllow?.length)
-      || Boolean(options?.taskId || options?.missionId || options?.meetingId);
+    // Explicit durable/meeting grants are exact-capability runs. Ordinary
+    // interactive turns retain the full available capability surface even
+    // when Jev is in enforce mode: Jev is an advisory decision layer here,
+    // while the model chooses the next useful action and runtime execution
+    // still enforces ownership, approvals, schemas, and receipts.
+    const strictCapabilityExposure = Boolean(options?.taskId || options?.missionId || options?.meetingId || missionPromptRelevant);
     // The native router preserves non-native schemas for callers that need
     // to compose routing themselves. The supervisor must not pass that
     // preserved catalog straight to the model, or a native route silently
     // re-exposes every Composio action.
     const routedNativeTools = availableTools.filter((tool) => {
       const name = toolSchemaName(tool);
-      return name.startsWith("CHUCK_") && selectedNativeNames.has(name);
+      return name.startsWith("CHUCK_")
+        && selectedNativeNames.has(name)
+        && (!nativeDiscoveryAlreadyUsed || name !== "CHUCK_FIND_TOOLS");
     });
-    // Full loading is an explicit compatibility path. Normal production
-    // turns use the exact native slice plus routed/discovery app actions.
-    const legacyCompatibleTools = availableTools;
+    // Keep the full available surface for ordinary interactive turns. This is
+    // capability availability, not authorization: every execution still
+    // passes the runtime policy and provider verification gates below.
+    const legacyCompatibleTools = availableTools.filter((tool) => !nativeDiscoveryAlreadyUsed || toolSchemaName(tool) !== "CHUCK_FIND_TOOLS");
     const appIntent = APP_INTENT_PATTERN.test(`${routingQuery}\n${routingRecentContext ?? ""}`);
     const composioHasExactRoute = routedComposioNames.size > 0 || Boolean(composioDecision?.directTools?.length);
     const composioNeedsDiscovery = appIntent && !composioDecision?.noAppNeeded && (
@@ -3948,17 +3952,23 @@ async function executeAgent(
     const missionControlTools = options?.missionId
       ? availableTools.filter((tool) => MISSION_WORKER_CONTROL_TOOLS.includes(toolSchemaName(tool) as typeof MISSION_WORKER_CONTROL_TOOLS[number]))
       : [];
+    // A fresh mission request is already a durable-intent turn before a
+    // mission ID exists. Keep its creation and schema preflight capabilities
+    // available without reopening unrelated native families such as browser.
+    const missionPromptTools = missionPromptRelevant
+      ? availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_MISSION_START" || toolSchemaName(tool) === "CHUCK_TOOL_PREFLIGHT")
+      : [];
     const hasExactEmailReadAction = passiveEmailReadTurn && availableTools.some((tool) => isPassiveEmailReadToolSlug(toolSchemaName(tool)));
     const routedTools = (
       (voiceFastLane || voiceToolFreeTurn)
         ? []
         : noToolTurn
           ? [...availableTools.filter((tool) => strictCapabilityExposure
-            ? toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || (appIntent && toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS") || revealedNativeTools.has(toolSchemaName(tool))
-            : toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS" || revealedNativeTools.has(toolSchemaName(tool))), ...explicitAllowedTools, ...meetingPreloadedTools, ...preloadedVoiceCapabilityTools]
+            ? (!nativeDiscoveryAlreadyUsed && toolSchemaName(tool) === "CHUCK_FIND_TOOLS") || (appIntent && toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS") || revealedNativeTools.has(toolSchemaName(tool))
+            : (!nativeDiscoveryAlreadyUsed && toolSchemaName(tool) === "CHUCK_FIND_TOOLS") || toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS" || revealedNativeTools.has(toolSchemaName(tool))), ...missionPromptTools, ...explicitAllowedTools, ...meetingPreloadedTools, ...preloadedVoiceCapabilityTools]
           : missionHintPreload
-            ? [...(strictCapabilityExposure ? routedNativeTools : missionRoutedNativeTools), ...preloadedMissionTools, ...(strictCapabilityExposure ? composioDiscoveryTools : missionDiscoveryTools), ...explicitAllowedTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools]
-            : [...(strictCapabilityExposure ? routedNativeTools : legacyCompatibleTools), ...composioDiscoveryTools, ...preloadedMissionTools, ...explicitAllowedTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools, ...preloadedVoiceMcpTools]
+            ? [...(strictCapabilityExposure ? routedNativeTools : missionRoutedNativeTools), ...missionPromptTools, ...preloadedMissionTools, ...(strictCapabilityExposure ? composioDiscoveryTools : missionDiscoveryTools), ...explicitAllowedTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools]
+            : [...(strictCapabilityExposure ? routedNativeTools : legacyCompatibleTools), ...missionPromptTools, ...composioDiscoveryTools, ...preloadedMissionTools, ...explicitAllowedTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools, ...preloadedVoiceMcpTools]
     )
       .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index)
       .filter((tool) => {

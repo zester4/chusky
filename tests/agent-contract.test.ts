@@ -2366,6 +2366,31 @@ test("agent executes a safe tool and feeds its result into the next model round"
   });
 });
 
+test("interactive defaults allow a long model-led working window", () => {
+  assert.ok(config.interactiveInitialToolRounds >= 50);
+  assert.ok(config.interactiveMaxToolRounds >= 70);
+  assert.ok(config.interactiveMaxToolCalls >= 100);
+});
+
+test("native discovery is not offered repeatedly after it has already run", async () => {
+  const userId = 830004;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const requests: Array<Record<string, any>> = [];
+  await withAgentMocks([
+    toolResponse("CHUCK_FIND_TOOLS", JSON.stringify({ query: "calendar and email" }), "find-1"),
+    chatResponse({ role: "assistant", content: "I found the relevant capabilities and can continue from here." }),
+  ], async () => ({ tools: [] }), async () => {
+    const result = await runAgent(userId, "Find the relevant capabilities for my calendar and email request.", [], "test/model", undefined, undefined, undefined, undefined, undefined, { ephemeral: true });
+    assert.match(result.text, /relevant capabilities/i);
+    assert.deepEqual(result.toolsUsed, ["CHUCK_FIND_TOOLS"]);
+    const firstRoundTools = requests[0]?.tools?.map((tool: any) => tool.function.name) ?? [];
+    assert.ok(firstRoundTools.includes("CHUCK_FIND_TOOLS"));
+    const secondRoundTools = requests[1]?.tools?.map((tool: any) => tool.function.name) ?? [];
+    assert.equal(secondRoundTools.includes("CHUCK_FIND_TOOLS"), false);
+  }, false, undefined, (body) => requests.push(body));
+});
+
 test("interactive runs extend after verified progress instead of stopping at the initial window", async () => {
   const userId = 830003;
   await initStore({ memoryOnly: true });

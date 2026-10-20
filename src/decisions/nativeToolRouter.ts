@@ -318,33 +318,6 @@ function modelToolsForSelection(tools: ToolSchema[], selected: Set<string>): Too
 }
 
 /**
- * Keep a Jev or keyword route inside the current objective's deterministic
- * native capability vocabulary. Jev can rank candidates, but a malformed or
- * over-broad response must not make memory, reminders, browser, calendar,
- * and unrelated workflow tools visible on an otherwise focused turn.
- * Discovery and explicit lifecycle controls remain available through the
- * normal route closure.
- */
-export function scopeNativeToolRouteToObjective(tools: ToolSchema[], route: NativeToolRoute, query: string): NativeToolRoute {
-  if (!query.trim()) return route;
-  const objectiveNames = new Set(searchNativeToolManifest(query, undefined, 64).map((item) => item.slug));
-  const selected = new Set<string>();
-  for (const item of nativeToolManifest) {
-    if (item.alwaysAvailable) selected.add(item.slug);
-  }
-  for (const slug of route.selected) {
-    if (objectiveNames.has(slug)) selected.add(slug);
-  }
-  selected.add("CHUCK_FIND_TOOLS");
-  return {
-    ...route,
-    tools: modelToolsForSelection(tools, selected),
-    selected: [...selected],
-    ...(route.fallbackReason ? { fallbackReason: route.fallbackReason } : { fallbackReason: "objective_scoped" }),
-  };
-}
-
-/**
  * Apply a multi-label Jev result that was already obtained in a turn-wide
  * batch. This keeps the model-facing catalog reduction and lifecycle closure
  * identical to the standalone native router without making another request.
@@ -372,7 +345,7 @@ export function nativeToolRouteFromJevScores(tools: ToolSchema[], input: {
   if (!best || best.probability < config.jevNativeToolMinProbability) {
     const fallbackReason = "jev_no_native_tool_needed";
     const fallback = config.nativeToolLoading === "bundle" && !input.preserveAll
-      ? scopeNativeToolRouteToObjective(tools, bundleFallbackRoute(tools, input.query, fallbackReason), input.query)
+      ? bundleFallbackRoute(tools, input.query, fallbackReason)
       : baseline;
     return {
       ...fallback,
@@ -385,12 +358,12 @@ export function nativeToolRouteFromJevScores(tools: ToolSchema[], input: {
 
   const selected = ranked
     .filter((item) => item.probability >= config.jevNativeToolMinProbability)
-    .slice(0, Math.min(12, config.jevNativeToolMaxCandidates))
+    .slice(0, config.jevNativeToolMaxCandidates)
     .map((item) => item.id);
   if (!selected.length) {
     const fallbackReason = "jev_no_selected_native_tool";
     return {
-      ...(config.nativeToolLoading === "bundle" && !input.preserveAll ? scopeNativeToolRouteToObjective(tools, bundleFallbackRoute(tools, input.query, fallbackReason), input.query) : baseline),
+      ...(config.nativeToolLoading === "bundle" && !input.preserveAll ? bundleFallbackRoute(tools, input.query, fallbackReason) : baseline),
       candidateCount: input.candidateCount ?? ranked.length,
       fallbackReason,
       telemetry,
@@ -400,13 +373,13 @@ export function nativeToolRouteFromJevScores(tools: ToolSchema[], input: {
   const selectedSet = new Set(selected);
   for (const item of nativeToolManifest) if (item.alwaysAvailable) selectedSet.add(item.slug);
   retainLifecycleToolFamilies(tools, selectedSet, input.query, input.recentContext);
-  return scopeNativeToolRouteToObjective(tools, {
+  return {
     tools: modelToolsForSelection(tools, selectedSet),
     source: "jev",
     candidateCount: input.candidateCount ?? ranked.length,
     selected: [...selectedSet],
     telemetry,
-  }, input.query);
+  };
 }
 
 /** Add a separately routed native family without reopening a Jev request. */
@@ -555,7 +528,7 @@ export async function computeNativeToolRoute(query: string, tools: ToolSchema[],
   }
   const selected = ranking.ranked
     .filter((item) => item.probability >= config.jevNativeToolMinProbability)
-    .slice(0, Math.min(12, config.jevNativeToolMaxCandidates))
+    .slice(0, config.jevNativeToolMaxCandidates)
     .map((item) => item.id);
   if (!selected.length) {
     const fallbackReason = config.nativeToolLoading === "bundle" && !options.preserveAll
@@ -601,11 +574,11 @@ export async function routeNativeToolsForTurn(tools: ToolSchema[], query: string
   preserveAll?: boolean;
 } = {}): Promise<NativeToolRoute> {
   const baseline = baselineRoute(tools);
-  if (config.nativeToolLoading === "bundle" && !options.preserveAll && (!query.trim() || !config.jevNativeToolRouting || !jevEnabled("native"))) return scopeNativeToolRouteToObjective(tools, bundleFallbackRoute(tools, query, "bundle_keyword_fallback"), query);
+  if (config.nativeToolLoading === "bundle" && !options.preserveAll && (!query.trim() || !config.jevNativeToolRouting || !jevEnabled("native"))) return bundleFallbackRoute(tools, query, "bundle_keyword_fallback");
   if (!query.trim() || !config.jevNativeToolRouting || !jevEnabled("native")) return baseline;
   const client = options.client ?? jevClient();
   if (!client.available()) return config.nativeToolLoading === "bundle" && !options.preserveAll
-    ? scopeNativeToolRouteToObjective(tools, bundleFallbackRoute(tools, query, "bundle_jev_unavailable"), query)
+    ? bundleFallbackRoute(tools, query, "bundle_jev_unavailable")
     : { ...baseline, fallbackReason: "jev_unavailable" };
   const mode = config.jevMode;
   const run = computeNativeToolRoute(query, tools, {
@@ -650,14 +623,12 @@ export async function routeNativeToolsForTurn(tools: ToolSchema[], query: string
     // Shadow mode may keep Jev advisory, but it must not reopen the entire
     // native catalog when production bundle loading is enabled. Use the same
     // deterministic objective bundle that the off/unavailable paths use.
-    return config.nativeToolLoading === "bundle" && !options.preserveAll
-      ? scopeNativeToolRouteToObjective(tools, bundleFallbackRoute(tools, query, "jev_shadow_bundle"), query)
-      : baseline;
+    return baseline;
   }
   const { value, failure } = await awaitRoute(run, options.deadline ? options.deadline.remaining() : config.jevTurnBudgetMs);
   if (!value || value.source !== "jev") {
     const fallback = enforceDirectMeetingJoinRoute(tools, value ?? (config.nativeToolLoading === "bundle" && !options.preserveAll
-      ? scopeNativeToolRouteToObjective(tools, bundleFallbackRoute(tools, query, "bundle_route_failure"), query)
+      ? bundleFallbackRoute(tools, query, "bundle_route_failure")
       : { ...baseline, ...(failure ? { fallbackReason: failure } : {}) }), query);
     log(fallback, false, failure ?? fallback.fallbackReason ?? "fallback");
     return fallback;
@@ -666,12 +637,12 @@ export async function routeNativeToolsForTurn(tools: ToolSchema[], query: string
     const baselineNativeTools = nativeToolCount(tools);
     const exposedNativeTools = nativeToolCount(value.tools);
     if (exposedNativeTools >= baselineNativeTools) {
-      const fallback = enforceDirectMeetingJoinRoute(tools, scopeNativeToolRouteToObjective(tools, bundleFallbackRoute(tools, query, "jev_route_not_reduced"), query), query);
+      const fallback = enforceDirectMeetingJoinRoute(tools, bundleFallbackRoute(tools, query, "jev_route_not_reduced"), query);
       log(fallback, false, "jev_route_not_reduced");
       return fallback;
     }
   }
-  const guarded = enforceDirectMeetingJoinRoute(tools, scopeNativeToolRouteToObjective(tools, value, query), query);
+  const guarded = enforceDirectMeetingJoinRoute(tools, value, query);
   log(guarded, true);
   return guarded;
 }

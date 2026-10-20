@@ -68,7 +68,7 @@ test("capability routing gives the supervisor concrete delegation, skill, and to
   assert.match(prompt, /For an objective spanning distinct capabilities or dependent specialist stages, use CHUCK_PLAN_DELEGATION/);
   assert.match(prompt, /for one bounded specialist task, use CHUCK_DELEGATE_SUBAGENT/);
   assert.match(prompt, /reselect: search with CHUCK_SEARCH_SKILLS, read the matching SKILL\.md/);
-  assert.match(prompt, /use CHUCK_FIND_TOOLS once/);
+  assert.match(prompt, /If an exact native capability is genuinely absent, use CHUCK_FIND_TOOLS and then use its returned capability/);
   assert.match(prompt, /use COMPOSIO_SEARCH_TOOLS, then use COMPOSIO_GET_TOOL_SCHEMAS/);
   assert.match(prompt, /Jev is the turn router, not the worker, approver, or source of truth/);
   assert.match(prompt, /Skills are routed from their name and description/);
