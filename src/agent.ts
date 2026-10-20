@@ -3906,13 +3906,11 @@ async function executeAgent(
       ...revealedNativeTools,
       "CHUCK_FIND_TOOLS",
     ]);
-    // Enforce mode is the production exact-capability boundary. Shadow/off
-    // remain compatibility modes by design so operators can observe or roll
-    // back routing without changing the model catalog. Durable workers and
-    // meeting grants are always exact because their scopes are already
-    // explicit. In enforce mode, uncertainty goes to discovery; it never
-    // silently reopens the full native or Composio catalog.
+    // A normal production turn is capability-scoped. Enforce mode is one
+    // route source, while bundle loading supplies the deterministic fallback.
+    // Shadow/off must not reopen the full native catalog in production.
     const strictCapabilityExposure = config.jevMode === "enforce"
+      || (config.nativeToolLoading === "bundle" && !options?.toolAllow?.length)
       || Boolean(options?.taskId || options?.missionId || options?.meetingId);
     // The native router preserves non-native schemas for callers that need
     // to compose routing themselves. The supervisor must not pass that
@@ -3922,13 +3920,8 @@ async function executeAgent(
       const name = toolSchemaName(tool);
       return name.startsWith("CHUCK_") && selectedNativeNames.has(name);
     });
-    // Shadow/off are compatibility modes. Keep the pre-Jev native catalogue
-    // available there so an operator can roll routing out without changing
-    // the behavior of existing SDK callers. Enforce mode uses the exact
-    // Jev-selected slice above and never falls back to this catalogue.
-    // Include non-native schemas as well: the legacy path may contain an
-    // explicitly injected MCP/test capability or a connected-app action.
-    // Strict Jev mode never uses this compatibility catalogue.
+    // Full loading is an explicit compatibility path. Normal production
+    // turns use the exact native slice plus routed/discovery app actions.
     const legacyCompatibleTools = availableTools;
     const appIntent = APP_INTENT_PATTERN.test(`${routingQuery}\n${routingRecentContext ?? ""}`);
     const composioHasExactRoute = routedComposioNames.size > 0 || Boolean(composioDecision?.directTools?.length);

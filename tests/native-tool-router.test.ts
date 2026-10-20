@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import { JevClient } from "../src/decisions/jev.js";
-import { computeNativeToolRoute, enforceDirectMeetingJoinRoute, isDirectMeetingJoinRequest, nativeToolManifest, routeNativeToolsForTurn, searchComposioGatewayManifest, searchDiscoveredToolManifest, searchNativeToolManifest } from "../src/decisions/nativeToolRouter.js";
+import { computeNativeToolRoute, enforceDirectMeetingJoinRoute, isDirectMeetingJoinRequest, nativeToolManifest, routeNativeToolsForTurn, scopeNativeToolRouteToObjective, searchComposioGatewayManifest, searchDiscoveredToolManifest, searchNativeToolManifest } from "../src/decisions/nativeToolRouter.js";
 
 const mutableConfig = config as unknown as Record<string, unknown>;
 
@@ -81,6 +81,28 @@ test("bundle loading exposes core plus the matched bundle instead of the full na
     assert.ok(!names.includes("CHUCK_BROWSER"));
     assert.ok(route.tools.length < tools().length);
   } finally { restore(); }
+});
+
+test("objective scoping prevents an over-broad route from crossing native tool families", () => {
+  const all = tools();
+  const overBroad = {
+    tools: all,
+    source: "jev" as const,
+    candidateCount: all.length,
+    selected: all.map((tool) => tool.function.name),
+  };
+
+  const pdf = scopeNativeToolRouteToObjective(all, overBroad, "Create a PDF report");
+  const pdfNames = pdf.tools.map((tool: any) => tool.function.name);
+  assert.ok(pdfNames.includes("CHUCK_CREATE_PDF"));
+  assert.ok(!pdfNames.includes("CHUCK_BROWSER"));
+  assert.ok(!pdfNames.includes("CHUCK_SEARCH_MEMORY"));
+
+  const browser = scopeNativeToolRouteToObjective(all, overBroad, "Fill in a web form using the browser");
+  const browserNames = browser.tools.map((tool: any) => tool.function.name);
+  assert.ok(browserNames.includes("CHUCK_BROWSER"));
+  assert.ok(!browserNames.includes("CHUCK_CREATE_PDF"));
+  assert.ok(!browserNames.includes("CHUCK_SEARCH_MEMORY"));
 });
 
 test("an explicit Jev abstention creates a discovery-only native route", async () => {
@@ -377,13 +399,15 @@ test("current lifecycle intent takes precedence over stale history without widen
   } finally { restore(); }
 });
 
-test("shadow mode evaluates native routing without changing the catalog", async () => {
-  const restore = withConfig({ jevMode: "shadow", jevSurfaces: new Set(["native"]), jevNativeToolRouting: true });
+test("shadow mode evaluates native routing while keeping production bundle scope", async () => {
+  const restore = withConfig({ nativeToolLoading: "bundle", jevMode: "shadow", jevSurfaces: new Set(["native"]), jevNativeToolRouting: true });
   try {
     const all = tools();
     const route = await routeNativeToolsForTurn(all, "Create a PDF report", { client: new JevClient({ apiKey: "k", fetchImpl: chooseRequestedTool() }) });
     assert.equal(route.source, "fallback");
-    assert.equal(route.tools, all);
+    assert.notEqual(route.tools, all);
+    assert.ok(route.tools.some((tool: any) => tool.function.name === "CHUCK_CREATE_PDF"));
+    assert.ok(!route.tools.some((tool: any) => tool.function.name === "CHUCK_BROWSER"));
     await new Promise((resolve) => setTimeout(resolve, 20));
   } finally { restore(); }
 });
