@@ -4673,7 +4673,8 @@ async function executeAgent(
               try {
                 const providerResult = await composioExecute(sessionObj, input.toolSlug, input.arguments, signal);
                 if (providerResult?.successful !== true || providerResult?.error) throw new Error("The provider did not confirm the compensation action.");
-                await finishExternalAction(userId, claim.logicalActionId, `${input.toolSlug} returned a successful provider response.`, providerReceiptId(providerResult));
+                const finished = await finishExternalAction(userId, claim.logicalActionId, `${input.toolSlug} returned a successful provider response.`, providerReceiptId(providerResult));
+                if (!finished) throw new Error("The provider accepted this action, but Chusky could not persist its durable receipt. The outcome is uncertain; verify provider state before retrying.");
               } catch (error) {
                 dispatchFailure = error instanceof Error ? error.message : String(error);
                 await failExternalAction(userId, claim.logicalActionId, dispatchFailure);
@@ -4950,7 +4951,8 @@ async function executeAgent(
                 })()
                 : [];
             toolReceiptId = providerReceiptId(execResult) ?? externalClaim.receipt?.providerId ?? externalClaim.receipt?.id;
-            await finishExternalAction(userId, externalClaim.logicalActionId, result, toolReceiptId, trustedProviderActions);
+            const finished = await finishExternalAction(userId, externalClaim.logicalActionId, result, toolReceiptId, trustedProviderActions);
+            if (!finished) throw new Error("The provider accepted this action, but Chusky could not persist its durable receipt. The outcome is uncertain; verify provider state before retrying.");
           }
         }
         if (!toolFailed && directProviderTool && options?.missionId && options?.missionStepId && toolReceiptId) {

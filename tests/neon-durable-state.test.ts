@@ -124,7 +124,7 @@ test("Neon durable session domains write atomically and permit versioned partial
   assert.equal(pool.client.calls[0]?.text, "BEGIN");
   assert.equal(pool.client.calls[1]?.text, "SELECT pg_advisory_xact_lock($1::bigint)");
   assert.deepEqual(pool.client.calls[1]?.values, [42]);
-  assert.equal(pool.client.calls.filter((call) => call.text.includes("INSERT INTO chusky_session_domain")).length, 6);
+  assert.equal(pool.client.calls.filter((call) => call.text.includes("INSERT INTO chusky_session_domain")).length, DURABLE_SESSION_DOMAINS.length);
   assert.equal(pool.client.calls.filter((call) => call.text.includes("pg_advisory_xact_lock")).length, 1);
   assert.equal(pool.client.calls.at(-1)?.text, "COMMIT");
   assert.equal(pool.client.released, true);
@@ -187,6 +187,21 @@ test("durable session snapshots never leak into the Redis core payload", () => {
   assert.equal("durableDomainSnapshots" in core, false);
 });
 
+test("autonomous receipts survive the Neon session split instead of living in the aggregate core", () => {
+  const receipt = {
+    id: "act_receipt_1", userId: 42, provider: "composio" as const, tool: "GMAIL_SEND_EMAIL",
+    argumentsHash: "a".repeat(64), logicalActionId: "mission:mis_test:single:GMAIL_SEND_EMAIL:hash",
+    sourceKind: "mission", sourceId: "mis_test", missionStepId: "step-1", status: "succeeded" as const,
+    receiptVerification: "provider_response" as const, providerId: "provider-receipt-1", createdAt: 1, updatedAt: 2,
+  };
+  const value = { ...session(), externalActions: [receipt] } as UserSession;
+  const { core, domains } = splitSessionDomains(value);
+  assert.equal("externalActions" in core, false);
+  assert.deepEqual((domains.get("autonomy") as { externalActions: unknown[] }).externalActions, [receipt]);
+  const joined = joinSessionDomains(core, domains);
+  assert.deepEqual(joined.externalActions, [receipt]);
+});
+
 test("durable saves never synthesize an unloaded SDK domain", () => {
   const partial = { ...session(), durableDomainSnapshots: { profile: { totalMessages: 1 } } } as UserSession & { durableDomainSnapshots: Record<string, unknown> };
   assert.equal(splitSessionDomainsForSave(partial, true, false).domains.has("sdk"), false);
@@ -220,7 +235,7 @@ test("Neon session writes extract SDK runs into rows in the same transaction", a
 
 test("Neon health verifies reachability and the core session schema", async () => {
   const pool = new FakePool();
-  pool.schemaDefinition = "CHECK (domain IN ('profile', 'conversation', 'memories', 'assets', 'calls', 'sdk'))";
+  pool.schemaDefinition = "CHECK (domain IN ('profile', 'conversation', 'memories', 'assets', 'calls', 'autonomy', 'sdk'))";
   const state = new NeonDurableState(pool as never);
   const health = await state.healthStatus();
   assert.deepEqual(pool.reads, []);
@@ -402,7 +417,7 @@ test("durable session startup rejects a schema without the profile domain migrat
 
 test("durable session startup accepts the current domain constraint", async () => {
   const pool = new FakePool();
-  pool.schemaDefinition = "CHECK ((domain = ANY (ARRAY['profile'::text, 'conversation'::text, 'memories'::text, 'assets'::text, 'calls'::text, 'sdk'::text])))";
+  pool.schemaDefinition = "CHECK ((domain = ANY (ARRAY['profile'::text, 'conversation'::text, 'memories'::text, 'assets'::text, 'calls'::text, 'autonomy'::text, 'sdk'::text])))";
   const state = new NeonDurableState(pool as never);
   await state.assertSessionSchema();
   assert.equal(pool.calls.length, 3);

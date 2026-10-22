@@ -62,7 +62,25 @@ export function runMissionProcess(input: ProcessProofInput, killAt?: string): Pr
   return new Promise((resolve, reject) => {
     const child = fork(fileURLToPath(new URL("./missionProcessWorker.mjs", import.meta.url)), [JSON.stringify(input)], {
       execArgv: [], stdio: ["ignore", "ignore", "ignore", "ipc"],
-      env: { ...process.env, NODE_PATH: join(root, "node_modules"), JEV_MODE: "off", MISSION_PROCESS_REDIS_PREFIX: missionProofRedisPrefix, MISSION_PROOF_COMPILED_DIR: compiled, TELEGRAM_BOT_TOKEN: "ci-test-telegram-token", COMPOSIO_API_KEY: "ci-test-composio-key", OPENROUTER_API_KEY: "ci-test-openrouter-key" },
+      env: {
+        ...process.env,
+        NODE_PATH: join(root, "node_modules"),
+        JEV_MODE: "off",
+        // This proof exercises the real Redis backend only. Do not let a
+        // developer .env turn it into an accidental Neon, object-catalog, or
+        // metrics integration test before the worker reaches its crash point.
+        DURABLE_STATE_ENABLED: "false",
+        DURABLE_STATE_MISSIONS_ENABLED: "false",
+        DURABLE_STATE_SDK_RUNS_ENABLED: "false",
+        DURABLE_STATE_SDK_TABLES_ENABLED: "false",
+        DURABLE_OBJECT_CATALOG_ENABLED: "false",
+        DURABLE_STORAGE_METRICS_ENABLED: "false",
+        MISSION_PROCESS_REDIS_PREFIX: missionProofRedisPrefix,
+        MISSION_PROOF_COMPILED_DIR: compiled,
+        TELEGRAM_BOT_TOKEN: "ci-test-telegram-token",
+        COMPOSIO_API_KEY: "ci-test-composio-key",
+        OPENROUTER_API_KEY: "ci-test-openrouter-key",
+      },
     });
     const boundaries: string[] = [];
     let result: ProcessProofResult | undefined;

@@ -5,7 +5,7 @@ import { REDIS_METRIC_FAMILIES, type RedisCommandFamilyMetrics, type RedisMetric
 import { logger } from "./logger.js";
 import type { VoiceCallReconciliationRecord } from "./calls/reconciliationTypes.js";
 
-export const DURABLE_SESSION_DOMAINS = ["profile", "conversation", "memories", "assets", "calls", "sdk"] as const;
+export const DURABLE_SESSION_DOMAINS = ["profile", "conversation", "memories", "assets", "calls", "autonomy", "sdk"] as const;
 export type DurableSessionDomain = typeof DURABLE_SESSION_DOMAINS[number];
 
 export interface DurableSessionDocument {
@@ -1058,13 +1058,13 @@ export class NeonDurableState {
     return result.rows[0] ? toDurableMission(result.rows[0]) : undefined;
   }
 
-  async listMissions(userId: number, limit = 100, afterMissionId?: string, statuses?: readonly string[]): Promise<DurableMissionRecord[]> {
+  async listMissions(userId: number, limit = 100, afterMissionId?: string, statuses?: readonly string[], order: "updated" | "id" = "updated"): Promise<DurableMissionRecord[]> {
     assertUserId(userId);
     const boundedLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(500, limit)) : 100;
     if (afterMissionId !== undefined && !/^mis_[A-Za-z0-9_-]{1,160}$/.test(afterMissionId)) throw new Error("Durable mission pagination cursor is invalid.");
     const requestedStatuses = [...new Set((statuses ?? []).filter((status): status is string => typeof status === "string" && /^(?:queued|running|waiting|paused|blocked|completed|failed|cancelled)$/.test(status)))];
     const statusClause = requestedStatuses.length ? " AND status = ANY($4::text[])" : "";
-    const orderClause = requestedStatuses.length && afterMissionId === undefined ? "updated_at DESC, mission_id" : "mission_id";
+    const orderClause = order === "id" || afterMissionId !== undefined ? "mission_id" : "updated_at DESC, mission_id";
     const result = await this.measuredQuery<MissionRow>(this.database,
       `SELECT owner_user_id, mission_id, status, idempotency_key, payload, version, created_at, updated_at FROM chusky_mission WHERE owner_user_id = $1 AND ($2::text IS NULL OR mission_id > $2)${statusClause} ORDER BY ${orderClause} LIMIT $3`,
       requestedStatuses.length ? [userId, afterMissionId ?? null, boundedLimit, requestedStatuses] : [userId, afterMissionId ?? null, boundedLimit]);
@@ -1180,7 +1180,7 @@ export class NeonDurableState {
     const constraint = await this.measuredQuery<{ definition: string }>(this.database,
       "SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid = 'chusky_session_domain'::regclass AND conname = 'chusky_session_domain_domain_check'");
     const definition = constraint.rows[0]?.definition ?? "";
-    if (!definition.includes("profile") || !definition.includes("calls") || !definition.includes("sdk")) throw new Error("Neon durable session-domain constraint is missing required domains; apply the latest durable-state migrations.");
+    if (!definition.includes("profile") || !definition.includes("calls") || !definition.includes("autonomy") || !definition.includes("sdk")) throw new Error("Neon durable session-domain constraint is missing required domains; apply the latest durable-state migrations.");
   }
 
   async assertVoiceCallReconciliationSchema(): Promise<void> {

@@ -120,7 +120,7 @@ test("incomplete promoted sessions repair only missing durable domains", async (
     async readSessionDomains() { return new Map(documents) as Map<never, never>; },
     async appendConversationMessages(_userId: number, messages: readonly unknown[]) { assert.equal(messages.length, 1); },
     async writeSessionDomains(_userId: number, payloads: ReadonlyMap<string, unknown>, _runs: unknown[], expected: ReadonlyMap<string, number | undefined>) {
-      assert.deepEqual([...expected.keys()].sort(), ["assets", "calls", "conversation", "memories", "sdk"]);
+      assert.deepEqual([...expected.keys()].sort(), ["assets", "autonomy", "calls", "conversation", "memories", "sdk"]);
       for (const [domain, payload] of payloads) {
         writes.push(domain);
         documents.set(domain, { domain, payload, version: 1, updatedAt: 1 } as DurableSessionDocument);
@@ -131,8 +131,8 @@ test("incomplete promoted sessions repair only missing durable domains", async (
 
   const repaired = await repairIncompleteDurableSession(820006, snapshot, { state: state as never });
 
-  assert.deepEqual([...repaired.keys()].sort(), ["assets", "calls", "conversation", "memories", "profile", "sdk"]);
-  assert.deepEqual(writes.sort(), ["assets", "calls", "conversation", "memories", "sdk"]);
+  assert.deepEqual([...repaired.keys()].sort(), ["assets", "autonomy", "calls", "conversation", "memories", "profile", "sdk"]);
+  assert.deepEqual(writes.sort(), ["assets", "autonomy", "calls", "conversation", "memories", "sdk"]);
   assert.deepEqual(repaired.get("profile")?.payload, { model: "existing/model" });
 });
 

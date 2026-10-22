@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { claimDelivery, completeDelivery, getExternalAction, getMission, recordTrustedMissionEvidence, saveExternalAction, updateExternalAction, type ExternalActionReceipt } from "../store.js";
+import { claimDelivery, completeDelivery, getExternalAction, getMission, listExternalActions, recordTrustedMissionEvidence, saveExternalAction, updateExternalAction, type ExternalActionReceipt } from "../store.js";
 import { logger } from "../logger.js";
 import { queueCompensation, appendTraceEvent, appendReliabilitySample } from "../reliability/persistence.js";
 
@@ -7,6 +7,65 @@ export interface TrustedProviderAction {
   toolSlug: string;
   argumentsHash: string;
   index?: number;
+}
+
+function missionReceiptEvidence(receipt: ExternalActionReceipt): Array<{
+  id: string;
+  kind: "tool_receipt";
+  summary: string;
+  source?: string;
+  ref: string;
+  hash: string;
+  verified: true;
+  verifiedBy: "system";
+}> {
+  const actionEvidence = (receipt.providerActions ?? []).slice(0, 50).map((action) => ({
+    id: `evidence_${receipt.id}_${action.index ?? 0}_${createHash("sha256").update(`${action.toolSlug}:${action.argumentsHash}`).digest("hex").slice(0, 16)}`,
+    kind: "tool_receipt" as const,
+    summary: `${action.toolSlug} completed successfully inside a confirmed provider batch.`,
+    source: action.toolSlug,
+    ref: `tool-receipt:${receipt.id}:${action.index ?? 0}`,
+    hash: action.argumentsHash,
+    verified: true as const,
+    verifiedBy: "system" as const,
+  }));
+  return [{
+    id: `evidence_${receipt.id}`,
+    kind: "tool_receipt",
+    summary: `${receipt.tool} completed successfully${receipt.providerId ? ` (${receipt.providerId})` : ""}.`,
+    ref: `tool-receipt:${receipt.id}`,
+    hash: receipt.argumentsHash,
+    verified: true,
+    verifiedBy: "system",
+  }, ...actionEvidence];
+}
+
+/**
+ * Repair mission proof after a provider write succeeded but the process died
+ * before the evidence mutation completed. This never replays the provider.
+ */
+export async function repairMissionEvidenceForMission(userId: number, missionId: string, receipts?: ExternalActionReceipt[]): Promise<number> {
+  const candidates = (receipts ?? await listExternalActions(userId, 400)).filter((receipt) =>
+    receipt.status === "succeeded"
+    && receipt.sourceKind === "mission"
+    && receipt.sourceId === missionId
+    && receipt.missionEvidenceStatus !== "persisted",
+  );
+  let repaired = 0;
+  for (const receipt of candidates) {
+    try {
+      const recorded = await recordTrustedMissionEvidence(userId, missionId, missionReceiptEvidence(receipt), receipt.missionStepId);
+      if (!recorded) continue;
+      const updated = await updateExternalAction(userId, receipt.logicalActionId, {
+        missionEvidenceStatus: "persisted",
+        missionEvidenceError: undefined,
+      });
+      if (updated?.missionEvidenceStatus === "persisted") repaired++;
+    } catch (error) {
+      logger.warn({ userId, missionId, receiptId: receipt.id, errorName: error instanceof Error ? error.name : "UnknownError" }, "Trusted mission evidence repair failed");
+    }
+  }
+  return repaired;
 }
 
 function stableValue(value: unknown): string {
@@ -80,8 +139,17 @@ export async function beginExternalAction(input: {
   return { state: "new", receipt, logicalActionId };
 }
 
-export async function finishExternalAction(userId: number, logicalActionId: string, resultSummary: string, providerId?: string, providerActions: TrustedProviderAction[] = []): Promise<void> {
-  const receipt = await updateExternalAction(userId, logicalActionId, { status: "succeeded", resultSummary: resultSummary.slice(0, 8_000), ...(providerId ? { providerId: providerId.slice(0, 240) } : {}), receiptVerification: "provider_response", verifiedAt: Date.now(), error: undefined });
+export async function finishExternalAction(userId: number, logicalActionId: string, resultSummary: string, providerId?: string, providerActions: TrustedProviderAction[] = []): Promise<ExternalActionReceipt | undefined> {
+  const normalizedProviderActions = providerActions.slice(0, 50).flatMap((action) => action && typeof action.toolSlug === "string" && typeof action.argumentsHash === "string"
+    ? [{ toolSlug: action.toolSlug.slice(0, 180), argumentsHash: action.argumentsHash.slice(0, 128), ...(typeof action.index === "number" && Number.isSafeInteger(action.index) && action.index >= 0 ? { index: action.index } : {}) }]
+    : []);
+  const receipt = await updateExternalAction(userId, logicalActionId, { status: "succeeded", resultSummary: resultSummary.slice(0, 8_000), ...(providerId ? { providerId: providerId.slice(0, 240) } : {}), ...(normalizedProviderActions.length ? { providerActions: normalizedProviderActions } : {}), receiptVerification: "provider_response", verifiedAt: Date.now(), error: undefined });
+  if (!receipt) {
+    // Do not acknowledge the delivery claim when the success receipt itself
+    // was not durably updated. Callers must surface an uncertain outcome.
+    logger.error({ userId, logicalActionId }, "External action succeeded but its durable receipt was missing");
+    return undefined;
+  }
   await appendReliabilitySample({ ownerId: userId, operation: receipt?.tool ?? "external_action", status: "success", at: Date.now(), provider: receipt?.provider }).catch(() => undefined);
   await appendTraceEvent({ ownerId: userId, kind: "receipt", type: "external_action.succeeded", at: Date.now(), correlationId: logicalActionId, summary: `${receipt?.tool ?? "External action"} was confirmed by the provider.`, metadata: { providerId: providerId ?? null } }).catch(() => undefined);
   // This is the production trusted-evidence boundary: the provider/tool
@@ -89,25 +157,7 @@ export async function finishExternalAction(userId: number, logicalActionId: stri
   // model can request evidence, but it cannot manufacture this system proof.
   if (receipt?.sourceKind === "mission" && receipt.sourceId) {
     try {
-      const actionEvidence = providerActions.slice(0, 50).map((action) => ({
-        id: `evidence_${receipt.id}_${action.index ?? 0}_${createHash("sha256").update(`${action.toolSlug}:${action.argumentsHash}`).digest("hex").slice(0, 16)}`,
-        kind: "tool_receipt" as const,
-        summary: `${action.toolSlug} completed successfully inside a confirmed provider batch.`,
-        source: action.toolSlug,
-        ref: `tool-receipt:${receipt.id}:${action.index ?? 0}`,
-        hash: action.argumentsHash,
-        verified: true,
-        verifiedBy: "system" as const,
-      }));
-      const recorded = await recordTrustedMissionEvidence(userId, receipt.sourceId, [{
-        id: `evidence_${receipt.id}`,
-        kind: "tool_receipt",
-        summary: `${receipt.tool} completed successfully${receipt.providerId ? ` (${receipt.providerId})` : ""}.`,
-        ref: `tool-receipt:${receipt.id}`,
-        hash: receipt.argumentsHash,
-        verified: true,
-        verifiedBy: "system",
-      }, ...actionEvidence], receipt.missionStepId);
+      const recorded = await recordTrustedMissionEvidence(userId, receipt.sourceId, missionReceiptEvidence(receipt), receipt.missionStepId);
       if (!recorded) throw new Error("mission evidence target was unavailable or changed concurrently");
       await updateExternalAction(userId, logicalActionId, { missionEvidenceStatus: "persisted", missionEvidenceError: undefined });
     } catch (error) {
@@ -120,6 +170,7 @@ export async function finishExternalAction(userId: number, logicalActionId: stri
     }
   }
   await completeDelivery(`autonomy:external-action:${userId}:${createHash("sha256").update(logicalActionId).digest("hex")}`, 365 * 24 * 60 * 60);
+  return receipt;
 }
 
 export async function failExternalAction(userId: number, logicalActionId: string, error: string): Promise<void> {
@@ -156,16 +207,22 @@ export async function reconcileExternalActionByRead(input: { userId: number; log
   await appendReliabilitySample({ ownerId: input.userId, operation: reconciled.tool, status: "success", at: input.verifiedAt, provider: reconciled.provider });
   await appendTraceEvent({ ownerId: input.userId, kind: "receipt", type: "external_action.reconciled", at: input.verifiedAt, correlationId: input.logicalActionId, status: "verified", summary: `${reconciled.tool} state was confirmed by a fresh provider read.`, metadata: { provider: reconciled.provider, evidenceRef: input.evidenceRef.slice(0, 500) } });
   if (reconciled.sourceKind === "mission" && reconciled.sourceId) {
-    await recordTrustedMissionEvidence(input.userId, reconciled.sourceId, [{
-      id: `evidence_reconcile_${reconciled.id}_${createHash("sha256").update(input.evidenceRef).digest("hex").slice(0, 20)}`,
-      kind: "before_after",
-      summary: input.summary.slice(0, 2_000),
-      source: reconciled.tool,
-      ref: input.evidenceRef.slice(0, 500),
-      hash: reconciled.argumentsHash,
-      verified: true,
-      verifiedBy: "system",
-    }], reconciled.missionStepId);
+    try {
+      const recorded = await recordTrustedMissionEvidence(input.userId, reconciled.sourceId, [{
+        id: `evidence_reconcile_${reconciled.id}_${createHash("sha256").update(input.evidenceRef).digest("hex").slice(0, 20)}`,
+        kind: "before_after",
+        summary: input.summary.slice(0, 2_000),
+        source: reconciled.tool,
+        ref: input.evidenceRef.slice(0, 500),
+        hash: reconciled.argumentsHash,
+        verified: true,
+        verifiedBy: "system",
+      }], reconciled.missionStepId);
+      await updateExternalAction(input.userId, input.logicalActionId, { missionEvidenceStatus: recorded ? "persisted" : "failed", missionEvidenceError: recorded ? undefined : "Trusted mission evidence could not be persisted." });
+    } catch (error) {
+      await updateExternalAction(input.userId, input.logicalActionId, { missionEvidenceStatus: "failed", missionEvidenceError: "Trusted mission evidence could not be persisted." }).catch(() => undefined);
+      logger.warn({ userId: input.userId, receiptId: reconciled.id, errorName: error instanceof Error ? error.name : "UnknownError" }, "Trusted mission evidence persistence failed after read-back reconciliation");
+    }
   }
   await completeDelivery(`autonomy:external-action:${input.userId}:${createHash("sha256").update(input.logicalActionId).digest("hex")}`, 365 * 24 * 60 * 60);
   return reconciled;

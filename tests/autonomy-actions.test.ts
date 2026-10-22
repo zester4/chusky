@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { beginExternalAction, failExternalAction, finishExternalAction, isExternalWriteTool, reconcileExternalActionByRead } from "../src/autonomy/actions.js";
-import { completeMissionStep, createMission, getExternalAction, getMission, initStore, startMission } from "../src/store.js";
+import { beginExternalAction, failExternalAction, finishExternalAction, isExternalWriteTool, reconcileExternalActionByRead, repairMissionEvidenceForMission } from "../src/autonomy/actions.js";
+import { completeMissionStep, createMission, getExternalAction, getMission, initStore, saveExternalAction, startMission } from "../src/store.js";
 
 test("autonomous external action receipts make successful provider writes idempotent", async () => {
   await initStore({ memoryOnly: true });
@@ -125,4 +125,56 @@ test("successful batched provider actions create per-action trusted receipt evid
   assert.equal(providerEvidence?.verifiedBy, "system");
   assert.equal(providerEvidence?.verified, true);
   assert.match(providerEvidence?.ref ?? "", /^tool-receipt:.*:0$/);
+});
+
+test("mission recovery repairs trusted evidence without replaying a succeeded provider action", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 950007;
+  const mission = await createMission(userId, {
+    title: "Repair interrupted proof",
+    objective: "Preserve provider proof after a worker interruption",
+    definitionOfDone: "The provider receipt is attached to the mission",
+    requiredEvidence: ["kind:tool_receipt"],
+  });
+  const started = await startMission(userId, mission.id);
+  assert.ok(started?.currentStepId);
+  const claim = await beginExternalAction({
+    userId,
+    provider: "composio",
+    tool: "COMPOSIO_MULTI_EXECUTE_TOOL",
+    args: { tools: [{ tool_slug: "GMAIL_SEND_EMAIL", arguments: { to: "a@example.com" } }] },
+    runId: "mission-proof-repair",
+    source: { kind: "mission", id: mission.id, missionStepId: started!.currentStepId },
+  });
+  assert.equal(claim.state, "new");
+  assert.ok(claim.receipt);
+  // Model the real crash window: the provider succeeded and the receipt was
+  // durable, but the mission evidence mutation did not finish.
+  await saveExternalAction({
+    ...claim.receipt!,
+    status: "succeeded",
+    providerId: "batch-proof-1",
+    missionEvidenceStatus: "failed",
+    missionEvidenceError: "worker interrupted after provider success",
+    providerActions: [{ toolSlug: "GMAIL_SEND_EMAIL", argumentsHash: "hash-1", index: 0 }],
+  });
+  const repaired = await repairMissionEvidenceForMission(userId, mission.id);
+  assert.equal(repaired, 1);
+  const receipt = await getExternalAction(userId, claim.logicalActionId);
+  assert.equal(receipt?.missionEvidenceStatus, "persisted");
+  const evidence = (await getMission(userId, mission.id))?.evidence ?? [];
+  assert.ok(evidence.some((item) => item.source === "GMAIL_SEND_EMAIL"));
+  assert.equal((await beginExternalAction({
+    userId,
+    provider: "composio",
+    tool: "COMPOSIO_MULTI_EXECUTE_TOOL",
+    args: { tools: [{ tool_slug: "GMAIL_SEND_EMAIL", arguments: { to: "a@example.com" } }] },
+    runId: "mission-proof-retry",
+    source: { kind: "mission", id: mission.id, missionStepId: started!.currentStepId },
+  })).state, "succeeded");
+});
+
+test("a missing durable receipt cannot be acknowledged as a completed external action", async () => {
+  await initStore({ memoryOnly: true });
+  assert.equal(await finishExternalAction(950008, "missing-action", "provider accepted"), undefined);
 });

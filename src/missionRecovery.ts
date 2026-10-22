@@ -7,6 +7,7 @@ import {
   getMissionRecoveryMissionCursor,
   getMissionRecoveryOwnerCursor,
   listMissionOwnerIds,
+  listExternalActions,
   listMissionsPage,
   listTasksForMission,
   quarantineExpiredTask,
@@ -16,6 +17,7 @@ import {
   setMissionRecoveryOwnerCursor,
   updateMission,
 } from "./store.js";
+import { repairMissionEvidenceForMission } from "./autonomy/actions.js";
 import { reconcileMissionExecution, resumeMissionAndSchedule, type MissionTaskEnqueuer } from "./missionScheduler.js";
 import { logger } from "./logger.js";
 
@@ -72,15 +74,29 @@ export async function recoverMissionsForOwner(
 ): Promise<MissionRecoveryReport> {
   const report: MissionRecoveryReport = { ownersScanned: 1, missionsScanned: 0, repaired: 0, republished: 0, timerWakes: 0, quarantined: 0, blocked: 0, errors: 0 };
   const now = options.now ?? Date.now();
-  const activeMissions = (await listMissionsPage(userId, 200, ["running", "waiting", "failed"]))
-    .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
   const maxMissions = Math.max(1, Math.floor(options.maxMissionsPerOwner ?? 100));
   const missionCursor = await getMissionRecoveryMissionCursor(userId);
-  const cursorIndex = missionCursor ? activeMissions.findIndex((mission) => mission.id > missionCursor) : 0;
-  const startIndex = cursorIndex < 0 ? 0 : cursorIndex;
-  const missions = activeMissions.length <= maxMissions
-    ? activeMissions
-    : Array.from({ length: maxMissions }, (_, index) => activeMissions[(startIndex + index) % activeMissions.length]!);
+  const pageSize = Math.min(200, maxMissions);
+  let missions = await listMissionsPage(userId, pageSize, ["running", "waiting", "failed"], { order: "id", ...(missionCursor ? { afterMissionId: missionCursor } : {}) });
+  // Cursor wrap is intentional: it gives every active mission a turn even
+  // when the owner has more records than one sweep page. Stable ID ordering
+  // makes this safe across Redis, Neon, replicas, and process restarts.
+  if (!missions.length && missionCursor) missions = await listMissionsPage(userId, pageSize, ["running", "waiting", "failed"], { order: "id" });
+  missions = missions.slice(0, maxMissions);
+  let missionReceipts: Awaited<ReturnType<typeof listExternalActions>> = [];
+  try {
+    missionReceipts = await listExternalActions(userId, 400);
+  } catch (error) {
+    report.errors++;
+    logger.warn({ userId, errorClass: error instanceof Error ? error.name : "unknown" }, "Mission evidence recovery could not read external receipts");
+  }
+  const receiptsByMission = new Map<string, typeof missionReceipts>();
+  for (const receipt of missionReceipts) {
+    if (receipt.sourceKind !== "mission" || !receipt.sourceId || receipt.status !== "succeeded" || receipt.missionEvidenceStatus === "persisted") continue;
+    const current = receiptsByMission.get(receipt.sourceId) ?? [];
+    current.push(receipt);
+    receiptsByMission.set(receipt.sourceId, current);
+  }
   // Read the owner's task collection once per sweep. Loading it for every
   // mission makes recovery O(missions × tasks), which grows sharply for active
   // accounts with many long-running objectives.
@@ -92,6 +108,7 @@ export async function recoverMissionsForOwner(
   const versionChangedMissionIds = new Set<string>();
   for (const mission of missions) {
     try {
+      report.repaired += await repairMissionEvidenceForMission(userId, mission.id, receiptsByMission.get(mission.id) ?? []);
       const tasks = tasksByMission.get(mission.id) ?? [];
       if (mission.status === "waiting") {
         const waiting = mission.waiting;

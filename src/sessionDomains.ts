@@ -100,7 +100,21 @@ export function sessionUsesNeonDomains(session: UserSession): boolean {
 
 /** Separate high-growth fields without changing the UserSession API used by callers. */
 export function splitSessionDomains(session: UserSession, separateSdkRuns = false, separateSdkTables = false): { core: UserSession; domains: DurableSessionPayloads; sdkRuns: Array<{ threadId: string; run: SdkThreadRecord["runs"][number] }> } {
-  const { durableDomainSnapshots: _snapshots, ...sessionCore } = session as UserSession & { durableDomainSnapshots?: Partial<Record<DurableSessionDomain, unknown>> };
+  const {
+    durableDomainSnapshots: _snapshots,
+    // External-action receipts and recovery evidence are an execution ledger,
+    // not session metadata. Keeping them in the aggregate core meant Neon
+    // rehydration could silently lose the idempotency/uncertainty record after
+    // a worker restart.
+    externalActions: _externalActions,
+    reliabilitySamples: _reliabilitySamples,
+    executionReservations: _executionReservations,
+    outcomeVerifications: _outcomeVerifications,
+    compensations: _compensations,
+    reliabilityTrace: _reliabilityTrace,
+    approvalEscalations: _approvalEscalations,
+    ...sessionCore
+  } = session as UserSession & { durableDomainSnapshots?: Partial<Record<DurableSessionDomain, unknown>> };
   const sdkRuns = separateSdkRuns ? (session.sdkThreads ?? []).flatMap((thread) => thread.runs.map((run) => ({ threadId: thread.id, run }))) : [];
   const sdkThreads = separateSdkRuns ? (session.sdkThreads ?? []).map((thread) => ({ ...thread, runs: [] })) : session.sdkThreads ?? [];
   const sdkTablePayload = separateSdkTables
@@ -130,6 +144,17 @@ export function splitSessionDomains(session: UserSession, separateSdkRuns = fals
     // transcripts. Keep them separate from profile/preferences so call
     // persistence is durable without inflating unrelated account reads.
     ["calls", { phoneCalls: session.phoneCalls ?? [] }],
+    // Mission/task external writes must survive session rehydration and must
+    // remain independently CAS-protected from chat/profile writes.
+    ["autonomy", {
+      externalActions: session.externalActions ?? [],
+      reliabilitySamples: session.reliabilitySamples ?? [],
+      executionReservations: session.executionReservations ?? [],
+      outcomeVerifications: session.outcomeVerifications ?? [],
+      compensations: session.compensations ?? [],
+      reliabilityTrace: session.reliabilityTrace ?? [],
+      approvalEscalations: session.approvalEscalations ?? [],
+    }],
     ["sdk", sdkTablePayload],
   ]);
   const core = {
@@ -166,6 +191,7 @@ export function joinSessionDomains(core: UserSession, documents: ReadonlyMap<Dur
   const memories = object(documents.get("memories"));
   const assets = object(documents.get("assets"));
   const calls = object(documents.get("calls"));
+  const autonomy = object(documents.get("autonomy"));
   const sdk = includeSdkTables ? object(documents.get("sdk")) : {};
   const { durableSessionFormat: _marker, ...session } = core as SessionWithDurableMarker;
   return {
@@ -189,6 +215,13 @@ export function joinSessionDomains(core: UserSession, documents: ReadonlyMap<Dur
     artifacts: Array.isArray(assets.artifacts) ? assets.artifacts as ArtifactRecord[] : [],
     artifactRegistrationIntents: Array.isArray(assets.artifactRegistrationIntents) ? assets.artifactRegistrationIntents as UserSession["artifactRegistrationIntents"] : [],
     phoneCalls: Array.isArray(calls.phoneCalls) ? calls.phoneCalls as UserSession["phoneCalls"] : [],
+    externalActions: Array.isArray(autonomy.externalActions) ? autonomy.externalActions as UserSession["externalActions"] : core.externalActions ?? [],
+    reliabilitySamples: Array.isArray(autonomy.reliabilitySamples) ? autonomy.reliabilitySamples as UserSession["reliabilitySamples"] : core.reliabilitySamples ?? [],
+    executionReservations: Array.isArray(autonomy.executionReservations) ? autonomy.executionReservations as UserSession["executionReservations"] : core.executionReservations ?? [],
+    outcomeVerifications: Array.isArray(autonomy.outcomeVerifications) ? autonomy.outcomeVerifications as UserSession["outcomeVerifications"] : core.outcomeVerifications ?? [],
+    compensations: Array.isArray(autonomy.compensations) ? autonomy.compensations as UserSession["compensations"] : core.compensations ?? [],
+    reliabilityTrace: Array.isArray(autonomy.reliabilityTrace) ? autonomy.reliabilityTrace as UserSession["reliabilityTrace"] : core.reliabilityTrace ?? [],
+    approvalEscalations: Array.isArray(autonomy.approvalEscalations) ? autonomy.approvalEscalations as UserSession["approvalEscalations"] : core.approvalEscalations ?? [],
     ...(includeSdkTables ? {
       sdkThreads: Array.isArray(sdk.sdkThreads) ? sdk.sdkThreads as SdkThreadRecord[] : [],
       sdkIdempotency: object(sdk.sdkIdempotency) as UserSession["sdkIdempotency"],

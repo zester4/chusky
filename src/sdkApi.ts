@@ -2782,6 +2782,15 @@ export function registerSdkApi(app: Hono): void {
     return c.json({ available: Boolean(provider), provider: provider ?? null, capabilities: { rawAudioRecording: false, transcriptRetention: true, transcriptDeletion: true }, data: (await listPhoneCalls(owner.userId)).map(callView) });
   });
 
+  // The dashboard needs to explain which production gates are still open, but
+  // it must never receive credentials or provider secrets. Keep this separate
+  // from the operator endpoint and scope it to the authenticated workspace.
+  app.get("/v1/account/calls/readiness", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before reading voice readiness.");
+    return c.json({ data: buildTwilioActivationChecklist() });
+  });
+
   app.delete("/v1/account/calls/:callId/transcript", async (c) => {
     const owner = await callOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before deleting call transcripts.");

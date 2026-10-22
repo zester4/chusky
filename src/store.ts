@@ -1139,6 +1139,13 @@ export interface WebSessionReconciliationTask {
 
 export type MissionStatus = "queued" | "running" | "waiting" | "paused" | "blocked" | "completed" | "failed" | "cancelled";
 
+export interface MissionPageOptions {
+  /** Stable cursor used by the distributed recovery sweeper. */
+  afterMissionId?: string;
+  /** Updated-time ordering is useful for UI reads; ID ordering is required for cursors. */
+  order?: "updated" | "id";
+}
+
 export interface MissionBudget {
   maxDurationSeconds: number;
   /** Missing on legacy records means the original wall-clock contract. */
@@ -1567,6 +1574,8 @@ export interface ExternalActionReceipt {
   /** Whether the server successfully attached trusted mission proof. */
   missionEvidenceStatus?: "persisted" | "failed";
   missionEvidenceError?: string;
+  /** Hash-only proof for actions inside a provider batch; never stores arguments. */
+  providerActions?: Array<{ toolSlug: string; argumentsHash: string; index?: number }>;
   status: "started" | "succeeded" | "failed" | "ambiguous";
   resultSummary?: string;
   providerId?: string;
@@ -2257,7 +2266,7 @@ interface Backend {
   claimTaskEnqueue(userId: number, id: string, token: string, claimMs: number): Promise<TaskRecord | undefined>;
   renewTaskLease(userId: number, id: string, leaseToken: string, leaseMs: number): Promise<TaskRecord | undefined>;
   getMissions(userId: number): Promise<MissionRecord[]>;
-  getMissionsPage(userId: number, limit: number, statuses?: MissionStatus[]): Promise<MissionRecord[]>;
+  getMissionsPage(userId: number, limit: number, statuses?: MissionStatus[], options?: MissionPageOptions): Promise<MissionRecord[]>;
   getMission(userId: number, id: string): Promise<MissionRecord | undefined>;
   saveMissions(userId: number, missions: MissionRecord[]): Promise<void>;
   createMissionIfAbsent(userId: number, mission: MissionRecord): Promise<MissionRecord>;
@@ -4654,14 +4663,18 @@ class RedisBackend implements Backend {
     }
     return this.readRedisMissions(userId);
   }
-  async getMissionsPage(userId: number, limit: number, statuses?: MissionStatus[]): Promise<MissionRecord[]> {
+  async getMissionsPage(userId: number, limit: number, statuses?: MissionStatus[], options?: MissionPageOptions): Promise<MissionRecord[]> {
     const boundedLimit = Math.max(1, Math.min(200, Math.floor(limit)));
     if (await this.missionOwnerUsesNeon(userId)) {
-      const page = await this.durableState!.listMissions(userId, boundedLimit, undefined, statuses);
+      const page = await this.durableState!.listMissions(userId, boundedLimit, options?.afterMissionId, statuses, options?.order);
       return page.map((record) => this.missionFromDurable(record));
     }
     const wanted = statuses?.length ? new Set(statuses) : undefined;
-    return (await this.readRedisMissions(userId)).filter((mission) => !wanted || wanted.has(mission.status)).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, boundedLimit);
+    const ordered = (await this.readRedisMissions(userId))
+      .filter((mission) => !wanted || wanted.has(mission.status))
+      .filter((mission) => !options?.afterMissionId || mission.id > options.afterMissionId)
+      .sort(options?.order === "id" || options?.afterMissionId ? (a, b) => a.id.localeCompare(b.id) : (a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+    return ordered.slice(0, boundedLimit);
   }
   private async readRedisMissions(userId: number): Promise<MissionRecord[]> {
     const raw = await this.r.get(this.missionk(userId));
@@ -6290,9 +6303,13 @@ class MemoryBackend implements Backend {
     tasks[index] = next; this.tasks.set(userId, tasks); return next;
   }
   async getMissions(userId: number) { return this.missions.get(userId) ?? []; }
-  async getMissionsPage(userId: number, limit: number, statuses?: MissionStatus[]) {
+  async getMissionsPage(userId: number, limit: number, statuses?: MissionStatus[], options?: MissionPageOptions) {
     const wanted = statuses?.length ? new Set(statuses) : undefined;
-    return [...(this.missions.get(userId) ?? [])].filter((mission) => !wanted || wanted.has(mission.status)).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, Math.max(1, Math.min(200, Math.floor(limit))));
+    return [...(this.missions.get(userId) ?? [])]
+      .filter((mission) => !wanted || wanted.has(mission.status))
+      .filter((mission) => !options?.afterMissionId || mission.id > options.afterMissionId)
+      .sort(options?.order === "id" || options?.afterMissionId ? (a, b) => a.id.localeCompare(b.id) : (a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id))
+      .slice(0, Math.max(1, Math.min(200, Math.floor(limit))));
   }
   async getMission(userId: number, id: string) { return (this.missions.get(userId) ?? []).find((mission) => mission.id === id); }
   async saveMissions(userId: number, missions: MissionRecord[]) { this.missions.set(userId, missions); }
@@ -7220,6 +7237,18 @@ function normalizeExternalAction(value: unknown, uid: number): ExternalActionRec
   if (input.userId !== uid || typeof input.id !== "string" || typeof input.tool !== "string" || typeof input.argumentsHash !== "string" || typeof input.logicalActionId !== "string") return undefined;
   if (input.provider !== "composio" && input.provider !== "mcp" && input.provider !== "native") return undefined;
   if (input.status !== "started" && input.status !== "succeeded" && input.status !== "failed" && input.status !== "ambiguous") return undefined;
+  const providerActions = Array.isArray(input.providerActions)
+    ? input.providerActions.slice(0, 50).flatMap((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+      const action = item as Record<string, unknown>;
+      if (typeof action.toolSlug !== "string" || !action.toolSlug.trim() || typeof action.argumentsHash !== "string" || !action.argumentsHash.trim()) return [];
+      return [{
+        toolSlug: action.toolSlug.slice(0, 180),
+        argumentsHash: action.argumentsHash.slice(0, 128),
+        ...(typeof action.index === "number" && Number.isSafeInteger(action.index) && action.index >= 0 ? { index: action.index } : {}),
+      }];
+    })
+    : [];
   return {
     id: input.id.slice(0, 160), userId: uid, provider: input.provider, tool: input.tool.slice(0, 180),
     ...(typeof input.account === "string" ? { account: input.account.slice(0, 160) } : {}), argumentsHash: input.argumentsHash.slice(0, 128), logicalActionId: input.logicalActionId.slice(0, 240),
@@ -7229,6 +7258,7 @@ function normalizeExternalAction(value: unknown, uid: number): ExternalActionRec
     ...(typeof input.occurrenceId === "string" ? { occurrenceId: input.occurrenceId.slice(0, 240) } : {}), status: input.status,
     ...(input.missionEvidenceStatus === "persisted" || input.missionEvidenceStatus === "failed" ? { missionEvidenceStatus: input.missionEvidenceStatus } : {}),
     ...(typeof input.missionEvidenceError === "string" ? { missionEvidenceError: input.missionEvidenceError.slice(0, 500) } : {}),
+    ...(providerActions.length ? { providerActions } : {}),
     ...(typeof input.resultSummary === "string" ? { resultSummary: input.resultSummary.slice(0, 8_000) } : {}), ...(typeof input.providerId === "string" ? { providerId: input.providerId.slice(0, 240) } : {}), ...(input.receiptVerification === "provider_response" || input.receiptVerification === "provider_read" || input.receiptVerification === "manual" || input.receiptVerification === "missing" ? { receiptVerification: input.receiptVerification } : {}), ...(typeof input.verifiedAt === "number" && Number.isFinite(input.verifiedAt) ? { verifiedAt: input.verifiedAt } : {}), ...(typeof input.error === "string" ? { error: input.error.slice(0, 1_000) } : {}),
     createdAt: typeof input.createdAt === "number" ? input.createdAt : Date.now(), updatedAt: typeof input.updatedAt === "number" ? input.updatedAt : Date.now(),
   };
@@ -11001,10 +11031,12 @@ export async function listMissions(userId: number, statuses?: MissionStatus[]): 
     .sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-export async function listMissionsPage(userId: number, limit = 100, statuses?: MissionStatus[]): Promise<MissionRecord[]> {
-  return (await backend.getMissionsPage(userId, Math.max(1, Math.min(200, limit)), statuses)).map(normalizeMission)
+export async function listMissionsPage(userId: number, limit = 100, statuses?: MissionStatus[], options?: MissionPageOptions): Promise<MissionRecord[]> {
+  const missions = (await backend.getMissionsPage(userId, Math.max(1, Math.min(200, limit)), statuses, options)).map(normalizeMission)
     .filter((mission) => !statuses?.length || statuses.includes(mission.status))
-    .sort((a, b) => b.updatedAt - a.updatedAt);
+  return missions.sort(options?.order === "id" || options?.afterMissionId
+    ? (a, b) => a.id.localeCompare(b.id)
+    : (a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
 }
 
 export async function getMission(userId: number, id: string): Promise<MissionRecord | undefined> {
@@ -11422,7 +11454,8 @@ export async function resumeMissionFromProviderEvent(userId: number, id: string,
   const initial = await getMission(userId, id);
   if (!initial) return undefined;
   if (initial.status === "running" && initial.events.some((event) => event.type === "resumed" && event.provider === provider && event.providerEventId === providerEventId)) return initial;
-  return mutateMission(userId, id, (mission) => {
+  const waitingStepId = initial.waiting?.kind === "provider_event" ? initial.waiting.stepId : undefined;
+  const resumed = await mutateMission(userId, id, (mission) => {
     const waiting = mission.waiting;
     if (mission.status !== "waiting" || waiting?.kind !== "provider_event" || waiting.provider !== provider || waiting.providerEventId !== providerEventId) return undefined;
     const now = Date.now();
@@ -11432,6 +11465,26 @@ export async function resumeMissionFromProviderEvent(userId: number, id: string,
     if (typeof waiting.expiresAt === "number" && waiting.expiresAt <= now) return undefined;
     return { status: "running", waiting: undefined, error: undefined, nextAction: "Continue from the provider event checkpoint.", events: [...mission.events, { ...missionEvent("resumed", `Provider event ${providerEventId} received from ${provider}.`, now), provider, providerEventId }] };
   });
+  if (!resumed || !waitingStepId) return resumed;
+
+  // The expiry wake was useful while the provider was silent, but it must not
+  // remain the only wake after the exact callback arrives. Clear the accepted
+  // publication and move the same durable task to now so the event endpoint's
+  // normal reconciliation publishes an immediate continuation. This is
+  // intentionally task-scoped and idempotent: a replayed callback sees the
+  // already-recorded resume event and leaves the task alone.
+  const task = (await listTasksForMission(userId, id)).find((candidate) => candidate.missionStepId === waitingStepId && candidate.status === "queued");
+  if (task) {
+    await updateTask(userId, task.id, {
+      runAt: Date.now(),
+      workflowRunId: undefined,
+      workflowPublishedAt: undefined,
+      enqueueClaim: undefined,
+      error: undefined,
+      nextAction: "Continue from the provider event checkpoint.",
+    });
+  }
+  return resumed;
 }
 
 export async function checkpointMission(userId: number, id: string, checkpoint: string, nextAction?: string): Promise<MissionRecord | undefined> {
@@ -12222,7 +12275,7 @@ export async function updateExternalAction(userId: number, logicalActionId: stri
 }
 
 export async function listExternalActions(userId: number, limit = 50): Promise<ExternalActionReceipt[]> {
-  return (await getSession(userId)).externalActions?.slice(-Math.max(1, Math.min(200, Math.floor(limit)))).reverse() ?? [];
+  return (await getSession(userId)).externalActions?.slice(-Math.max(1, Math.min(400, Math.floor(limit)))).reverse() ?? [];
 }
 
 export async function writeScratchpad(uid: number, key: string, content: string): Promise<void> {

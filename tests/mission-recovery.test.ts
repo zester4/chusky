@@ -6,6 +6,7 @@ import {
   getMission,
   getTask,
   initStore,
+  listMissionsPage,
   listTasks,
   startMission,
   settleTaskRun,
@@ -262,6 +263,18 @@ test("owner recovery rotates through capped mission batches in stable ID order",
   await recoverMissionsForOwner(userId, fairEnqueue, { maxMissionsPerOwner: 2 });
   await recoverMissionsForOwner(userId, fairEnqueue, { maxMissionsPerOwner: 2 });
   assert.deepEqual([...visited].sort(), missionTaskIds.sort());
+});
+
+test("mission page wrapper preserves the stable ID order used by recovery cursors", async () => {
+  const userId = 981027;
+  const created = [];
+  for (let index = 0; index < 5; index++) created.push(await runningMission(userId, `page-order-${index}`));
+  const ordered = await listMissionsPage(userId, 5, ["running"], { order: "id" });
+  const ids = ordered.map((mission) => mission.id);
+  assert.deepEqual(ids, [...ids].sort());
+  const after = await listMissionsPage(userId, 5, ["running"], { order: "id", afterMissionId: ids[1] });
+  assert.deepEqual(after.map((mission) => mission.id), ids.slice(2));
+  assert.equal(created.length, 5);
 });
 
 test("only one process-wide recovery sweep advances cursors at a time", async () => {

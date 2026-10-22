@@ -2103,6 +2103,18 @@ test("linked verified dashboard users can request and list phone calls without e
   assert.deepEqual(body.data, []);
 });
 
+test("voice readiness is available to the account without exposing provider secrets", async () => {
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "voice-readiness-owner" };
+  const response = await api.fetch(new Request("http://local/v1/account/calls/readiness", { headers }));
+  assert.equal(response.status, 200);
+  const body = await response.json() as { data: { status: string; checks: Array<{ id: string; variables?: string[]; detail: string }> } };
+  assert.ok(["ready", "pending", "blocked"].includes(body.data.status));
+  assert.ok(body.data.checks.some((check) => check.id === "voice_canary"));
+  const serialized = JSON.stringify(body.data);
+  assert.equal(serialized.includes("bridge-secret"), false);
+});
+
 test("verified web accounts can use the persona library without linking Telegram", async () => {
   const previousBetterAuth = config.betterAuthEnabled;
   try {

@@ -5,6 +5,32 @@ the dedicated `chusky-browser` service, and its Chusky integration. The current
 browser foundations exist, but a real multi-region warm fleet is not complete
 until the deployment and provider-side checks below are finished.
 
+## P0 — mission engine external Redis crash proof
+
+- [ ] Run the real process-kill/restart proof from Railway or another host that
+      can open the dedicated Redis URL over TCP port 6379. The current sandbox
+      cannot open Upstash TCP, although the Redis HTTPS endpoint responds to
+      `PONG`.
+- [ ] In the isolated Railway test service, set
+      `MISSION_PROCESS_REDIS_URL` to the dedicated crash-test Redis URL. Do not
+      point this proof at production Redis and do not rely on `REDIS_URL` alone.
+- [ ] From that service, run `npm run test:mission:crash` and retain the final
+      output as external validation evidence.
+- [ ] Require all ten process-crash scenarios to pass: complete, strict
+      verification, timer wake, provider callback, approval, checkpoint,
+      failure recovery, prose/no-progress recovery, cancellation, and replan.
+- [ ] Confirm the proof reaches real kill boundaries, preserves the same mission
+      and task identity after restart, and produces no unreconciled scenarios.
+
+**Railway validation command:**
+
+```bash
+MISSION_PROCESS_REDIS_URL="$MISSION_PROCESS_REDIS_URL" npm run test:mission:crash
+```
+
+The crash proof disables Neon, object-catalog, and metrics integrations in its
+child workers so this item validates the real Redis-backed mission engine only.
+
 ## P0 — cost and safety guardrails before scaling
 
 - [ ] Deploy a staging canary with one Railway region and one browser worker.

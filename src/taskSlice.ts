@@ -608,8 +608,17 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
       if (mission) {
         const approval = await getApproval(task.userId, error.approvalId);
         const expiresAt = approval?.expiresAt;
-        await waitMission(task.userId, mission.id, { kind: "approval", key: error.approvalId, stepId: mission.currentStepId, expiresAt }, mission.checkpoint, `Approve or deny ${error.toolSlug} (${error.approvalId}) before the mission can continue.`);
-        return { status: "queued" as const, waiting: true, message: `Mission is waiting for approval of ${error.toolSlug}.`, checkpoint: mission.checkpoint, nextAction: `Approve or deny ${error.toolSlug} (${error.approvalId}) before continuing.`, runAt: expiresAt ?? Date.now() + 24 * 60 * 60 * 1000 };
+        // The model may have persisted a checkpoint immediately before the
+        // approval boundary. The mission object captured before the turn is
+        // stale at this point; using it here can roll the checkpoint back and
+        // make the resumed worker repeat the same wait forever. Read the
+        // latest durable mission state before parking the approval.
+        const latestMission = await getMission(task.userId, mission.id);
+        const approvalCheckpoint = latestMission?.checkpoint ?? mission.checkpoint;
+        const approvalStepId = latestMission?.currentStepId ?? mission.currentStepId;
+        const approvalNextAction = `Approve or deny ${error.toolSlug} (${error.approvalId}) before continuing.`;
+        await waitMission(task.userId, mission.id, { kind: "approval", key: error.approvalId, stepId: approvalStepId, expiresAt }, approvalCheckpoint, approvalNextAction);
+        return { status: "queued" as const, waiting: true, message: `Mission is waiting for approval of ${error.toolSlug}.`, checkpoint: approvalCheckpoint, nextAction: approvalNextAction, runAt: expiresAt ?? Date.now() + 24 * 60 * 60 * 1000 };
       }
       return { status: "blocked" as const, message: `Approval required for ${error.toolSlug}`, nextAction: "Approve or deny the pending action, then retry the task." };
     }
