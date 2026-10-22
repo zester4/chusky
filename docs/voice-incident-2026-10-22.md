@@ -19,6 +19,9 @@ Railway logs for the controlled calls around 21:04–21:14 UTC show:
   Eager STT events no longer produce audible tool-free answers that can skip work.
 - Keep the batch fallback tool-capable and defer accounting to idempotent turn
   commit, independently of speculation.
+- Do not cancel a dispatched tool when the first-speech latency budget expires.
+  Label-free transport events track tool execution while request and call lifetime
+  limits remain active.
 - Preserve discovered calendar schemas through voice selection and execution.
 - Extend current-turn callable actions from successful capability discovery while
   retaining explicit allow/deny rules, account isolation and normal approvals.

@@ -988,6 +988,7 @@ class TwilioVoiceCall:
         """
         self.turn_first_audio_event = asyncio.Event()
         self.turn_first_audio_at = None
+        self.agent_tool_started = False
         stream_task = asyncio.create_task(
             self._consume_agent_stream(transcript, speculative=speculative),
             name=f"twilio-agent-stream-{self.call_id}",
@@ -999,6 +1000,11 @@ class TwilioVoiceCall:
                 try:
                     await asyncio.wait_for(self.turn_first_audio_event.wait(), timeout=max(1, int(budget_ms)) / 1000)
                 except asyncio.TimeoutError:
+                    # A speech-latency deadline must not cancel a dispatched
+                    # calendar write. Its provider result is still required.
+                    # The HTTP/request and call lifetime limits remain active.
+                    if self.agent_tool_started:
+                        return await stream_task
                     if turn_start_deadline_exceeded(
                         budget_started_at,
                         time.monotonic(),
@@ -1050,11 +1056,14 @@ class TwilioVoiceCall:
                         continue
                     event = json.loads(line)
                     if event.get("type") == "tool_start":
+                        self.agent_tool_started = True
                         await self._cancel_tool_progress()
                         if buffer.strip():
                             await self._send_persistent_tts(normalize_voice_chunk(buffer), flush=True)
                             buffer = ""
                         await self._speak_tool_start(str(event.get("text") or ""))
+                    elif event.get("type") == "tool_end":
+                        await self._cancel_tool_progress()
                     elif event.get("type") == "delta":
                         await self._cancel_tool_progress()
                         delta = str(event.get("text") or "")

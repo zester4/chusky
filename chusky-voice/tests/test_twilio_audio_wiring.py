@@ -692,6 +692,18 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         fallback.assert_awaited_once()
         self.assertEqual(self.call.metrics.turn_start_budget_exceeded, 1)
 
+    async def test_audio_deadline_does_not_cancel_a_dispatched_tool(self):
+        self.call.settings.turn_start_budget_ms = 10
+        async def tool_turn(*_args, **_kwargs):
+            self.call.agent_tool_started = True
+            await asyncio.sleep(0.03)
+            return voice_app.VoiceTurnResult(text="The booking is complete.", cost=0)
+        fallback = AsyncMock()
+        with patch.object(self.call, "_consume_agent_stream", tool_turn), patch.object(self.call, "_speak_slow_turn_fallback", fallback):
+            result = await self.call._request_agent_stream("Please book it.")
+        self.assertEqual(result.text, "The booking is complete.")
+        fallback.assert_not_awaited()
+
     async def test_terminal_done_text_is_spoken_when_no_deltas_arrive(self):
         class TerminalOnlyAgentHttp(FakeAgentHttp):
             def stream(self, method, url, **kwargs):
