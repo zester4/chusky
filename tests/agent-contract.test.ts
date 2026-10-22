@@ -410,6 +410,39 @@ test("discovery expands an owner turn so a verified action can execute through t
   }
 });
 
+test("phone history observes provider lifecycle changes within one chat turn", async () => {
+  const { addPhoneCall, updatePhoneCall } = await import("../src/store.js");
+  const userId = 831342;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const callId = "twc_live_history_test";
+  await addPhoneCall(userId, { id: callId, userId, provider: "twilio", phoneNumber: "+15550101234", purpose: "Check status", status: "bridging", providerStatus: "ringing", createdAt: Date.now(), updatedAt: Date.now() });
+  const originalFetch = globalThis.fetch;
+  const observed: string[] = [];
+  let round = 0;
+  setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "live-call-history-session", tools: async () => [] }) } });
+  globalThis.fetch = (async (input, init) => {
+    if (!String(input).includes("/chat/completions")) return new Response("{}", { status: 200 });
+    const body = JSON.parse(String(init?.body));
+    if (round === 1) {
+      observed.push(body.messages.filter((message: any) => message.role === "tool").at(-1).content);
+      await updatePhoneCall(userId, callId, { status: "ended", providerStatus: "completed" });
+    }
+    if (round === 2) observed.push(body.messages.filter((message: any) => message.role === "tool").at(-1).content);
+    const response = round < 2 ? toolResponse("CHUCK_LIST_PHONE_CALLS", "{}", `call-${round}`) : chatResponse({ role: "assistant", content: "The call has ended." });
+    round++;
+    return response;
+  }) as typeof fetch;
+  try {
+    await runAgent(userId, "Check the current status of my phone call.", [], "test/model");
+    assert.match(observed[0], /ringing/);
+    assert.match(observed[1], /completed/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
 test("mission provider allowlists resolve an exact schema when the session exposes only meta-tools", async () => {
   const userId = 831237;
   await initStore({ memoryOnly: true });

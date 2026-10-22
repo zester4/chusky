@@ -29,6 +29,8 @@ Railway logs for the controlled calls around 21:04–21:14 UTC show:
   available to load additional capabilities when the objective requires them.
 - Tell the supervisor to finish its chat turn after launching an asynchronous
   call, leaving the live conversation and durable outcome to their own runtimes.
+- Read phone-call history live: provider callbacks can change the call state
+  while the same owner chat is still running, making turn-wide caching stale.
 - Generate call outcomes with the configured voice model and the call's scoped
   lock, independently of the owner's selected chat model and chat lock.
 - Insert recovered openings before conversation turns, using the call start time.
