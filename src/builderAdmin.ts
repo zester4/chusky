@@ -9,6 +9,7 @@ import { logger } from "./logger.js";
 import { builderEnabled, builderRepository, builderVoiceControl, invalidateBuilderControl, newBuilderEvent, type BuilderRepository, type BuilderVoiceControl } from "./builderControl.js";
 import { checkTwilioSubaccountHealth, listTwilioSubaccountViews, provisionTwilioSubaccount, updateTwilioSubaccountStatus, type TwilioSubaccountView } from "./calls/twilioSubaccounts.js";
 import { isTwilioVoiceBridgeConfigured } from "./calls/twilioNumbers.js";
+import { buildTwilioActivationChecklist } from "./calls/twilioActivation.js";
 
 export interface BuilderSession {
   user: { id: string; name?: string; emailVerified?: boolean; twoFactorEnabled?: boolean };
@@ -211,6 +212,10 @@ export function registerBuilderAdmin(app: Hono, dependencies: BuilderDependencie
     } catch {
       return c.json(error("voice_unavailable", "Tenant voice administration is temporarily unavailable."), 503);
     }
+  });
+  builder.get("/voice/readiness", async (c) => {
+    if (!(c.get("principal").role === "builder_admin" || c.get("principal").role === "builder_viewer")) return c.json(error("permission_denied", "Voice administration is restricted to builder personnel."), 403);
+    return c.json({ data: buildTwilioActivationChecklist(), note: "Configured values are not live proof. Complete the dedicated canary and load-test checks before enabling customer number sales." });
   });
   builder.post("/voice/subaccounts", async (c) => {
     const { session, role } = c.get("principal");

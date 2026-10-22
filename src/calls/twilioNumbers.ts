@@ -9,6 +9,8 @@ export type TwilioNumberSummary = {
   locality?: string;
   region?: string;
   isoCountry?: string;
+  /** Twilio's country/number-type address requirement for provisioning. */
+  addressRequirements?: TwilioAddressRequirement;
   /** Customer-facing monthly price calculated from the live provider price. */
   customerPriceCents?: number;
   capabilities: { voice: boolean; sms: boolean; mms: boolean; fax: boolean };
@@ -17,6 +19,19 @@ export type TwilioNumberSummary = {
 export type TwilioNumberPurchaseSummary = TwilioNumberSummary & {
   /** Stored server-side for margin and billing reconciliation. */
   providerCostCents: number;
+  /** Created on the tenant account and attached to the purchased number. */
+  providerAddressSid?: string;
+};
+
+export type TwilioAddressRequirement = "none" | "any" | "local" | "foreign";
+
+export type TwilioNumberAddress = {
+  name: string;
+  street: string;
+  city: string;
+  region: string;
+  postalCode: string;
+  countryCode: string;
 };
 
 export type TwilioNumberPricingPolicy = {
@@ -184,7 +199,11 @@ function boundedLimit(value: unknown): number {
   return Number.isFinite(parsed) ? Math.max(1, Math.min(30, Math.floor(parsed))) : 10;
 }
 
-function normalize(value: { sid?: string; phoneNumber: string; friendlyName?: string | null; locality?: string | null; region?: string | null; isoCountry?: string | null; capabilities?: { voice?: boolean; sms?: boolean; mms?: boolean; fax?: boolean } }, customerPriceCents?: number): TwilioNumberSummary {
+function normalizeAddressRequirement(value: unknown): TwilioAddressRequirement | undefined {
+  return value === "none" || value === "any" || value === "local" || value === "foreign" ? value : undefined;
+}
+
+function normalize(value: { sid?: string; phoneNumber: string; friendlyName?: string | null; locality?: string | null; region?: string | null; isoCountry?: string | null; addressRequirements?: unknown; capabilities?: { voice?: boolean; sms?: boolean; mms?: boolean; fax?: boolean } }, customerPriceCents?: number): TwilioNumberSummary {
   return {
     ...(value.sid ? { sid: value.sid } : {}),
     phoneNumber: value.phoneNumber,
@@ -192,6 +211,7 @@ function normalize(value: { sid?: string; phoneNumber: string; friendlyName?: st
     ...(value.locality ? { locality: value.locality } : {}),
     ...(value.region ? { region: value.region } : {}),
     ...(value.isoCountry ? { isoCountry: value.isoCountry } : {}),
+    ...(normalizeAddressRequirement(value.addressRequirements) ? { addressRequirements: normalizeAddressRequirement(value.addressRequirements) } : {}),
     ...(customerPriceCents !== undefined ? { customerPriceCents } : {}),
     capabilities: {
       voice: value.capabilities?.voice !== false,
@@ -199,6 +219,25 @@ function normalize(value: { sid?: string; phoneNumber: string; friendlyName?: st
       mms: value.capabilities?.mms === true,
       fax: value.capabilities?.fax === true,
     },
+  };
+}
+
+function normalizeAddress(value: TwilioNumberAddress | undefined): TwilioNumberAddress | undefined {
+  if (!value) return undefined;
+  const clean = (input: unknown, field: string, max: number) => {
+    const result = typeof input === "string" ? input.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim() : "";
+    if (!result || result.length > max) throw new Error(`${field} is required and must be at most ${max} characters.`);
+    return result;
+  };
+  const countryCode = clean(value.countryCode, "address countryCode", 2).toUpperCase();
+  if (!/^[A-Z]{2}$/.test(countryCode)) throw new Error("address countryCode must be a two-letter country code.");
+  return {
+    name: clean(value.name, "address name", 120),
+    street: clean(value.street, "address street", 180),
+    city: clean(value.city, "address city", 100),
+    region: clean(value.region, "address region", 100),
+    postalCode: clean(value.postalCode, "address postalCode", 40),
+    countryCode,
   };
 }
 
@@ -266,7 +305,7 @@ export async function searchTwilioNumbers(input: TwilioNumberSearch, options: Tw
 }
 
 /** Purchase one number and point its inbound voice webhook at Chusky. */
-export async function purchaseTwilioNumber(input: { phoneNumber: string; countryCode?: string; friendlyName?: string; features?: TwilioNumberFeatures }, options: TwilioNumberDependencies = defaults()): Promise<TwilioNumberPurchaseSummary> {
+export async function purchaseTwilioNumber(input: { phoneNumber: string; countryCode?: string; friendlyName?: string; features?: TwilioNumberFeatures; address?: TwilioNumberAddress }, options: TwilioNumberDependencies = defaults()): Promise<TwilioNumberPurchaseSummary> {
   validate(options);
   const features = requestedFeatures(input.features);
   if ((features.sms || features.mms) && options.smsEnabled !== true) throw new Error("Messaging numbers are not enabled for this deployment.");
@@ -281,19 +320,41 @@ export async function purchaseTwilioNumber(input: { phoneNumber: string; country
   const friendlyName = input.friendlyName?.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
   const base = options.webhookBaseUrl.replace(/\/+$/, "");
   const client = twilio(options.accountSid, options.authToken);
-  const item = await client.incomingPhoneNumbers.create({
-    phoneNumber: input.phoneNumber,
-    voiceUrl: `${base}/twilio/inbound`,
-    voiceMethod: "POST",
-    ...(features.sms || features.mms ? {
-      smsUrl: `${base}/twilio/sms`,
-      smsMethod: "POST",
-      statusCallback: `${base}/twilio/sms/status`,
-      statusCallbackMethod: "POST",
-    } : {}),
-    ...(friendlyName ? { friendlyName } : {}),
-  });
-  return { ...normalize(item, pricing.customerPriceCents), providerCostCents: pricing.providerCostCents };
+  const address = normalizeAddress(input.address);
+  let providerAddressSid: string | undefined;
+  try {
+    if (address) {
+      const providerAddress = await client.addresses.create({
+        customerName: address.name,
+        street: address.street,
+        city: address.city,
+        region: address.region,
+        postalCode: address.postalCode,
+        isoCountry: address.countryCode,
+        friendlyName: friendlyName ? `${friendlyName} address` : "Chusky number address",
+      });
+      providerAddressSid = providerAddress.sid;
+    }
+    const item = await client.incomingPhoneNumbers.create({
+      phoneNumber: input.phoneNumber,
+      voiceUrl: `${base}/twilio/inbound`,
+      voiceMethod: "POST",
+      ...(providerAddressSid ? { addressSid: providerAddressSid } : {}),
+      ...(features.sms || features.mms ? {
+        smsUrl: `${base}/twilio/sms`,
+        smsMethod: "POST",
+        statusCallback: `${base}/twilio/sms/status`,
+        statusCallbackMethod: "POST",
+      } : {}),
+      ...(friendlyName ? { friendlyName } : {}),
+    });
+    return { ...normalize(item, pricing.customerPriceCents), providerCostCents: pricing.providerCostCents, ...(providerAddressSid ? { providerAddressSid } : {}) };
+  } catch (error) {
+    if (providerAddressSid) {
+      try { await client.addresses(providerAddressSid).remove(); } catch { /* best effort; the number purchase did not complete */ }
+    }
+    throw error;
+  }
 }
 
 /** Release a number purchased through Chusky. */

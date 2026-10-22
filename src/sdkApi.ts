@@ -3067,7 +3067,7 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/account/calls/numbers/purchase", async (c) => {
     const owner = await callOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before purchasing a phone number.");
-    const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; displayName?: unknown; countryCode?: unknown; features?: unknown };
+    const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; displayName?: unknown; countryCode?: unknown; features?: unknown; address?: unknown };
     const phoneNumber = normalizeInboundPhone(body.phoneNumber);
     if (!phoneNumber) return apiError(c, 400, "invalid_phone_number", "phoneNumber must be a valid E.164 number.");
     const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
@@ -3085,6 +3085,7 @@ export function registerSdkApi(app: Hono): void {
         mms: rawFeatures.mms === true,
         fax: rawFeatures.fax === true,
       } : undefined;
+      const address = body.address && typeof body.address === "object" && !Array.isArray(body.address) ? body.address as Record<string, unknown> : undefined;
       // Lazy customer provisioning: the customer only clicks Buy. The child
       // account is created automatically and remains under the platform
       // parent, which is the Twilio billing owner.
@@ -3094,9 +3095,17 @@ export function registerSdkApi(app: Hono): void {
         countryCode: typeof body.countryCode === "string" ? body.countryCode : undefined,
         friendlyName: typeof body.displayName === "string" ? body.displayName : undefined,
         features,
+        ...(address ? { address: {
+          name: typeof address.name === "string" ? address.name : "",
+          street: typeof address.street === "string" ? address.street : "",
+          city: typeof address.city === "string" ? address.city : "",
+          region: typeof address.region === "string" ? address.region : "",
+          postalCode: typeof address.postalCode === "string" ? address.postalCode : "",
+          countryCode: typeof address.countryCode === "string" ? address.countryCode : "",
+        } } : {}),
       }, tenant.dependencies);
       if (!purchased.sid) throw new Error("The provider did not return a phone-number resource.");
-      const owned = ownershipRecord({ userId: owner.userId, subaccountId: tenant.subaccount.id, phoneNumber: purchased.phoneNumber, providerNumberId: purchased.sid, providerCostCents: purchased.providerCostCents, customerPriceCents: purchased.customerPriceCents });
+      const owned = ownershipRecord({ userId: owner.userId, subaccountId: tenant.subaccount.id, phoneNumber: purchased.phoneNumber, providerNumberId: purchased.sid, providerAddressSid: purchased.providerAddressSid, providerCostCents: purchased.providerCostCents, customerPriceCents: purchased.customerPriceCents });
       const route = normalizeVoiceInboundRouteInput({
         provider: "twilio",
         phoneNumber: purchased.phoneNumber,

@@ -608,6 +608,7 @@ export interface TwilioNumberOwnershipRecord {
   subaccountId: string;
   phoneNumber: string;
   providerNumberId: string;
+  providerAddressSid?: string;
   status: TwilioNumberOwnershipStatus;
   currency: "USD";
   providerCostCents?: number;
