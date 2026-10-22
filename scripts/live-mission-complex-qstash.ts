@@ -20,6 +20,7 @@ import type { TaskWaitRequest } from "../src/types.js";
 
 type Outcome = AgentResult["toolOutcomes"][number];
 type ScenarioKind = "campaign" | "retry" | "uncertain" | "disconnected" | "human_input" | "duplicate" | "cancelled" | "parallel";
+type CampaignProfile = "lost_deals" | "partners" | "churned_customers" | "recruiting" | "key_accounts" | "baseline";
 
 interface AppConnection {
   toolkit: string;
@@ -41,6 +42,7 @@ interface ProviderReceipt {
 interface Scenario {
   name: string;
   kind: ScenarioKind;
+  profile?: CampaignProfile;
   userId: number;
   missionId: string;
   initialTaskId?: string;
@@ -114,8 +116,84 @@ async function main(): Promise<void> {
     ["calendar", { toolkit: "googlecalendar", accountId: "acct_calendar_synthetic", alias: "owner-calendar", status: "connected" }],
     ["sheets", { toolkit: "googlesheets", accountId: "acct_sheets_synthetic", alias: "owner-sheets", status: "connected" }],
     ["crm", { toolkit: "hubspot", accountId: "acct_crm_synthetic", alias: "owner-crm", status: "connected" }],
+    ["ats", { toolkit: "greenhouse", accountId: "acct_ats_synthetic", alias: "owner-ats", status: "connected" }],
     ["notion", { toolkit: "notion", accountId: "acct_notion_synthetic", alias: "owner-notion", status: "revoked" }],
   ]);
+  type CampaignAction = { connection: string; toolkit: string; tool: string };
+  const campaignMappings: Record<CampaignProfile, Record<string, CampaignAction>> = {
+    baseline: {
+      signals: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_LIST_MESSAGES" },
+      list: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_SEARCH_CONTACTS" },
+      shortlist: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_UPDATE_CONTACT" },
+      enrichment: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_FETCH_EMAILS" },
+      "saved-work": { connection: "sheets", toolkit: "googlesheets", tool: "GOOGLE_SHEETS_APPEND_ROWS" },
+      research: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_FETCH_EMAILS" },
+      outreach: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_SEND_EMAIL" },
+      followup: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_SEND_EMAIL" },
+      client: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_CREATE_TICKET" },
+      feedback: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_LIST_MESSAGES" },
+    },
+    lost_deals: {
+      signals: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_LIST_MESSAGES" },
+      list: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_SEARCH_DEALS" },
+      shortlist: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_UPDATE_DEAL" },
+      enrichment: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_FETCH_EMAILS" },
+      "saved-work": { connection: "sheets", toolkit: "googlesheets", tool: "GOOGLE_SHEETS_APPEND_ROWS" },
+      research: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_FETCH_EMAILS" },
+      outreach: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_SEND_EMAIL" },
+      followup: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_SEND_EMAIL" },
+      client: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_UPDATE_DEAL" },
+      feedback: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_LIST_MESSAGES" },
+    },
+    partners: {
+      signals: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_LIST_MESSAGES" },
+      list: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_SEARCH_COMPANIES" },
+      shortlist: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_UPDATE_COMPANY" },
+      enrichment: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_FETCH_EMAILS" },
+      "saved-work": { connection: "sheets", toolkit: "googlesheets", tool: "GOOGLE_SHEETS_APPEND_ROWS" },
+      research: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_FETCH_EMAILS" },
+      outreach: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_SEND_EMAIL" },
+      followup: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_SEND_EMAIL" },
+      client: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_CREATE_TICKET" },
+      feedback: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_LIST_MESSAGES" },
+    },
+    churned_customers: {
+      signals: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_LIST_MESSAGES" },
+      list: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_SEARCH_CONTACTS" },
+      shortlist: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_UPDATE_CONTACT" },
+      enrichment: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_FETCH_EMAILS" },
+      "saved-work": { connection: "sheets", toolkit: "googlesheets", tool: "GOOGLE_SHEETS_APPEND_ROWS" },
+      research: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_FETCH_EMAILS" },
+      outreach: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_SEND_EMAIL" },
+      followup: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_SEND_EMAIL" },
+      client: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_CREATE_TICKET" },
+      feedback: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_LIST_MESSAGES" },
+    },
+    recruiting: {
+      signals: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_LIST_MESSAGES" },
+      list: { connection: "ats", toolkit: "greenhouse", tool: "GREENHOUSE_SEARCH_CANDIDATES" },
+      shortlist: { connection: "ats", toolkit: "greenhouse", tool: "GREENHOUSE_UPDATE_CANDIDATE" },
+      enrichment: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_FETCH_EMAILS" },
+      "saved-work": { connection: "sheets", toolkit: "googlesheets", tool: "GOOGLE_SHEETS_APPEND_ROWS" },
+      research: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_FETCH_EMAILS" },
+      outreach: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_SEND_EMAIL" },
+      followup: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_SEND_EMAIL" },
+      client: { connection: "ats", toolkit: "greenhouse", tool: "GREENHOUSE_UPDATE_CANDIDATE" },
+      feedback: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_LIST_MESSAGES" },
+    },
+    key_accounts: {
+      signals: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_LIST_MESSAGES" },
+      list: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_SEARCH_CONTACTS" },
+      shortlist: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_UPDATE_CONTACT" },
+      enrichment: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_FETCH_EMAILS" },
+      "saved-work": { connection: "sheets", toolkit: "googlesheets", tool: "GOOGLE_SHEETS_APPEND_ROWS" },
+      research: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_FETCH_EMAILS" },
+      outreach: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_SEND_EMAIL" },
+      followup: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_SEND_EMAIL" },
+      client: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_CREATE_TICKET" },
+      feedback: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_LIST_MESSAGES" },
+    },
+  };
   const providerActionLog: Array<{ scenario: string; stepId: string; toolkit: string; accountId: string; toolSlug: string; kind: "discovery" | "dispatch" | "readback"; receiptId?: string }> = [];
   const deniedForeignDeliveries: string[] = [];
   let scriptedAgentRuns = 0;
@@ -137,7 +215,7 @@ async function main(): Promise<void> {
 
   const publish = async (userId: number, taskId: string, runAt = Date.now()): Promise<string> => {
     assert.ok(ownerIds.has(userId), "Only synthetic owners may publish.");
-    assert.ok(messageIds.length < 90, "Complex proof publication limit exceeded.");
+    assert.ok(messageIds.length < 180, "Complex proof publication limit exceeded.");
     const accepted = await client.publishJSON({
       url: destination,
       body: { suiteId, userId, taskId },
@@ -161,18 +239,17 @@ async function main(): Promise<void> {
     return account;
   };
 
-  const discoverAndSchema = (scenario: Scenario, stepId: string, toolkit: string, toolSlug: string): Outcome[] => {
-    const account = connection(toolkit === "gmail" ? "gmail" : toolkit === "googlecalendar" ? "calendar" : toolkit === "googlesheets" ? "sheets" : toolkit === "hubspot" ? "crm" : "gmail");
-    const discoveryCall = randomUUID();
-    const schemaCall = randomUUID();
-    providerActionLog.push({ scenario: scenario.name, stepId, toolkit, accountId: account.accountId, toolSlug: "COMPOSIO_SEARCH_TOOLS", kind: "discovery" });
-    providerActionLog.push({ scenario: scenario.name, stepId, toolkit, accountId: account.accountId, toolSlug: "COMPOSIO_GET_TOOL_SCHEMAS", kind: "discovery" });
-    return [
-      { callId: discoveryCall, toolSlug: "COMPOSIO_SEARCH_TOOLS", status: "succeeded", dispatched: false },
-      { callId: schemaCall, toolSlug: "COMPOSIO_GET_TOOL_SCHEMAS", status: "succeeded", dispatched: false },
-      { callId: randomUUID(), toolSlug, status: "succeeded", dispatched: true },
-    ];
-  };
+  const connectionNameForToolkit = (toolkit: string): string => toolkit === "gmail"
+    ? "gmail"
+    : toolkit === "googlecalendar"
+      ? "calendar"
+      : toolkit === "googlesheets"
+        ? "sheets"
+        : toolkit === "hubspot"
+          ? "crm"
+          : toolkit === "greenhouse"
+            ? "ats"
+            : "gmail";
 
   const dispatchProvider = (scenario: Scenario, stepId: string, connectionName: string, toolSlug: string, mode: "success" | "uncertain" | "readback" = "success"): Outcome => {
     const account = connection(connectionName);
@@ -193,6 +270,21 @@ async function main(): Promise<void> {
     providerReceipts.set(key, { key, toolkit: account.toolkit, accountId: account.accountId, toolSlug, receiptId, dispatched: 1, state });
     providerActionLog.push({ scenario: scenario.name, stepId, toolkit: account.toolkit, accountId: account.accountId, toolSlug, kind: "dispatch", receiptId });
     return { callId: randomUUID(), toolSlug, status: mode === "uncertain" ? "uncertain" : "succeeded", dispatched: true, receiptId };
+  };
+
+  const discoverAndSchema = (scenario: Scenario, stepId: string, toolkit: string, toolSlug: string): Outcome[] => {
+    const connectionName = connectionNameForToolkit(toolkit);
+    const account = connection(connectionName);
+    const discoveryCall = randomUUID();
+    const schemaCall = randomUUID();
+    providerActionLog.push({ scenario: scenario.name, stepId, toolkit, accountId: account.accountId, toolSlug: "COMPOSIO_SEARCH_TOOLS", kind: "discovery" });
+    providerActionLog.push({ scenario: scenario.name, stepId, toolkit, accountId: account.accountId, toolSlug: "COMPOSIO_GET_TOOL_SCHEMAS", kind: "discovery" });
+    const receipt = dispatchProvider(scenario, stepId, connectionName, toolSlug, "success");
+    return [
+      { callId: discoveryCall, toolSlug: "COMPOSIO_SEARCH_TOOLS", status: "succeeded", dispatched: false },
+      { callId: schemaCall, toolSlug: "COMPOSIO_GET_TOOL_SCHEMAS", status: "succeeded", dispatched: false },
+      receipt,
+    ];
   };
 
   const evidenceAndComplete = async (scenario: Scenario, taskId: string, stepId: string, runtime: ReturnType<typeof runtimeFor>, receipt?: Outcome): Promise<AgentResult> => {
@@ -266,19 +358,7 @@ async function main(): Promise<void> {
         const receipt = dispatchProvider(scenario, step.id, "calendar", "GOOGLE_CALENDAR_GET", "readback");
         return evidenceAndComplete(scenario, options.taskId!, step.id, runtime, receipt);
       }
-      const mapping: Record<string, { connection: string; toolkit: string; tool: string }> = {
-        signals: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_LIST_MESSAGES" },
-        list: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_SEARCH_CONTACTS" },
-        shortlist: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_UPDATE_CONTACT" },
-        enrichment: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_FETCH_EMAILS" },
-        "saved-work": { connection: "sheets", toolkit: "googlesheets", tool: "GOOGLE_SHEETS_APPEND_ROWS" },
-        research: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_FETCH_EMAILS" },
-        outreach: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_SEND_EMAIL" },
-        followup: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_SEND_EMAIL" },
-        client: { connection: "crm", toolkit: "hubspot", tool: "HUBSPOT_CREATE_TICKET" },
-        feedback: { connection: "gmail", toolkit: "gmail", tool: "GMAIL_LIST_MESSAGES" },
-      };
-      const selected = mapping[step.id];
+      const selected = campaignMappings[scenario.profile ?? "baseline"][step.id];
       if (selected) {
         const outcomes = discoverAndSchema(scenario, step.id, selected.toolkit, selected.tool);
         const receipt = outcomes.find((outcome) => outcome.toolSlug === selected.tool);
@@ -441,7 +521,7 @@ async function main(): Promise<void> {
     }
   })().catch((error) => { if (!streamAbort.signal.aborted) errors.push(error instanceof Error ? error.message : "Relay stream failed"); });
 
-  const createScenario = async (name: string, kind: ScenarioKind, steps: Array<{ id: string; title: string; objective: string; dependsOn?: string[]; allowedTools?: string[] }>, options: { expectedStatus?: Scenario["expectedStatus"]; workSchedule?: { timezone: string; windowStart: string; windowEnd: string; dailyBudgetSeconds: number; cadenceSeconds: number } } = {}): Promise<Scenario> => {
+  const createScenario = async (name: string, kind: ScenarioKind, steps: Array<{ id: string; title: string; objective: string; dependsOn?: string[]; allowedTools?: string[] }>, options: { expectedStatus?: Scenario["expectedStatus"]; campaignProfile?: CampaignProfile; workSchedule?: { timezone: string; windowStart: string; windowEnd: string; dailyBudgetSeconds: number; cadenceSeconds: number } } = {}): Promise<Scenario> => {
     const userId = 7_908_000_000 + Math.floor(Math.random() * 800_000) + scenarios.size;
     ownerIds.add(userId);
     const mission = await store.createMission(userId, {
@@ -455,7 +535,7 @@ async function main(): Promise<void> {
       steps,
     });
     await startMission(userId, mission.id);
-    const scenario: Scenario = { name, kind, userId, missionId: mission.id, expectedStatus: options.expectedStatus ?? (kind === "disconnected" ? "blocked" : kind === "cancelled" ? "cancelled" : "completed"), scriptedRuns: 0, taskIds: new Set() };
+    const scenario: Scenario = { name, kind, ...(options.campaignProfile ? { profile: options.campaignProfile } : {}), userId, missionId: mission.id, expectedStatus: options.expectedStatus ?? (kind === "disconnected" ? "blocked" : kind === "cancelled" ? "cancelled" : "completed"), scriptedRuns: 0, taskIds: new Set() };
     scenarios.set(mission.id, scenario);
     await reconcileMissionExecution(userId, mission.id, async (owner, taskId, runAt) => publish(owner, taskId, runAt));
     const tasks = await listTasks(userId);
@@ -469,6 +549,25 @@ async function main(): Promise<void> {
     const currentHour = new Date().getUTCHours();
     const windowStart = `${String(currentHour).padStart(2, "0")}:00`;
     const windowEnd = `${String(Math.min(23, currentHour + 2)).padStart(2, "0")}:59`;
+    const relationshipCampaignSteps = (profile: CampaignProfile, outcome: string): Array<{ id: string; title: string; objective: string; dependsOn?: string[]; allowedTools?: string[] }> => {
+      const mapping = campaignMappings[profile];
+      const allowed = (stepId: string): string[] | undefined => mapping[stepId] ? [mapping[stepId].tool] : undefined;
+      return [
+        { id: "goal", title: "Goal", objective: `Persist the business outcome: ${outcome}.` },
+        { id: "signals", title: "Signals", objective: `Detect fresh signals relevant to ${outcome}.`, dependsOn: ["goal"], allowedTools: allowed("signals") },
+        { id: "list", title: "List", objective: `Build the working list needed to ${outcome}.`, dependsOn: ["signals"], allowedTools: allowed("list") },
+        { id: "shortlist", title: "Shortlist", objective: `Prioritize the strongest candidates for ${outcome}.`, dependsOn: ["list"], allowedTools: allowed("shortlist") },
+        { id: "enrichment", title: "Enrichment", objective: "Add current contacts, company context, and relevant history.", dependsOn: ["shortlist"], allowedTools: allowed("enrichment") },
+        { id: "saved-work", title: "Saved work", objective: "Save the verified working list for the owner.", dependsOn: ["enrichment"], allowedTools: allowed("saved-work") },
+        { id: "next-action", title: "Next action", objective: "Wait for a meaningful trigger or scheduled follow-up, then resume once.", dependsOn: ["saved-work"] },
+        { id: "research", title: "Research", objective: "Understand the situation and prepare a relevant next step.", dependsOn: ["next-action"], allowedTools: allowed("research") },
+        { id: "outreach", title: "Outreach", objective: "Send a tailored, approved message through the connected channel.", dependsOn: ["research"], allowedTools: allowed("outreach") },
+        { id: "meeting", title: "Meeting", objective: "Create the meeting and wait for the exact provider callback.", dependsOn: ["outreach"], allowedTools: ["GOOGLE_CALENDAR_CREATE_EVENT", "GOOGLE_CALENDAR_GET"] },
+        { id: "followup", title: "Follow-up", objective: "Continue the verified next step after the meeting.", dependsOn: ["meeting"], allowedTools: allowed("followup") },
+        { id: "client", title: "Client", objective: "Persist the post-conversation relationship or care record.", dependsOn: ["followup"], allowedTools: allowed("client") },
+        { id: "feedback", title: "Feedback", objective: "Read feedback signals and close the mission with a verified outcome.", dependsOn: ["client"], allowedTools: allowed("feedback") },
+      ];
+    };
     const campaign = await createScenario("full-lifecycle-campaign", "campaign", [
       { id: "goal", title: "Goal", objective: "Persist the business outcome and completion contract." },
       { id: "signals", title: "Signals", objective: "Read connected Gmail signals and identify relevant opportunities.", dependsOn: ["goal"], allowedTools: ["GMAIL_LIST_MESSAGES"] },
@@ -483,7 +582,13 @@ async function main(): Promise<void> {
       { id: "followup", title: "Follow-up", objective: "Send a concise verified follow-up after the meeting.", dependsOn: ["meeting"], allowedTools: ["GMAIL_SEND_EMAIL"] },
       { id: "client", title: "Client", objective: "Create a verified client-care record in the CRM.", dependsOn: ["followup"], allowedTools: ["HUBSPOT_CREATE_TICKET"] },
       { id: "feedback", title: "Feedback", objective: "Read feedback signals and close the mission with a verified receipt.", dependsOn: ["client"], allowedTools: ["GMAIL_LIST_MESSAGES"] },
-    ], { workSchedule: { timezone: "UTC", windowStart, windowEnd, dailyBudgetSeconds: 7200, cadenceSeconds: 60 } });
+    ], { campaignProfile: "baseline", workSchedule: { timezone: "UTC", windowStart, windowEnd, dailyBudgetSeconds: 7200, cadenceSeconds: 60 } });
+
+    const lostDeals = await createScenario("re-engage-lost-deals", "campaign", relationshipCampaignSteps("lost_deals", "revive stalled opportunities from the last six to twelve months"), { campaignProfile: "lost_deals", workSchedule: { timezone: "UTC", windowStart, windowEnd, dailyBudgetSeconds: 7200, cadenceSeconds: 60 } });
+    const partners = await createScenario("find-referral-partners", "campaign", relationshipCampaignSteps("partners", "build a qualified referral and integration partner pipeline"), { campaignProfile: "partners", workSchedule: { timezone: "UTC", windowStart, windowEnd, dailyBudgetSeconds: 7200, cadenceSeconds: 60 } });
+    const churned = await createScenario("win-back-churned-customers", "campaign", relationshipCampaignSteps("churned_customers", "bring realistic former customers back before they settle with a competitor"), { campaignProfile: "churned_customers", workSchedule: { timezone: "UTC", windowStart, windowEnd, dailyBudgetSeconds: 7200, cadenceSeconds: 60 } });
+    const recruiting = await createScenario("recruit-right-candidates", "campaign", relationshipCampaignSteps("recruiting", "fill an open role with strong, relevant candidates"), { campaignProfile: "recruiting", workSchedule: { timezone: "UTC", windowStart, windowEnd, dailyBudgetSeconds: 7200, cadenceSeconds: 60 } });
+    const keyAccounts = await createScenario("protect-and-expand-key-accounts", "campaign", relationshipCampaignSteps("key_accounts", "reduce churn risk and find expansion opportunities in active accounts"), { campaignProfile: "key_accounts", workSchedule: { timezone: "UTC", windowStart, windowEnd, dailyBudgetSeconds: 7200, cadenceSeconds: 60 } });
 
     const retry = await createScenario("transient-provider-retry", "retry", [{ id: "retry", title: "Retry", objective: "Retry a non-dispatched provider read once and complete with a receipt.", allowedTools: ["GOOGLE_SHEETS_GET"] }]);
     const uncertain = await createScenario("uncertain-write-reconciliation", "uncertain", [{ id: "uncertain", title: "Uncertain write", objective: "Reconcile an accepted-but-uncertain email send without sending twice.", allowedTools: ["GMAIL_SEND_EMAIL", "GMAIL_GET_MESSAGE"] }]);
@@ -498,7 +603,7 @@ async function main(): Promise<void> {
       { id: "join", title: "Join", objective: "Join both verified branches.", dependsOn: ["people", "companies"], allowedTools: ["GOOGLE_SHEETS_APPEND_ROWS"] },
     ]);
 
-    assert.ok(campaign.initialTaskId && retry.initialTaskId && uncertain.initialTaskId && duplicate.initialTaskId && cancelled.initialTaskId);
+    assert.ok([campaign, lostDeals, partners, churned, recruiting, keyAccounts, retry, uncertain, duplicate, cancelled].every((scenario) => scenario.initialTaskId));
     await cancelMission(cancelled.userId, cancelled.missionId, "Synthetic owner cancellation before the queue delivery.");
     await cancelMissionTasks(cancelled.userId, cancelled.missionId);
 
@@ -514,17 +619,14 @@ async function main(): Promise<void> {
     while (Date.now() < deadline && !errors.length) {
       const states = await Promise.all([...scenarios.values()].map(async (scenario) => (await getMission(scenario.userId, scenario.missionId))?.status));
       const terminal = [...scenarios.values()].every((scenario, index) => states[index] === scenario.expectedStatus);
-      const campaignState = await getMission(campaign.userId, campaign.missionId);
-      const requiredFullPath = campaignState?.status === "completed" && campaignState.steps.length === 13;
-      const retryState = (await getMission(retry.userId, retry.missionId))?.status === "completed";
-      const uncertainState = (await getMission(uncertain.userId, uncertain.missionId))?.status === "completed";
-      const humanState = (await getMission(human.userId, human.missionId))?.status === "completed";
-      const parallelState = (await getMission(parallel.userId, parallel.missionId))?.status === "completed";
-      if (terminal && requiredFullPath && retryState && uncertainState && humanState && parallelState && signedDeliveryIds.size >= 25) break;
+      const campaignStates = await Promise.all([...scenarios.values()].filter((scenario) => scenario.kind === "campaign").map(async (scenario) => getMission(scenario.userId, scenario.missionId)));
+      const requiredFullPaths = campaignStates.every((mission) => mission?.status === "completed" && mission.steps.length === 13);
+      if (terminal && requiredFullPaths && signedDeliveryIds.size >= 25) break;
       await new Promise((resolveSleep) => setTimeout(resolveSleep, 1000));
     }
     await Promise.all([...processing]);
     assert.deepEqual(errors, []);
+    assert.equal(signedDeliveryIds.size, messageIds.length, "Every accepted QStash publication must be observed as a signed delivery in this no-retry run.");
     const terminalStatuses = await Promise.all([...scenarios.values()].map(async (scenario) => ({
       name: scenario.name,
       expected: scenario.expectedStatus,
@@ -537,10 +639,10 @@ async function main(): Promise<void> {
     );
     assert.equal(deniedForeignDeliveries.length >= 1, true, "A cross-owner delivery must be rejected.");
     assert.equal(connectionBlocks, 1);
-    assert.equal(approvalWaits, 1);
-    assert.equal(providerWaits, 1);
+    assert.equal(approvalWaits, 6);
+    assert.equal(providerWaits, 6);
     assert.equal(humanInputWaits, 1);
-    assert.equal(timerWaits, 1);
+    assert.equal(timerWaits, 6);
     assert.ok(duplicateTaskDeliveriesSuppressed >= 1, "Duplicate task delivery must be suppressed by the durable task lease/CAS.");
     assert.ok([...deniedHosts].every((host) => ["registry.npmjs.org", "telemetry.composio.dev"].includes(host)), "Unexpected non-queue network activity was attempted.");
     assert.equal(providerReceipts.get([...providerReceipts.keys()].find((key) => key.startsWith(`${uncertain.missionId}:`))!)?.dispatched, 1, "Uncertain provider action must not be dispatched twice.");
@@ -548,7 +650,7 @@ async function main(): Promise<void> {
     for (const scenario of scenarios.values()) {
       const mission = await getMission(scenario.userId, scenario.missionId);
       const tasks = (await listTasks(scenario.userId)).filter((task) => task.missionId === scenario.missionId);
-      output.push({ name: scenario.name, kind: scenario.kind, status: mission?.status, expectedStatus: scenario.expectedStatus, stepStatuses: mission?.steps.map(({ id, status, attempts }) => ({ id, status, attempts })), taskStatuses: tasks.map(({ id, status, attempt }) => ({ id, status, attempt })), scriptedRuns: scenario.scriptedRuns, events: mission?.events.filter((event) => ["waiting", "approval_waiting", "approval_resumed", "provider_event", "blocked", "completed", "cancelled"].includes(event.type)).map(({ type, message }) => ({ type, message })) });
+      output.push({ name: scenario.name, kind: scenario.kind, profile: scenario.profile, status: mission?.status, expectedStatus: scenario.expectedStatus, stepStatuses: mission?.steps.map(({ id, status, attempts }) => ({ id, status, attempts })), taskStatuses: tasks.map(({ id, status, attempt }) => ({ id, status, attempt })), scriptedRuns: scenario.scriptedRuns, events: mission?.events.filter((event) => ["waiting", "approval_waiting", "approval_resumed", "provider_event", "blocked", "completed", "cancelled"].includes(event.type)).map(({ type, message }) => ({ type, message })) });
     }
     console.log(JSON.stringify({
       ok: true,
@@ -560,6 +662,8 @@ async function main(): Promise<void> {
       publications: messageIds.length,
       scriptedAgentRuns,
       providerDispatches: [...providerReceipts.values()].reduce((total, receipt) => total + receipt.dispatched, 0),
+      connectedAccounts: [...appConnections.values()].map(({ toolkit, accountId, alias, status }) => ({ toolkit, accountId, alias, status })),
+      providerActionLogEntries: providerActionLog.length,
       duplicateSuppressed,
       duplicateTaskDeliveriesSuppressed,
       deniedForeignDeliveries: deniedForeignDeliveries.length,
@@ -568,6 +672,11 @@ async function main(): Promise<void> {
       scenarios: output,
       tested: [
         "goal-to-feedback campaign with 13 dependency-ordered stages",
+        "lost-deal re-engagement campaign with CRM deal signals and revival follow-through",
+        "referral and integration partner campaign with company-fit ranking",
+        "churned-customer win-back campaign with account-history recovery",
+        "candidate recruiting campaign with ATS-backed list and shortlist steps",
+        "key-account protection and expansion campaign with customer-care follow-through",
         "real QStash signatures and delayed timer wake",
         "connected account selection plus discovery/schema/execute sequencing",
         "approval pause and exact-task resume",

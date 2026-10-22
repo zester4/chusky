@@ -29,6 +29,12 @@ skip the task-state idempotency check.
 - One 13-stage mission from goal, signals, list, shortlist, enrichment, saved
   work, next action, research, outreach, meeting, follow-up, client care, and
   feedback.
+- Five additional 13-stage relationship campaigns: re-engage lost deals,
+  find referral/integration partners, win back churned customers, recruit
+  candidates through an ATS-backed pipeline, and protect/expand key accounts.
+- The campaign variants use different synthetic provider actions, including
+  CRM deals and companies, CRM contacts, an ATS account, Gmail, Google Sheets,
+  and Google Calendar.
 - Discovery and schema lookup before each scripted connected-app action, with
   synthetic connected accounts and exact account/tool receipt tracking.
 - A real QStash-delivered durable timer wake.
