@@ -61,7 +61,8 @@
     "typecheck": "node --max-old-space-size=8192 ./node_modules/typescript/bin/tsc --noEmit",
     "test": "tsx --test --import=./tests/test-environment.mjs --test-concurrency=1 tests/*.test.ts",
     "test:sdk": "tsx --test --test-concurrency=1 sdk/tests/*.test.ts",
-    "test:mission:crash": "tsx --test --import=./tests/test-environment.mjs --test-concurrency=1 tests/mission-process-crash.proof.ts"
+    "test:mission:crash": "tsx --test --import=./tests/test-environment.mjs --test-concurrency=1 tests/mission-process-crash.proof.ts",
+    "test:mission:qstash:live": "node --use-env-proxy --import=tsx scripts/live-mission-qstash-matrix.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.800.0",
