@@ -1,4 +1,4 @@
-import { normalizeVoiceCallProfile, type CallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
+import { normalizeBusinessVoiceCallProfile, normalizeVoiceCallProfile, type CallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
 import type { BlandInboundRoute } from "./blandInbound.js";
 import type { VoiceInboundRouteRecord } from "../store.js";
 
@@ -36,7 +36,9 @@ export function normalizeVoiceInboundRouteInput(input: Record<string, unknown>, 
   if (verifiedCallers.some((caller) => !allowedCallers.includes(caller)) && callProfile === "personal") throw new Error("verifiedCallers must be included in allowedCallers for personal lines");
   const rawProfile = input.voiceProfile ?? existing?.voiceProfile ?? {};
   if (!rawProfile || typeof rawProfile !== "object" || Array.isArray(rawProfile)) throw new Error("voiceProfile must be an object");
-  const voiceProfile = normalizeVoiceCallProfile({ ...(rawProfile as VoiceCallProfileInput), mode: (rawProfile as VoiceCallProfileInput).mode ?? (callProfile === "business" ? "support" : "general") });
+  const voiceProfile = callProfile === "business"
+    ? normalizeBusinessVoiceCallProfile({ ...(rawProfile as VoiceCallProfileInput), mode: (rawProfile as VoiceCallProfileInput).mode ?? "support" })
+    : normalizeVoiceCallProfile({ ...(rawProfile as VoiceCallProfileInput), mode: (rawProfile as VoiceCallProfileInput).mode ?? "general" });
   const providerNumberId = typeof input.providerNumberId === "string" && /^[A-Za-z0-9]{6,80}$/.test(input.providerNumberId.trim())
     ? input.providerNumberId.trim()
     : existing?.providerNumberId;

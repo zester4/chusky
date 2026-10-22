@@ -101,6 +101,49 @@ for (const direction of ["inbound", "outbound"] as const) {
   }
 }
 
+test("default business inbound voice exposes callback capture without owner-private reads", async () => {
+  const userId = 920099;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const requests: any[] = [];
+  const originalFetch = globalThis.fetch;
+  const session = {
+    sessionId: "default-business-voice-session",
+    tools: async () => [],
+    search: async () => [],
+    execute: async () => ({ successful: true, data: {} }),
+  };
+  setAgentDependenciesForTests({ composio: {
+    create: async () => session,
+    connectedAccounts: { list: async () => ({ items: [] }) },
+  } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/chat/completions")) {
+      requests.push(JSON.parse(String(init?.body)));
+      return requests.length === 1
+        ? toolResponse("CHUCK_SCRATCHPAD_WRITE", JSON.stringify({ key: "voice:callback", content: "Caller requested a callback about a delayed order." }))
+        : chatResponse({ role: "assistant", content: "I have noted your request. What is the best email address or phone number for the follow-up?" });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    await runAgent(userId, "Please take a message about my delayed order and note that I need a callback.", [], "test/model", undefined, undefined, undefined, undefined,
+      { accountId: `account_${userId}`, provider: "voice", conversationId: "twc_default_business", scope: "private" },
+      { voiceTurn: true, voiceSessionId: "twilio:default-business", voiceRoutingHint: "Handle an inbound customer support request", voiceScopedAccess: true, ephemeral: true,
+        voiceToolPolicy: { enabled: true, allowedToolkits: [], allowedConnectionIds: [], allowExternalWrites: true, version: 1 } });
+    const names = requests[0].tools.map((tool: any) => tool.function.name);
+    assert.ok(names.includes("CHUCK_SCRATCHPAD_WRITE"));
+    assert.ok(names.includes("CHUCK_SET_REMINDER"));
+    assert.ok(names.includes("CHUCK_TASK_CREATE"));
+    assert.ok(!names.includes("CHUCK_SEARCH_MEMORY"));
+    assert.ok(!names.includes("CHUCK_TASK_LIST"));
+    assert.ok(!names.includes("CHUCK_LIST_PHONE_CALLS"));
+  } finally {
+    globalThis.fetch = originalFetch;
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
 test("meeting calendar writes require provider-shaped availability evidence", () => {
   assert.equal(isSuccessfulCalendarResult({ status: "success" }), false);
   assert.equal(isSuccessfulCalendarResult({ successful: true, data: [] }), false);

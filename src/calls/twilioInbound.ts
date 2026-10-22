@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { addPhoneCall, listPhoneCalls, type PhoneCallRecord } from "../store.js";
-import { parseVoiceCallProfileJson, voiceRecordingBlockReason, type CallProfile, type VoiceCallProfile } from "./voiceProfile.js";
+import { defaultBusinessVoiceProfile, parseBusinessVoiceCallProfileJson, parseVoiceCallProfileJson, voiceRecordingBlockReason, type CallProfile, type VoiceCallProfile } from "./voiceProfile.js";
 
 const E164 = /^\+[1-9]\d{7,14}$/;
 
@@ -44,7 +44,7 @@ export function inboundTwilioOwnerForNumber(to: string, fallbackOwner: string, r
  * rejected instead of silently falling back to Chusky, because the fallback
  * could represent the wrong business or omit the intended tool boundary. */
 export function parseTwilioInboundVoiceProfile(value: string, callProfile: CallProfile): VoiceCallProfile {
-  try { return parseVoiceCallProfileJson(value, callProfile === "business" ? "support" : "general"); }
+  try { return callProfile === "business" ? parseBusinessVoiceCallProfileJson(value) : parseVoiceCallProfileJson(value, "general"); }
   catch (error) { throw new Error(error instanceof Error ? `TWILIO_INBOUND_VOICE_PROFILE: ${error.message}` : "TWILIO_INBOUND_VOICE_PROFILE is invalid"); }
 }
 
@@ -52,7 +52,8 @@ export function parseTwilioInboundVoiceProfile(value: string, callProfile: CallP
  * for idempotency and lifecycle correlation; no call audio is retained. */
 export async function registerTwilioInboundCall(input: { userId: number; from: string; to: string; callSid: string; callProfile?: CallProfile; voiceProfile?: VoiceCallProfile; verification?: "public" | "identified" | "verified"; twilioSubaccountId?: string }): Promise<PhoneCallRecord> {
   if (!E164.test(input.from) || !E164.test(input.to) || !/^CA[a-zA-Z0-9]{10,64}$/.test(input.callSid)) throw new Error("Invalid Twilio inbound call data");
-  const recordingBlock = input.voiceProfile ? voiceRecordingBlockReason(input.voiceProfile) : undefined;
+  const voiceProfile = input.voiceProfile ?? (input.callProfile === "business" ? defaultBusinessVoiceProfile() : undefined);
+  const recordingBlock = voiceProfile ? voiceRecordingBlockReason(voiceProfile) : undefined;
   if (recordingBlock) throw new Error(recordingBlock);
   const existing = (await listPhoneCalls(input.userId)).find((call) => call.provider === "twilio" && call.direction === "inbound" && call.providerCallId === input.callSid);
   if (existing) return existing;
@@ -66,8 +67,8 @@ export async function registerTwilioInboundCall(input: { userId: number; from: s
     callVerification: input.callProfile === "business" ? (input.verification === "verified" ? "verified" : "identified") : "verified",
     phoneNumber: input.from,
     purpose: "Inbound phone call",
-    ...(input.voiceProfile ? { voiceProfile: input.voiceProfile } : {}),
-    transcriptRetentionDays: input.voiceProfile?.controls?.retentionDays ?? 30,
+    ...(voiceProfile ? { voiceProfile } : {}),
+    transcriptRetentionDays: voiceProfile?.controls?.retentionDays ?? 30,
     status: "bridging",
     providerStatus: "initiated",
     providerCallId: input.callSid,

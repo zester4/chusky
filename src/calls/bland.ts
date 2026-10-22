@@ -3,7 +3,7 @@ import { claimPhoneCallStart, claimVoiceCapacity, enqueueVoiceCallReconciliation
 import { createBlandCallToken, isValidBlandToolSecret } from "./blandSecurity.js";
 import { resolveVoiceContinuity, voiceContinuityInstructions } from "./continuity.js";
 import { normalizePhoneCallRequestKey } from "./requestKey.js";
-import { normalizeVoiceCallProfile, resolveOutboundVoiceCallProfile, voiceCallDialBlockReason, voiceProfileInstructions, type CallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
+import { defaultBusinessVoiceProfile, normalizeVoiceCallProfile, resolveOutboundVoiceCallProfile, voiceCallDialBlockReason, voiceProfileInstructions, type CallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -64,8 +64,8 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
   const phoneNumber = text(input.phoneNumber, "phoneNumber", 16);
   if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber)) throw new Error("phoneNumber must be an E.164 phone number, for example +14155550123");
   const purpose = text(input.purpose, "purpose", 2000);
-  const profile = resolveOutboundVoiceCallProfile(await getVoiceCallProfile(userId), input.profile);
   const callProfile = input.callProfile === "business" ? "business" : "personal";
+  const profile = resolveOutboundVoiceCallProfile(await getVoiceCallProfile(userId), input.profile === undefined && callProfile === "business" ? defaultBusinessVoiceProfile() : input.profile);
   const dialBlockReason = voiceCallDialBlockReason(profile);
   if (dialBlockReason) throw new Error(dialBlockReason);
   if (profile.controls?.optOutEnabled !== false && await hasVoiceCallOptOut(userId, phoneNumber)) throw new Error("This contact has opted out of further calls. No call was placed.");

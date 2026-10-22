@@ -41,3 +41,11 @@ test("Twilio inbound profile is explicit and preserves the business tool boundar
   assert.equal(profile.toolPolicy.allowExternalWrites, false);
   assert.throws(() => parseTwilioInboundVoiceProfile("not-json", "business"), /valid JSON/);
 });
+
+test("Twilio business inbound defaults to the connected-app-capable Chusky representative", () => {
+  const profile = parseTwilioInboundVoiceProfile("", "business");
+  assert.equal(profile.identity, "Chusky");
+  assert.equal(profile.mode, "support");
+  assert.equal(profile.toolPolicy?.enabled, true);
+  assert.deepEqual(profile.toolPolicy?.allowedToolkits, []);
+});

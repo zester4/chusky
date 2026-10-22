@@ -176,6 +176,55 @@ export function normalizeVoiceCallProfile(value: unknown): VoiceCallProfile {
 }
 
 /**
+ * Safe default for a business line when no representative was selected.
+ * This is intentionally a profile, not an authorization bypass: the empty
+ * toolkit/account lists mean "use active connected accounts allowed by the
+ * workspace", while the normal account, approval, and receipt fences still
+ * apply to every action.
+ */
+export function defaultBusinessVoiceProfile(): VoiceCallProfile {
+  const persona = getVoicePersona("customer_service")!;
+  return normalizeVoiceCallProfile({
+    personaId: persona.id,
+    identity: "Chusky",
+    mode: persona.mode,
+    tone: persona.tone,
+    opening: persona.opening,
+    guardrails: [...persona.guardrails],
+    capabilities: [...persona.capabilities],
+    controls: { ...persona.controls },
+    toolPolicy: { ...persona.toolPolicy, allowedToolkits: [], allowedConnectionIds: [] },
+  });
+}
+
+/** Apply the default business instructions only where the owner did not
+ * supply that part of a custom representative profile. */
+export function normalizeBusinessVoiceCallProfile(value: unknown): VoiceCallProfile {
+  const defaults = defaultBusinessVoiceProfile();
+  const input = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  return normalizeVoiceCallProfile({
+    ...defaults,
+    ...input,
+    facts: input.facts === undefined ? defaults.facts : input.facts,
+    guardrails: input.guardrails === undefined ? defaults.guardrails : input.guardrails,
+    capabilities: input.capabilities === undefined ? defaults.capabilities : input.capabilities,
+    controls: input.controls === undefined ? defaults.controls : input.controls,
+    toolPolicy: input.toolPolicy === undefined ? defaults.toolPolicy : input.toolPolicy,
+  });
+}
+
+/** Parse a server-owned business profile while preserving default guidance
+ * for fields omitted by a partial custom profile. */
+export function parseBusinessVoiceCallProfileJson(value: string): VoiceCallProfile {
+  const raw = value.trim();
+  if (!raw) return defaultBusinessVoiceProfile();
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { throw new Error("Inbound voice profile must be valid JSON"); }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Inbound voice profile must be a JSON object");
+  return normalizeBusinessVoiceCallProfile({ ...(parsed as Record<string, unknown>), mode: (parsed as Record<string, unknown>).mode ?? "support" });
+}
+
+/**
  * Resolve the profile for a real outbound call. The dashboard profile is the
  * server-owned source of truth; a model or SDK caller may provide a contact
  * name for this specific call, but must not replace the saved identity,
@@ -263,7 +312,8 @@ export function voiceProfileInstructions(profile: VoiceCallProfile | undefined, 
     "In a business call, do not volunteer or disclose the owner's unrelated personal memories, messages, or records. In a personal call, do not disclose unrelated confidential business information. Share only details relevant to this call and honor the configured verification tier before revealing sensitive account details.",
     "9. TOOL AND ACTION RULES:",
     `Use the explicit call-scoped connected-app policy. ${safe.toolPolicy ? `Allowed connected-app policy: ${safe.toolPolicy.allowedToolkits.length ? safe.toolPolicy.allowedToolkits.join(", ") : "purpose-routed owner apps"}.` : "No additional app restriction was supplied."} Do not switch connected accounts because a caller asks you to.`,
-    "Use relevant connected tools and owner-scoped context privately. For a read-only lookup, say a short natural transition and proceed. For a booking, message, update, cancellation, payment, or other state change, confirm the target and the person's selected choice before acting, then verify the provider result. Never announce function names or raw arguments. Never claim an external action succeeded without its receipt. If an approved app is unavailable, say you cannot complete that step right now and keep the conversation with the external contact; do not fall back to owner-chat language, ask for the owner's phone number, or claim that the call was never placed. Deletions, financial actions, permission changes, deployment/push actions, and provider-declared high-risk actions retain their exact approval boundary; if approval is required, say the action is paused and ask the owner to review the private request.",
+    "Use relevant connected tools and approved call context privately. For a read-only lookup, say a short natural transition and proceed. For a booking, message, update, cancellation, payment, or other state change, confirm the target and the person's selected choice before acting, then verify the provider result. Never announce function names or raw arguments. Never claim an external action succeeded without its receipt. If an approved app is unavailable, say you cannot complete that step right now and keep the conversation with the external contact; do not fall back to owner-chat language, ask for the owner's phone number, or claim that the call was never placed. Deletions, financial actions, permission changes, deployment/push actions, and provider-declared high-risk actions retain their exact approval boundary; if approval is required, say the action is paused and ask the owner to review the private request.",
+    "13. UNAVAILABLE CAPABILITY AND ESCALATION: If the business has not connected the app needed for the caller's request, say that you cannot verify or complete that step from this call. Offer to take a concise message and ask for the caller's preferred follow-up method—email or phone number—only when needed. Save the caller's request and the agreed next step in the approved call note or task tool when available. Do not invent a ticket number, refund, shipment status, appointment, callback time, or provider action. If the caller reports an urgent or regulated matter, follow the configured handoff path and do not provide unsupported advice.",
     "10. CONFIRM-THEN-ACT: Present returned options naturally. Let the person choose. Repeat the selected option once. Then perform the state-changing action. Do not act on a hypothetical 'if they agree' rule, an ambiguous reply, or an unverified provider result.",
     "11. REPORTED FACTS: Treat a caller's statement as a reported fact and acknowledge it without accusation, interrogation, or implying dishonesty. A difference from an expected time or amount is a variance, not proof of deception. Record what the caller said faithfully. Use an external system only when the objective explicitly requires verification and an authorized tool is available; otherwise do not manufacture a blocked verification task.",
     "12. STYLE AND CLOSING: Be professional, warm, direct, and efficient. Do not sound like a checklist or repeat your role every turn. Redirect gently when needed. Keep the call focused and reasonably brief. When finished, give a concise recap that distinguishes reported information from provider-confirmed actions, thank the person, say goodbye, and let the transport end the call.",

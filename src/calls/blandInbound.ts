@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { addPhoneCall, getBlandPhoneCallByProviderId, getPhoneCall, updatePhoneCall, type PhoneCallRecord } from "../store.js";
 import { isValidBlandToolSecret } from "./blandSecurity.js";
-import { voiceRecordingBlockReason, type CallProfile, type VoiceCallProfile } from "./voiceProfile.js";
+import { defaultBusinessVoiceProfile, voiceRecordingBlockReason, type CallProfile, type VoiceCallProfile } from "./voiceProfile.js";
 
 const E164 = /^\+[1-9]\d{7,14}$/;
 
@@ -54,12 +54,13 @@ export function parseBlandInboundRoutes(value: string, options: { callProfile?: 
   const callProfile = options.callProfile === "business" ? "business" : "personal";
   const purpose = (options.purpose ?? "Handle an inbound caller request").replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 2_000) || "Handle an inbound caller request";
   const allowedCallers = [...new Set(options.allowedCallers ?? [])];
+  const voiceProfile = options.voiceProfile ?? (callProfile === "business" ? defaultBusinessVoiceProfile() : undefined);
   for (const entry of value.split(",").map((item) => item.trim()).filter(Boolean)) {
     const [phoneNumber, owner] = entry.split("=", 2).map((item) => item?.trim() ?? "");
     if (!E164.test(phoneNumber)) throw new Error("BLAND_INBOUND_ROUTES must map E.164 numbers to positive owner IDs");
     const userId = Number(owner);
     if (!Number.isSafeInteger(userId) || userId <= 0) throw new Error("BLAND_INBOUND_ROUTES must map E.164 numbers to positive owner IDs");
-    routes.set(phoneNumber, { phoneNumber, userId, callProfile, ...(options.voiceProfile ? { voiceProfile: options.voiceProfile } : {}), purpose, allowedCallers });
+    routes.set(phoneNumber, { phoneNumber, userId, callProfile, ...(voiceProfile ? { voiceProfile } : {}), purpose, allowedCallers });
   }
   return routes;
 }
@@ -103,7 +104,8 @@ export async function registerBlandInboundCall(input: {
   from?: unknown;
 }): Promise<PhoneCallRecord> {
   if (!/^[A-Za-z0-9_-]{6,160}$/.test(input.providerCallId)) throw new Error("Invalid Bland inbound provider call ID");
-  const recordingBlock = input.route.voiceProfile ? voiceRecordingBlockReason(input.route.voiceProfile) : undefined;
+  const voiceProfile = input.route.voiceProfile ?? (input.route.callProfile === "business" ? defaultBusinessVoiceProfile() : undefined);
+  const recordingBlock = voiceProfile ? voiceRecordingBlockReason(voiceProfile) : undefined;
   if (recordingBlock) throw new Error(recordingBlock);
   const existingByProvider = await getBlandPhoneCallByProviderId(input.providerCallId);
   if (existingByProvider) {
@@ -123,8 +125,8 @@ export async function registerBlandInboundCall(input: {
     provider: "bland",
     direction: "inbound",
     callProfile: input.route.callProfile,
-    ...(input.route.voiceProfile ? { voiceProfile: input.route.voiceProfile } : {}),
-    transcriptRetentionDays: input.route.voiceProfile?.controls?.retentionDays ?? 30,
+    ...(voiceProfile ? { voiceProfile } : {}),
+    transcriptRetentionDays: voiceProfile?.controls?.retentionDays ?? 30,
     callVerification: verified ? "verified" : input.route.callProfile === "business" ? "identified" : "public",
     // Bland's live event payload may omit `from`; retain the configured line
     // until the post-call payload provides the caller number.

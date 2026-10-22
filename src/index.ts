@@ -68,7 +68,7 @@ import { answerBlandQuestion } from "./calls/blandBrain.js";
 import { processBlandConsult, processBlandWebhook } from "./calls/blandWebhooks.js";
 import { isBlandVoiceConfigured } from "./calls/bland.js";
 import { isBlandInboundConfigured, normalizeBlandInboundNumber, parseBlandInboundAllowedCallers, parseBlandInboundRoutes, resolveBlandInboundRoute, type BlandInboundRoute } from "./calls/blandInbound.js";
-import { isVoiceOptOutRequest, parseVoiceCallProfileJson } from "./calls/voiceProfile.js";
+import { isVoiceOptOutRequest, parseBusinessVoiceCallProfileJson, parseVoiceCallProfileJson } from "./calls/voiceProfile.js";
 import { listBlandCuratedVoices } from "./calls/blandVoices.js";
 import { FLUX_TTS_VOICES } from "./voiceSettings.js";
 import { twilioSmsCredentialsForNumber, twilioWebhookCredentialsForCall, twilioWebhookCredentialsForRoute } from "./calls/twilioSubaccounts.js";
@@ -1281,7 +1281,9 @@ async function main(): Promise<void> {
         } else {
           const routes = parseBlandInboundRoutes(config.blandInboundRoutes, {
             callProfile: config.blandInboundCallProfile === "business" ? "business" : "personal",
-            voiceProfile: parseVoiceCallProfileJson(config.blandInboundVoiceProfile, config.blandInboundCallProfile === "business" ? "support" : "general"),
+            voiceProfile: config.blandInboundCallProfile === "business"
+              ? parseBusinessVoiceCallProfileJson(config.blandInboundVoiceProfile)
+              : parseVoiceCallProfileJson(config.blandInboundVoiceProfile, "general"),
             purpose: config.blandInboundPurpose,
             allowedCallers: parseBlandInboundAllowedCallers(config.blandInboundAllowedCallers),
           });

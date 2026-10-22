@@ -55,7 +55,12 @@ Regression contracts cover Salesforce, Freshdesk and Shopify in both directions,
 including a tool unavailable until mid-turn discovery, unrelated-app exclusion,
 selected-account binding, and discovery on read-only calls. Existing policy tests
 retain refund/write blocking and account-switch rejection. Default representative
-identity remains Chusky; absent inbound app authorization remains tool-free.
+identity remains Chusky. Business inbound routes without a selected representative
+now receive the default Customer Service profile with an enabled, workspace-scoped
+connected-app policy, so active Gmail, Calendar, ticketing, CRM, commerce, and
+billing connections can be discovered for the current caller request. Public
+inbound native access is limited to callback-note, reminder, and task-creation
+primitives; owner memory, task-list, and call-history reads remain private.
 
 Regression tests mock model/provider boundaries and exercise real agent dispatch,
 gateway discovery, transcript storage and bridge turn handling. They do not place

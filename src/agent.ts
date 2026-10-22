@@ -401,8 +401,11 @@ export function voiceFastLaneEligible(value: string): boolean {
 export const VOICE_TURN_NATIVE_TOOLS = [
   "CHUCK_SEARCH_MEMORY",
   "CHUCK_SCRATCHPAD_READ",
+  "CHUCK_SCRATCHPAD_WRITE",
   "CHUCK_LIST_REMINDERS",
+  "CHUCK_SET_REMINDER",
   "CHUCK_LIST_JOBS",
+  "CHUCK_TASK_CREATE",
   "CHUCK_TASK_LIST",
   "CHUCK_TASK_GET",
   "CHUCK_LIST_PHONE_CALLS",
@@ -415,6 +418,14 @@ const VOICE_TURN_TOOL_NAMES = new Set<string>(VOICE_TURN_NATIVE_TOOLS);
 // external conversation and speak as if it were still chatting with the
 // owner.
 const VOICE_TURN_SAFE_NATIVE_TOOLS = new Set<string>(VOICE_TURN_NATIVE_TOOLS);
+// A public business caller may leave a callback request or ask for a reminder,
+// but must not receive the owner's private memory, task list, or call history.
+// Connected-app access is separately scoped by the persisted business policy.
+const VOICE_SCOPED_NATIVE_TOOLS = new Set<string>([
+  "CHUCK_SCRATCHPAD_WRITE",
+  "CHUCK_SET_REMINDER",
+  "CHUCK_TASK_CREATE",
+]);
 
 /** Pure capability fence used by the live voice payload and its contract tests. */
 export function voiceToolIsWithinCapabilityFence(name: string, capabilityNames: Iterable<string>, explicitAllow: Iterable<string> = []): boolean {
@@ -2919,7 +2930,7 @@ async function executeAgent(
   if (voiceTurn) {
     availableTools = availableTools.filter((tool) => {
       const name = toolName(tool);
-      return !name.startsWith("CHUCK_") || VOICE_TURN_SAFE_NATIVE_TOOLS.has(name);
+      return !name.startsWith("CHUCK_") || (voiceScopedAccess ? VOICE_SCOPED_NATIVE_TOOLS.has(name) : VOICE_TURN_SAFE_NATIVE_TOOLS.has(name));
     });
   }
   // A normal chat turn may see the durable-wait schema, but only a worker

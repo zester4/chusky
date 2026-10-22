@@ -5,7 +5,7 @@ import { appendPhoneCallEvent, claimPhoneCallStart, enqueueVoiceCallReconciliati
 import { resolveVoiceContinuity } from "./continuity.js";
 import { normalizePhoneCallRequestKey } from "./requestKey.js";
 import { subaccountNumberDependencies } from "./twilioSubaccounts.js";
-import { normalizeVoiceCallProfile, resolveOutboundVoiceCallProfile, voiceCallDialBlockReason, type CallProfile, type VoiceCallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
+import { defaultBusinessVoiceProfile, normalizeVoiceCallProfile, resolveOutboundVoiceCallProfile, voiceCallDialBlockReason, type CallProfile, type VoiceCallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
 
 export interface TwilioCallInput { phoneNumber: string; purpose: string; profile?: VoiceCallProfileInput; callProfile?: CallProfile; continuityFromCallId?: string; requestKey?: string; }
 export interface TwilioCallDependencies {
@@ -166,7 +166,7 @@ export async function startTwilioCallForUser(userId: number, input: TwilioCallIn
   validate(options, true);
   if (options.voicemailMessage !== undefined && (!options.voicemailMessage.trim() || options.voicemailMessage.length > 500)) throw new Error("voicemailMessage must be 1-500 characters");
   const { phoneNumber, purpose, profile: requestedProfile, callProfile } = validateTwilioCallInput(input);
-  const profile = resolveOutboundVoiceCallProfile(await getVoiceCallProfile(userId), requestedProfile);
+  const profile = resolveOutboundVoiceCallProfile(await getVoiceCallProfile(userId), input.profile === undefined && callProfile === "business" ? defaultBusinessVoiceProfile() : requestedProfile);
   const continuity = await resolveVoiceContinuity(userId, input.continuityFromCallId);
   const dialBlockReason = voiceCallDialBlockReason(profile);
   if (dialBlockReason) throw new Error(dialBlockReason);

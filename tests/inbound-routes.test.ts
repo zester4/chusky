@@ -16,9 +16,17 @@ test("durable inbound routes normalize phones and reject unsafe personal default
   }, 42);
   assert.equal(route.phoneNumber, "+15550100123");
   assert.equal(route.voiceProfile.identity, "Chusky");
+  assert.equal(route.voiceProfile.toolPolicy?.enabled, true);
   assert.equal(route.callProfile, "business");
   assert.equal(twilioRouteCallerAllowed(route, "+233550472834"), true);
   assert.equal(blandRouteFromRecord(route).userId, 42);
+});
+
+test("business inbound routes keep default app access when a custom identity omits policy", () => {
+  const route = normalizeVoiceInboundRouteInput({ provider: "twilio", phoneNumber: "+15550100125", callProfile: "business", voiceProfile: { identity: "Alex", organization: "Acme" } }, 43);
+  assert.equal(route.voiceProfile.identity, "Alex");
+  assert.equal(route.voiceProfile.toolPolicy?.enabled, true);
+  assert.deepEqual(route.voiceProfile.toolPolicy?.allowedToolkits, []);
 });
 
 test("provider lifecycle event projection never regresses after a terminal callback", () => {

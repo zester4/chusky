@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeVoiceCallProfile, resolveOutboundVoiceCallProfile, voiceProfileInstructions, voiceProfileNativeTools } from "../src/calls/voiceProfile.js";
+import { defaultBusinessVoiceProfile, normalizeBusinessVoiceCallProfile, normalizeVoiceCallProfile, resolveOutboundVoiceCallProfile, voiceProfileInstructions, voiceProfileNativeTools } from "../src/calls/voiceProfile.js";
 import { initStore, getPhoneCall, getVoiceCallProfile, setVoiceCallProfile } from "../src/store.js";
 import { startTwilioCallForUser } from "../src/calls/twilio.js";
 
@@ -47,6 +47,22 @@ test("voice identity cannot turn a configured assistant into a regulated profess
   const profile = normalizeVoiceCallProfile({ identity: "Dr. Amina, licensed nurse" });
   assert.equal(profile.identity, "Chusky");
   assert.match(voiceProfileInstructions(profile, "outbound", "Check in"), /Never claim to be human, a nurse, doctor, lawyer, accountant/i);
+});
+
+test("business calls receive a capable default representative when none is configured", () => {
+  const profile = defaultBusinessVoiceProfile();
+  assert.equal(profile.identity, "Chusky");
+  assert.equal(profile.mode, "support");
+  assert.equal(profile.toolPolicy?.enabled, true);
+  assert.deepEqual(profile.toolPolicy?.allowedToolkits, []);
+  assert.match(voiceProfileInstructions(profile, "inbound", "Handle the caller's request"), /UNAVAILABLE CAPABILITY AND ESCALATION/);
+  assert.match(voiceProfileInstructions(profile, "inbound", "Handle the caller's request"), /preferred follow-up method/i);
+
+  const partial = normalizeBusinessVoiceCallProfile({ identity: "Alex", organization: "Acme" });
+  assert.equal(partial.identity, "Alex");
+  assert.equal(partial.organization, "Acme");
+  assert.equal(partial.toolPolicy?.enabled, true);
+  assert.match(partial.guardrails.join(" "), /connected business records/i);
 });
 
 test("explicit AI disclosure is opt-in and remains a one-time introduction", () => {
@@ -136,4 +152,6 @@ test("business calls carry a separate call profile", async () => {
     webhookBaseUrl: "https://chusky.example", mediaStreamUrl: "wss://voice.example/twilio/stream", mediaBridgeSecret: "bridge-secret", createCall: async () => ({ sid: "CA-business" }),
   });
   assert.equal(call.callProfile, "business");
+  assert.equal(call.voiceProfile?.identity, "Chusky");
+  assert.equal(call.voiceProfile?.toolPolicy?.enabled, true);
 });
