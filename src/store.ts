@@ -9129,9 +9129,10 @@ export async function appendPhoneCallTranscriptTurn(
     }
     const existing = current.transcript?.turns ?? [];
     if (existing.some((turn) => turn.id === turnId)) return current;
-    const next = [...existing, { id: turnId, at: typeof input.at === "number" && Number.isFinite(input.at) ? Math.max(0, Math.floor(input.at)) : Date.now(), caller, assistant, ...(input.kind ? { kind: input.kind } : {}) }];
+    const entry = { id: turnId, at: input.kind === "opening" ? current.createdAt : typeof input.at === "number" && Number.isFinite(input.at) ? Math.max(0, Math.floor(input.at)) : Date.now(), caller, assistant, ...(input.kind ? { kind: input.kind } : {}) };
+    const next = input.kind === "opening" ? [entry, ...existing] : [...existing, entry];
     current.transcript = {
-      turns: next.slice(-80),
+      turns: next.length > 80 && next[0]?.kind === "opening" ? [next[0], ...next.slice(-79)] : next.slice(-80),
       truncated: Boolean(current.transcript?.truncated) || next.length > 80,
       updatedAt: Date.now(),
     };

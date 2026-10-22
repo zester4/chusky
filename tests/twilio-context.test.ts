@@ -1,6 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { callerFacingCallTopic, twilioVoiceHistory, twilioVoiceInstructions, twilioVoiceKeyterms, twilioVoiceOpening, twilioVoiceTranscript } from "../src/calls/twilioContext.js";
+import { callerFacingCallTopic, sanitizeUnverifiedVoiceAction, twilioVoiceHistory, twilioVoiceInstructions, twilioVoiceKeyterms, twilioVoiceOpening, twilioVoiceTranscript } from "../src/calls/twilioContext.js";
+
+test("named-contact booking instructions never enter the transport greeting", () => {
+  const opening = twilioVoiceOpening({ ...base, direction: "outbound", purpose: "Ask about tomorrow's appointment at 8:00 AM. If Seyyid Annan agrees to come in, confirm the agreement on the call so the appointment can be booked in Google Calendar, then end the call cleanly. Do not discuss anything else." });
+  assert.match(opening, /appointment at 8:00 AM/);
+  assert.doesNotMatch(opening, /If Seyyid|confirm the agreement|Google Calendar|end the call|Do not discuss/);
+});
+
+test("spoken confirmation of a booking requires a provider write receipt", () => {
+  const call = { ...base, purpose: "Book tomorrow's appointment" };
+  const answer = "Great, I have you confirmed for tomorrow at eight AM.";
+  assert.doesNotMatch(sanitizeUnverifiedVoiceAction(call, answer, []), /have you confirmed/);
+  assert.doesNotMatch(sanitizeUnverifiedVoiceAction(call, answer, [{ toolSlug: "GOOGLECALENDAR_EVENTS_LIST", receiptId: "read_receipt" }]), /have you confirmed/);
+  assert.doesNotMatch(sanitizeUnverifiedVoiceAction(call, answer, [{ toolSlug: "GOOGLECALENDAR_CREATE_EVENT", receiptId: "" }]), /have you confirmed/);
+  assert.equal(sanitizeUnverifiedVoiceAction(call, answer, [{ toolSlug: "GOOGLECALENDAR_CREATE_EVENT", receiptId: "event_receipt" }]), answer);
+});
 
 const base = {
   id: "twc_00000000-0000-0000-0000-000000000000", userId: 7, provider: "twilio" as const,

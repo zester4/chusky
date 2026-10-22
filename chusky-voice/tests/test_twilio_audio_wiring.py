@@ -595,7 +595,7 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("elevenlabs.io", opened_urls[0])
         self.assertIn("api.deepgram.com", opened_urls[1])
 
-    async def test_inbound_eager_turn_streams_once_and_commits_the_final_answer(self):
+    async def test_eager_turn_waits_for_one_final_tool_capable_request(self):
         agent_http = FakeAgentHttp()
         self.call.http = agent_http
         tts_socket = StreamingFakeTtsSocket()
@@ -615,15 +615,21 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(agent_http.stream_requests), 1)
         request = agent_http.stream_requests[0]
-        self.assertTrue(request["json"]["speculative"])
+        self.assertFalse(request["json"]["speculative"])
         self.assertEqual(request["json"]["transcript"], transcript)
         self.assertEqual(len(agent_http.posts), 1)
         self.assertTrue(agent_http.posts[0]["url"].endswith("/commit-turn"))
         self.assertEqual(agent_http.posts[0]["json"]["text"], "I can help you with that.")
         self.assertEqual([event["type"] for event in tts_socket.sent].count("Speak"), 1)
         latency = self.call.metrics.snapshot(1)["twilio"]["latencyMs"]
-        self.assertEqual(latency["eagerToFirstAudio"]["count"], 1)
+        self.assertEqual(latency["eagerToFirstAudio"]["count"], 0)
         self.assertEqual(latency["endOfTurnToFirstAudio"]["count"], 1)
+
+    async def test_eager_draft_cannot_speak_or_execute_before_caller_finishes(self):
+        self.call._request_agent_stream = AsyncMock()
+        await self.call._start_draft("Please book it", 1)
+        self.call._request_agent_stream.assert_not_called()
+        self.assertIsNone(self.call.draft_task)
 
     async def test_flux_updates_are_used_when_final_event_has_no_transcript(self):
         agent_http = FakeAgentHttp()

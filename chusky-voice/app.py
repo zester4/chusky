@@ -630,20 +630,12 @@ class TwilioVoiceCall:
                 self.response_task.add_done_callback(self._observe_response_task)
 
     async def _start_draft(self, transcript: str, turn_index: int) -> None:
-        if self.draft_task and not self.draft_task.done():
-            if self.draft_turn_index == turn_index and self._same_transcript(self.draft_transcript, transcript):
-                return
-            self.draft_task.cancel()
-            await asyncio.gather(self.draft_task, return_exceptions=True)
-        self.draft_transcript, self.draft_turn_index = transcript, turn_index
-        self.eager_response_started_at = time.monotonic()
-        self.response_started_at = 0.0
-        self.tts_first_audio_recorded = False
-        self.draft_task = asyncio.create_task(
-            self._request_agent_stream(transcript, speculative=True),
-            name=f"twilio-draft-{self.call_id}-{turn_index}",
-        )
-        self.draft_task.add_done_callback(self._observe_response_task)
+        # EagerEndOfTurn is provisional. The backend deliberately disables
+        # tools for speculative requests, so promoting their spoken answer at
+        # EndOfTurn silently skips calendar writes and other requested work.
+        # Wait for the finalized caller turn and run its normal tool-capable
+        # request once. No speculative speech may become a business receipt.
+        return
 
     def _observe_response_task(self, task: asyncio.Task[Any]) -> None:
         try:
@@ -747,10 +739,10 @@ class TwilioVoiceCall:
             response = await self.http.post(
                 self.settings.chusky_turn_url,
                 headers={"Authorization": f"Bearer {self.settings.bridge_secret}"},
-                # The bridge always commits the definitive result itself. Keep
-                # this legacy batch request speculative so it never writes a
-                # second copy before _commit_turn obtains its idempotent lease.
-                json={"callId": self.call_id, "userId": self.user_id, "transcript": transcript, "speculative": True, "opening": self.call_greeting or self.fallback_greeting or ""},
+                # Final speech needs the tool-capable path. Defer accounting
+                # to the bridge's idempotent commit without marking it as a
+                # tool-free speculative request.
+                json={"callId": self.call_id, "userId": self.user_id, "transcript": transcript, "speculative": False, "deferCommit": True, "opening": self.call_greeting or self.fallback_greeting or ""},
                 timeout=httpx.Timeout(45.0, connect=10.0),
             )
             response.raise_for_status()
@@ -840,7 +832,8 @@ class TwilioVoiceCall:
             if self._uses_elevenlabs_tts:
                 self.elevenlabs_runtime_fallback = True
             LOG.warning(
-                "Persistent Twilio TTS connection ended",
+                "Persistent Twilio TTS connection ended: call_id=%s error_type=%s close_code=%s",
+                self.call_id, type(error).__name__, getattr(error, "code", None),
                 extra={
                     "call_id": self.call_id,
                     "error_type": type(error).__name__,
@@ -850,7 +843,8 @@ class TwilioVoiceCall:
             )
         except Exception as error:
             LOG.warning(
-                "Persistent Twilio TTS connection ended",
+                "Persistent Twilio TTS connection ended: call_id=%s error_type=%s",
+                self.call_id, type(error).__name__,
                 extra={"call_id": self.call_id, "error_type": type(error).__name__},
             )
 

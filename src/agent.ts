@@ -2859,6 +2859,7 @@ async function executeAgent(
   const uniqueVoiceCapabilityTools = voiceCapabilityTools.filter((tool) => !voiceCalendarNames.has(composioActionSlug(toolName(tool))));
   const voiceCapabilityNames = new Set([
     ...voiceCapabilitySlugs.map(composioActionSlug),
+    ...voiceCalendarNames,
     ...uniqueVoiceCapabilityTools.map((tool) => composioActionSlug(toolName(tool))),
   ]);
   const boundedOwnerVoice = voiceTurn && (ownerPrivateRun || voiceScopedAccess) && !options?.meetingId && !voiceFastLane && !voiceToolFreeTurn;
@@ -2942,7 +2943,7 @@ async function executeAgent(
   // search returned no rows, the voice model received zero tools even though
   // Composio routing had selected the correct application/action.
   const preloadedVoiceCapabilityTools = voiceTurn && (ownerPrivateRun || voiceScopedAccess)
-    ? [...availableTools, ...fullComposioTools, ...voiceCapabilityTools]
+    ? [...availableTools, ...fullComposioTools, ...voiceCapabilityTools, ...voiceCalendarTools]
       .filter((tool, index, all) => all.findIndex((candidate) => toolName(candidate) === toolName(tool)) === index)
       .filter((tool) => voiceCapabilityNames.has(composioActionSlug(toolName(tool))))
     : [];
@@ -3526,6 +3527,7 @@ async function executeAgent(
   for (const action of composioDecision?.actions ?? []) addGrantedComposioAction(composioActionSlug(String(action.id ?? "")));
   for (const tool of nativeToolRoute.tools) addGrantedComposioAction(toolName(tool));
   for (const tool of meetingPreloadedTools) addGrantedComposioAction(toolName(tool));
+  for (const tool of preloadedVoiceCapabilityTools) addGrantedComposioAction(composioActionSlug(toolName(tool)));
   for (const value of persistedMissionRouting?.composioActions ?? []) addGrantedComposioAction(composioActionSlug(value));
   if (missionRoutingKey && !persistedMissionRouting && !reusableMissionRouting) {
     missionRoutingCache.set(missionRoutingKey, { at: Date.now(), skillRoute, tregRoute, routedAccounts, composioDecision });
@@ -3907,11 +3909,6 @@ async function executeAgent(
       ...revealedNativeTools,
       ...(nativeDiscoveryAlreadyUsed ? [] : ["CHUCK_FIND_TOOLS"]),
     ]);
-    // Explicit durable/meeting grants are exact-capability runs. Ordinary
-    // interactive turns retain the full available capability surface even
-    // when Jev is in enforce mode: Jev is an advisory decision layer here,
-    // while the model chooses the next useful action and runtime execution
-    // still enforces ownership, approvals, schemas, and receipts.
     const strictCapabilityExposure = Boolean(options?.taskId || options?.missionId || options?.meetingId || missionPromptRelevant);
     // The native router preserves non-native schemas for callers that need
     // to compose routing themselves. The supervisor must not pass that
@@ -3923,10 +3920,14 @@ async function executeAgent(
         && selectedNativeNames.has(name)
         && (!nativeDiscoveryAlreadyUsed || name !== "CHUCK_FIND_TOOLS");
     });
-    // Keep the full available surface for ordinary interactive turns. This is
-    // capability availability, not authorization: every execution still
-    // passes the runtime policy and provider verification gates below.
-    const legacyCompatibleTools = availableTools.filter((tool) => !nativeDiscoveryAlreadyUsed || toolSchemaName(tool) !== "CHUCK_FIND_TOOLS");
+    // Owner turns discover native capabilities progressively. Keep provider
+    // schemas already loaded from their account while avoiding the entire
+    // native catalogue (including unrelated shells) on a simple call retry.
+    const legacyCompatibleTools = availableTools.filter((tool) => {
+      const name = toolSchemaName(tool);
+      return (!nativeDiscoveryAlreadyUsed || name !== "CHUCK_FIND_TOOLS")
+        && (!ownerPrivateRun || voiceTurn || !name.startsWith("CHUCK_") || selectedNativeNames.has(name));
+    });
     const appIntent = APP_INTENT_PATTERN.test(`${routingQuery}\n${routingRecentContext ?? ""}`);
     const composioHasExactRoute = routedComposioNames.size > 0 || Boolean(composioDecision?.directTools?.length);
     const composioNeedsDiscovery = appIntent && !composioDecision?.noAppNeeded && (
@@ -4907,6 +4908,13 @@ async function executeAgent(
         if (slug === "COMPOSIO_SEARCH_TOOLS" || slug === "COMPOSIO_GET_TOOL_SCHEMAS") {
           for (const [toolSlug, presentation] of collectComposioToolPresentations(execResult)) {
             composioToolPresentations.set(toolSlug, { ...composioToolPresentations.get(toolSlug), ...presentation });
+            // Discovery expands the current task's callable capabilities. It
+            // never expands explicit run restrictions or bypasses approvals.
+            const canonical = composioActionSlug(toolSlug);
+            if (!providerResultExplicitlyFailed(execResult)
+              && (!allow || allow.has(toolSlug) || allow.has(canonical)) && !deny.has(toolSlug) && !deny.has(canonical)
+              && (!executionScope || toolBelongsToCapabilityScope(canonical, executionScope))
+              && voiceModelAllowed(canonical)) addGrantedComposioAction(canonical);
           }
           if (slug === "COMPOSIO_SEARCH_TOOLS") await enrichComposioToolPresentations(composio, composioToolPresentations, signal);
         }

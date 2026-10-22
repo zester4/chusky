@@ -44,6 +44,8 @@ function purposeText(call: PhoneCallRecord): string {
 
 function callerFacingTopic(purpose: string): string {
   let topic = purpose
+    .replace(/(?:[.!?]\s*|[,;]\s*)(?:if|when|once|after)\s+[^.!?;]{1,180}?\b(?:agrees?|confirms?|accepts?|says?\s+yes)\b[\s\S]*$/i, "")
+    .replace(/(?:[.!?]\s+)(?:confirm the agreement|then\s+|do not\s+|end the call\b)[\s\S]*$/i, "")
     .replace(/^(?:please\s+)?(?:ask|check|confirm)\s+(?:if|whether)\s+(?:they|he|she|you|the\s+(?:client|customer|patient|recipient))(?:(?:\s+(?:will|would|can|could|is|are))|(?:'ll|’ll))\s+be\s+available\s+for\s+/i, "your availability for ")
     .replace(/(?:,?\s+)(?:if|when|once|after)\s+(?:they|he|she|you|the\s+(?:client|customer|patient|recipient))\b[\s\S]*$/i, "")
     .replace(/(?:,?\s+)(?:then|and\s+then)\s+(?:book|schedule|create|send|update|confirm|add|save)\b[\s\S]*$/i, "")

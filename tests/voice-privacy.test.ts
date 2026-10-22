@@ -4,6 +4,19 @@ import { addPhoneCall, appendPhoneCallTranscriptTurn, deletePhoneCallTranscript,
 
 before(async () => { await initStore({ memoryOnly: true }); });
 
+test("shutdown recovery inserts the opening before already committed caller turns", async () => {
+  const userId = 910403;
+  const id = "twc_opening_order";
+  const startedAt = Date.now() - 10_000;
+  await addPhoneCall(userId, { id, userId, provider: "twilio", direction: "outbound", phoneNumber: "+15550103", purpose: "test", status: "ended", createdAt: startedAt, updatedAt: startedAt });
+  await appendPhoneCallTranscriptTurn(userId, id, { turnId: "turn_1", caller: "Yes", assistant: "Thank you" });
+  await appendPhoneCallTranscriptTurn(userId, id, { turnId: "opening", assistant: "Hello", kind: "opening" });
+  await appendPhoneCallTranscriptTurn(userId, id, { turnId: "opening", assistant: "Hello", kind: "opening" });
+  const turns = (await getPhoneCall(userId, id))!.transcript!.turns;
+  assert.deepEqual(turns.map(turn => turn.id), ["opening", "turn_1"]);
+  assert.equal(turns[0].at, startedAt);
+});
+
 test("transcript turns are idempotent and owner deletion preserves an audit timeline", async () => {
   const userId = 910401;
   const id = "twc_privacy_delete";

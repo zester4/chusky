@@ -368,6 +368,48 @@ test("generic Composio gateways cannot execute an action outside the current rou
   }, true);
 });
 
+test("discovery expands an owner turn so a verified action can execute through the gateway", async () => {
+  const userId = 831341;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const executed: string[] = [];
+  const action = "GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS";
+  const modelRequests: any[] = [];
+  const session = {
+    sessionId: "discovery-expansion-test",
+    tools: async () => ["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_MULTI_EXECUTE_TOOL"].map(name => ({ type: "function", function: { name, parameters: { type: "object" } } })),
+    execute: async (slug: string) => {
+      executed.push(slug);
+      return slug === "COMPOSIO_GET_TOOL_SCHEMAS"
+        ? { successful: true, data: { tools: [{ slug: action, name: "List calendar events", toolkit: { slug: "googlecalendar" }, inputParameters: { type: "object", properties: {} } }] } }
+        : { successful: true, data: { results: [{ tool_slug: action, successful: true, data: { items: [] } }] } };
+    },
+  };
+  const originalFetch = globalThis.fetch;
+  setAgentDependenciesForTests({ composio: { create: async () => session } });
+  const replies = [
+    toolResponse("COMPOSIO_GET_TOOL_SCHEMAS", JSON.stringify({ tool_slugs: [action] })),
+    toolResponse("COMPOSIO_MULTI_EXECUTE_TOOL", JSON.stringify({ tools: [{ tool_slug: action, arguments: {} }] }), "call-2"),
+    chatResponse({ role: "assistant", content: "I checked the calendar events." }),
+  ];
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/chat/completions")) {
+      modelRequests.push(JSON.parse(String(init?.body)));
+      return replies.shift() ?? chatResponse({ role: "assistant", content: "Done" });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(userId, "Check my Google Calendar events.", [], "test/model", undefined, undefined, undefined, undefined, undefined, { ownerPrivateRun: true });
+    assert.match(result.text, /checked the calendar/);
+    assert.ok(executed.includes("COMPOSIO_MULTI_EXECUTE_TOOL"), "a discovered provider action must not remain blocked by the initial route");
+    assert.ok(!modelRequests[0].tools.some((tool: any) => /CHUCK_(?:DAYTONA|REMOTE)/.test(tool.function.name)), "a calendar lookup must not load unrelated remote execution tools");
+  } finally {
+    globalThis.fetch = originalFetch;
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
 test("mission provider allowlists resolve an exact schema when the session exposes only meta-tools", async () => {
   const userId = 831237;
   await initStore({ memoryOnly: true });
@@ -1862,6 +1904,41 @@ test("owner-private calendar voice turns preload exact calendar tools from large
     assert.match(result.text, /checked the calendar/i);
     assert.equal(requests[0]?.tools.some((tool: any) => tool.function.name === calendarTool.function.name), true);
     assert.deepEqual(executed, [calendarTool.function.name]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+test("calendar schemas discovered outside the static bundle reach the voice model and execute", async () => {
+  const userId = 830154;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const name = "GOOGLECALENDAR_LIST_CALENDARS";
+  const tool = { type: "function", function: { name, description: "List calendars", parameters: { type: "object", properties: {} } } };
+  const requests: any[] = [];
+  const executed: string[] = [];
+  const session = {
+    sessionId: "calendar-discovered-schema-session",
+    tools: async () => [],
+    search: async () => [tool],
+    execute: async (slug: string) => { executed.push(slug); return { successful: true, data: { items: [] } }; },
+  };
+  const originalFetch = globalThis.fetch;
+  setAgentDependenciesForTests({ composio: { create: async () => session } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/chat/completions")) {
+      requests.push(JSON.parse(String(init?.body)));
+      return requests.length === 1 ? toolResponse(name, "{}") : chatResponse({ role: "assistant", content: "Calendar lookup completed." });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    await runAgent(userId, "Check which calendar is available.", [], "test/model", undefined, undefined, undefined, undefined,
+      { accountId: `account_${userId}`, provider: "voice", conversationId: "twc_discovered_calendar", scope: "private" },
+      { ownerPrivateRun: true, voiceTurn: true, voiceSessionId: "twilio:discovered-calendar", voiceRoutingHint: "Check the appointment calendar." });
+    assert.ok(requests[0].tools.some((candidate: any) => candidate.function.name === name));
+    assert.deepEqual(executed, [name]);
   } finally {
     globalThis.fetch = originalFetch;
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });

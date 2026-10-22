@@ -23,6 +23,8 @@ export function callerFacingCallTopic(purpose: unknown): string {
   if (!topic) return "the reason for this call";
 
   topic = topic
+    .replace(/(?:[.!?]\s*|[,;]\s*)(?:if|when|once|after)\s+[^.!?;]{1,180}?\b(?:agrees?|confirms?|accepts?|says?\s+yes)\b[\s\S]*$/i, "")
+    .replace(/(?:[.!?]\s+)(?:confirm the agreement|then\s+|do not\s+|end the call\b)[\s\S]*$/i, "")
     .replace(/^(?:please\s+)?(?:ask|check|confirm)\s+(?:if|whether)\s+(?:they|he|she|you|the\s+(?:client|customer|patient|recipient))(?:(?:\s+(?:will|would|can|could|is|are))|(?:'ll|’ll))\s+be\s+available\s+for\s+/i, "your availability for ")
     .replace(/^(?:please\s+)?confirm\s+if\s+(?:they|he|she|you)(?:(?:\s+(?:will|would|can|could))|(?:'ll|’ll))\s+make\s+it\s+for\s+/i, "your availability for ")
     .replace(/(?:,?\s+)(?:if|when|once|after)\s+(?:they|he|she|you|the\s+(?:client|customer|patient|recipient))\b[\s\S]*$/i, "")
@@ -142,7 +144,9 @@ export function voiceActionNeedsProviderReceipt(call: PhoneCallRecord): boolean 
 export function sanitizeUnverifiedVoiceAction(call: PhoneCallRecord, text: string, verifiedActions: Array<{ toolSlug: string; receiptId: string }>): string {
   const answer = text.trim();
   if (!answer || !voiceActionNeedsProviderReceipt(call)) return answer;
-  const hasBookingWrite = verifiedActions.some((action) => /(?:CALENDAR|APPOINTMENT|BOOK|SCHEDULE).*(?:CREATE|ADD|UPDATE|INSERT|BOOK|EVENT)|(?:CREATE|ADD|UPDATE|INSERT|BOOK).*(?:CALENDAR|APPOINTMENT|EVENT)/i.test(action.toolSlug));
-  if (hasBookingWrite || !/\b(?:booked|scheduled|reserved|all set|appointment (?:is )?confirmed|updated your appointment|created the event)\b/i.test(answer)) return answer;
+  const hasBookingWrite = verifiedActions.some((action) => Boolean(action.receiptId)
+    && /(?:CALENDAR|CALENDLY|APPOINTMENT|BOOKING|SCHEDULE|EVENT)/i.test(action.toolSlug)
+    && /(?:^|[:_])(?:CREATE|ADD|UPDATE|INSERT|BOOK|PATCH)(?:_|$)/i.test(action.toolSlug));
+  if (hasBookingWrite || !/\b(?:booked|scheduled|reserved|all set|appointment (?:is )?confirmed|(?:have|got) you confirmed|updated your appointment|created the event)\b/i.test(answer)) return answer;
   return "I have noted that time as your preference, but I have not booked the appointment yet. I still need to confirm the appointment details and calendar availability before I can say it is booked.";
 }

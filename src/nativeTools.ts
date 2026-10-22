@@ -2349,10 +2349,11 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
       const phoneNumber = text(args.phoneNumber);
       const purpose = text(args.purpose);
       // A model retry gets a new tool-call ID, but it remains inside the same
-      // durable agent run. Hash the bounded call intent so the provider side
-      // effect is claimed once before either Twilio or Bland is contacted.
+      // durable agent run. Rewording the purpose or contact must not create a
+      // second call to the same destination. An owner-requested retry arrives
+      // in a new run and therefore receives a new provider claim.
       const requestKey = runtime.currentRunId?.trim()
-        ? `pc_${createHash("sha256").update(JSON.stringify({ version: 2, userId, runId: runtime.currentRunId.trim(), phoneNumber: phoneNumber.replace(/[^0-9+]/g, ""), purpose: purpose.replace(/\s+/g, " ").trim().toLowerCase(), callProfile, contactName: suppliedContactName ?? null, continuityFromCallId: continuityFromCallId ?? null })).digest("hex")}`
+        ? `pc_${createHash("sha256").update(JSON.stringify({ version: 3, userId, runId: runtime.currentRunId.trim(), phoneNumber: phoneNumber.replace(/[^0-9+]/g, "") })).digest("hex")}`
         : undefined;
       const input = { phoneNumber, purpose, ...(profile ? { profile } : {}), ...(continuityFromCallId ? { continuityFromCallId } : {}), callProfile, ...(requestKey ? { requestKey } : {}) };
       if (phoneCallLauncherForTests) return phoneCallLauncherForTests(userId, input);
