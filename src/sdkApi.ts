@@ -109,6 +109,10 @@ import { PROVIDER_SURFACES, providerMatrixWithProofs } from "./reliability/provi
 import { normalizeProviderSmokeChecks, PROVIDER_SMOKE_CAPABILITIES } from "./reliability/providerSmoke.js";
 import { buildReadinessReport } from "./reliability/readiness.js";
 import { buildTwilioActivationChecklist } from "./calls/twilioActivation.js";
+import { billingPlanCatalog, subscriptionAllowsUsage } from "./billing.js";
+import { complianceReadiness, normalizeVoiceComplianceInput } from "./calls/compliance.js";
+import { getBillingAccount, getVoiceCompliance, listTwilioBillingEntries, saveVoiceCompliance } from "./store.js";
+import { listTwilioSubaccountViews } from "./calls/twilioSubaccounts.js";
 import { listApprovalEscalations, runDueApprovalEscalations, scheduleApprovalEscalation } from "./approvals/escalation.js";
 import { buildOperatorTimeline } from "./reliability/timeline.js";
 import { diagnoseMission } from "./reliability/missionDoctor.js";
@@ -2775,11 +2779,72 @@ export function registerSdkApi(app: Hono): void {
     return c.body(null, 204);
   });
 
+  app.get("/v1/account/billing", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before reading billing.");
+    const account = await getBillingAccount(owner.userId);
+    const entries = await listTwilioBillingEntries(owner.userId, 100);
+    const compliance = await getVoiceCompliance(owner.userId);
+    return c.json({
+      data: {
+        plans: billingPlanCatalog(),
+        subscription: account?.subscription ?? null,
+        usageAllowed: account?.subscription ? subscriptionAllowsUsage(account.subscription) : false,
+        provider: { status: "not_configured" as const, collectionEnabled: false },
+        numberLedger: entries.map((entry) => ({ id: entry.id, kind: entry.kind, amountCents: entry.amountCents, currency: entry.currency, status: entry.status, createdAt: new Date(entry.createdAt).toISOString(), metadata: entry.metadata })),
+        compliance: compliance ? { readiness: complianceReadiness(compliance), emergencyAddressStatus: compliance.emergencyAddressStatus, regulatoryStatus: compliance.regulatoryStatus } : { readiness: "not_configured" as const, emergencyAddressStatus: "not_configured" as const, regulatoryStatus: "not_configured" as const },
+      },
+    });
+  });
+
+  app.get("/v1/account/calls/health", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before reading voice health.");
+    const [compliance, routes, subaccounts] = await Promise.all([getVoiceCompliance(owner.userId), listVoiceInboundRoutes(owner.userId), listTwilioSubaccountViews(100)]);
+    return c.json({ data: { readiness: buildTwilioActivationChecklist(), compliance: compliance ? { ...compliance, readiness: complianceReadiness(compliance) } : { readiness: "not_configured" }, inboundRoutes: routes, subaccounts: subaccounts.filter((account) => account.userId === owner.userId) } });
+  });
+
+  app.get("/v1/account/calls/compliance", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before reading voice compliance settings.");
+    const data = await getVoiceCompliance(owner.userId);
+    return c.json({ data: data ? { ...data, readiness: complianceReadiness(data) } : { version: 0, readiness: "not_configured", emergencyAddressStatus: "not_configured", regulatoryStatus: "not_configured", regulatoryCountries: [], recordingConsentRequired: true, optOutEnabled: true, retentionDays: 30 } });
+  });
+
+  app.put("/v1/account/calls/compliance", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before updating voice compliance settings.");
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const idempotencyKey = (c.req.header("Idempotency-Key") ?? "").trim();
+    if (!idempotencyKey || idempotencyKey.length > 255) return apiError(c, 400, "idempotency_key_required", "A valid Idempotency-Key is required to update voice compliance settings.");
+    const fingerprint = createHash("sha256").update(`PUT:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
+    const prior = await sdkIdempotency(c, owner.userId, fingerprint);
+    if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
+    if (prior.replay !== undefined) return c.json(prior.replay);
+    try {
+      const current = await getVoiceCompliance(owner.userId);
+      const expectedVersion = body.expectedVersion === undefined ? current?.version ?? 0 : body.expectedVersion;
+      if (!Number.isSafeInteger(expectedVersion) || Number(expectedVersion) < 0) return apiError(c, 400, "invalid_voice_compliance_version", "expectedVersion must be a non-negative integer.");
+      const record = normalizeVoiceComplianceInput(owner.userId, body, current);
+      if (!(await saveVoiceCompliance(record, Number(expectedVersion)))) return apiError(c, 409, "voice_compliance_conflict", "Voice compliance settings changed in another session. Refresh before saving again.");
+      const response = { data: { ...record, readiness: complianceReadiness(record) } };
+      await recordSdkIdempotency(owner.userId, idempotencyKey, fingerprint, response);
+      return c.json(response);
+    } catch (error) {
+      return apiError(c, 400, "invalid_voice_compliance", error instanceof Error ? error.message : "Voice compliance settings are invalid.");
+    }
+  });
+
   app.get("/v1/account/calls", async (c) => {
     const owner = await callOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your web account before using calls.");
     const provider = await phoneCallingProvider(owner.userId);
-    return c.json({ available: Boolean(provider), provider: provider ?? null, capabilities: { rawAudioRecording: false, transcriptRetention: true, transcriptDeletion: true }, data: (await listPhoneCalls(owner.userId)).map(callView) });
+    const limit = Math.max(1, Math.min(100, Math.floor(Number(c.req.query("limit") ?? 25) || 25)));
+    const cursor = Number(c.req.query("cursor") ?? 0);
+    const calls = (await listPhoneCalls(owner.userId)).filter((call) => !Number.isFinite(cursor) || cursor <= 0 || call.createdAt < cursor);
+    const page = calls.slice(0, limit);
+    const nextCursor = calls.length > page.length ? page.at(-1)?.createdAt : undefined;
+    return c.json({ available: Boolean(provider), provider: provider ?? null, capabilities: { rawAudioRecording: false, transcriptRetention: true, transcriptDeletion: true }, data: page.map(callView), ...(nextCursor ? { nextCursor } : {}) });
   });
 
   // The dashboard needs to explain which production gates are still open, but

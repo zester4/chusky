@@ -40,6 +40,8 @@ import type { CompanyAgentProfile, CompanyPolicy } from "./companyPlatform.js";
 import type { RecallChatCommand } from "./meetings/recall.js";
 import type { MeetingCapabilities } from "./meetings/capabilities.js";
 import type { VoiceCallReconciliationRecord } from "./calls/reconciliationTypes.js";
+import { applyBillingEvent, type BillingEvent, type BillingSubscription, type BillingTransitionResult } from "./billing.js";
+import type { VoiceComplianceRecord } from "./calls/compliance.js";
 
 export interface SessionReadOptions {
   /** Read only the durable domains needed by this operation. */
@@ -626,6 +628,15 @@ export interface TwilioBillingLedgerEntry {
   status: "recorded" | "voided";
   createdAt: number;
   metadata?: Record<string, string>;
+}
+
+/** Account-scoped billing projection. Provider payloads stay outside this
+ * record; only normalized state and deduplication IDs are persisted. */
+export interface BillingAccountRecord {
+  userId: number;
+  subscription?: BillingSubscription;
+  appliedEventIds: string[];
+  updatedAt: number;
 }
 
 export interface PhoneCallTranscriptTurn {
@@ -2216,6 +2227,11 @@ interface Backend {
   listTwilioNumberOwnership(userId: number, limit: number): Promise<TwilioNumberOwnershipRecord[]>;
   appendTwilioBillingEntry(entry: TwilioBillingLedgerEntry): Promise<void>;
   listTwilioBillingEntries(userId: number, limit: number): Promise<TwilioBillingLedgerEntry[]>;
+  getBillingAccount(userId: number): Promise<BillingAccountRecord | undefined>;
+  saveBillingAccount(record: BillingAccountRecord, expectedVersion?: number): Promise<boolean>;
+  applyBillingEvent(userId: number, event: BillingEvent, expectedVersion?: number): Promise<BillingTransitionResult>;
+  getVoiceCompliance(userId: number): Promise<VoiceComplianceRecord | undefined>;
+  saveVoiceCompliance(record: VoiceComplianceRecord, expectedVersion?: number): Promise<boolean>;
   enqueueVoiceCallReconciliation(record: VoiceCallReconciliationRecord): Promise<void>;
   claimVoiceCallReconciliations(nowMs: number, limit: number, leaseMs: number, leaseToken: string): Promise<VoiceCallReconciliationRecord[]>;
   completeVoiceCallReconciliation(id: string, leaseToken: string): Promise<boolean>;
@@ -2680,6 +2696,8 @@ class RedisBackend implements Backend {
   private twilioOwnershipSubaccountIndexKey = (subaccountId: string) => `chuck:voice:twilio-subaccount-numbers:${createHash("sha256").update(subaccountId).digest("hex")}`;
   private twilioBillingKey = (id: string) => `chuck:voice:twilio-billing:${createHash("sha256").update(id).digest("hex")}`;
   private twilioBillingIndexKey = (userId: number) => `chuck:user:${userId}:twilio-billing`;
+  private billingAccountKey = (userId: number) => `chuck:user:${userId}:billing-account`;
+  private voiceComplianceKey = (userId: number) => `chuck:user:${userId}:voice-compliance`;
   private voiceReconciliationKey = (id: string) => `chuck:voice:reconciliation:${createHash("sha256").update(id).digest("hex")}`;
   private voiceReconciliationIndexKey = () => "chuck:voice:reconciliation:due";
   private voiceReconciliationLeaseKey = (id: string) => `chuck:voice:reconciliation-lease:${createHash("sha256").update(id).digest("hex")}`;
@@ -3862,6 +3880,70 @@ class RedisBackend implements Backend {
       try { return JSON.parse(raw) as TwilioBillingLedgerEntry; } catch { return undefined; }
     }));
     return records.filter((record): record is TwilioBillingLedgerEntry => record !== undefined && record.userId === userId);
+  }
+
+  async getBillingAccount(userId: number): Promise<BillingAccountRecord | undefined> {
+    const raw = await this.r.get(this.billingAccountKey(userId));
+    if (!raw) return undefined;
+    try {
+      const value = JSON.parse(raw) as BillingAccountRecord;
+      if (value.userId !== userId || !Array.isArray(value.appliedEventIds)) return undefined;
+      return value;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async saveBillingAccount(record: BillingAccountRecord, expectedVersion?: number): Promise<boolean> {
+    const key = this.billingAccountKey(record.userId);
+    const payload = JSON.stringify({ ...record, appliedEventIds: [...new Set(record.appliedEventIds)].slice(-2_000) });
+    const result = await this.r.eval(
+      "local prior=redis.call('GET',KEYS[1]); if prior and ARGV[2]~='' then local decoded=cjson.decode(prior); local current=decoded.subscription and tonumber(decoded.subscription.version) or 0; if current~=tonumber(ARGV[2]) then return 0 end end; redis.call('SET',KEYS[1],ARGV[1]); return 1",
+      1, key, payload, expectedVersion === undefined ? "" : String(expectedVersion),
+    );
+    return Number(result) === 1;
+  }
+
+  async applyBillingEvent(userId: number, event: BillingEvent, expectedVersion?: number): Promise<BillingTransitionResult> {
+    const key = this.billingAccountKey(userId);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await this.r.watch(key);
+      try {
+        const raw = await this.r.get(key);
+        if (!raw) throw new Error("Billing account is not configured.");
+        const current = JSON.parse(raw) as BillingAccountRecord;
+        if (current.userId !== userId || !current.subscription) throw new Error("Billing subscription is not configured.");
+        if (expectedVersion !== undefined && current.subscription.version !== expectedVersion) throw new Error("Billing state changed; refresh and retry.");
+        const result = applyBillingEvent(current.subscription, event, new Set(current.appliedEventIds));
+        if (!result.applied) { await this.r.unwatch(); return result; }
+        const next = { ...current, subscription: result.subscription, appliedEventIds: [...new Set([...current.appliedEventIds, event.id])].slice(-2_000), updatedAt: Date.now() };
+        const committed = await this.r.multi().set(key, JSON.stringify(next)).exec();
+        if (committed) return result;
+      } catch (error) {
+        await this.r.unwatch().catch(() => undefined);
+        throw error;
+      }
+    }
+    throw new Error("Billing state is busy; retry shortly.");
+  }
+
+  async getVoiceCompliance(userId: number): Promise<VoiceComplianceRecord | undefined> {
+    const raw = await this.r.get(this.voiceComplianceKey(userId));
+    if (!raw) return undefined;
+    try {
+      const value = JSON.parse(raw) as VoiceComplianceRecord;
+      return value.userId === userId ? { ...value, version: Number.isSafeInteger(value.version) && value.version >= 0 ? value.version : 0 } : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async saveVoiceCompliance(record: VoiceComplianceRecord, expectedVersion?: number): Promise<boolean> {
+    const result = await this.r.eval(
+      "local prior=redis.call('GET',KEYS[1]); if prior and ARGV[2]~='' then local decoded=cjson.decode(prior); local current=tonumber(decoded.version) or 0; if current~=tonumber(ARGV[2]) then return 0 end end; redis.call('SET',KEYS[1],ARGV[1]); return 1",
+      1, this.voiceComplianceKey(record.userId), JSON.stringify(record), expectedVersion === undefined ? "" : String(expectedVersion),
+    );
+    return Number(result) === 1;
   }
   async enqueueVoiceCallReconciliation(record: VoiceCallReconciliationRecord): Promise<void> {
     if (this.durableState) return this.durableState.enqueueVoiceCallReconciliation(record);
@@ -5488,6 +5570,8 @@ class MemoryBackend implements Backend {
   private twilioSubaccountByUser = new Map<number, string>();
   private twilioNumberOwnership = new Map<string, TwilioNumberOwnershipRecord>();
   private twilioBillingEntries = new Map<number, TwilioBillingLedgerEntry[]>();
+  private billingAccounts = new Map<number, BillingAccountRecord>();
+  private voiceCompliance = new Map<number, VoiceComplianceRecord>();
   private agentRuns = new Map<string, AgentRunRecord>();
   private handoffs = new Map<string, HandoffRecord & { userId: number }>();
   private rates = new Map<number, { n: number; exp: number }>();
@@ -5815,6 +5899,34 @@ class MemoryBackend implements Backend {
   }
   async listTwilioBillingEntries(userId: number, limit: number) {
     return (this.twilioBillingEntries.get(userId) ?? []).slice(0, Math.max(1, Math.min(500, Math.floor(limit)))).map((entry) => structuredClone(entry));
+  }
+  async getBillingAccount(userId: number) {
+    const record = this.billingAccounts.get(userId);
+    return record ? structuredClone(record) : undefined;
+  }
+  async saveBillingAccount(record: BillingAccountRecord, expectedVersion?: number) {
+    const currentVersion = this.billingAccounts.get(record.userId)?.subscription?.version ?? 0;
+    if (expectedVersion !== undefined && currentVersion !== expectedVersion) return false;
+    this.billingAccounts.set(record.userId, structuredClone({ ...record, appliedEventIds: [...new Set(record.appliedEventIds)].slice(-2_000) }));
+    return true;
+  }
+  async applyBillingEvent(userId: number, event: BillingEvent, expectedVersion?: number) {
+    const current = this.billingAccounts.get(userId);
+    if (!current?.subscription) throw new Error("Billing subscription is not configured.");
+    if (expectedVersion !== undefined && current.subscription.version !== expectedVersion) throw new Error("Billing state changed; refresh and retry.");
+    const result = applyBillingEvent(current.subscription, event, new Set(current.appliedEventIds));
+    if (result.applied) this.billingAccounts.set(userId, structuredClone({ ...current, subscription: result.subscription, appliedEventIds: [...new Set([...current.appliedEventIds, event.id])].slice(-2_000), updatedAt: Date.now() }));
+    return result;
+  }
+  async getVoiceCompliance(userId: number) {
+    const record = this.voiceCompliance.get(userId);
+    return record ? structuredClone(record) : undefined;
+  }
+  async saveVoiceCompliance(record: VoiceComplianceRecord, expectedVersion?: number) {
+    const currentVersion = this.voiceCompliance.get(record.userId)?.version ?? 0;
+    if (expectedVersion !== undefined && currentVersion !== expectedVersion) return false;
+    this.voiceCompliance.set(record.userId, structuredClone(record));
+    return true;
   }
   async enqueueVoiceCallReconciliation(record: VoiceCallReconciliationRecord) {
     const key = `${record.userId}:${record.callId}:${record.phase}`;
@@ -9251,6 +9363,26 @@ export function appendTwilioBillingEntry(entry: TwilioBillingLedgerEntry): Promi
 
 export function listTwilioBillingEntries(userId: number, limit = 100): Promise<TwilioBillingLedgerEntry[]> {
   return backend.listTwilioBillingEntries(userId, Math.max(1, Math.min(500, Math.floor(limit))));
+}
+
+export function getBillingAccount(userId: number): Promise<BillingAccountRecord | undefined> {
+  return backend.getBillingAccount(userId);
+}
+
+export function saveBillingAccount(record: BillingAccountRecord, expectedVersion?: number): Promise<boolean> {
+  return backend.saveBillingAccount(record, expectedVersion);
+}
+
+export function applyBillingEventForUser(userId: number, event: BillingEvent, expectedVersion?: number): Promise<BillingTransitionResult> {
+  return backend.applyBillingEvent(userId, event, expectedVersion);
+}
+
+export function getVoiceCompliance(userId: number): Promise<VoiceComplianceRecord | undefined> {
+  return backend.getVoiceCompliance(userId);
+}
+
+export function saveVoiceCompliance(record: VoiceComplianceRecord, expectedVersion?: number): Promise<boolean> {
+  return backend.saveVoiceCompliance(record, expectedVersion);
 }
 
 const ACTIVE_RECALL_MEETING_STATUSES = new Set<RecallMeetingStatus>(["creating", "scheduled", "joining", "waiting_room", "in_call", "leaving"]);
