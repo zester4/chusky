@@ -178,7 +178,10 @@ export const config = {
   // ── OpenRouter (for LLM inference) ────────────────────────────────
   openRouterApiKey: required("OPENROUTER_API_KEY"),
   defaultModel,
-  turnOpeningEnabled: optional("TURN_OPENING_ENABLED", "true") === "true",
+  // A second model call for a cosmetic acknowledgement makes every normal
+  // turn feel slower. The UI already has durable tool/activity events; opt in
+  // only for clients that explicitly need a preliminary opening.
+  turnOpeningEnabled: optional("TURN_OPENING_ENABLED", "false") === "true",
   turnOpeningModel: optional("TURN_OPENING_MODEL", "").trim() || "openai/gpt-4.1-nano",
   turnOpeningDeadlineMs: Math.min(2500, positiveInt("TURN_OPENING_DEADLINE_MS", 600)),
   groupDefaultModel: optional("GROUP_DEFAULT_MODEL", defaultModel),
@@ -879,6 +882,11 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // Structured artifact tool calls can contain many sections and otherwise
   // hit the provider's default output ceiling while serializing JSON.
   openRouterArtifactMaxTokens: positiveInt("OPENROUTER_ARTIFACT_MAX_TOKENS", 12_000),
+  // Keep ordinary answers and tool arguments short by default. These are
+  // output budgets, not workflow limits; durable/artifact/voice paths retain
+  // their own settings and operators can raise these values when needed.
+  openRouterInteractiveMaxTokens: boundedInt("OPENROUTER_INTERACTIVE_MAX_TOKENS", 2_048, 512, 8_000),
+  openRouterConversationalMaxTokens: boundedInt("OPENROUTER_CONVERSATIONAL_MAX_TOKENS", 768, 256, 4_000),
   openRouterFallbackModels: optional("OPENROUTER_FALLBACK_MODELS", "")
     .split(",").map((model) => model.trim()).filter(Boolean),
   // This is a routing preference, not a hard client timeout. Set 0 to omit it.
