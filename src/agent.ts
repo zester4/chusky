@@ -79,7 +79,7 @@ import { resolveComposioRoute } from "./composioRouting.js";
 import { buildArtifactEmailArguments, type ArtifactEmailFile } from "./artifactEmail.js";
 import { buildArtifactUploadArguments } from "./artifactBridge.js";
 import { boundMissionContext, compactModelMessages, compactModelMessagesWithSummary, contextSearchQuery } from "./agentContext.js";
-import { bindVoicePolicyAccount, normalizeVoiceToolPolicy, normalizeVoiceToolkit, voicePolicyAllowsExecution, voiceToolkitAllowed, type VoiceToolPolicy } from "./calls/voiceToolPolicy.js";
+import { bindVoicePolicyAccount, normalizeVoiceToolPolicy, normalizeVoiceToolkit, voicePolicyAllowsExecution, voiceToolkitAllowed, voiceToolkitForAction, type VoiceToolPolicy } from "./calls/voiceToolPolicy.js";
 import { ATTENTION_PULSE_IDENTITY, CAPABILITY_ROUTING_KERNEL, compactActionCustomization, compactConversationalCustomization, compactMissionCustomization, composeSystemPrompt } from "./prompt.js";
 import { contextPrompt } from "./contextGraph.js";
 import { withLatencyBudget } from "./voiceLatency.js";
@@ -297,6 +297,11 @@ const IN_TURN_READ_CACHE_TOOLS = new Set([
 const APP_INTENT_PATTERN = /\b(?:email|gmail|outlook|calendar|slack|notion|github|crm|connected app|connected account|integration|send|reply|schedule|book|appointment|message|inbox)\b/i;
 const VOICE_CALENDAR_TOOL_LIMIT = 32;
 const VOICE_COMPOSIO_TOOL_LIMIT = 24;
+const VOICE_DISCOVERY_TOOL = { type: "function", function: {
+  name: "COMPOSIO_SEARCH_TOOLS",
+  description: "Find the exact connected-app tools needed for the current caller request. Use when the next action is missing, including unfamiliar business apps. This searches only this call's permitted active accounts; it does not perform the business action. Returned callable tools become available in the next round.",
+  parameters: { type: "object", properties: { query: { type: "string", minLength: 1, maxLength: 1900 } }, required: ["query"], additionalProperties: false },
+} };
 const GOOGLE_CALENDAR_TOOL_PATTERN = /^(?:googlecalendar:)?GOOGLECALENDAR_[A-Z0-9_]+$/i;
 const SHARED_PUBLIC_COMPOSIO_TOOLS = new Set(["COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT"]);
 
@@ -389,7 +394,8 @@ const VOICE_NATIVE_ACTION_REQUEST_PATTERN = /\b(?:remind(?:er)?|task|email|e-mai
 /** True when a private phone turn is safe to handle without external tools. */
 export function voiceFastLaneEligible(value: string): boolean {
   const text = value.trim();
-  return voiceComposioToolSlugs(text).length === 0 && !VOICE_NATIVE_ACTION_REQUEST_PATTERN.test(text);
+  return voiceComposioToolSlugs(text).length === 0 && !VOICE_NATIVE_ACTION_REQUEST_PATTERN.test(text)
+    && /^(?:hi|hello|hey|thanks|thank you|goodbye|bye|yes|no|okay|ok|how are you(?: doing)?(?: today)?|why are you calling(?: me)?)[.!?\s]*$/i.test(text);
 }
 
 export const VOICE_TURN_NATIVE_TOOLS = [
@@ -415,7 +421,7 @@ export function voiceToolIsWithinCapabilityFence(name: string, capabilityNames: 
   const canonical = name.trim().toUpperCase();
   const capabilities = new Set([...capabilityNames].map(composioActionSlug));
   const allowed = new Set([...explicitAllow].map((value) => value.trim().toUpperCase()));
-  return VOICE_TURN_TOOL_NAMES.has(canonical) || allowed.has(canonical) || capabilities.has(composioActionSlug(canonical));
+  return canonical === "COMPOSIO_SEARCH_TOOLS" || VOICE_TURN_TOOL_NAMES.has(canonical) || allowed.has(canonical) || capabilities.has(composioActionSlug(canonical));
 }
 const GROUP_ARTIFACT_TOOLS = new Set([
   "CHUCK_ARTIFACT",
@@ -2829,7 +2835,8 @@ async function executeAgent(
   // this run remain available, while the model can discover any other action
   // through COMPOSIO_SEARCH_TOOLS and execute it through the session.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const voiceCapabilitySlugsForFallback = voiceTurn && (ownerPrivateRun || voiceScopedAccess) && !voiceFastLane
+  const genericVoiceDiscovery = boundedVoicePreparation && typeof sessionObj?.search === "function" && typeof composio?.connectedAccounts?.list === "function";
+  const voiceCapabilitySlugsForFallback = voiceTurn && (ownerPrivateRun || voiceScopedAccess) && !voiceFastLane && !genericVoiceDiscovery
     ? voiceComposioToolSlugs(`${voiceRoutingText}\n${options?.voiceRoutingHint ?? ""}`)
     : [];
   const composioExactLookupAvailable = typeof composio?.tools?.getRawComposioTools === "function"
@@ -2840,7 +2847,10 @@ async function executeAgent(
       : await sessionObj.tools()
     : [];
   fullComposioTools.forEach((tool: unknown) => registerComposioToolMetadata(tool));
-  const voiceCalendarRequest = voiceTurn && (ownerPrivateRun || voiceScopedAccess)
+  const dynamicVoiceDiscovery = genericVoiceDiscovery
+    ? await discoverVoiceRequestTools(userId, sessionObj, `Current caller request: ${voiceRoutingText.slice(0, 900)}\nCall objective: ${(options?.voiceRoutingHint ?? "").slice(0, 400)}\nRecent call dialogue: ${history.slice(-4).map((message) => typeof message.content === "string" ? message.content : "").join(" ").slice(-500)}`, voiceToolPolicy, voicePreparationKey, signal)
+    : { tools: [] as any[], accounts: [] as ConnectedComposioAccount[] };
+  const voiceCalendarRequest = voiceTurn && (ownerPrivateRun || voiceScopedAccess) && !genericVoiceDiscovery
     && /\b(?:calendar|calendars|schedule|scheduling|appointment|appointments|availability|available|book|booking|reschedule)\b/i.test(`${voiceRoutingText}\n${options?.voiceRoutingHint ?? ""}`);
   const voiceCalendarTools = voiceCalendarRequest
     ? voicePreparationKey
@@ -2859,6 +2869,7 @@ async function executeAgent(
   const voiceCapabilityNames = new Set([
     ...voiceCapabilitySlugs.map(composioActionSlug),
     ...voiceCalendarNames,
+    ...dynamicVoiceDiscovery.tools.map((tool) => composioActionSlug(toolName(tool))),
     ...uniqueVoiceCapabilityTools.map((tool) => composioActionSlug(toolName(tool))),
   ]);
   const boundedOwnerVoice = voiceTurn && (ownerPrivateRun || voiceScopedAccess) && !options?.meetingId && !voiceFastLane && !voiceToolFreeTurn;
@@ -2874,6 +2885,8 @@ async function executeAgent(
     ...discoveredMeetingTools,
     ...voiceCalendarTools,
     ...uniqueVoiceCapabilityTools,
+    ...dynamicVoiceDiscovery.tools,
+    ...(boundedVoicePreparation && sessionObj && voiceToolPolicy?.enabled ? [VOICE_DISCOVERY_TOOL] : []),
   ]
     .filter((tool) => !HIDDEN_COMPOSIO_MODEL_TOOLS.has(toolName(tool)))
     .filter((tool) => !sharedScope
@@ -2942,8 +2955,9 @@ async function executeAgent(
   // search returned no rows, the voice model received zero tools even though
   // Composio routing had selected the correct application/action.
   const preloadedVoiceCapabilityTools = voiceTurn && (ownerPrivateRun || voiceScopedAccess)
-    ? [...availableTools, ...fullComposioTools, ...voiceCapabilityTools, ...voiceCalendarTools]
+    ? [...availableTools, ...fullComposioTools, ...voiceCapabilityTools, ...voiceCalendarTools, ...dynamicVoiceDiscovery.tools]
       .filter((tool, index, all) => all.findIndex((candidate) => toolName(candidate) === toolName(tool)) === index)
+      .filter((tool) => !deny.has(toolName(tool)))
       .filter((tool) => voiceCapabilityNames.has(composioActionSlug(toolName(tool))))
     : [];
   // Private meeting turns may use the owner's explicitly discovered MCP
@@ -3534,7 +3548,7 @@ async function executeAgent(
   }
   let accountContext = "";
   let composioRouteContext = "";
-  let connectedAccountSnapshot: ConnectedComposioAccount[] | undefined;
+  let connectedAccountSnapshot: ConnectedComposioAccount[] | undefined = dynamicVoiceDiscovery.accounts.length ? dynamicVoiceDiscovery.accounts : undefined;
   if (!sharedScope && routedAccounts) {
     const accounts = routedAccounts.filter((account) => {
       if (!voiceToolPolicy || (!voiceToolPolicy.allowedToolkits.length && !voiceToolPolicy.allowedConnectionIds.length)) return true;
@@ -3903,6 +3917,10 @@ async function executeAgent(
     const routedComposioTools = routedComposioNames.size
       ? availableTools.filter((tool) => routedComposioNames.has(toolSchemaName(tool)))
       : [];
+    if (boundedVoicePreparation && voiceToolPolicy?.enabled) {
+      const discovery = availableTools.find((tool) => toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS");
+      if (discovery) routedComposioTools.push(discovery);
+    }
     const selectedNativeNames = new Set([
       ...nativeToolRoute.selected.filter((name) => !nativeDiscoveryAlreadyUsed || name !== "CHUCK_FIND_TOOLS"),
       ...revealedNativeTools,
@@ -4853,6 +4871,20 @@ async function executeAgent(
               execResult = { screenshotCaptured: true, mediaType: screenshot.mediaType, sizeBytes: screenshot.sizeBytes, note: "The current E2B browser screenshot was sent through the active private channel. No browser interaction was performed after capture." };
             }
           }
+        } else if (voiceTurn && slug === "COMPOSIO_SEARCH_TOOLS") {
+          const found = await discoverVoiceRequestTools(userId, sessionObj, String(args.query ?? ""), voiceToolPolicy, voicePreparationKey, signal);
+          connectedAccountSnapshot = found.accounts;
+          const admittedTools: any[] = [];
+          for (const tool of found.tools) {
+            const name = toolSchemaName(tool);
+            if (deny.has(name) || allow && !allow.has(name)) continue;
+            admittedTools.push(tool);
+            voiceCapabilityNames.add(composioActionSlug(name));
+            addGrantedComposioAction(composioActionSlug(name));
+            if (!availableTools.some((candidate) => toolSchemaName(candidate) === name)) availableTools.push(addAccountSelector(tool));
+            if (!preloadedVoiceCapabilityTools.some((candidate) => toolSchemaName(candidate) === name)) preloadedVoiceCapabilityTools.push(addAccountSelector(tool));
+          }
+          execResult = { tools: admittedTools.map((tool) => ({ slug: tool.function.name, description: tool.function.description })), note: "Use the returned exact tools now. Normal call permissions and approvals apply." };
         } else {
           const mediaRuntime: AgentMediaRuntime = {
             currentImages: currentImagesForMediaAction,
@@ -5634,7 +5666,7 @@ async function resolveExactComposioModelTools(
       const slug = composioActionSlug(name);
       if (!slugs.includes(slug) || resolved.has(slug)) continue;
       const tool = exactComposioModelTool(candidate, slug);
-      if (tool) resolved.set(slug, { tool, source });
+      if (tool) { registerComposioToolMetadata(candidate); resolved.set(slug, { tool, source }); }
     }
   };
   if (!slugs.length) return resolved;
@@ -5797,6 +5829,43 @@ function voiceModelToolFromComposioRecord(value: any, allowed: ReadonlySet<strin
  * session remains the preferred source because it preserves provider-qualified
  * names and connected-account routing.
  */
+// Search only active accounts admitted by the persisted call policy. Discovery
+// selects schemas, never authorizes a provider action or account change.
+async function discoverVoiceRequestTools(
+  userId: number, sessionObj: any, query: string, policy: VoiceToolPolicy | undefined,
+  cacheKey: string | undefined, signal?: AbortSignal,
+): Promise<{ tools: any[]; accounts: ConnectedComposioAccount[] }> {
+  if (!policy?.enabled || typeof sessionObj?.search !== "function") return { tools: [], accounts: [] };
+  try {
+    const accounts = (await (cacheKey ? cachedVoiceConnectedAccounts(cacheKey, () => listConnectedAccounts(userId)) : listConnectedAccounts(userId)))
+      .filter((account) => account.status.toUpperCase() === "ACTIVE"
+        && (!policy.allowedToolkits.length || policy.allowedToolkits.some((toolkit) => normalizeVoiceToolkit(toolkit) === normalizeVoiceToolkit(account.toolkit)))
+        && (!policy.allowedConnectionIds.length || policy.allowedConnectionIds.some((id) => id.toLowerCase() === account.id.toLowerCase() || id.toLowerCase() === account.alias?.toLowerCase())));
+    if (!accounts.length) return { tools: [], accounts };
+    const toolkits = [...new Set(accounts.map((account) => account.toolkit))];
+    const result = await abortable(sessionObj.search({ query: query.slice(0, 1900), toolkits }), signal);
+    const candidates = normalizeComposioSearchResults(result);
+    const names = [...new Set(candidates.map((candidate: any) => composioActionSlug(String(candidate?.function?.name ?? candidate?.slug ?? candidate?.toolSlug ?? candidate?.tool_slug ?? candidate?.name ?? ""))))]
+      .filter((name) => isProviderActionSlug(name) && voiceToolkitAllowed(name, policy)
+        && accounts.some((account) => normalizeVoiceToolkit(account.toolkit) === normalizeVoiceToolkit(voiceToolkitForAction(name) ?? "")));
+    const tools = new Map<string, any>();
+    for (const candidate of candidates) {
+      const record = candidate as any;
+      const name = composioActionSlug(String(record?.function?.name ?? record?.slug ?? record?.toolSlug ?? record?.tool_slug ?? record?.name ?? ""));
+      if (!names.includes(name)) continue;
+      const tool = exactComposioModelTool(candidate, name);
+      if (tool) { registerComposioToolMetadata(candidate); tools.set(name, tool); }
+    }
+    const missing = names.filter((name) => !tools.has(name));
+    if (missing.length) for (const [name, resolved] of await resolveExactComposioModelTools(sessionObj, missing, signal)) tools.set(name, resolved.tool);
+    return { tools: [...tools.values()], accounts };
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    logger.warn({ errorType: error instanceof Error ? error.name : "DiscoveryError" }, "Voice connected-tool discovery unavailable");
+    return { tools: [], accounts: [] };
+  }
+}
+
 async function discoverVoiceComposioTools(sessionTools: any[], slugs: readonly string[], signal?: AbortSignal): Promise<any[]> {
   if (!slugs.length) return [];
   const allowed = new Set(slugs.map(composioActionSlug));

@@ -40,12 +40,66 @@ test("routes voice call objectives to bounded exact Composio capability bundles"
   ]);
 });
 test("voice fast lane only applies to ordinary conversation", () => {
+  assert.equal(voiceFastLaneEligible("Look up case ABC in Salesforce."), false);
+  assert.equal(voiceFastLaneEligible("Find the ticket in Freshdesk."), false);
   assert.equal(voiceFastLaneEligible("How are you doing today?"), true);
   assert.equal(voiceFastLaneEligible("Why are you calling me?"), true);
   assert.equal(voiceFastLaneEligible("Please book an appointment for tomorrow."), false);
   assert.equal(voiceFastLaneEligible("Can you check my calendar?"), false);
   assert.equal(voiceFastLaneEligible("Follow up with the client about tomorrow's meeting."), false);
 });
+
+for (const direction of ["inbound", "outbound"] as const) {
+  for (const toolkit of ["salesforce", "freshdesk", "shopify"]) {
+    test(`${direction} voice discovers and executes ${toolkit} outside fixed bundles`, async () => {
+      const userId = 920000 + (direction === "inbound" ? 0 : 10) + ["salesforce", "freshdesk", "shopify"].indexOf(toolkit);
+      await initStore({ memoryOnly: true });
+      invalidateSession(userId);
+      const name = `${toolkit.toUpperCase()}_GET_RECORD`;
+      const tool = { type: "function", function: { name, description: "Read a business record", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } };
+      const executed: string[] = [];
+      const requests: any[] = [];
+      const searches: any[] = [];
+      const session = {
+        sessionId: `generic-${userId}`, tools: async () => [],
+        search: async (args: any) => { searches.push(args); return toolkit === "freshdesk" && searches.length === 1 ? [] : [tool, { ...tool, function: { ...tool.function, name: "STRIPE_GET_CUSTOMER" } }]; },
+        execute: async (slug: string) => { executed.push(slug); return { successful: true, data: { id: "ABC", status: "open" } }; },
+      };
+      const originalFetch = globalThis.fetch;
+      setAgentDependenciesForTests({ composio: {
+        create: async () => session,
+        connectedAccounts: { list: async () => ({ items: [
+          { id: `ca_${toolkit}`, toolkit: { slug: toolkit }, status: "ACTIVE" },
+          { id: "ca_stripe", toolkit: { slug: "stripe" }, status: "ACTIVE" },
+        ] }) },
+      } });
+      globalThis.fetch = (async (input, init) => {
+        if (String(input).includes("/chat/completions")) {
+          requests.push(JSON.parse(String(init?.body)));
+          if (toolkit === "freshdesk" && requests.length === 1) return toolResponse("COMPOSIO_SEARCH_TOOLS", '{"query":"Read Freshdesk record ABC"}', "discover-next");
+          return requests.length === (toolkit === "freshdesk" ? 2 : 1) ? toolResponse(name, '{"id":"ABC"}', "read-record") : chatResponse({ role: "assistant", content: "The record is open." });
+        }
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch;
+      try {
+        await runAgent(userId, `Look up record ABC in ${toolkit}.`, [], "test/model", undefined, undefined, undefined, undefined,
+          { accountId: `account_${userId}`, provider: "voice", conversationId: `twc_${userId}`, scope: "private" },
+          { voiceTurn: true, voiceSessionId: `twilio:${userId}`, voiceRoutingHint: "Customer service request",
+            ...(direction === "outbound" ? { ownerPrivateRun: true } : { voiceScopedAccess: true, ephemeral: true }),
+            voiceToolPolicy: { enabled: true, allowedToolkits: [toolkit], allowedConnectionIds: [`ca_${toolkit}`], allowExternalWrites: false, version: 1 } });
+        assert.ok(searches.length > 0);
+        assert.deepEqual(searches[0].toolkits, [toolkit]);
+        assert.ok(requests[toolkit === "freshdesk" ? 1 : 0].tools.some((candidate: any) => candidate.function.name === name));
+        assert.ok(!requests[0].tools.some((candidate: any) => candidate.function.name === "STRIPE_GET_CUSTOMER"));
+        assert.deepEqual(executed, [name]);
+        if (toolkit === "freshdesk") assert.ok(searches.length >= 2, "mid-turn discovery executes on read-only calls");
+      } finally {
+        globalThis.fetch = originalFetch;
+        setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+      }
+    });
+  }
+}
 
 test("meeting calendar writes require provider-shaped availability evidence", () => {
   assert.equal(isSuccessfulCalendarResult({ status: "success" }), false);

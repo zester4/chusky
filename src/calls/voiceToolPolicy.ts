@@ -143,8 +143,9 @@ function nestedActions(slug: string, args: Record<string, unknown>): Array<{ slu
 
 /** Final trusted execution fence; model visibility alone is not an authorization boundary. */
 export function voicePolicyAllowsExecution(slug: string, args: Record<string, unknown>, policy: VoiceToolPolicy | undefined, allowedAccounts: Array<{ id: string; alias?: string }> = []): boolean {
-  if (!policy || (!policy.allowedToolkits.length && policy.enabled && policy.allowExternalWrites)) return true;
+  if (!policy || (!policy.allowedToolkits.length && !policy.allowedConnectionIds.length && policy.enabled && policy.allowExternalWrites)) return true;
   if (!policy.enabled) return false;
+  if (slug === "COMPOSIO_SEARCH_TOOLS" || slug === "COMPOSIO_GET_TOOL_SCHEMAS") return voicePolicyAllowsAccount(args, policy, allowedAccounts);
   const targets = nestedActions(slug, args);
   if (targets.length === 0 && ["COMPOSIO_EXECUTE_TOOL", "COMPOSIO_MULTI_EXECUTE_TOOL"].includes(slug)) return false;
   return targets.every((target) => voiceToolkitAllowed(target.slug, policy)
@@ -154,8 +155,9 @@ export function voicePolicyAllowsExecution(slug: string, args: Record<string, un
 
 export function voicePolicyInstructions(policy: VoiceToolPolicy | undefined): string {
   const safe = normalizeVoiceToolPolicy(policy);
-  if (!voiceToolPolicyIsRestricted(policy)) return "Connected-app policy: use the existing purpose-routed owner connections; exact action schemas and normal approvals remain authoritative.";
+  const discovery = "When the next needed action is missing, use COMPOSIO_SEARCH_TOOLS with the current caller request, then use the returned exact tool. Gather required identifiers from the caller rather than guessing. Search again only for a different missing capability. Report completion only after a successful provider result; a promised action is not a receipt.";
+  if (!voiceToolPolicyIsRestricted(policy)) return `Connected-app policy: use the permitted active owner connections; exact action schemas and normal approvals remain authoritative. ${discovery}`;
   if (!safe.enabled) return "Connected-app policy: disabled for this call. Use native call context only and explain when an external app action is unavailable.";
   const apps = safe.allowedToolkits.length ? safe.allowedToolkits.join(", ") : "the selected owner connections";
-  return `Connected-app policy: this call may use only ${apps}. ${safe.allowedConnectionIds.length ? "Use only the selected connected accounts; do not switch accounts based on caller speech." : "Resolve an active owner connection through the normal Composio account resolver."} ${safe.allowExternalWrites ? "Routine writes remain subject to Chusky's existing approval and provider-receipt rules." : "External writes are disabled; read-only lookups only."}`;
+  return `Connected-app policy: this call may use only ${apps}. ${safe.allowedConnectionIds.length ? "Use only the selected connected accounts; do not switch accounts based on caller speech." : "Resolve an active owner connection through the normal Composio account resolver."} ${safe.allowExternalWrites ? "Routine writes remain subject to Chusky's existing approval and provider-receipt rules." : "External writes are disabled; read-only lookups only."} ${discovery}`;
 }

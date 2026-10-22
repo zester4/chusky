@@ -42,6 +42,21 @@ Railway logs for the controlled calls around 21:04–21:14 UTC show:
 
 ## Verification boundary
 
+### Generic connected-app discovery
+
+Inbound business calls with an explicit scoped app policy and outbound owner
+calls now search the current caller request against permitted active connected
+apps. They load exact provider schemas instead of depending on calendar or
+fixed app bundles. Legacy SDKs without search retain the existing compatibility
+path. A call can search for another missing capability during its next action;
+discovery itself does not perform that action or authorize a write.
+
+Regression contracts cover Salesforce, Freshdesk and Shopify in both directions,
+including a tool unavailable until mid-turn discovery, unrelated-app exclusion,
+selected-account binding, and discovery on read-only calls. Existing policy tests
+retain refund/write blocking and account-switch rejection. Default representative
+identity remains Chusky; absent inbound app authorization remains tool-free.
+
 Regression tests mock model/provider boundaries and exercise real agent dispatch,
 gateway discovery, transcript storage and bridge turn handling. They do not place
 telephone calls or create calendar events.
