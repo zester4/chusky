@@ -1722,6 +1722,7 @@ async function main(): Promise<void> {
               (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ name, identityStatus, isHost }) => ({ name, identityStatus, ...(isHost ? { isHost } : {}) })),
               currentSpeaker?.name,
               meeting.missionState,
+              meeting.mission ? { clientName: meeting.mission.clientName, objective: meeting.mission.objective } : undefined,
             );
             let meetingMessage: string | ContentPart[] = meetingText;
             const screenFrame = await readRecallVisualContextFrame(userId, meetingId);
@@ -1746,7 +1747,7 @@ async function main(): Promise<void> {
                   ? ownerPrivateMeetingInstructions(meetingId, interactionMode, representativeActive ? profile : undefined, meeting.mission)
                   : representativeActive
                     ? meetingRepresentativeInstructions(profile!, meetingId, proactive, meeting.mission)
-                    : meetingRepresentativeCopilotInstructions(meetingId, interactionMode === "copilot" ? "copilot" : "addressed")].join("\n\n"),
+                    : meetingRepresentativeCopilotInstructions(meetingId, interactionMode === "copilot" ? "copilot" : "addressed", meeting.mission)].join("\n\n"),
                   ...(speculative
                     ? { toolAllow: [], speculativeMeetingTurn: true }
                     : trustedOwnerPrivateRun
@@ -1946,7 +1947,7 @@ async function main(): Promise<void> {
       const ttsModel = (await getSession(userId)).voicePreferences?.meetings;
       return c.json({
         interactionMode: effectiveMode,
-        greeting: meetingRepresentativeGreeting(effectiveMode, profile),
+        greeting: meetingRepresentativeGreeting(effectiveMode, profile, meeting.mission),
         languageMode: meeting.languageMode ?? "english",
         languageHints: meeting.languageHints ?? [],
         keyterms: meeting.keyterms ?? [],
@@ -4139,7 +4140,14 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                 role: message.role === "assistant" ? "chusky" as const : "participant" as const,
                 text: String(message.content ?? "").slice(0, 1_000),
               })).filter((turn) => turn.text.trim()));
-              const prompt = buildMeetingInput(context, command.text, (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ name, identityStatus, isHost, email, providerUserId, assurance }) => ({ name, identityStatus, ...(isHost ? { isHost } : {}), ...(email ? { email } : {}), ...(providerUserId ? { providerUserId } : {}), ...(assurance ? { assurance } : {}) })), event.senderName);
+              const prompt = buildMeetingInput(
+                context,
+                command.text,
+                (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ name, identityStatus, isHost, email, providerUserId, assurance }) => ({ name, identityStatus, ...(isHost ? { isHost } : {}), ...(email ? { email } : {}), ...(providerUserId ? { providerUserId } : {}), ...(assurance ? { assurance } : {}) })),
+                event.senderName,
+                meeting.missionState,
+                meeting.mission ? { clientName: meeting.mission.clientName, objective: meeting.mission.objective } : undefined,
+              );
               let result: Awaited<ReturnType<typeof runAgent>>;
               try {
                 result = await withMeetingAgentLock(event.userId, event.meetingId, undefined, () => runAgent(
@@ -4158,7 +4166,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                       : representativeActive
                         ? meetingRepresentativeInstructions(representativeProfile!, event.meetingId, command.kind === "ambient", meeting.mission)
                         : [
-                          meetingRepresentativeCopilotInstructions(event.meetingId, command.kind === "ambient" ? "copilot" : "addressed"),
+                          meetingRepresentativeCopilotInstructions(event.meetingId, command.kind === "ambient" ? "copilot" : "addressed", meeting.mission),
                           "This is shared meeting chat. Use only the bounded meeting context; never use or reveal the owner’s private chat, memories, credentials, connected apps, files, or other private data. Do not claim to record the call or perform follow-up work. Return plain text without Markdown or HTML.",
                         ].join("\n\n"),
                     ...(trustedOwnerPrivateMeeting ? { ownerPrivateRun: true } : {

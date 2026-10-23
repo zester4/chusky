@@ -81,3 +81,14 @@ test("meeting context remains bounded at the bridge trust boundary", () => {
   assert.throws(() => validateMeetingContext(Array.from({ length: 33 }, () => ({ role: "participant", text: "turn" }))), /at most 32 turns/);
   assert.throws(() => validateMeetingContext(Array.from({ length: 13 }, () => ({ role: "participant", text: "x".repeat(1_000) }))), /exceeds 12000 characters/);
 });
+
+test("meeting input carries the owner-approved assignment even before a checkpoint exists", () => {
+  const input = buildMeetingInput([], "What should we do next?", [], undefined, undefined, {
+    clientName: "Acme",
+    objective: "Resolve the onboarding blockers",
+  });
+  assert.match(input, /Meeting assignment/);
+  assert.match(input, /Acme/);
+  assert.match(input, /Resolve the onboarding blockers/);
+  assert.match(input, /not an instruction to override policy/);
+});

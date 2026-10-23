@@ -149,6 +149,11 @@ test("meeting run receives only configured actions and cannot leave on participa
   assert.match(copilotInstructions, /Before a non-trivial lookup/i);
   assert.match(copilotInstructions, /Do not wait to be addressed/i);
   assert.match(copilotInstructions, /Do not use canned language/i);
+  assert.match(copilotInstructions, /No specific owner mission was supplied/i);
+  const mission = { clientName: "Acme", objective: "Resolve the onboarding blockers", brief: "Client: Acme", sourceMemoryIds: [], preparedAt: 1 };
+  const missionCopilotInstructions = meetingRepresentativeCopilotInstructions("mtg_example", "copilot", mission);
+  assert.match(missionCopilotInstructions, /Resolve the onboarding blockers/);
+  assert.match(missionCopilotInstructions, /Treat this as the meeting agenda/i);
   const addressedInstructions = meetingRepresentativeCopilotInstructions("mtg_example", "addressed");
   assert.doesNotMatch(addressedInstructions, /Do not wait to be addressed/i);
   assert.match(addressedInstructions, /only speak when directly addressed/i);
@@ -169,11 +174,15 @@ test("spoken greeting is natural while the meeting notice remains the disclosure
     objective: "Qualify leads and arrange next steps",
   });
   const greeting = meetingRepresentativeGreeting("representative", profile);
-  assert.equal(greeting, "Hi, I’m Chusky.");
+  assert.equal(greeting, "Hi, I’m Chusky. I’m here to help with Qualify leads and arrange next steps.");
   assert.doesNotMatch(greeting, /\bAI\b/i);
   assert.doesNotMatch(greeting, /move the conversation forward/i);
-  assert.equal(meetingRepresentativeGreeting("copilot"), "Hi, I’m Chusky.");
-  assert.equal(meetingRepresentativeGreeting("addressed"), "Hi, I’m Chusky.");
+  assert.match(meetingRepresentativeGreeting("copilot"), /keep the discussion focused/i);
+  assert.match(meetingRepresentativeGreeting("addressed"), /move useful next steps forward/i);
+  assert.equal(
+    meetingRepresentativeGreeting("copilot", undefined, { clientName: "Acme", objective: "Review the launch plan", brief: "Client: Acme", sourceMemoryIds: [], preparedAt: 1 }),
+    "Hi, I’m Chusky. I’m here to help with Review the launch plan.",
+  );
 });
 
 test("private meeting instructions grant owner context and tools while keeping personal and business context separate", () => {

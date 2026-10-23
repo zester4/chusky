@@ -547,7 +547,11 @@ export async function joinRecallMeeting(userId: number, input: {
   const missionInput = inheritedMission?.mission
     ? undefined
     : hasMissionInput
-      ? { clientName: input.clientName, objective: input.objective ?? representativeProfile.objective, clientContext: input.clientContext }
+      ? {
+        clientName: input.clientName,
+        objective: typeof input.objective === "string" && input.objective.trim() ? input.objective : representativeProfile.objective,
+        clientContext: input.clientContext,
+      }
       : automaticMeetingContext && title
         ? automaticMeetingContext
         : undefined;

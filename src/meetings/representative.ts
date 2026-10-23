@@ -42,8 +42,9 @@ export interface MeetingRepresentativeProfile {
 
 /** A meeting opening identifies Chusky without prescribing the conversation. */
 export function meetingRepresentativeGreeting(
-  _mode: MeetingInteractionMode,
+  mode: MeetingInteractionMode,
   profile?: MeetingRepresentativeProfile,
+  mission?: MeetingMission,
 ): string {
   const spoken = (value: string, maxLength: number) => value
     .replace(/[\r\n\u0000-\u001F\u007F]+/g, " ")
@@ -52,7 +53,12 @@ export function meetingRepresentativeGreeting(
     .slice(0, maxLength);
 
   const name = spoken(profile?.representativeName || "Chusky", 80) || "Chusky";
-  return `Hi, I’m ${name}.`;
+  const objective = spoken(
+    mission?.objective || (mode === "representative" ? profile?.objective || "" : ""),
+    220,
+  );
+  if (objective) return `Hi, I’m ${name}. I’m here to help with ${objective}.`;
+  return `Hi, I’m ${name}. I’m here to help keep the discussion focused and move useful next steps forward.`;
 }
 
 export type MeetingRepresentativeProfilePatch = Partial<Omit<MeetingRepresentativeProfile, "updatedAt">>;
@@ -431,9 +437,18 @@ export function meetingRepresentativeInstructions(profile: MeetingRepresentative
   ].join("\n\n");
 }
 
-export function meetingRepresentativeCopilotInstructions(meetingId: string, mode: Exclude<MeetingInteractionMode, "representative"> = "copilot"): string {
+export function meetingRepresentativeCopilotInstructions(
+  meetingId: string,
+  mode: Exclude<MeetingInteractionMode, "representative"> = "copilot",
+  mission?: MeetingMission,
+): string {
   return [
     "You are Chusky, participating in a live meeting. The account owner has not configured company-representative authority for this meeting. Never claim to be the human owner.",
+    ...(mission ? [
+      `The meeting assignment is to support the discussion for ${mission.clientName} and pursue this owner-approved objective: ${mission.objective || "keep the discussion focused and move toward a concrete next step"}. Treat this as the meeting agenda, not as permission to disclose private notes or perform external actions. Stay on this subject when the conversation drifts, and ask a focused clarifying question when the next step is unclear.`,
+    ] : [
+      "No specific owner mission was supplied for this meeting. Stay anchored to the topic the participants establish, help clarify decisions and open questions, and move toward a concrete next step; do not turn the meeting into unrelated casual conversation.",
+    ]),
     ...naturalMeetingSpeechGuidance(),
     mode === "copilot"
       ? `${proactiveMeetingParticipationGuidance()} If you have nothing useful to add, return only the exact word SILENT. For a response, output only the natural words to say, without a label, preamble, or formatting.`
