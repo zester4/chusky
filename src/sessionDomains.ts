@@ -130,6 +130,7 @@ export function splitSessionDomains(session: UserSession, separateSdkRuns = fals
       ...(typeof session.telegramChatId === "number" ? { telegramChatId: session.telegramChatId } : {}),
       ...(typeof session.voiceReplies === "boolean" ? { voiceReplies: session.voiceReplies } : {}),
       ...(session.voicePreferences ? { voicePreferences: session.voicePreferences } : {}),
+      ...(session.voiceCallProfile ? { voiceCallProfile: session.voiceCallProfile } : {}),
       // Dashboard identity state belongs in the compact profile projection so
       // overview/channel reads do not hydrate conversation or asset domains.
       ...(Object.keys(session.scratchpad ?? {}).length ? { scratchpad: session.scratchpad } : {}),
@@ -202,6 +203,7 @@ export function joinSessionDomains(core: UserSession, documents: ReadonlyMap<Dur
     ...(Number.isSafeInteger(profile.telegramChatId) ? { telegramChatId: Number(profile.telegramChatId) } : {}),
     ...(typeof profile.voiceReplies === "boolean" ? { voiceReplies: profile.voiceReplies } : {}),
     ...(profile.voicePreferences && typeof profile.voicePreferences === "object" && !Array.isArray(profile.voicePreferences) ? { voicePreferences: profile.voicePreferences as UserSession["voicePreferences"] } : {}),
+    ...(profile.voiceCallProfile && typeof profile.voiceCallProfile === "object" && !Array.isArray(profile.voiceCallProfile) ? { voiceCallProfile: profile.voiceCallProfile as UserSession["voiceCallProfile"] } : {}),
     ...(Number.isSafeInteger(profile.createdAt) && Number(profile.createdAt) >= 0 ? { createdAt: Number(profile.createdAt) } : {}),
     ...(Number.isSafeInteger(profile.updatedAt) && Number(profile.updatedAt) >= 0 ? { updatedAt: Number(profile.updatedAt) } : {}),
     scratchpad: profile.scratchpad && typeof profile.scratchpad === "object" && !Array.isArray(profile.scratchpad) ? profile.scratchpad as UserSession["scratchpad"] : core.scratchpad,

@@ -592,6 +592,17 @@ test("Redis session split contains only the 20-message hot window and Neon profi
   original.history = Array.from({ length: 45 }, (_, index) => ({ id: `msg_${index}`, role: index % 2 ? "assistant" as const : "user" as const, content: `message ${index}`, createdAt: index + 1 }));
   original.model = "preferred/model";
   original.voiceReplies = true;
+  original.voiceCallProfile = {
+    personaId: "customer_service",
+    personaVersion: 1,
+    identity: "Chusky",
+    organization: "Acme",
+    mode: "support",
+    tone: "warm",
+    facts: [],
+    guardrails: ["Use verified business records."],
+    capabilities: ["call_history"],
+  };
   const { core, domains } = splitSessionDomains(original, true);
   assert.equal(core.history.length, 20);
   assert.equal(core.history[0]?.id, "msg_25");
@@ -599,5 +610,6 @@ test("Redis session split contains only the 20-message hot window and Neon profi
   assert.deepEqual(joinSessionDomains(core, domains).history.map((message) => message.id), original.history.slice(-20).map((message) => message.id));
   assert.equal(joinSessionDomains(core, domains).model, "preferred/model");
   assert.equal(joinSessionDomains(core, domains).voiceReplies, true);
-  assert.deepEqual(domains.get("profile"), { model: "preferred/model", totalMessages: 1, totalCost: 0, voiceReplies: true, createdAt: original.createdAt });
+  assert.deepEqual(joinSessionDomains(core, domains).voiceCallProfile, original.voiceCallProfile);
+  assert.deepEqual(domains.get("profile"), { model: "preferred/model", totalMessages: 1, totalCost: 0, voiceReplies: true, voiceCallProfile: original.voiceCallProfile, createdAt: original.createdAt });
 });
