@@ -5,9 +5,8 @@ description: Validate, version, publish, and track Chusky SDK releases.
 
 The canonical SDK source is the separate [`zester4/chusky-sdk`](https://github.com/zester4/chusky-sdk) repository. Its **Release Chusky SDK** workflow automatically validates and publishes when `package.json` or `package-lock.json` changes on `main`. It also supports a manually dispatched exact version and `sdk-vX.Y.Z` tags for recovery. The agent monorepo's release workflow is a guarded fallback; never start two releases for the same version concurrently.
 
-The checked-in SDK mirror currently contains `1.15.1`. The latest published
-package is `1.15.0`; publish and tag `1.15.1` only after the canonical
-repository's release checks pass.
+The checked-in SDK mirror contains `1.15.1`, which is published as
+`@chusky/sdk@1.15.1` and tagged `sdk-v1.15.1` in the canonical repository.
 
 ## 1.15.1 — Mission execution fences
 
