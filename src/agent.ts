@@ -234,7 +234,7 @@ const VOICE_CALENDAR_TOOL_LIMIT = 32;
 const VOICE_COMPOSIO_TOOL_LIMIT = 24;
 const VOICE_DISCOVERY_TOOL = { type: "function", function: {
   name: "COMPOSIO_SEARCH_TOOLS",
-  description: "Find the exact connected-app tools needed for the current caller request. Use when the next action is missing, including unfamiliar business apps. This searches only this call's permitted active accounts; it does not perform the business action. Returned callable tools become available in the next round.",
+  description: "Find the exact connected-app tools needed for the current caller request. Use when the next action is missing, including unfamiliar business apps. Always provide a concise query derived from the current request; never call this with an empty object. This searches only this call's permitted active accounts; it does not perform the business action. Returned callable tools become available in the next round.",
   parameters: { type: "object", properties: { query: { type: "string", minLength: 1, maxLength: 1900 } }, required: ["query"], additionalProperties: false },
 } };
 const GOOGLE_CALENDAR_TOOL_PATTERN = /^(?:googlecalendar:)?GOOGLECALENDAR_[A-Z0-9_]+$/i;
@@ -2618,6 +2618,44 @@ function userRequestText(message: string | ContentPart[]): string {
     : message.filter((part): part is Extract<ContentPart, { type: "text" }> => part.type === "text").map((part) => part.text).join("\n");
 }
 
+type ComposioSearchRepairSource = "provided" | "request" | "history" | "routing_hint" | "none";
+
+/**
+ * Providers occasionally emit `{}` for a required discovery call even though
+ * the user request is present in the same model round. Repair only this
+ * deterministic transport omission; the search result is still account- and
+ * policy-scoped by the normal Composio discovery path.
+ */
+export function repairComposioSearchArguments(
+  args: Record<string, unknown>,
+  request: string | ContentPart[],
+  history: Message[] = [],
+  routingHint?: string,
+): { args: Record<string, unknown>; repaired: boolean; query: string; source: ComposioSearchRepairSource } {
+  const existing = typeof args.query === "string" ? args.query.trim() : "";
+  if (existing) return { args, repaired: false, query: existing, source: "provided" };
+
+  const compact = (value: string): string => value.replace(/\s+/g, " ").trim();
+  const historyText = [...history].reverse()
+    .filter((message) => message.role === "user")
+    .map((message) => typeof message.content === "string" ? message.content : userRequestText(message.content ?? []))
+    .map(compact)
+    .find(Boolean) ?? "";
+  const requestText = compact(userRequestText(request));
+  const hintText = compact(routingHint ?? "");
+  const primary = requestText
+    ? { text: requestText, source: "request" as const }
+    : historyText
+      ? { text: historyText, source: "history" as const }
+      : hintText
+        ? { text: hintText, source: "routing_hint" as const }
+        : undefined;
+  if (!primary) return { args, repaired: false, query: "", source: "none" };
+
+  const query = compact([primary.text, primary.source !== "routing_hint" ? hintText : ""].filter(Boolean).join("\n")).slice(0, 1900);
+  return { args: { ...args, query }, repaired: true, query, source: primary.source };
+}
+
 type ImageReference = { type: "image_url"; image_url: { url: string } };
 
 function imageSize(value: unknown): string {
@@ -2785,7 +2823,11 @@ async function executeAgent(
   let durableRunVersion: number | undefined;
 
   let requestModel = model;
-  let emptyVoiceRetries = 0;
+  // A live spoken turn must not end as an empty stream. Meeting turns that
+  // are not owner-private still use the same recovery contract as Twilio and
+  // private Recall turns, but keep their normal account/participant policy.
+  const liveSpokenTurn = voiceTurn || Boolean(options?.meetingId && !options?.speculativeMeetingTurn);
+  let emptyLiveRetries = 0;
 
   const throwIfDurablyCancelled = async (): Promise<void> => {
     throwIfAborted(signal);
@@ -2899,15 +2941,17 @@ async function executeAgent(
     return voiceToolIsWithinCapabilityFence(name, voiceCapabilityNames, allow ?? []);
   };
   if (uniqueVoiceCapabilityTools.length) logger.info({ count: uniqueVoiceCapabilityTools.length, requested: voiceCapabilitySlugs.length }, "Voice Composio capability tools preloaded");
+  const exactVoiceDiscovery = boundedVoicePreparation && Boolean(sessionObj) && voiceToolPolicy?.enabled === true;
+  const modelComposioTools = fullComposioTools.filter((tool) => !(exactVoiceDiscovery && toolName(tool) === "COMPOSIO_SEARCH_TOOLS"));
   const composioTools = [
-    ...(fullComposioTools.length > 80 || boundedOwnerVoice
-      ? fullComposioTools.filter((tool) => toolName(tool).startsWith("COMPOSIO_") || Boolean(allow?.has(toolName(tool))))
-      : fullComposioTools),
+    ...(modelComposioTools.length > 80 || boundedOwnerVoice
+      ? modelComposioTools.filter((tool) => toolName(tool).startsWith("COMPOSIO_") || Boolean(allow?.has(toolName(tool))))
+      : modelComposioTools),
     ...discoveredMeetingTools,
     ...voiceCalendarTools,
     ...uniqueVoiceCapabilityTools,
     ...dynamicVoiceDiscovery.tools,
-    ...(boundedVoicePreparation && sessionObj && voiceToolPolicy?.enabled ? [VOICE_DISCOVERY_TOOL] : []),
+    ...(exactVoiceDiscovery ? [VOICE_DISCOVERY_TOOL] : []),
   ]
     .filter((tool) => !HIDDEN_COMPOSIO_MODEL_TOOLS.has(toolName(tool)))
     .filter((tool) => !sharedScope
@@ -4149,7 +4193,7 @@ async function executeAgent(
         } as ChatResponse;
       } else {
         await persistRun("running", "run.model_requested", undefined, { model: requestModel, round, messageCount: messages.length });
-        const runRoutingOptions: OrChatOptions | undefined = voiceTurn ? {
+        const runRoutingOptions: OrChatOptions | undefined = liveSpokenTurn ? {
           preferredMaxLatencySeconds: 2,
           preferredMinThroughput: 50,
           fallbackModels: config.voiceFallbackModels,
@@ -4184,7 +4228,7 @@ async function executeAgent(
         requestModel = config.visionModel;
         if (onStatus) await onStatus(`👁️ I’m switching to a model that can understand ${modality} input…`);
         logger.warn({ requestedModel: model, requestModel, modality }, "Selected model rejected media input; using fallback");
-        const runRoutingOptions: OrChatOptions | undefined = voiceTurn ? {
+        const runRoutingOptions: OrChatOptions | undefined = liveSpokenTurn ? {
           preferredMaxLatencySeconds: 2,
           preferredMinThroughput: 50,
           fallbackModels: config.voiceFallbackModels,
@@ -4266,22 +4310,24 @@ async function executeAgent(
     // ── Done: no tool calls or explicit stop ──────────────────────────
     if (toolCalls.length === 0) {
       const rawText = typeof assistantMsg.content === "string" ? cleanModelText(assistantMsg.content) : "";
-      if (rawText) emptyVoiceRetries = 0;
+      if (rawText) emptyLiveRetries = 0;
       // Guard: OpenRouter occasionally returns a completion with both empty
       // content AND no tool calls. Returning an empty string here causes the
       // next message to contain a blank assistant turn, which OpenRouter then
       // rejects with "model output must contain either output text or tool calls".
       // Instead, inject a one-shot nudge and continue the loop.
-      if (!rawText && voiceTurn) {
-        if (emptyVoiceRetries < 1) {
-          emptyVoiceRetries += 1;
-          logger.warn({ round, model: requestModel }, "Empty voice completion — allowing one bounded retry");
+      if (!rawText && liveSpokenTurn) {
+        if (emptyLiveRetries < 1) {
+          emptyLiveRetries += 1;
+          const fallbackModel = config.voiceFallbackModels.find((candidate) => candidate && candidate !== requestModel);
+          if (fallbackModel) requestModel = fallbackModel;
+          logger.warn({ round, model: requestModel, fallbackModel }, "Empty live completion — retrying the spoken turn once");
           messages.push({ role: "assistant", content: "(no response)" });
-          messages.push({ role: "user", content: "Your previous response was empty. Reply now with one short helpful spoken sentence." });
+          messages.push({ role: "user", content: "Your previous response was empty or truncated. Continue the current request now. If an external capability is needed, call the exact tool with complete schema-valid arguments; otherwise reply with one short helpful spoken sentence." });
           continue;
         }
         const recovery = "I’m sorry, I didn’t get a complete response. Could you say that again?";
-        logger.error({ round, model: requestModel }, "Voice model returned repeated empty completions");
+        logger.error({ round, model: requestModel, meeting: Boolean(options?.meetingId) }, "Live model returned repeated empty completions");
         return { text: recovery, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionRoutingCache: missionRoutingResult, ...(privateLinks.length ? { privateLinks } : {}) };
       }
       if (!rawText && round < maxModelRounds - 1) {
@@ -4410,7 +4456,19 @@ async function executeAgent(
           if (browserToolCallsExecuted >= config.maxBrowserToolCalls) throw new BrowserRunLimitError();
           browserToolCallsExecuted += 1;
         }
-        const args = parseToolArguments(call.function.arguments);
+        let args = parseToolArguments(call.function.arguments);
+        if (slug === "COMPOSIO_SEARCH_TOOLS") {
+          const repaired = repairComposioSearchArguments(args, userMessage, history, options?.voiceRoutingHint);
+          if (repaired.repaired) {
+            args = repaired.args;
+            auditArgs = args;
+            logger.info({
+              source: repaired.source,
+              queryLength: repaired.query.length,
+              userHash: createHash("sha256").update(String(userId)).digest("hex").slice(0, 16),
+            }, "Repaired missing Composio discovery query from the active request");
+          }
+        }
         const readCacheKey = inTurnReadCacheKey(slug, args);
         const hasCachedRead = readCacheKey !== undefined && inTurnReadResults.has(readCacheKey);
         const cachedReadResult = hasCachedRead ? inTurnReadResults.get(readCacheKey!) : undefined;
@@ -5926,20 +5984,60 @@ function voiceModelToolFromComposioRecord(value: any, allowed: ReadonlySet<strin
  */
 // Search only active accounts admitted by the persisted call policy. Discovery
 // selects schemas, never authorizes a provider action or account change.
+function discoveryErrorReason(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error ?? "Unknown discovery error");
+  return raw
+    .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, "Bearer [redacted]")
+    .replace(/(?:api[_-]?key|token|secret|authorization)[=:][^\s,;]+/gi, "$1=[redacted]")
+    .slice(0, 280);
+}
+
 async function discoverVoiceRequestTools(
   userId: number, sessionObj: any, query: string, policy: VoiceToolPolicy | undefined,
   cacheKey: string | undefined, signal?: AbortSignal,
 ): Promise<{ tools: any[]; accounts: ConnectedComposioAccount[] }> {
   if (!policy?.enabled || typeof sessionObj?.search !== "function") return { tools: [], accounts: [] };
+  let accounts: ConnectedComposioAccount[] = [];
   try {
-    const accounts = (await (cacheKey ? cachedVoiceConnectedAccounts(cacheKey, () => listConnectedAccounts(userId)) : listConnectedAccounts(userId)))
+    accounts = (await (cacheKey ? cachedVoiceConnectedAccounts(cacheKey, () => listConnectedAccounts(userId)) : listConnectedAccounts(userId)))
       .filter((account) => account.status.toUpperCase() === "ACTIVE"
         && (!policy.allowedToolkits.length || policy.allowedToolkits.some((toolkit) => normalizeVoiceToolkit(toolkit) === normalizeVoiceToolkit(account.toolkit)))
         && (!policy.allowedConnectionIds.length || policy.allowedConnectionIds.some((id) => id.toLowerCase() === account.id.toLowerCase() || id.toLowerCase() === account.alias?.toLowerCase())));
     if (!accounts.length) return { tools: [], accounts };
     const toolkits = [...new Set(accounts.map((account) => account.toolkit))];
-    const result = await abortable(sessionObj.search({ query: query.slice(0, 1900), toolkits }), signal);
-    const candidates = normalizeComposioSearchResults(result);
+    const searchQuery = query.trim().slice(0, 1900);
+    let result: unknown;
+    let usedUnscopedSearch = false;
+    try {
+      result = await abortable(sessionObj.search({ query: searchQuery, toolkits }), signal);
+    } catch (scopedError) {
+      if (signal?.aborted) throw scopedError;
+      // ToolRouter SDK versions differ on whether `toolkits` is accepted by
+      // session.search. Retry the same request without that optional filter,
+      // then apply the connected-account toolkit fence locally below.
+      logger.debug({
+        errorType: scopedError instanceof Error ? scopedError.name : "DiscoveryError",
+        reason: discoveryErrorReason(scopedError),
+      }, "Scoped Composio discovery failed; retrying with account-safe local filtering");
+      usedUnscopedSearch = true;
+      result = await abortable(sessionObj.search({ query: searchQuery }), signal);
+    }
+    let candidates = normalizeComposioSearchResults(result);
+    if (!candidates.length && toolkits.length && !usedUnscopedSearch) {
+      // A few catalogue implementations return an empty result instead of
+      // rejecting an unsupported toolkit filter. Give the same request one
+      // compatible retry, still filtering every candidate against `accounts`.
+      try {
+        const fallbackResult = await abortable(sessionObj.search({ query: searchQuery }), signal);
+        candidates = normalizeComposioSearchResults(fallbackResult);
+      } catch (fallbackError) {
+        if (signal?.aborted) throw fallbackError;
+        logger.debug({
+          errorType: fallbackError instanceof Error ? fallbackError.name : "DiscoveryError",
+          reason: discoveryErrorReason(fallbackError),
+        }, "Unscoped Composio discovery retry failed");
+      }
+    }
     const names = [...new Set(candidates.map((candidate: any) => composioActionSlug(String(candidate?.function?.name ?? candidate?.slug ?? candidate?.toolSlug ?? candidate?.tool_slug ?? candidate?.name ?? ""))))]
       .filter((name) => isProviderActionSlug(name) && voiceToolkitAllowed(name, policy)
         && accounts.some((account) => normalizeVoiceToolkit(account.toolkit) === normalizeVoiceToolkit(voiceToolkitForAction(name) ?? "")));
@@ -5956,8 +6054,12 @@ async function discoverVoiceRequestTools(
     return { tools: [...tools.values()], accounts };
   } catch (error) {
     if (signal?.aborted) throw error;
-    logger.warn({ errorType: error instanceof Error ? error.name : "DiscoveryError" }, "Voice connected-tool discovery unavailable");
-    return { tools: [], accounts: [] };
+    logger.warn({
+      errorType: error instanceof Error ? error.name : "DiscoveryError",
+      reason: discoveryErrorReason(error),
+      accountCount: accounts.length,
+    }, "Voice connected-tool discovery unavailable");
+    return { tools: [], accounts };
   }
 }
 

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { addRecallMeeting, claimAgentUpgrade, completeMissionStep, createMission, createWebTelegramLinkCode, finalizeMissionIfReady, getApproval, getMission, getSession, initStore, listAgentRuns, listMissions, listTasks, redeemWebTelegramLinkCode, saveSession, setApprovalStatus, startMission, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { stableSdkUserId } from "../src/sdkIdentity.js";
-import { appendPreviewLinks, cleanModelText, getReconnectUrl, getToolkitStatesPage, invalidateSession, isSuccessfulCalendarResult, listConnectedAccounts, openRouterAttemptTimeoutMs, OpenRouterTimeoutError, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, searchTools, transcriptionFormatForMimeType, voiceComposioToolSlugs, voiceFastLaneEligible, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
+import { appendPreviewLinks, cleanModelText, getReconnectUrl, getToolkitStatesPage, invalidateSession, isSuccessfulCalendarResult, listConnectedAccounts, openRouterAttemptTimeoutMs, OpenRouterTimeoutError, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, repairComposioSearchArguments, runAgent, searchTools, transcriptionFormatForMimeType, voiceComposioToolSlugs, voiceFastLaneEligible, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { formatAgentUpgradeNotice, loadAgentUpgrade } from "../src/upgradeNotice.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -48,6 +48,29 @@ test("voice fast lane only applies to ordinary conversation", () => {
   assert.equal(voiceFastLaneEligible("Please book an appointment for tomorrow."), false);
   assert.equal(voiceFastLaneEligible("Can you check my calendar?"), false);
   assert.equal(voiceFastLaneEligible("Follow up with the client about tomorrow's meeting."), false);
+});
+
+test("Composio discovery repairs an empty provider argument from the active request", () => {
+  const repaired = repairComposioSearchArguments(
+    {},
+    "The caller says their Shopify order has not shipped. Check the order status and explain the next step.",
+    [],
+    "Handle the caller's support request",
+  );
+  assert.equal(repaired.repaired, true);
+  assert.equal(repaired.source, "request");
+  assert.match(repaired.query, /Shopify order has not shipped/);
+  assert.match(String(repaired.args.query), /support request/);
+});
+
+test("Composio discovery preserves a valid model query and can use recent user history", () => {
+  const provided = repairComposioSearchArguments({ query: "Find the Salesforce case" }, "Ignore this", []);
+  assert.equal(provided.repaired, false);
+  assert.equal(provided.query, "Find the Salesforce case");
+
+  const fromHistory = repairComposioSearchArguments({}, "", [{ role: "user", content: "Find my open Freshdesk ticket" }]);
+  assert.equal(fromHistory.source, "history");
+  assert.equal(fromHistory.query, "Find my open Freshdesk ticket");
 });
 
 for (const direction of ["inbound", "outbound"] as const) {
