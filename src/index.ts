@@ -30,6 +30,7 @@ import { WorkflowNonRetryableError } from "@upstash/workflow";
 import { executeDurableTask } from "./taskRunner.js";
 import { executeTaskSlice } from "./taskSlice.js";
 import { executeWebSessionReconciliationTask, recoverWebSessionReconciliationTasks } from "./webSessionReconciliation.js";
+import { recoverQueuedTaskWorkflows } from "./taskRecovery.js";
 import { reconcileTinyFishResearchRun } from "./tinyfishResearch.js";
 import { completeMissionStepAndAdvance, finalizeMissionCloseout, MissionEnqueueError, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, rescheduleQueuedMissionTasks, resumeMissionAndSchedule, validateMissionStepsPayload } from "./missionScheduler.js";
 import { onComposerTaskSettled } from "./workflows/composer.js";
@@ -327,6 +328,7 @@ async function main(): Promise<void> {
   let sdkWebhookRecovery: ReturnType<typeof setInterval> | undefined;
   let missionRecovery: ReturnType<typeof setInterval> | undefined;
   let webSessionReconciliationRecovery: ReturnType<typeof setInterval> | undefined;
+  let taskRecovery: ReturnType<typeof setInterval> | undefined;
   let scheduleRecovery: ReturnType<typeof setInterval> | undefined;
   let memoryProjectionRecovery: ReturnType<typeof setInterval> | undefined;
   let memoryReflectionRecovery: ReturnType<typeof setInterval> | undefined;
@@ -395,6 +397,29 @@ async function main(): Promise<void> {
   void reconcileWebSessionTasks();
   webSessionReconciliationRecovery = setInterval(() => { void reconcileWebSessionTasks(); }, 120_000);
   if (typeof webSessionReconciliationRecovery === "object" && "unref" in webSessionReconciliationRecovery) webSessionReconciliationRecovery.unref();
+  let taskRecoveryInFlight = false;
+  const reconcileQueuedTasks = async () => {
+    // Generic task recovery is intentionally enabled only when both halves of
+    // the durable handoff exist. In-memory mode is for local development and
+    // cannot provide replica-safe recovery after a process restart.
+    if (taskRecoveryInFlight || !config.qstashToken || !config.webhookUrl || !isDurableStore()) return;
+    taskRecoveryInFlight = true;
+    try {
+      const result = await recoverQueuedTaskWorkflows(enqueueTaskWorkflow);
+      if (result.republished || result.failures.length) {
+        logger.info({ owners: result.owners, checked: result.checked, republished: result.republished, failures: result.failures.length }, "Generic durable tasks recovered");
+      }
+      for (const failure of result.failures) logger.warn({ userId: failure.userId, taskId: failure.taskId, error: failure.error }, "Generic durable task recovery failed");
+      if (result.leaseLost) logger.warn({ owners: result.owners, checked: result.checked }, "Generic durable task recovery stopped after losing its lease");
+    } catch (error) {
+      logger.warn({ errorType: error instanceof Error ? error.name : "TaskRecoveryError" }, "Generic durable task recovery sweep failed");
+    } finally {
+      taskRecoveryInFlight = false;
+    }
+  };
+  void reconcileQueuedTasks();
+  taskRecovery = setInterval(() => { void reconcileQueuedTasks(); }, 60_000);
+  if (typeof taskRecovery === "object" && "unref" in taskRecovery) taskRecovery.unref();
   let scheduleRecoveryInFlight = false;
   const reconcileSchedules = async () => {
     if (scheduleRecoveryInFlight || !config.qstashToken || (!config.jobWorkflowUrl && !config.webhookUrl)) return;
@@ -558,6 +583,7 @@ async function main(): Promise<void> {
     if (sdkWebhookRecovery) clearInterval(sdkWebhookRecovery);
     if (missionRecovery) clearInterval(missionRecovery);
     if (webSessionReconciliationRecovery) clearInterval(webSessionReconciliationRecovery);
+    if (taskRecovery) clearInterval(taskRecovery);
     if (scheduleRecovery) clearInterval(scheduleRecovery);
     if (memoryProjectionRecovery) clearInterval(memoryProjectionRecovery);
     if (telegramWebhookRecovery) clearInterval(telegramWebhookRecovery);

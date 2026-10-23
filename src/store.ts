@@ -11430,6 +11430,19 @@ export async function releaseMissionRecoveryLease(token: string): Promise<void> 
   return backend.releaseKeyLock("mission-recovery-sweeper", token);
 }
 
+/** Distributed lease for the generic durable-task publication recovery sweep. */
+export async function acquireTaskRecoveryLease(token: string, leaseSeconds: number): Promise<boolean> {
+  return backend.acquireKeyLock("task-recovery-sweeper", token, leaseSeconds);
+}
+
+export async function renewTaskRecoveryLease(token: string, leaseSeconds: number): Promise<boolean> {
+  return backend.renewKeyLock("task-recovery-sweeper", token, leaseSeconds);
+}
+
+export async function releaseTaskRecoveryLease(token: string): Promise<void> {
+  return backend.releaseKeyLock("task-recovery-sweeper", token);
+}
+
 export async function migrateMissionOwnerToNeon(userId: number): Promise<{ status: "migrated" | "already_migrated"; missionCount: number; eventCount: number }> {
   return backend.migrateMissionOwnerToNeon(userId);
 }

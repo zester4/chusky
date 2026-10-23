@@ -5253,6 +5253,20 @@ export function registerSdkApi(app: Hono): void {
         run.updatedAt = Date.now();
         thread.updatedAt = run.updatedAt;
         await persistSdkRunSnapshot(owner.userId, thread.id, run);
+        if (isDurableStore() && config.qstashToken && config.webhookUrl) {
+          // The durable task/run snapshot is the acknowledgement boundary.
+          // Do not hold the approval request open on a QStash network round
+          // trip. If publication fails or this process dies before publishing,
+          // the generic task recovery sweep will claim this queued task and
+          // publish it exactly once. The task worker still owns the actual
+          // model/provider continuation.
+          void enqueueTaskWithClaim(owner.userId, task.id, task.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer)
+            .then((workflowRunId) => {
+              if (!workflowRunId) logger.warn({ userId: owner.userId, approvalId: approval.id, taskId: task!.id }, "Approved continuation was already claimed; recovery will reconcile it");
+            })
+            .catch((error) => logger.warn({ userId: owner.userId, approvalId: approval.id, taskId: task!.id, errorType: error instanceof Error ? error.name : "ApprovalContinuationEnqueueError" }, "Approved continuation publication deferred to durable recovery"));
+          return c.json({ id: approval.id, status: "approved", taskId: task.id, run: runView(thread.id, run) }, 202);
+        }
         const workflowRunId = await enqueueTaskWithClaim(owner.userId, task.id, task.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer);
         if (!workflowRunId) throw new Error("The approved continuation is already being queued.");
         const latestSession = await getSessionWithSdkRuns(owner.userId, thread.id);
