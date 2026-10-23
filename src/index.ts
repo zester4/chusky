@@ -2498,8 +2498,14 @@ async function main(): Promise<void> {
           const legacyThread = legacySession.sdkThreads?.find((item) => item.id === threadId);
           if (legacyThread) { legacyThread.runs = [run]; legacyThread.updatedAt = run.updatedAt; }
           await saveSession(device.userId, legacySession);
-        } else if (!(await saveSdkRun(device.userId, threadId, run))) {
-          throw new Error("SDK run persistence is unavailable");
+        } else {
+          if (!(await saveSdkRun(device.userId, threadId, run))) throw new Error("SDK run persistence is unavailable");
+          // Each guarded write increments the durable row version. Refresh
+          // the local snapshot before the next event is persisted so an
+          // enqueue sequence cannot return 503 after work was already queued.
+          const persistedRun = await getSdkRun(device.userId, threadId, run.id);
+          if (!persistedRun) throw new Error("The SDK run disappeared during durable persistence.");
+          Object.assign(run, persistedRun);
         }
       };
       try {
