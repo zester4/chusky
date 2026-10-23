@@ -1641,6 +1641,31 @@ async function sdkAutonomyMutation(c: any, userId: number, fingerprint: string, 
   } finally { clearInterval(renewal); await releaseUserLock(userId, lockToken); }
 }
 
+/**
+ * Resolve the public origin advertised by discovery documents.
+ *
+ * Railway terminates TLS before forwarding requests to the Node process, so
+ * c.req.url can be an internal http URL even when the public service URL is
+ * https. Prefer the explicitly configured public webhook origin, then use the
+ * trusted proxy headers when available, and finally fall back to the request
+ * origin for local development.
+ */
+function publicOriginForRequest(c: any): string {
+  const configured = config.webhookUrl.trim();
+  if (configured) {
+    try {
+      const origin = new URL(configured);
+      if (origin.protocol === "https:") return origin.origin;
+    } catch {
+      // Fall through to the proxy/request origin so discovery never breaks.
+    }
+  }
+  const forwardedProto = (c.req.header("x-forwarded-proto") ?? "").split(",")[0].trim().toLowerCase();
+  const forwardedHost = (c.req.header("x-forwarded-host") ?? "").split(",")[0].trim();
+  if (forwardedProto === "https" && forwardedHost && !/[\\s\\/]/.test(forwardedHost)) return `https://${forwardedHost}`;
+  return new URL(c.req.url).origin;
+}
+
 /** Public v1 API for a self-hosted instance. Keep CLI and Telegram routes private. */
 export function registerSdkApi(app: Hono): void {
   setMissionUpdateNotifier(enqueueA2AMissionUpdate);
@@ -1649,14 +1674,15 @@ export function registerSdkApi(app: Hono): void {
   const a2aAgentCard = (c: any) => {
     c.header("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
     c.header("A2A-Version", A2A_PROTOCOL_VERSION);
+    const origin = publicOriginForRequest(c);
     return c.json({
       name: "Chusky Outcome Runtime",
       description: "Persistent, governed business outcomes across tools, departments, meetings, and channels.",
       version: A2A_PROTOCOL_VERSION,
-      documentationUrl: `${new URL(c.req.url).origin}/docs`,
-      url: new URL(c.req.url).origin,
+      documentationUrl: `${origin}/docs`,
+      url: origin,
       protocolVersion: A2A_PROTOCOL_VERSION,
-      supportedInterfaces: [{ url: `${new URL(c.req.url).origin}/a2a/rpc`, protocolBinding: "JSONRPC", protocolVersion: A2A_PROTOCOL_VERSION }],
+      supportedInterfaces: [{ url: `${origin}/a2a/rpc`, protocolBinding: "JSONRPC", protocolVersion: A2A_PROTOCOL_VERSION }],
       capabilities: { streaming: true, pushNotifications: true, stateTransitionHistory: true },
       securitySchemes: { bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "Chusky API key" } },
       security: [{ bearerAuth: [] }],

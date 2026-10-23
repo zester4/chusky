@@ -1357,6 +1357,22 @@ test("A2A JSON-RPC exposes standard task operations over the owner-scoped missio
   assert.equal(((await unsupportedVersion.json()) as { error: { code: string } }).error.code, "a2a_version_not_supported");
 });
 
+test("A2A discovery advertises the configured HTTPS origin behind a TLS proxy", async () => {
+  const previousWebhookUrl = config.webhookUrl;
+  config.webhookUrl = "https://chusky-staging.example/";
+  try {
+    const api = app();
+    const response = await api.fetch(new Request("http://internal/a2a/.well-known/agent-card.json"));
+    assert.equal(response.status, 200);
+    const body = await response.json() as { url: string; documentationUrl: string; supportedInterfaces: Array<{ url: string }> };
+    assert.equal(body.url, "https://chusky-staging.example");
+    assert.equal(body.documentationUrl, "https://chusky-staging.example/docs");
+    assert.equal(body.supportedInterfaces[0]?.url, "https://chusky-staging.example/a2a/rpc");
+  } finally {
+    config.webhookUrl = previousWebhookUrl;
+  }
+});
+
 test("A2A REST cancellation cancels every mission branch, not only the root task", async () => {
   setSdkTaskWorkflowEnqueuerForTests(async () => "workflow-a2a-cancel-branches");
   const externalId = "a2a-rest-cancel-branches";
