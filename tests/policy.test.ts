@@ -4,6 +4,14 @@ import { humanProgressStatus, humanToolStatus, isReadOnlyToolSlug, isRiskyToolSl
 import { clearComposioToolMetadata, registerComposioToolMetadata } from "../src/composioRisk.js";
 import { isSharedChannelToolDenied } from "../src/sharedChannelPolicy.js";
 
+test("Composio discovery never asks for an execution approval", () => {
+  for (const slug of ["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS"]) {
+    for (const owner of [false, true]) for (const trigger of [false, true]) {
+      assert.equal(requiresToolApproval(slug, {}, true, owner, trigger), false);
+    }
+  }
+});
+
 test("mission resume stays autonomous, including bounded duration continuation", () => {
   assert.equal(toolApprovalPolicy("CHUCK_MISSION_RESUME", { id: "mis_existing" }), "private");
   assert.equal(toolApprovalPolicy("CHUCK_MISSION_RESUME", { id: "mis_existing", maxDurationSeconds: 3600 }), "private");

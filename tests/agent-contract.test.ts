@@ -9,6 +9,7 @@ import { nativeTool } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/index.js";
 import { AUTONOMY_OPERATING_KERNEL, needsAutonomyCloseoutNudge } from "../src/autonomy/operatingLoop.js";
 import { JevClient, setJevClientForTests } from "../src/decisions/jev.js";
+import { mcpClient } from "../src/mcp/client.js";
 
 // Agent contract tests mock provider HTTP calls; never send their fetch stubs
 // to a developer's configured Upstash Vector instance.
@@ -504,6 +505,84 @@ test("discovery expands an owner turn so a verified action can execute through t
   } finally {
     globalThis.fetch = originalFetch;
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+const discoveryTestToolkits = ["gmail", "shopify", "hubspot", "freshdesk", "notion", "slack", "stripe", "customerp"];
+for (const toolkit of discoveryTestToolkits) {
+  test(`owner discovery installs ${toolkit} schemas and supports a dependent read chain`, async () => {
+    const userId = 841000 + discoveryTestToolkits.indexOf(toolkit);
+    await initStore({ memoryOnly: true });
+    invalidateSession(userId);
+    const list = `${toolkit.toUpperCase()}_LIST_RECORDS`;
+    const read = `${toolkit.toUpperCase()}_GET_RECORD`;
+    const executed: string[] = [];
+    const requests: any[] = [];
+    const session = {
+      sessionId: `dependent-${toolkit}`,
+      tools: async () => ["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_MULTI_EXECUTE_TOOL"].map(name => ({ type: "function", function: { name, parameters: { type: "object" } } })),
+      execute: async (slug: string, args: any) => {
+        executed.push(slug);
+        if (slug === "COMPOSIO_GET_TOOL_SCHEMAS") return { successful: true, data: { tools: args.tool_slugs.map((name: string) => ({ slug: name, description: "Read connected records", inputParameters: { type: "object", properties: {} } })) } };
+        if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") return { successful: true, data: { results: [{ tool_slug: read, successful: true, data: { text: "Verified detail" } }] } };
+        return { successful: true, data: { records: [{ id: "record-1" }] } };
+      },
+    };
+    const originalFetch = globalThis.fetch;
+    setAgentDependenciesForTests({ composio: { create: async () => session } });
+    const replies = [
+      toolResponse("COMPOSIO_GET_TOOL_SCHEMAS", JSON.stringify({ tool_slugs: [list] }), "schema-list"),
+      toolResponse(list, "{}", "list-records"),
+      toolResponse("COMPOSIO_GET_TOOL_SCHEMAS", JSON.stringify({ tool_slugs: [read] }), "schema-read"),
+      toolResponse(read, "{}", "read-record"),
+      toolResponse("COMPOSIO_MULTI_EXECUTE_TOOL", JSON.stringify({ tools: [{ tool_slug: read, arguments: {} }] }), "batch-read"),
+      chatResponse({ role: "assistant", content: "Verified records summarized." }),
+    ];
+    globalThis.fetch = (async (input, init) => {
+      if (String(input).includes("/chat/completions")) {
+        requests.push(JSON.parse(String(init?.body)));
+        return replies.shift() ?? chatResponse({ role: "assistant", content: "Done" });
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const result = await runAgent(userId, toolkit === "gmail" ? "Summarize my last 3 emails" : `Review my latest ${toolkit} records and summarize their details.`, [], "test/model", undefined, undefined, undefined, undefined, undefined, { ownerPrivateRun: true });
+      assert.ok(result.toolsSucceeded.includes(list), "discovered list action must execute directly");
+      assert.ok(result.toolsSucceeded.includes(read), "a later dependency must execute directly");
+      assert.ok(result.toolsSucceeded.includes("COMPOSIO_MULTI_EXECUTE_TOOL"), "batch execution must remain available after discovery");
+      assert.ok(requests[1].tools.some((tool: any) => tool.function.name === list));
+      assert.ok(requests[3].tools.some((tool: any) => tool.function.name === read));
+      assert.ok(requests.every(request => request.tools.some((tool: any) => tool.function.name === "COMPOSIO_SEARCH_TOOLS")), "Composio search must remain callable throughout the task");
+      assert.equal(executed.filter(name => name === list).length, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+      setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+    }
+  });
+}
+
+test("compact routing retains connected MCP tools and executes them through the shared loop", async () => {
+  const userId = 841100;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const slug = "MCP_custom_read_record_test";
+  const originalDiscover = mcpClient.discoverToolsForUser;
+  const originalCall = mcpClient.callTool;
+  const calls: unknown[] = [];
+  mcpClient.discoverToolsForUser = async () => ({ tools: [{ type: "function", function: { name: slug, description: "Read the connected business record", parameters: { type: "object", properties: {} } } }], failures: [] });
+  mcpClient.callTool = async (owner, name, args) => { calls.push({ owner, name, args }); return { content: [{ type: "text", text: "Verified record" }] }; };
+  try {
+    await withAgentMocks([
+      toolResponse(slug, "{}", "mcp-read"),
+      chatResponse({ role: "assistant", content: "Mission summary prepared from the verified record." }),
+    ], async () => { throw new Error("An MCP action must not be sent to Composio"); }, async () => {
+      const result = await runAgent(userId, "Prepare a mission summary from the connected business record.", [], "test/model", undefined, undefined, undefined, undefined, undefined, { ownerPrivateRun: true });
+      assert.ok(result.toolsSucceeded.includes(slug));
+      assert.deepEqual(calls, [{ owner: userId, name: slug, args: {} }]);
+    });
+  } finally {
+    mcpClient.discoverToolsForUser = originalDiscover;
+    mcpClient.callTool = originalCall;
   }
 });
 
@@ -1416,7 +1495,7 @@ test("turn-wide Jev none keeps irrelevant connected-app schemas out of a convers
     assert.ok(Object.keys(jevRequests[0].questions).includes("action_required"), "the batched Jev request must include the turn-wide action check");
     assert.equal(connectedAccountLookups, 0, "no-app turns must skip connected-account lookup");
     const visibleTools = modelRequests[0]?.tools?.map((tool: any) => tool.function.name).sort() ?? [];
-    assert.deepEqual(visibleTools, [], "a no-action turn must not expose discovery tools that can trigger unrelated work");
+    assert.deepEqual(visibleTools, ["COMPOSIO_SEARCH_TOOLS"], "a route suggesting no action must still let the model discover a needed capability");
   } finally {
     globalThis.fetch = originalFetch;
     Object.assign(config, previous);
@@ -2594,22 +2673,42 @@ test("interactive defaults allow a long model-led working window", () => {
   assert.ok(config.interactiveMaxToolCalls >= 100);
 });
 
-test("native discovery is not offered repeatedly after it has already run", async () => {
+test("native discovery executes a dependent write and read in the shared runtime", async () => {
+  const userId = 841101;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  await withAgentMocks([
+    toolResponse("CHUCK_FIND_TOOLS", JSON.stringify({ query: "scratchpad private notes" }), "discover-notes"),
+    toolResponse("CHUCK_SCRATCHPAD_WRITE", JSON.stringify({ key: "discovery-proof", content: "Verified working note" }), "write-note"),
+    toolResponse("CHUCK_SCRATCHPAD_READ", JSON.stringify({ query: "discovery-proof" }), "read-note"),
+    chatResponse({ role: "assistant", content: "The note was saved and verified." }),
+  ], async () => { throw new Error("Native actions must not be dispatched to Composio"); }, async () => {
+    const result = await runAgent(userId, "Save a private working note and read it back to verify it.", [], "test/model", undefined, undefined, undefined, undefined, undefined, { ownerPrivateRun: true });
+    assert.ok(result.toolsSucceeded.includes("CHUCK_SCRATCHPAD_WRITE"));
+    assert.ok(result.toolsSucceeded.includes("CHUCK_SCRATCHPAD_READ"));
+    const saved = await getSession(userId);
+    assert.match(JSON.stringify(saved.scratchpad), /Verified working note/);
+  });
+});
+
+test("native discovery remains available for later task dependencies", async () => {
   const userId = 830004;
   await initStore({ memoryOnly: true });
   invalidateSession(userId);
   const requests: Array<Record<string, any>> = [];
   await withAgentMocks([
     toolResponse("CHUCK_FIND_TOOLS", JSON.stringify({ query: "calendar and email" }), "find-1"),
+    toolResponse("CHUCK_FIND_TOOLS", JSON.stringify({ query: "reminders for the follow-up" }), "find-2"),
     chatResponse({ role: "assistant", content: "I found the relevant capabilities and can continue from here." }),
   ], async () => ({ tools: [] }), async () => {
     const result = await runAgent(userId, "Find the relevant capabilities for my calendar and email request.", [], "test/model", undefined, undefined, undefined, undefined, undefined, { ephemeral: true });
     assert.match(result.text, /relevant capabilities/i);
     assert.deepEqual(result.toolsUsed, ["CHUCK_FIND_TOOLS"]);
+    assert.equal(requests.length, 3, "a second discovery query must execute within the same run");
     const firstRoundTools = requests[0]?.tools?.map((tool: any) => tool.function.name) ?? [];
     assert.ok(firstRoundTools.includes("CHUCK_FIND_TOOLS"));
     const secondRoundTools = requests[1]?.tools?.map((tool: any) => tool.function.name) ?? [];
-    assert.equal(secondRoundTools.includes("CHUCK_FIND_TOOLS"), false);
+    assert.equal(secondRoundTools.includes("CHUCK_FIND_TOOLS"), true);
   }, false, undefined, (body) => requests.push(body));
 });
 

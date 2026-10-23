@@ -77,7 +77,6 @@ export async function answerBlandQuestion(input: { userId: number; callId: strin
       voiceRoutingHint: input.purpose,
       voiceToolPolicy: call.voiceProfile?.toolPolicy,
       voiceAllowHumanHandoff: call.voiceProfile?.controls?.allowHumanHandoff,
-      maxToolCalls: 12,
       maxCost: 0.75,
       instructions: voiceProfileInstructions(call.voiceProfile, call.direction, input.purpose),
     },

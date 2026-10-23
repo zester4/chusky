@@ -487,6 +487,9 @@ function triggerCriticalToolCall(slug: string, args: Record<string, unknown>, de
 }
 
 export function requiresToolApproval(slug: string, args: Record<string, unknown> = {}, forceApproval = false, ownerPrivateRun = false, triggerRun = false): boolean {
+  // Catalogue discovery and schema inspection execute no provider action.
+  // Ask for approval at execution when needed, never just to find a tool.
+  if (["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS"].includes(canonicalPolicySlug(slug))) return false;
   if (canonicalPolicySlug(slug) === "CHUCK_MONID_RUN") return true;
   if (canonicalPolicySlug(slug) === "CHUCK_TREG_ADMIN") return forceApproval || !isTregAdminReadAction(String(args.action ?? ""));
   if (triggerRun) return forceApproval || triggerCriticalToolCall(slug, args);
