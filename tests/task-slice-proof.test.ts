@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { executeTaskSlice, type TaskSliceContext } from "../src/taskSlice.js";
 import { executeDurableTask } from "../src/taskRunner.js";
 import { nativeTool } from "../src/nativeTools.js";
-import { acquireUserLock, claimApproval, createApproval, createMission, getMission, getTask, initStore, listTasks, recordTrustedMissionEvidence, releaseUserLock, resumeMissionFromProviderEvent, startMission, updateMission, waitMission } from "../src/store.js";
+import { acquireUserLock, claimApproval, createApproval, createMission, createTask, getApproval, getMission, getTask, getSession, initStore, listTasks, recordTrustedMissionEvidence, releaseUserLock, resumeMissionFromProviderEvent, saveSession, setApprovalStatus, startMission, updateMission, waitMission } from "../src/store.js";
 import { reconcileMissionExecution, replanMissionAndSchedule, resumeMissionAndSchedule } from "../src/missionScheduler.js";
 import { resumeMissionTaskAfterApproval } from "../src/missionApproval.js";
 import { ApprovalRequiredError } from "../src/agent.js";
@@ -84,6 +84,71 @@ test("full production slice executes a scripted model through real native dispat
   assert.equal(calls, 1);
   assert.equal(run.task?.status, "completed");
   assert.equal((await getMission(userId, mission.id))?.status, "completed");
+});
+
+test("approved SDK continuations preserve exact approval context through the durable worker", async () => {
+  const userId = 982099;
+  const queue = new MissionFakeQStash();
+  const threadId = "thr_approval_worker_proof";
+  const runId = "run_approval_worker_proof";
+  const approval = await createApproval({
+    userId,
+    toolSlug: "CHUCK_SEARCH_SKILLS",
+    args: { query: "sales" },
+    request: "Find the sales guidance.",
+    history: [{ role: "user", content: "Find the sales guidance.", createdAt: 1 }],
+    model: "test/model",
+  });
+  assert.equal(await setApprovalStatus(userId, approval.id, "approved"), true);
+  const session = await getSession(userId);
+  session.sdkThreads = [{
+    id: threadId,
+    externalId: threadId,
+    metadata: { source: "sdk", title: "Approval worker proof" },
+    history: [],
+    runs: [{
+      id: runId,
+      status: "queued",
+      input: approval.request,
+      approvalId: undefined,
+      taskId: "task_approval_worker_proof",
+      events: [{ id: "approval_activity", type: "run.tool_activity", at: 1, toolSlug: approval.toolSlug, status: "started", message: "Approval accepted; the action is queued for execution." }],
+      createdAt: 1,
+      updatedAt: 1,
+    }],
+    createdAt: 1,
+    updatedAt: 1,
+  }];
+  await saveSession(userId, session);
+  const task = await createTask(userId, {
+    id: "task_approval_worker_proof",
+    title: "Approved action: CHUCK_SEARCH_SKILLS",
+    objective: approval.request,
+    runAt: Date.now(),
+    sdkRunId: runId,
+    sdkThreadId: threadId,
+    sdkInput: approval.request,
+    sdkHistory: approval.history,
+    sdkModel: approval.model,
+    approvedApprovalId: approval.id,
+  });
+  const model = (async (...args: any[]) => {
+    assert.equal(args[7], approval.id, "the worker must carry the approved approval ID");
+    assert.equal(args[9]?.forceApprovedAction, true, "the worker must force the exact approved action");
+    assert.deepEqual(args[2], approval.history, "the worker must use the captured approval context");
+    assert.equal(await setApprovalStatus(userId, approval.id, "consumed"), true);
+    return { text: "Approved action completed.", toolsUsed: [approval.toolSlug], toolsSucceeded: [approval.toolSlug], toolOutcomes: [], cost: 0 };
+  }) as NonNullable<TaskSliceContext["runAgent"]>;
+  const result = await executeDurableTask({ userId, taskId: task.id }, {
+    workerId: "approval-worker-proof",
+    execute: (claimed, signal) => executeTaskSlice(claimed, signal, context(queue, model)),
+  });
+  assert.equal(result.task?.status, "completed");
+  assert.equal((await getTask(userId, task.id))?.approvedApprovalId, undefined);
+  const settled = (await getSession(userId)).sdkThreads?.find((item) => item.id === threadId)?.runs.find((item) => item.id === runId);
+  assert.equal(settled?.status, "completed");
+  assert.equal(settled?.events.find((event) => event.id === "approval_activity")?.status, "completed");
+  assert.equal((await getApproval(userId, approval.id))?.status, "consumed");
 });
 
 test("full production slice parks an early timer wake without invoking the model", async () => {

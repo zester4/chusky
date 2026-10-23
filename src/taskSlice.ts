@@ -2,7 +2,7 @@ import { extendMissionDurationIfEligible } from "./store.js";
 import { config } from "./config.js";
 import { appendSdkRunHistory, appendSdkRunHistoryToSession, getMeetingRepresentativeProfile } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
-import { getTelegramChatId, getSession, getSessionWithSdkRuns, getSdkRun, saveSdkRun, saveSession, addUsage, canSpend, getApproval, getTask, getMission, isTaskCancellationRequested, recordMissionSlice, waitMission, resumeMissionFromTimer, checkpointMission, completeTask, updateTask, updateMission, acquireMissionLease, renewMissionLease, releaseMissionLease, acquireMissionStepLease, renewMissionStepLease, releaseMissionStepLease, missionBudgetPreflight, MISSION_ZERO_COST_BUDGET_ERROR, getRecallMeeting, getMeetingContact } from "./store.js";
+import { getTelegramChatId, getSession, getSessionWithSdkRuns, getSdkRun, saveSdkRun, saveSession, addUsage, canSpend, getApproval, getTask, getMission, isTaskCancellationRequested, recordMissionSlice, waitMission, resumeMissionFromTimer, checkpointMission, completeTask, updateTask, updateMission, acquireMissionLease, renewMissionLease, releaseMissionLease, acquireMissionStepLease, renewMissionStepLease, releaseMissionStepLease, missionBudgetPreflight, MISSION_ZERO_COST_BUDGET_ERROR, getRecallMeeting, getMeetingContact, setApprovalStatus } from "./store.js";
 import { runAgent as defaultRunAgent, ApprovalRequiredError } from "./agent.js";
 import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
@@ -308,7 +308,7 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
              ? "This is a post-wake continuation. The timer has already completed. Execute the saved active-step action now; do not narrate, repeat the pre-wait checkpoint, or call CHUCK_TASK_WAIT."
              : undefined;
            const instructions = [task.sdkInstructions, skillInstructions, wakeInstructions].filter(Boolean).join("\n\n").slice(0, 24000) || undefined;
-           return runAgent(task.userId, turnPrompt, agentHistory, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, task.approvedApprovalId, undefined, { toolAllow: missionWorkerToolAllowlist(task.missionAllowedTools, task.sdkTools?.allow), toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: mission ? Math.min(task.sdkBudget?.maxToolCalls ?? mission.budget.maxToolCalls, Math.max(1, missionRemainingTools ?? 1)) : task.sdkBudget?.maxToolCalls, maxCost: mission ? Math.min(task.sdkBudget?.maxCost ?? mission.budget.maxCost, Math.max(0.0001, missionRemainingCost ?? 0.0001)) : task.sdkBudget?.maxCost, instructions, runId: task.sdkRunId, parentRunId: task.sdkThreadId, taskId: task.id, missionId: task.missionId, missionStepId: task.missionStepId, missionStepObjective: currentMissionStep?.objective, missionToolHints: task.missionToolHints, missionTimerResumed, missionWakeCheckpoint, missionWakeNextAction, ownerPrivateRun: task.sdkOwnerPrivateRun === true, organizationId: task.sdkOrganizationId, missionRoutingCache: task.attempt > 0 ? undefined : task.missionRoutingCache, enqueueMissionTask });
+           return runAgent(task.userId, turnPrompt, task.sdkHistory ?? agentHistory, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, task.approvedApprovalId, undefined, { toolAllow: missionWorkerToolAllowlist(task.missionAllowedTools, task.sdkTools?.allow), toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: mission ? Math.min(task.sdkBudget?.maxToolCalls ?? mission.budget.maxToolCalls, Math.max(1, missionRemainingTools ?? 1)) : task.sdkBudget?.maxToolCalls, maxCost: mission ? Math.min(task.sdkBudget?.maxCost ?? mission.budget.maxCost, Math.max(0.0001, missionRemainingCost ?? 0.0001)) : task.sdkBudget?.maxCost, instructions, forceApprovedAction: Boolean(task.approvedApprovalId), runId: task.sdkRunId, parentRunId: task.sdkThreadId, taskId: task.id, missionId: task.missionId, missionStepId: task.missionStepId, missionStepObjective: currentMissionStep?.objective, missionToolHints: task.missionToolHints, missionTimerResumed, missionWakeCheckpoint, missionWakeNextAction, ownerPrivateRun: task.sdkOwnerPrivateRun === true, organizationId: task.sdkOrganizationId, missionRoutingCache: task.attempt > 0 ? undefined : task.missionRoutingCache, enqueueMissionTask });
          }
   
         const followUp = task.meetingFollowUp;
@@ -568,12 +568,20 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
     if (task.sdkRunId && task.sdkThreadId) {
       if (result.cost) await addUsage(task.userId, result.cost);
       const runInput = await getSdkRun(task.userId, task.sdkThreadId, task.sdkRunId);
+      const approvedAction = task.approvedApprovalId ? await getApproval(task.userId, task.approvedApprovalId) : undefined;
       const settledAt = Date.now();
       const sdkRun = await updateTaskSdkRun(task, (run) => {
         run.status = "completed";
         run.output = result.text;
         run.artifacts = sdkRunArtifacts(result.generatedFiles);
         run.cost = result.cost;
+        if (task.approvedApprovalId) {
+          const approvedActivity = [...run.events].reverse().find((event) => event.type === "run.tool_activity" && event.toolSlug === approvedAction?.toolSlug && event.status === "started");
+          if (approvedActivity) {
+            approvedActivity.status = "completed";
+            approvedActivity.message = "Approved action completed.";
+          }
+        }
         run.events.push({ id: `evt_${randomUUID()}`, type: "run.completed", at: settledAt });
         run.updatedAt = settledAt;
       }, runInput ? [
@@ -624,9 +632,18 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
     }
     if (task.sdkRunId && task.sdkThreadId) {
       const message = error instanceof Error ? error.message : "Agent failed";
+      const approvedAction = task.approvedApprovalId ? await getApproval(task.userId, task.approvedApprovalId) : undefined;
+      if (task.approvedApprovalId) await setApprovalStatus(task.userId, task.approvedApprovalId, "consumed").catch(() => false);
       const sdkRun = await updateTaskSdkRun(task, (run) => {
         run.status = "failed";
         run.error = { code: "agent_error", message };
+        if (task.approvedApprovalId) {
+          const approvedActivity = [...run.events].reverse().find((event) => event.type === "run.tool_activity" && event.toolSlug === approvedAction?.toolSlug && event.status === "started");
+          if (approvedActivity) {
+            approvedActivity.status = "failed";
+            approvedActivity.message = "Approval accepted, but the action could not be completed.";
+          }
+        }
         run.events.push({ id: `evt_${randomUUID()}`, type: "run.failed", at: Date.now(), text: message });
         run.updatedAt = Date.now();
       });

@@ -5174,22 +5174,13 @@ export function registerSdkApi(app: Hono): void {
       const session = await getSessionWithSdkRuns(owner.userId); const thread = session.sdkThreads!.find((item) => item.runs.some((run) => run.approvalId === approval.id));
       if (!thread) { await setApprovalStatus(owner.userId, approval.id, "denied"); return apiError(c, 409, "run_not_found", "The run that requested this approval no longer exists."); }
       const run = thread.runs.find((item) => item.approvalId === approval.id)!;
-      const approvedActivity = [...run.events].reverse().find((item) => item.type === "run.tool_activity" && item.toolSlug === approval.toolSlug && item.status === "approval_required");
-      if (approvedActivity) { approvedActivity.status = "started"; approvedActivity.message = "Approval accepted; executing the approved action."; }
-      run.status = "running";
-      run.approvalId = undefined;
-      appendSdkRunProgress(run, { phase: "acting", title: "Executing the approved action", detail: "Approval was accepted and the requested action is now running.", provider: run.progress?.provider, evidence: run.progress?.evidence });
-      run.events.push(event("run.started", "Approval granted; continuing this run."));
-      run.updatedAt = Date.now();
-      thread.updatedAt = run.updatedAt;
-      await persistSdkRunSnapshot(owner.userId, thread.id, run);
-      const abort = new AbortController();
-      activeRuns.set(run.id, abort);
-      let costIncrement = 0;
-      try {
-        if (approval.toolSlug === "CHUCK_MISSION_RESUME") {
-          // Resume is a control-plane operation, not a fresh model decision.
-          // Execute only the exact stored arguments after the atomic claim.
+      if (approval.toolSlug === "CHUCK_MISSION_RESUME" && !missionResumeApproval) {
+        // A mission resume without a saved approval wait is still a control
+        // plane operation. Keep it model-free and settle it in this request;
+        // unlike a provider/model action, it does not need to hold the HTTP
+        // request open for inference.
+        const resumeActivity = [...run.events].reverse().find((item) => item.type === "run.tool_activity" && item.toolSlug === approval.toolSlug && item.status === "approval_required");
+        try {
           if (run.tools?.deny?.includes(approval.toolSlug) || (run.tools?.allow && !run.tools.allow.includes(approval.toolSlug))) throw new Error("The approved action is outside this run's tool policy.");
           validateNativeToolArguments(approval.toolSlug, approval.args);
           const missionId = String(approval.args.id);
@@ -5199,71 +5190,98 @@ export function registerSdkApi(app: Hono): void {
           if (!mission) throw new Error("The approved mission is no longer resumable.");
           if (mission.status !== "running" && mission.status !== "completed") throw new Error("Approval was accepted, but the mission remains blocked. Inspect its saved checkpoint and budget.");
           await setApprovalStatus(owner.userId, approval.id, "consumed");
-          if (approvedActivity) { approvedActivity.status = "completed"; approvedActivity.message = "Approved mission resume completed."; }
+          if (resumeActivity) { resumeActivity.status = "completed"; resumeActivity.message = "Approved mission resume completed."; }
           run.status = "completed";
+          run.approvalId = undefined;
           run.output = `Approval accepted. Mission ${mission.id} is continuing automatically from its saved checkpoint. The mission remains active until its persisted work and verification finish.`;
           run.error = undefined;
           appendSdkRunProgress(run, terminalSdkRunProgress("completed", { previous: run.progress }));
           run.events.push(event("run.completed"));
-        } else {
-        const result = await runAgent(owner.userId, approval.request, approval.history, approval.model, undefined, abort.signal, undefined, approval.id, undefined, {
-          ...await sdkAgentOptions({ budget: run.budget, tools: run.tools, skills: run.skills }, run.id, thread.id, run.agentInstructions, run.ownerPrivateRun === true),
-          forceApprovedAction: true,
-          onToolActivity: async (activity: AgentToolActivity) => {
-            const activityEvent = { id: `evt_${randomUUID()}`, type: "run.tool_activity", at: Date.now(), ...activity };
-            run.events.push(activityEvent);
-            run.updatedAt = activityEvent.at;
-            thread.updatedAt = activityEvent.at;
-            await persistSdkRunSnapshot(owner.userId, thread.id, run);
-            appendSdkRunProgress(run, progressFromSdkToolActivity(activity, run.progress));
-            await persistSdkRunSnapshot(owner.userId, thread.id, run);
-          },
-          onSubagentActivity: async (activity: SubagentActivityUpdate & { parentToolCallId: string }) => {
-            const activityEvent = { id: `evt_${randomUUID()}`, type: "run.subagent_activity", at: Date.now(), ...activity };
-            run.events.push(activityEvent);
-            run.updatedAt = activityEvent.at;
-            thread.updatedAt = activityEvent.at;
-            await persistSdkRunSnapshot(owner.userId, thread.id, run);
-            appendSdkRunProgress(run, progressFromSdkSubagentActivity(activity, run.progress));
-            await persistSdkRunSnapshot(owner.userId, thread.id, run);
-          },
-        });
-        if (abort.signal.aborted) { run.status = "cancelled"; appendSdkRunProgress(run, terminalSdkRunProgress("cancelled", { previous: run.progress })); run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved.")); }
-        else { run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; costIncrement = result.cost ?? 0; run.error = undefined; appendSdkRunProgress(run, terminalSdkRunProgress("completed", { previous: run.progress, artifacts: run.artifacts })); run.events.push(event("run.completed")); }
-        const settledApproval = await getApproval(owner.userId, approval.id);
-        if (approvedActivity && settledApproval?.status === "consumed") {
-          const outcome = [...run.events].reverse().find((item) => item !== approvedActivity && item.type === "run.tool_activity" && item.toolSlug === approval.toolSlug && (item.status === "completed" || item.status === "failed" || item.status === "cancelled"));
-          approvedActivity.status = outcome?.status ?? "failed";
-          approvedActivity.message = outcome?.status === "completed" ? "Approved action completed." : "Approval accepted, but successful execution was not confirmed.";
-        }
-        else if (approvedActivity && run.status === "completed") {
-          approvedActivity.status = "failed";
-          approvedActivity.message = "Approval accepted, but the approved action was not executed.";
+          run.updatedAt = Date.now();
+          thread.updatedAt = run.updatedAt;
+          await persistSdkRunSnapshot(owner.userId, thread.id, run, [{ role: "user", content: approval.request, createdAt: run.createdAt }, { role: "assistant", content: run.output, createdAt: run.updatedAt }]);
+          return c.json(runView(thread.id, run));
+        } catch (error) {
+          await setApprovalStatus(owner.userId, approval.id, "consumed").catch(() => false);
+          if (resumeActivity) { resumeActivity.status = "failed"; resumeActivity.message = "Approval accepted, but the mission could not be resumed."; }
           run.status = "failed";
-          run.output = undefined;
-          run.error = { code: "approved_action_not_executed", message: "The approved action was not executed. Review the saved steps before retrying." };
-          await setApprovalStatus(owner.userId, approval.id, "consumed");
-          run.events = run.events.filter((item) => item.type !== "run.completed");
+          run.approvalId = undefined;
+          run.error = { code: "mission_resume_failed", message: error instanceof Error ? error.message : "Mission resume failed" };
           appendSdkRunProgress(run, terminalSdkRunProgress("failed", { previous: run.progress, error: run.error.message }));
           run.events.push(event("run.failed", run.error.message));
+          run.updatedAt = Date.now();
+          thread.updatedAt = run.updatedAt;
+          await persistSdkRunSnapshot(owner.userId, thread.id, run);
+          return c.json(runView(thread.id, run));
         }
-        }
-      } catch (error) {
-        if (approvedActivity) { approvedActivity.status = "failed"; approvedActivity.message = "Approval accepted, but the action could not be completed."; }
-        await setApprovalStatus(owner.userId, approval.id, "consumed");
-        if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; appendSdkRunProgress(run, { phase: "waiting", title: "Approval needed to continue", detail: "Review the next requested action before Chusky continues.", provider: run.progress?.provider, requiresApproval: true, evidence: run.progress?.evidence }); run.events.push(event("run.approval_required", "Another action needs your approval.")); }
-        else if (abort.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) { run.status = "cancelled"; appendSdkRunProgress(run, terminalSdkRunProgress("cancelled", { previous: run.progress })); run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved.")); }
-        else { run.status = "failed"; run.error = { code: "resume_failed", message: error instanceof Error ? error.message : "Approval resume failed" }; appendSdkRunProgress(run, terminalSdkRunProgress("failed", { previous: run.progress, error: run.error.message })); run.events.push(event("run.failed", run.error.message)); }
       }
-      run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt;
+      const approvedActivity = [...run.events].reverse().find((item) => item.type === "run.tool_activity" && item.toolSlug === approval.toolSlug && item.status === "approval_required");
+      if (approvedActivity) { approvedActivity.status = "started"; approvedActivity.message = "Approval accepted; the action is queued for execution."; }
+      run.status = "queued";
+      run.approvalId = undefined;
+      appendSdkRunProgress(run, { phase: "acting", title: "Approved action queued", detail: "Approval was accepted. The durable worker will execute the approved action next.", provider: run.progress?.provider, evidence: run.progress?.evidence });
+      run.events.push(event("run.queued", "Approval granted; durable continuation queued."));
+      let task: Awaited<ReturnType<typeof createTask>> | undefined;
       try {
-        await persistSdkRunSnapshot(owner.userId, thread.id, run, run.status === "completed" ? [
-          { role: "user", content: approval.request, createdAt: run.createdAt },
-          { role: "assistant", content: run.output ?? "", createdAt: run.updatedAt },
-        ] : [], costIncrement);
-        const latestSession = await getSession(owner.userId);
-        return c.json(runView(thread.id, latestSession.sdkThreads!.find((item) => item.id === thread.id)?.runs.find((item) => item.id === run.id) ?? run));
-      } finally { activeRuns.delete(run.id); }
+        // An approval is atomically claimed, so every accepted decision is a
+        // new continuation attempt. Do not reuse a cancelled task ID after a
+        // transient queue failure; createTask intentionally returns existing
+        // records for idempotent callers and would otherwise make a retry
+        // impossible.
+        task = await createTask(owner.userId, {
+          id: `task_approval_${approval.id}_${randomUUID()}`,
+          title: `Approved action: ${approval.toolSlug}`,
+          objective: approval.request || run.input || `Execute the approved ${approval.toolSlug} action.`,
+          runAt: Date.now(),
+          maxAttempts: 10,
+          sdkRunId: run.id,
+          sdkThreadId: thread.id,
+          sdkInput: approval.request || run.input,
+          sdkHistory: approval.history,
+          sdkAttachments: run.attachments,
+          sdkModel: run.model,
+          sdkTools: run.tools,
+          sdkBudget: run.budget,
+          sdkStartedAt: run.createdAt,
+          sdkSkills: run.skills,
+          sdkInstructions: run.agentInstructions,
+          sdkOrganizationId: run.organizationId,
+          sdkOwnerPrivateRun: run.ownerPrivateRun,
+          approvedApprovalId: approval.id,
+        });
+        run.taskId = task.id;
+        run.updatedAt = Date.now();
+        thread.updatedAt = run.updatedAt;
+        await persistSdkRunSnapshot(owner.userId, thread.id, run);
+        const workflowRunId = await enqueueTaskWithClaim(owner.userId, task.id, task.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer);
+        if (!workflowRunId) throw new Error("The approved continuation is already being queued.");
+        const latestSession = await getSessionWithSdkRuns(owner.userId, thread.id);
+        const latestThread = latestSession.sdkThreads?.find((item) => item.id === thread.id);
+        const latestRun = latestThread?.runs.find((item) => item.id === run.id) ?? run;
+        return c.json({ id: approval.id, status: "approved", taskId: task.id, workflowRunId, run: runView(thread.id, latestRun) }, 202);
+      } catch (error) {
+        // Do not leave an accepted approval attached to an unpublishable run.
+        // Cancelling the durable task first prevents a late provider delivery
+        // from starting after the approval is restored for a safe retry.
+        if (task) await cancelTask(owner.userId, task.id).catch(() => undefined);
+        await setApprovalStatus(owner.userId, approval.id, "pending").catch(() => false);
+        const rollbackSession = await getSessionWithSdkRuns(owner.userId, thread.id);
+        const rollbackThread = rollbackSession.sdkThreads?.find((item) => item.id === thread.id);
+        const rollbackRun = rollbackThread?.runs.find((item) => item.id === run.id);
+        if (rollbackThread && rollbackRun) {
+          const rollbackActivity = [...rollbackRun.events].reverse().find((item) => item.type === "run.tool_activity" && item.toolSlug === approval.toolSlug && item.status === "started");
+          if (rollbackActivity) { rollbackActivity.status = "approval_required"; rollbackActivity.message = "Approval is ready to retry; the continuation could not be queued."; }
+          rollbackRun.status = "requires_approval";
+          rollbackRun.approvalId = approval.id;
+          rollbackRun.taskId = undefined;
+          appendSdkRunProgress(rollbackRun, { phase: "waiting", title: "Approval needed to continue", detail: "The approved continuation could not be queued. Retry the approval after the task service recovers.", provider: rollbackRun.progress?.provider, requiresApproval: true, evidence: rollbackRun.progress?.evidence });
+          rollbackRun.events.push(event("run.approval_required", "The approved continuation could not be queued; approval remains available."));
+          rollbackRun.updatedAt = Date.now();
+          rollbackThread.updatedAt = rollbackRun.updatedAt;
+          await persistSdkRunSnapshot(owner.userId, rollbackThread.id, rollbackRun);
+        }
+        return apiError(c, 503, "approval_resume_enqueue_failed", error instanceof Error ? error.message : "The approved continuation could not be queued safely. Retry the approval shortly.");
+      }
     } finally { await releaseUserLock(owner.userId, token); }
   });
   app.post("/v1/approvals/:approvalId/escalate", async (c) => { const owner = sdkUser(c)!; const approval = await getApproval(owner.userId, c.req.param("approvalId")); if (!approval) return apiError(c, 404, "not_found", "Approval not found."); if (approval.status !== "pending" || approval.expiresAt <= Date.now()) return apiError(c, 409, "approval_not_escalatable", "Only a pending, unexpired approval can be escalated."); const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; const destination = body.destination === "channel" ? "channel" : "jira"; const toolSlug = typeof body.toolSlug === "string" ? body.toolSlug.trim() : undefined; if (destination === "jira" && toolSlug && !/^JIRA_[A-Z0-9_]*(CREATE|ADD|COMMENT|ISSUE|TICKET)[A-Z0-9_]*$/.test(toolSlug)) return apiError(c, 400, "invalid_escalation_tool", "Jira escalation requires an exact Jira issue/comment action."); if (destination === "channel" && toolSlug && !/^(SLACK|TELEGRAM|WHATSAPP|SENDGRID|GMAIL|OUTLOOK)_[A-Z0-9_]*(SEND|MESSAGE|POST|NOTIFY)[A-Z0-9_]*$/.test(toolSlug)) return apiError(c, 400, "invalid_escalation_tool", "Channel escalation requires an exact outbound message action."); const dueAt = typeof body.dueAt === "number" && Number.isFinite(body.dueAt) ? Math.max(Date.now(), body.dueAt) : Date.now(); const toolArgs = body.toolArgs && typeof body.toolArgs === "object" && !Array.isArray(body.toolArgs) ? body.toolArgs as Record<string, unknown> : undefined; return c.json(await scheduleApprovalEscalation({ ownerId: owner.userId, approvalId: approval.id, destination, summary: typeof body.summary === "string" ? body.summary : approval.request, dueAt, ...(toolSlug ? { toolSlug } : {}), ...(toolArgs ? { toolArgs } : {}) }), 201); });

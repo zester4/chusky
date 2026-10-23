@@ -863,144 +863,128 @@ test("persisted Composio batch actions survive run reload without exposing input
   assert.equal(JSON.stringify(run).includes("arguments"), false);
 });
 
-test("approved run stays visible while resuming and preserves its earlier steps", async () => {
-  const originalFetch = globalThis.fetch;
+test("approved run is acknowledged immediately and queued with its earlier steps", async () => {
   const externalId = "approval-resume-timeline-owner";
   const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
-  let markAgentCallStarted!: () => void;
-  let finishAgentCall!: () => void;
-  const agentCallStarted = new Promise<void>((resolve) => { markAgentCallStarted = resolve; });
-  const agentCallGate = new Promise<void>((resolve) => { finishAgentCall = resolve; });
-  setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "approval-resume-session", tools: async () => [] }) } });
-  globalThis.fetch = (async (input) => {
-    const url = String(input);
-    if (!url.includes("openrouter.ai")) return new Response("offline", { status: 503 });
-    if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
-    markAgentCallStarted();
-    await agentCallGate;
-    const final = { choices: [{ message: { role: "assistant", content: "Approval resumed successfully." }, finish_reason: "stop" }] };
-    return new Response(JSON.stringify(final), { status: 200, headers: { "content-type": "application/json" } });
-  }) as typeof fetch;
+  setSdkTaskWorkflowEnqueuerForTests(async (_ownerId, taskId) => `workflow-${taskId}`);
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId, "Content-Type": "application/json" };
+  const created = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers: { ...headers, "Idempotency-Key": "approval-resume-thread" }, body: JSON.stringify({}) }));
+  const thread = await created.json() as { id: string };
+  const approval = await createApproval({ userId, toolSlug: "CHUCK_SEARCH_SKILLS", args: { query: "sales" }, request: "Search the relevant guidance.", history: [{ role: "user", content: "Find sales guidance", createdAt: 1 }], model: "openai/gpt-luna-latest" });
+  const session = await getSession(userId);
+  session.sdkThreads!.find((item) => item.id === thread.id)!.runs.push({
+    id: "run_approved_timeline", status: "requires_approval", input: "Search the relevant guidance.", approvalId: approval.id,
+    events: [{ id: "event_original_step", type: "run.tool_activity", at: 1, toolSlug: "CHUCK_SEARCH_SKILLS", status: "completed", message: "Earlier research step", summary: "Sources found" }],
+    createdAt: 1, updatedAt: 1,
+  });
+  await saveSession(userId, session);
 
-  try {
-    const api = app();
-    const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId, "Content-Type": "application/json" };
-    const created = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers: { ...headers, "Idempotency-Key": "approval-resume-thread" }, body: JSON.stringify({}) }));
-    const thread = await created.json() as { id: string };
-    const approval = await createApproval({ userId, toolSlug: "CHUCK_SEARCH_SKILLS", args: { query: "sales" }, request: "Search the relevant guidance.", history: [], model: "openai/gpt-luna-latest" });
-    const session = await getSession(userId);
-    session.sdkThreads!.find((item) => item.id === thread.id)!.runs.push({
-      id: "run_approved_timeline", status: "requires_approval", input: "Search the relevant guidance.", approvalId: approval.id,
-      events: [{ id: "event_original_step", type: "run.tool_activity", at: 1, toolSlug: "CHUCK_SEARCH_SKILLS", status: "completed", message: "Earlier research step", summary: "Sources found" }],
-      createdAt: 1, updatedAt: 1,
-    });
-    await saveSession(userId, session);
-
-    const decisionPromise = api.fetch(new Request(`http://local/v1/approvals/${approval.id}`, { method: "POST", headers, body: JSON.stringify({ decision: "approve" }) }));
-    await agentCallStarted;
-    const inProgressResponse = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/run_approved_timeline`, { headers }));
-    const inProgress = await inProgressResponse.json() as { status: string; events: Array<{ id: string; type: string; status?: string }> };
-    assert.equal(inProgress.status, "running");
-    assert.equal(inProgress.events.some((event) => event.id === "event_original_step"), true);
-    assert.equal(inProgress.events.some((event) => event.type === "run.started"), true);
-
-    finishAgentCall();
-    const decision = await decisionPromise;
-    assert.equal(decision.status, 200);
-    const finalResponse = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/run_approved_timeline`, { headers }));
-    const finalRun = await finalResponse.json() as { status: string; output?: string; events: Array<{ id: string }> };
-    assert.equal(finalRun.status, "completed", JSON.stringify(finalRun));
-    assert.equal(finalRun.events.some((event) => event.id === "event_original_step"), true);
-    assert.match(finalRun.output ?? "", /Approval resumed successfully\.$/);
-  } finally {
-    finishAgentCall();
-    globalThis.fetch = originalFetch;
-  }
+  const startedAt = Date.now();
+  const decision = await api.fetch(new Request(`http://local/v1/approvals/${approval.id}`, { method: "POST", headers, body: JSON.stringify({ decision: "approve" }) }));
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(decision.status, 202);
+  assert.ok(elapsedMs < 2_000, `approval acknowledgement took ${elapsedMs}ms`);
+  const body = await decision.json() as { status: string; taskId: string; run: { status: string; taskId?: string; events: Array<{ id: string; type: string; status?: string }> } };
+  assert.equal(body.status, "approved");
+  assert.equal(body.run.status, "queued");
+  assert.equal(body.run.taskId, body.taskId);
+  assert.equal(body.run.events.some((event) => event.id === "event_original_step"), true);
+  assert.equal(body.run.events.some((event) => event.type === "run.queued"), true);
+  const queuedTask = await getTask(userId, body.taskId);
+  assert.equal(queuedTask?.approvedApprovalId, approval.id);
+  assert.deepEqual(queuedTask?.sdkHistory, approval.history);
+  assert.equal((await getApproval(userId, approval.id))?.status, "approved");
 });
 
-test("an approved action remains in the next model turn's conversation context", async () => {
-  const originalFetch = globalThis.fetch;
-  const originalDurableConfig = {
-    enabled: config.durableStateEnabled,
-    sdkRunsEnabled: config.durableStateSdkRunsEnabled,
-    missionsEnabled: config.durableStateMissionsEnabled,
-    durableMemoryEnabled: config.durableMemoryEnabled,
-    vectorUrl: config.upstashVectorRestUrl,
-    vectorToken: config.upstashVectorRestToken,
-  };
-  (config as { durableStateEnabled: boolean }).durableStateEnabled = false;
-  (config as { durableStateSdkRunsEnabled: boolean }).durableStateSdkRunsEnabled = false;
-  (config as { durableStateMissionsEnabled: boolean }).durableStateMissionsEnabled = false;
-  (config as { durableMemoryEnabled: boolean }).durableMemoryEnabled = false;
-  (config as { upstashVectorRestUrl: string }).upstashVectorRestUrl = "";
-  (config as { upstashVectorRestToken: string }).upstashVectorRestToken = "";
+test("an approved action is queued with the next model turn's conversation context", async () => {
   const externalId = "approval-failure-context-owner";
   const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
-  let followupMessages: Array<{ role: string; content?: string }> = [];
-  setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "approval-failure-context-session", tools: async () => [] }) } });
-  globalThis.fetch = (async (input, init) => {
-    const url = String(input);
-    if (!url.includes("openrouter.ai")) return new Response("offline", { status: 503 });
-    if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
-    const payload = JSON.parse(String(init?.body ?? "{}")) as { messages?: Array<{ role: string; content?: string }>; stream?: boolean };
-    if (payload.stream) followupMessages = payload.messages ?? [];
-    const text = payload.stream
-      ? `data: ${JSON.stringify({ choices: [{ delta: { role: "assistant", content: "I can see the previous run did not complete." }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`
-      : JSON.stringify({ choices: [{ message: { role: "assistant", content: "I didn't call any tools." }, finish_reason: "stop" }] });
-    return new Response(text, { status: 200, headers: { "content-type": payload.stream ? "text/event-stream" : "application/json" } });
-  }) as typeof fetch;
+  setSdkTaskWorkflowEnqueuerForTests(async (_ownerId, taskId) => `workflow-${taskId}`);
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId, "Content-Type": "application/json" };
+  const created = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers: { ...headers, "Idempotency-Key": "approval-failure-context-thread" }, body: JSON.stringify({}) }));
+  const thread = await created.json() as { id: string };
+  const approval = await createApproval({
+    userId,
+    toolSlug: "CHUCK_CONVERSATION_SEARCH",
+    args: { query: "What do you know about me so far?" },
+    request: "What do you know about me so far?",
+    history: [{ role: "user", content: "What do you know about me so far?", createdAt: 1 }],
+    model: "openai/gpt-luna-latest",
+  });
+  const session = await getSession(userId);
+  session.sdkThreads!.find((item) => item.id === thread.id)!.runs.push({
+    id: "run_approval_failure_context",
+    status: "requires_approval",
+    input: "What do you know about me so far?",
+    approvalId: approval.id,
+    events: [
+      { id: "find_one", type: "run.tool_activity", at: 1, toolSlug: "CHUCK_FIND_TOOLS", status: "completed", message: "Tool discovery completed" },
+      { id: "find_two", type: "run.tool_activity", at: 2, toolSlug: "CHUCK_FIND_TOOLS", status: "completed", message: "Tool discovery completed" },
+      { id: "search_approval", type: "run.tool_activity", at: 3, toolSlug: "CHUCK_CONVERSATION_SEARCH", status: "approval_required", message: "Waiting for approval" },
+    ],
+    createdAt: 1,
+    updatedAt: 3,
+  });
+  await saveSession(userId, session);
 
-  try {
-    const api = app();
-    const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId, "Content-Type": "application/json" };
-    const created = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers: { ...headers, "Idempotency-Key": "approval-failure-context-thread" }, body: JSON.stringify({}) }));
-    const thread = await created.json() as { id: string };
-    const approval = await createApproval({
-      userId,
-      toolSlug: "CHUCK_CONVERSATION_SEARCH",
-      args: { query: "What do you know about me so far?" },
-      request: "What do you know about me so far?",
-      history: [],
-      model: "openai/gpt-luna-latest",
-    });
-    const session = await getSession(userId);
-    session.sdkThreads!.find((item) => item.id === thread.id)!.runs.push({
-      id: "run_approval_failure_context",
-      status: "requires_approval",
-      input: "What do you know about me so far?",
-      approvalId: approval.id,
-      events: [
-        { id: "find_one", type: "run.tool_activity", at: 1, toolSlug: "CHUCK_FIND_TOOLS", status: "completed", message: "Tool discovery completed" },
-        { id: "find_two", type: "run.tool_activity", at: 2, toolSlug: "CHUCK_FIND_TOOLS", status: "completed", message: "Tool discovery completed" },
-        { id: "search_approval", type: "run.tool_activity", at: 3, toolSlug: "CHUCK_CONVERSATION_SEARCH", status: "approval_required", message: "Waiting for approval" },
-      ],
-      createdAt: 1,
-      updatedAt: 3,
-    });
-    await saveSession(userId, session);
+  const decision = await api.fetch(new Request(`http://local/v1/approvals/${approval.id}`, { method: "POST", headers, body: JSON.stringify({ decision: "approve" }) }));
+  assert.equal(decision.status, 202);
+  const result = await decision.json() as { status: string; taskId: string; run: { status: string; events: Array<{ id: string; type: string }> } };
+  assert.equal(result.status, "approved");
+  assert.equal(result.run.status, "queued");
+  assert.equal(result.run.events.some((item) => item.id === "find_one"), true);
+  assert.equal(result.run.events.some((item) => item.id === "find_two"), true);
+  assert.equal((await getTask(userId, result.taskId))?.sdkHistory?.[0]?.content, "What do you know about me so far?");
+});
 
-    const decision = await api.fetch(new Request(`http://local/v1/approvals/${approval.id}`, { method: "POST", headers, body: JSON.stringify({ decision: "approve" }) }));
-    assert.equal(decision.status, 200);
-    const settledSession = await getSession(userId);
-    const settledThread = settledSession.sdkThreads!.find((item) => item.id === thread.id)!;
-    assert.equal(settledThread.runs.find((item) => item.id === "run_approval_failure_context")?.error, undefined, JSON.stringify(settledThread.runs.find((item) => item.id === "run_approval_failure_context")));
-    assert.match(settledThread.history[0]?.content ?? "", /What do you know about me so far\?/);
-    assert.match(settledThread.history[1]?.content ?? "", /I didn't call any tools/i);
+test("a failed approval enqueue remains retryable with a fresh durable continuation", async () => {
+  const externalId = "approval-enqueue-retry-owner";
+  const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
+  let enqueueCalls = 0;
+  setSdkTaskWorkflowEnqueuerForTests(async (_ownerId, taskId) => {
+    enqueueCalls += 1;
+    if (enqueueCalls === 1) throw new Error("temporary queue outage");
+    return `workflow-${taskId}`;
+  });
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId, "Content-Type": "application/json" };
+  const thread = await (await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers, body: "{}" }))).json() as { id: string };
+  const approval = await createApproval({
+    userId,
+    toolSlug: "CHUCK_SEARCH_SKILLS",
+    args: { query: "sales" },
+    request: "Search the relevant guidance.",
+    history: [{ role: "user", content: "Find sales guidance", createdAt: 1 }],
+    model: "openai/gpt-luna-latest",
+  });
+  const session = await getSession(userId);
+  session.sdkThreads!.find((item) => item.id === thread.id)!.runs.push({
+    id: "run_approval_enqueue_retry",
+    status: "requires_approval",
+    input: "Search the relevant guidance.",
+    approvalId: approval.id,
+    events: [{ id: "retryable_approval_activity", type: "run.tool_activity", at: 1, toolSlug: "CHUCK_SEARCH_SKILLS", status: "approval_required", message: "Waiting for approval" }],
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  await saveSession(userId, session);
 
-    const followup = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/stream`, { method: "POST", headers, body: JSON.stringify({ input: "Why did you call find tools more than once?" }) }));
-    assert.equal(followup.status, 200);
-    await followup.text();
-    const modelContext = JSON.stringify(followupMessages);
-    assert.match(modelContext, /What do you know about me so far\?/);
-  } finally {
-    globalThis.fetch = originalFetch;
-    (config as { durableStateEnabled: boolean }).durableStateEnabled = originalDurableConfig.enabled;
-    (config as { durableStateSdkRunsEnabled: boolean }).durableStateSdkRunsEnabled = originalDurableConfig.sdkRunsEnabled;
-    (config as { durableStateMissionsEnabled: boolean }).durableStateMissionsEnabled = originalDurableConfig.missionsEnabled;
-    (config as { durableMemoryEnabled: boolean }).durableMemoryEnabled = originalDurableConfig.durableMemoryEnabled;
-    (config as { upstashVectorRestUrl: string }).upstashVectorRestUrl = originalDurableConfig.vectorUrl;
-    (config as { upstashVectorRestToken: string }).upstashVectorRestToken = originalDurableConfig.vectorToken;
-  }
+  const first = await api.fetch(new Request(`http://local/v1/approvals/${approval.id}`, { method: "POST", headers, body: JSON.stringify({ decision: "approve" }) }));
+  assert.equal(first.status, 503);
+  assert.equal((await getApproval(userId, approval.id))?.status, "pending");
+  const failedTask = (await listTasks(userId)).find((task) => task.sdkRunId === "run_approval_enqueue_retry");
+  assert.equal(failedTask?.status, "cancelled");
+
+  const second = await api.fetch(new Request(`http://local/v1/approvals/${approval.id}`, { method: "POST", headers, body: JSON.stringify({ decision: "approve" }) }));
+  assert.equal(second.status, 202);
+  const result = await second.json() as { taskId: string; run: { status: string; taskId?: string } };
+  assert.equal(result.run.status, "queued");
+  assert.equal(result.run.taskId, result.taskId);
+  assert.notEqual(result.taskId, failedTask?.id);
+  assert.equal(enqueueCalls, 2);
+  assert.equal((await getApproval(userId, approval.id))?.status, "approved");
 });
 
 test("SDK tool activity survives a disconnected stream while the same run keeps working", async () => {

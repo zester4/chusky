@@ -1392,6 +1392,8 @@ export interface TaskRecord {
   sdkRunId?: string;
   sdkThreadId?: string;
   sdkInput?: string;
+  /** Conversation snapshot captured at an approval boundary for exact resume context. */
+  sdkHistory?: Message[];
   sdkAttachments?: Array<{ id: string; name: string; contentType: string; size: number }>;
   sdkModel?: string;
   sdkTools?: { allow?: string[]; deny?: string[]; requireApproval?: string[] };
@@ -10394,6 +10396,7 @@ export async function createTask(userId: number, input: Pick<TaskRecord, "title"
     sdkRunId: input.sdkRunId,
     sdkThreadId: input.sdkThreadId,
     sdkInput: input.sdkInput,
+    sdkHistory: input.sdkHistory,
     sdkAttachments: input.sdkAttachments,
     sdkModel: input.sdkModel,
     sdkTools: input.sdkTools,
@@ -10403,6 +10406,7 @@ export async function createTask(userId: number, input: Pick<TaskRecord, "title"
     sdkInstructions: input.sdkInstructions,
     sdkOrganizationId: input.sdkOrganizationId,
     sdkOwnerPrivateRun: input.sdkOwnerPrivateRun === true ? true : undefined,
+    approvedApprovalId: input.approvedApprovalId,
     quotaReservationId: input.quotaReservationId,
     meetingFollowUp: input.meetingFollowUp,
     missionId: input.missionId,
