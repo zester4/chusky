@@ -201,7 +201,7 @@ test("CLI client exposes mission proof, context, department, and outcome control
     await client.missionProof("mis_1");
     await client.missionDoctor("mis_1");
     await client.missionControl("mis_1", { budget: { maxSlices: 20 } });
-    await client.createMission({ title: "Launch", objective: "Prepare launch", definitionOfDone: "Brief delivered", idempotencyKey: "launch-1" });
+    await client.createMission({ title: "Launch", objective: "Prepare launch", definitionOfDone: "Brief delivered", idempotencyKey: "launch-1", steps: [{ id: "checkpoint", title: "Checkpoint", objective: "Persist progress", allowedTools: ["CHUCK_MISSION_CHECKPOINT"] }] });
     await client.missionAction("mis_1", "pause");
     await client.replanMission("mis_1", { reason: "New evidence", steps: [{ title: "Recheck", objective: "Recheck the evidence" }] });
     await client.missionProviderEvent("mis_1", "stripe", "evt_1");
@@ -224,7 +224,7 @@ test("CLI client exposes mission proof, context, department, and outcome control
       "GET /cli/context", "POST /cli/context", "GET /cli/departments/catalog", "GET /cli/departments", "POST /cli/departments",
       "POST /cli/departments/sales/handoffs", "GET /cli/outcomes", "GET /cli/outcomes/qualified-fintech-leads", "POST /cli/outcomes/qualified-fintech-leads/plan",
     ]);
-    assert.deepEqual(calls[6].body, { title: "Launch", objective: "Prepare launch", definitionOfDone: "Brief delivered", idempotencyKey: "launch-1" });
+    assert.deepEqual(calls[6].body, { title: "Launch", objective: "Prepare launch", definitionOfDone: "Brief delivered", idempotencyKey: "launch-1", steps: [{ id: "checkpoint", title: "Checkpoint", objective: "Persist progress", allowedTools: ["CHUCK_MISSION_CHECKPOINT"] }] });
     assert.deepEqual(calls[9].body, { provider: "stripe", providerEventId: "evt_1" });
   } finally { globalThis.fetch = original; }
 });
