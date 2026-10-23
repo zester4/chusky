@@ -47,6 +47,7 @@ const meeting = await chusky.meetings.join({
   interactionMode: "representative",
   clientName: "Jordan Lee",
   objective: "Understand whether Acme Motors is a fit for the fleet program.",
+  clientContext: brief.brief,
 }, { idempotencyKey: "acme-fleet-meeting-2026-09-15" });
 ```
 
@@ -62,9 +63,13 @@ const brief = await chusky.meetings.prepare({
   objective: "Review the proposal and agree next steps",
 });
 
-await chusky.meetings.joinPreparation(preparation.id, {
-  clientName: brief.clientName,
-  objective: brief.objective,
+const listed = await chusky.meetings.list();
+const calendarPreparation = listed.preparations[0];
+if (!calendarPreparation) throw new Error("No prepared calendar meeting found");
+await chusky.meetings.joinPreparation(calendarPreparation.id, {
+  clientName: "Jordan Lee",
+  objective: "Review the proposal and agree next steps",
+  clientContext: brief.brief,
 });
 ```
 
@@ -99,11 +104,12 @@ meeting.
 ```ts
 const stop = new AbortController();
 
-await chusky.meetings.stream(undefined, (event) => {
-  for (const meeting of event.meetings) {
+for await (const event of chusky.meetings.stream(undefined, { signal: stop.signal })) {
+  if (event.type !== "snapshot") continue;
+  for (const meeting of event.workspace.meetings) {
     console.log(meeting.id, meeting.status, meeting.runtimeState);
   }
-}, stop.signal);
+}
 
 // Call stop.abort() when the dashboard view unmounts.
 ```

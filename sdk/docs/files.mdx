@@ -20,11 +20,12 @@ await fetch(intent.uploadUrl, {
 
 const verified = await chusky.files.complete(intent.id);
 
-// For Node.js Buffers, Uint8Arrays, or browser Blobs:
+// The convenience method accepts Uint8Array or ArrayBuffer. For a browser Blob:
+const data = new Uint8Array(await file.arrayBuffer());
 const uploaded = await chusky.files.upload({
   name: "logo.png",
   contentType: "image/png",
-  bytes,
+  data,
 });
 ```
 

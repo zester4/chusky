@@ -54,7 +54,9 @@ const chusky = new Chusky({
   userId: `customer_${session.accountId}`,
 });
 
-const thread = await chusky.threads.create({ source: "embedded-chat" });
+const thread = await chusky.threads.create({
+  metadata: { source: "embedded-chat" },
+});
 const stream = chusky.threads.runs(thread.id).stream({ input: message });
 // Convert the SDK events to NDJSON and return a streaming Response.
 ```

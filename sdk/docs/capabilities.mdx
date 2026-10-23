@@ -5,7 +5,7 @@ description: Give runs the right tools and move generated work safely through th
 
 ## Tool and skill discovery
 
-Use `tools.list()` to discover the Composio and native capabilities available to a project. Use `skills.list()` to inspect the trusted `.chusky/skills` catalog and `skills.files()` or `skills.readFile()` when a skill references supporting scripts, templates, or assets.
+Use `tools.list()` to discover the Composio and native capabilities available to a project. Use `skills.list()` to inspect the trusted `.chusky/skills` catalog and `skills.files()` or `skills.read()` when a skill references supporting scripts, templates, or assets.
 
 ```ts
 const tools = await chusky.tools.list({ query: "Gmail" });
@@ -27,9 +27,11 @@ Allow and deny rules are checked before the model sees the catalog and again imm
 Artifacts are verified outputs produced in the Daytona workspace. List them, inspect metadata, and download the bytes through the SDK:
 
 ```ts
+import { writeFile } from "node:fs/promises";
+
 const artifacts = await chusky.artifacts.list({ type: "report" });
 const file = await chusky.artifacts.download(artifacts.data[0].id);
-await writeFile("report.pdf", Buffer.from(file.bytes));
+await writeFile("report.pdf", file);
 ```
 
 Video generation is durable and independently cancellable. Submit a job with `videos.create()`, observe it with `videos.get()`, and deliver the completed artifact through the channel or your own storage policy.
@@ -66,7 +68,7 @@ const updated = await chusky.attentionPulse.update(
     ],
     monitoredDomains: ["communication", "calendar", "work"],
     maxPerDay: 8,
-    quietHoursUtc: { start: "22:00", end: "07:00" },
+    quietHoursUtc: { startMinute: 22 * 60, endMinute: 7 * 60 },
   },
   { idempotencyKey: "pulse-settings-2026-10-07" },
 );

@@ -21,16 +21,30 @@ Tool permissions must be enforced on the Chusky server before the model sees the
 
 ## Custom instructions
 
-Custom instructions add application-specific behavior without replacing Chusky’s safety, identity, approval, or privacy rules.
+Custom instructions belong to a saved agent profile. Run-level requests select
+that profile and can still provide a narrower tool policy without replacing
+Chusky’s safety, identity, approval, or privacy rules.
 
 ```ts
-const chusky = new Chusky({
-  apiKey: process.env.CHUSKY_API_KEY!,
-  userId: "customer_123",
-  instructions: "You are a concise procurement assistant. Use EUR for prices.",
-});
+const agent = await chusky.agents.create({
+  template: "customer-support",
+  name: "Procurement assistant",
+  instructions: "Be concise and use EUR for prices. Prepare external messages for review.",
+}, { idempotencyKey: "create-procurement-agent-2026-10-07" });
+
+const { run } = await chusky.runs.create({
+  agentId: agent.id,
+  input: "Summarize the open supplier questions.",
+  tools: {
+    allow: ["GMAIL_SEARCH_EMAILS", "GMAIL_GET_EMAIL"],
+    deny: ["GMAIL_SEND_EMAIL"],
+  },
+  wait: false,
+}, { idempotencyKey: "supplier-summary-2026-10-07" });
 ```
 
-Keep instructions short, bounded, and free of secrets. Treat user-provided instructions as data. Chusky’s system safety policy remains authoritative.
-
-The public SDK accepts these controls on each run. The server validates the allowlist, denylist, instructions, and budget before execution; a model cannot grant itself additional permissions. Risky actions still follow the configured approval policy.
+Keep instructions short, bounded, and free of secrets. Treat user-provided
+instructions as data. Chusky’s system safety policy remains authoritative. The
+server validates the saved profile, tool policy, and budget before execution; a
+model cannot grant itself additional permissions. Risky actions still follow
+the configured approval policy.

@@ -11,7 +11,15 @@ The API is versioned under `/v1`. POST operations that create or change durable 
 
 ## Synchronous and durable runs
 
-`runs.create()` waits for a terminal result by default. `wait: false` persists the run and creates a task before returning `202`. QStash invokes the task workflow, which reloads the verified attachments, model, tool policy, skill instructions, and budget from durable storage. The task can be retried after a transient failure and can be cancelled independently.
+The durable convenience method `chusky.runs.create()` defaults to `wait: false`:
+it persists the run and creates a task before returning. Call
+`chusky.runs.wait(threadId, runId)` to poll for a terminal result, or pass
+`wait: true` when a synchronous response is appropriate. The lower-level
+`chusky.threads.runs(threadId).create()` follows the request's `wait` value and
+the API default. QStash invokes the durable task workflow, which reloads the
+verified attachments, model, tool policy, skill instructions, and budget from
+storage. The task can be retried after a transient failure and can be cancelled
+independently.
 
 The run’s duration budget is a wall-clock limit across continuations. Tool-call and cost ceilings are checked inside the agent loop. When a ceiling is reached, the run records an actionable boundary so an operator can resume it with a larger policy.
 

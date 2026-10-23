@@ -11,6 +11,9 @@ Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
   honor creation-time budget ceilings.
 - Recover retryable durable scheduling failures when a mission create is
   retried with its original idempotency key.
+- Type the meeting preparation response as `MeetingMission` and align the
+  guides with the runtime's meeting stream, file upload, artifact download,
+  agent profile, and durable run APIs.
 - Document the authenticated dashboard's scope catalog and least-privilege
   personal API-key defaults.
 

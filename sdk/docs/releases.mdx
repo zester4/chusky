@@ -5,6 +5,32 @@ description: Validate, version, publish, and track Chusky SDK releases.
 
 The canonical SDK source is the separate [`zester4/chusky-sdk`](https://github.com/zester4/chusky-sdk) repository. Its **Release Chusky SDK** workflow automatically validates and publishes when `package.json` or `package-lock.json` changes on `main`. It also supports a manually dispatched exact version and `sdk-vX.Y.Z` tags for recovery. The agent monorepo's release workflow is a guarded fallback; never start two releases for the same version concurrently.
 
+The checked-in SDK mirror currently contains `1.15.1`. The latest published
+package is `1.15.0`; publish and tag `1.15.1` only after the canonical
+repository's release checks pass.
+
+## 1.15.1 — Mission execution fences
+
+- Expose mission-step `allowedTools` as a typed execution fence, including an
+  explicit empty list.
+- Keep provider-read verification out of explicitly tool-less worker slices and
+  prevent model-driven replans from widening their current tool fence.
+- Honor creation-time budget ceilings and recover retryable scheduling failures
+  when a mission is retried with its original idempotency key.
+
+## 1.15.0 — Run progress
+
+- Add typed `RunProgress` data to run snapshots and append-only `run.progress`
+  stream/replay events for planning, research, action, approval, and completion.
+- Keep progress and evidence bounded and provider-neutral; raw tool arguments,
+  connected-app payloads, credentials, and results are never included.
+
+## 1.14.0 — Private meeting mission state
+
+- Expose bounded owner-private meeting mission state in typed meeting records,
+  including decisions, open questions, commitments, next move, and checkpoint.
+- Shared meeting projections continue to omit this private working state.
+
 ## 1.13.0 — Verified trigger action context
 
 Dashboard actions for connected-app trigger events can now continue in Chat with
@@ -44,7 +70,7 @@ The SDK repository must have an `NPM_TOKEN` Actions secret with publish access t
 From the agent monorepo, `npm run sdk:check` validates its SDK mirror. To preflight an exact version without publishing, run:
 
 ```bash
-npm run sdk:publish -- --version 1.7.0 --dry-run
+npm run sdk:publish -- --version 1.15.1 --dry-run
 ```
 
 The preflight verifies that the manifest and lockfile agree and runs the SDK's publish lifecycle checks. Prefer publishing from the dedicated SDK repository; do not change the package repository URL to the agent monorepo.

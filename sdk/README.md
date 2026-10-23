@@ -28,54 +28,6 @@ CHUSKY_API_KEY=chsk_your_project_key
 
 The SDK automatically uses the hosted Chusky API, so `baseUrl` is optional.
 
-## Attention Pulse
-
-Use the typed Attention Pulse resource to configure Elena for an owner-scoped
-account. Enabling Pulse schedules durable checks; it does not grant provider
-access or bypass approval for financial, destructive, permission-changing, or
-high-impact outbound actions.
-
-```ts
-const current = await client.attentionPulse.get();
-const updated = await client.attentionPulse.update({
-  enabled: true,
-  cadence: "hourly",
-  authority: "prepare",
-  deliveryTargets: [{ provider: "telegram" }],
-  monitoredDomains: ["gmail", "calendar"],
-  maxPerDay: 4,
-}, { idempotencyKey: "pulse-setup-2026-10-07" });
-```
-
-`attentionPulse.get()` also returns `health`. Use it to render an honest
-control-plane state: `healthy`, `running`, `never_run`, `stale`, `failed`, or
-`waiting_for_connection`. The `recoveryAction` is a bounded UI hint such as
-`run_now`, `inspect`, or `connect_app`; it does not authorize provider access
-or bypass an approval. The dashboard bell and Chat remain a delivery surface
-for actionable Pulse candidates even when no external channel is connected.
-
-The `authority` values are `observe`, `prepare`, and `execute_reversible`.
-Provider actions still pass through the server's connected-account, ownership,
-approval, and verification controls.
-
-For run-level observability, `client.jobs.occurrences(id)` returns a bounded
-`pulseEvidence` receipt on Attention Pulse occurrences. It records due-watch
-checks, remaining observations/candidates, handling or delegation, approval
-waits, and dashboard/external delivery without exposing provider payloads or
-claiming that an external write succeeded.
-
-Recurring jobs expose an owner-scoped `scheduleError` when the worker cannot
-reconcile their durable QStash schedule. It is bounded, clears after a later
-successful repair, and does not imply that a provider action was attempted.
-
-Connected-app action cards opened from the dashboard can carry
-`metadata.triggerEventId` and `metadata.triggerActionId` into a Chat run. The
-API validates both against the authenticated owner's saved trigger event before
-admitting the run; event text never grants permission and consequential actions
-still require the normal approval boundary.
-Pass `baseUrl` only when targeting a staging or self-hosted API. Never expose
-`CHUSKY_API_KEY` in browser code, mobile apps, public repositories, or prompts.
-
 ~~~ts
 import { Chusky } from "@chusky/sdk";
 
@@ -104,6 +56,56 @@ if (completed.status === "failed") {
 
 console.log(completed.output ?? "The run completed without text output.");
 ~~~
+
+## Attention Pulse
+
+Attention Pulse provides owner-scoped proactive checks. Enabling it schedules
+durable checks; it does not grant provider access or bypass approval for
+financial, destructive, permission-changing, or high-impact outbound actions.
+
+Using the `chusky` client from the quickstart:
+
+~~~ts
+const current = await chusky.attentionPulse.get();
+const updated = await chusky.attentionPulse.update({
+  enabled: true,
+  cadence: "hourly",
+  authority: "prepare",
+  deliveryTargets: [{ provider: "telegram" }],
+  monitoredDomains: ["gmail", "calendar"],
+  maxPerDay: 4,
+}, { idempotencyKey: "pulse-setup-2026-10-07" });
+~~~
+
+`attentionPulse.get()` also returns `health`. Use it to render an honest
+control-plane state: `healthy`, `running`, `never_run`, `stale`, `failed`, or
+`waiting_for_connection`. The `recoveryAction` is a bounded UI hint such as
+`run_now`, `inspect`, or `connect_app`; it does not authorize provider access
+or bypass an approval. The dashboard bell and Chat remain delivery surfaces
+for actionable Pulse candidates even when no external channel is connected.
+
+The `authority` values are `observe`, `prepare`, and `execute_reversible`.
+Provider actions still pass through the server's connected-account, ownership,
+approval, and verification controls.
+
+For run-level observability, `chusky.jobs.occurrences(id)` returns a bounded
+`pulseEvidence` receipt on Attention Pulse occurrences. It records due-watch
+checks, remaining observations/candidates, handling or delegation, approval
+waits, and dashboard/external delivery without exposing provider payloads or
+claiming that an external write succeeded.
+
+Recurring jobs expose an owner-scoped `scheduleError` when the worker cannot
+reconcile their durable QStash schedule. It is bounded, clears after a later
+successful repair, and does not imply that a provider action was attempted.
+
+Connected-app action cards opened from the dashboard can carry
+`metadata.triggerEventId` and `metadata.triggerActionId` into a Chat run. The
+API validates both against the authenticated owner's saved trigger event before
+admitting the run; event text never grants permission and consequential actions
+still require the normal approval boundary.
+
+Pass `baseUrl` only when targeting a staging or self-hosted API. Never expose
+`CHUSKY_API_KEY` in browser code, mobile apps, public repositories, or prompts.
 
 ## The execution model
 
