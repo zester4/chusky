@@ -1425,7 +1425,13 @@ async function main(): Promise<void> {
                   else if (activity.status === "completed" || activity.status === "failed") send({ type: "tool_end" });
                   const eventType = activity.status === "started" ? "tool_started" : activity.status === "completed" ? "tool_completed" : activity.status === "failed" ? "tool_failed" : undefined;
                   if (activity.status === "completed" && activity.receiptId) verifiedActions.push({ toolSlug: activity.toolSlug, receiptId: activity.receiptId, summary: normalizeVoiceText(activity.message).slice(0, 400) });
-                  if (eventType) await appendPhoneCallEvent(userId, callId, { type: eventType, summary: normalizeVoiceText(activity.message).slice(0, 400), toolSlug: activity.toolSlug, ...(activity.receiptId ? { receiptId: activity.receiptId } : {}) }).catch(() => undefined);
+                  // The authenticated stream event is the caller-facing
+                  // progress boundary. Keep the durable audit write
+                  // fire-and-forget so a slow Redis/Neon write cannot delay
+                  // the actual provider tool dispatch or the next spoken
+                  // update. The call outcome reconciliation remains the
+                  // durable backstop if this observational write is delayed.
+                  if (eventType) void appendPhoneCallEvent(userId, callId, { type: eventType, summary: normalizeVoiceText(activity.message).slice(0, 400), toolSlug: activity.toolSlug, ...(activity.receiptId ? { receiptId: activity.receiptId } : {}) }).catch(() => undefined);
                 },
               });
             });
