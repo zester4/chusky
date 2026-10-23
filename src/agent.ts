@@ -732,6 +732,8 @@ export interface OrChatOptions {
   sessionId?: string;
   /** Ask OpenRouter to route across the selected model set by recent latency. */
   latencyOptimized?: boolean;
+  /** Explicit provider ranking for this workload. */
+  providerSort?: "latency" | "throughput";
   /** Total elapsed-time budget shared across all HTTP attempts for this turn. */
   maxTotalElapsedMs?: number;
   /** Safe trigger correlation for timing logs; contains no prompt or user content. */
@@ -763,10 +765,11 @@ export async function orChat(
   const routing = typeof options === "number" ? { preferredMaxLatencySeconds: options } : (options ?? {});
   const preferredMaxLatencySeconds = routing.preferredMaxLatencySeconds ?? config.openRouterPreferredMaxLatencySeconds;
   const fallbackModels = routing.fallbackModels ?? config.openRouterFallbackModels;
+  const providerSort = routing.providerSort ?? (routing.latencyOptimized ? "latency" : undefined);
   const body: Record<string, unknown> = {
     model,
     messages,
-    max_tokens: routing.maxTokens ?? 4096,
+    max_completion_tokens: routing.maxTokens ?? 4096,
     // OpenRouter keeps provider fallback enabled by default. Declaring it here
     // makes the production intent explicit. Do not require every provider to
     // support every optional request parameter: multimodal and reasoning
@@ -779,7 +782,7 @@ export async function orChat(
       ...(routing.preferredMinThroughput && routing.preferredMinThroughput > 0
         ? { preferred_min_throughput: { p50: routing.preferredMinThroughput } }
         : {}),
-      ...(routing.latencyOptimized ? { sort: { by: "latency", partition: "none" } } : {}),
+      ...(providerSort ? { sort: { by: providerSort, partition: "none" } } : {}),
     },
     ...(fallbackModels.length
       ? { models: [model, ...fallbackModels.filter((fallback) => fallback !== model)] }
@@ -801,6 +804,7 @@ export async function orChat(
   let budgetExhausted = false;
   let attemptsMade = 0;
   const requestStartedAt = Date.now();
+  let firstTextDeltaAt: number | undefined;
   const requestedTotalElapsedMs = routing.maxTotalElapsedMs
     ? Math.max(1, Math.min(routing.maxTotalElapsedMs, 120_000))
     : Number.POSITIVE_INFINITY;
@@ -820,6 +824,7 @@ export async function orChat(
     try {
       const attemptTimeoutMs = Math.max(1, Math.min(openRouterAttemptTimeoutMs(attempt), remainingMs));
       attemptsMade += 1;
+      const attemptStartedAt = Date.now();
       if (trace) logger.info({ ...trace, model: model.slice(0, 160), attempt: attemptsMade, timeoutMs: attemptTimeoutMs }, "Trigger model request attempt started");
       const attemptRequest = requestSignal(signal, attemptTimeoutMs);
       try {
@@ -836,8 +841,32 @@ export async function orChat(
         });
         if (res.ok) {
           const response = onDelta
-            ? await readStreamingChat(res, async (text) => { streamedOutputExposed = true; await onDelta(text); })
+            ? await readStreamingChat(res, async (text) => {
+              streamedOutputExposed = true;
+              if (text && firstTextDeltaAt === undefined) {
+                firstTextDeltaAt = Date.now();
+                logger.info({
+                  model: model.slice(0, 160),
+                  attempt: attemptsMade,
+                  ttftMs: firstTextDeltaAt - requestStartedAt,
+                  providerWaitMs: firstTextDeltaAt - attemptStartedAt,
+                  streaming: true,
+                  ...(trace ?? {}),
+                }, "OpenRouter first text delta");
+              }
+              await onDelta(text);
+            })
             : await res.json() as ChatResponse;
+          logger.info({
+            model: model.slice(0, 160),
+            attempt: attemptsMade,
+            elapsedMs: Date.now() - requestStartedAt,
+            attemptElapsedMs: Date.now() - attemptStartedAt,
+            ...(firstTextDeltaAt ? { ttftMs: firstTextDeltaAt - requestStartedAt } : {}),
+            streaming: Boolean(onDelta),
+            finishReason: response.choices[0]?.finish_reason,
+            ...(trace ?? {}),
+          }, "OpenRouter response received");
           if (trace) logger.info({ ...trace, model: model.slice(0, 160), finishReason: response.choices[0]?.finish_reason, attempt: attemptsMade, elapsedMs: Date.now() - requestStartedAt }, "Trigger model response received");
           return response;
         }
@@ -2755,6 +2784,23 @@ async function executeAgent(
   if (onStatus) await onStatus(humanProgressStatus("understanding"));
 
   const durableRunId = options?.runId ?? channelContext?.runId ?? `run_${randomUUID()}`;
+  // OpenRouter's short-lived provider affinity is useful only when it follows
+  // the same conversation. A user-wide key mixed unrelated chats together and
+  // reduced cache reuse while increasing the chance of a stale warm route.
+  // Hash the scope so provider metadata never contains user or conversation
+  // identifiers, while keeping it stable across model rounds in one thread.
+  const modelSessionScope = options?.missionId
+    ? `mission:${options.missionId}`
+    : options?.taskId
+    ? `task:${options.taskId}`
+    : options?.meetingId
+    ? `meeting:${options.meetingId}`
+    : channelContext?.conversationId
+    ? `channel:${channelContext.provider}:${channelContext.conversationId}`
+    : options?.parentRunId
+    ? `thread:${options.parentRunId}`
+    : durableRunId;
+  const modelSessionId = `chusky_${createHash("sha256").update(`${userId}:${modelSessionScope}`).digest("hex").slice(0, 48)}`;
   const voiceTurn = options?.voiceTurn === true;
   const voicePreparationKey = voiceTurn ? `${userId}:${options?.voiceSessionId ?? durableRunId}` : undefined;
   const voiceRoutingText = userRequestText(userMessage);
@@ -4196,19 +4242,20 @@ async function executeAgent(
           reasoningEffort: "minimal",
         } : channelContext?.triggerEventId ? {
           fallbackModels: config.openRouterFallbackModels,
-          latencyOptimized: true,
+          providerSort: "latency",
+          sessionId: modelSessionId,
           maxTotalElapsedMs: config.triggerModelRequestBudgetMs,
           triggerEventId: channelContext.triggerEventId,
           triggerRound: round,
         } : structuredArtifactRequest || malformedToolCallPending ? {
           maxTokens: config.openRouterArtifactMaxTokens,
-          latencyOptimized: true,
-          sessionId: `chat_${userId}`,
+          providerSort: "throughput",
+          sessionId: modelSessionId,
         } : {
           maxTokens: noToolTurn ? config.openRouterConversationalMaxTokens : config.openRouterInteractiveMaxTokens,
           fallbackModels: config.openRouterFallbackModels,
-          latencyOptimized: true,
-          sessionId: `chat_${userId}`,
+          providerSort: "latency",
+          sessionId: modelSessionId,
         };
         response = await orChat(requestModel, modelMessages, modelAvailableTools, signal, streamModelText, undefined, runRoutingOptions);
       }
@@ -4230,19 +4277,20 @@ async function executeAgent(
           reasoningEffort: "minimal",
         } : channelContext?.triggerEventId ? {
           fallbackModels: config.openRouterFallbackModels,
-          latencyOptimized: true,
+          providerSort: "latency",
+          sessionId: modelSessionId,
           maxTotalElapsedMs: config.triggerModelRequestBudgetMs,
           triggerEventId: channelContext.triggerEventId,
           triggerRound: round,
         } : structuredArtifactRequest || malformedToolCallPending ? {
           maxTokens: config.openRouterArtifactMaxTokens,
-          latencyOptimized: true,
-          sessionId: `chat_${userId}`,
+          providerSort: "throughput",
+          sessionId: modelSessionId,
         } : {
           maxTokens: noToolTurn ? config.openRouterConversationalMaxTokens : config.openRouterInteractiveMaxTokens,
           fallbackModels: config.openRouterFallbackModels,
-          latencyOptimized: true,
-          sessionId: `chat_${userId}`,
+          providerSort: "latency",
+          sessionId: modelSessionId,
         };
         response = await orChat(requestModel, modelMessages, modelAvailableTools, signal, streamModelText, undefined, runRoutingOptions);
       } else {

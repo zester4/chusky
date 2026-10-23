@@ -1331,14 +1331,20 @@ test("agent uses the selected model for a normal text response", async () => {
   }) as typeof fetch;
   setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "text-session", tools: async () => [], execute: async () => undefined }) } });
   try {
-    const result = await runAgent(830001, "hello", [], "test/model");
+    const result = await runAgent(830001, "hello", [], "test/model", undefined, undefined, undefined, undefined, undefined, { parentRunId: "thread-fast-path" });
     assert.equal(result.text, "done");
     assert.deepEqual(requests.map((request) => request.model), ["test/model"]);
+    assert.equal(requests[0]?.max_completion_tokens, config.openRouterConversationalMaxTokens);
+    assert.match(String(requests[0]?.session_id), /^chusky_[a-f0-9]{48}$/);
+    const sessionId = requests[0]?.session_id;
     assert.deepEqual(requests[0]?.provider, {
       allow_fallbacks: true,
-      preferred_max_latency: { p90: 45 },
+      preferred_max_latency: { p90: 5 },
       sort: { by: "latency", partition: "none" },
     });
+    requests.length = 0;
+    await runAgent(830001, "hello again", [], "test/model", undefined, undefined, undefined, undefined, undefined, { parentRunId: "thread-fast-path" });
+    assert.equal(requests[0]?.session_id, sessionId, "the same thread should retain provider cache affinity");
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -1481,7 +1487,12 @@ test("raises the output budget for structured artifact calls", async () => {
   try {
     const result = await runAgent(830054, "Create a PDF playbook with charts", [], "test/model");
     assert.match(result.text, /could not complete/);
-    assert.equal(requests[0]?.max_tokens, config.openRouterArtifactMaxTokens);
+    assert.equal(requests[0]?.max_completion_tokens, config.openRouterArtifactMaxTokens);
+    assert.deepEqual(requests[0]?.provider, {
+      allow_fallbacks: true,
+      preferred_max_latency: { p90: 5 },
+      sort: { by: "throughput", partition: "none" },
+    });
   } finally {
     globalThis.fetch = originalFetch;
     config.nativeToolLoading = originalNativeToolLoading;
@@ -1869,7 +1880,7 @@ test("private voice turns keep the Chusky context but skip Composio setup and du
       preferred_min_throughput: { p50: 50 },
       sort: { by: "latency", partition: "none" },
     });
-    assert.equal(requestBody?.max_tokens, config.voiceMaxTokens);
+    assert.equal(requestBody?.max_completion_tokens, config.voiceMaxTokens);
     assert.deepEqual(requestBody?.models, ["test/model", ...config.voiceFallbackModels.filter((fallback) => fallback !== "test/model")]);
     assert.equal(requestBody?.reasoning_effort, "minimal");
     assert.equal((await listAgentRuns(userId)).length, 0);
@@ -2245,7 +2256,7 @@ test("owner-private voice and meeting turns execute routine writes directly and 
     );
     assert.match(result.text, /email was sent/);
     assert.equal(created, 1, "the private voice turn must initialize the owner's Composio session");
-    assert.equal(requests[0]?.max_tokens, config.voiceMaxTokens, "private meeting/call speech should use the bounded voice response budget");
+    assert.equal(requests[0]?.max_completion_tokens, config.voiceMaxTokens, "private meeting/call speech should use the bounded voice response budget");
     assert.deepEqual(requests[0]?.models, ["test/model", ...config.voiceFallbackModels.filter((fallback) => fallback !== "test/model")]);
     assert.equal(requests[0]?.session_id, "private-meeting-test", "voice requests should retain provider prompt-cache affinity");
     assert.deepEqual(executed, [{ slug: "GMAIL_SEND_EMAIL", args: { to: "client@example.com", subject: "Follow-up", body: "Thanks for the conversation." } }]);

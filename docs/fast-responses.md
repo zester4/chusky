@@ -35,9 +35,20 @@ Configuration (no new credentials required):
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `TURN_OPENING_ENABLED` | `true` | Rollout/rollback switch |
+| `TURN_OPENING_ENABLED` | `false` | Optional rollout/rollback switch for a separate opening model |
 | `TURN_OPENING_MODEL` | `openai/gpt-4.1-nano` | Separate verified low-latency text model |
 | `TURN_OPENING_DEADLINE_MS` | `600` | Generation deadline, capped at 2500 ms |
+| `OPENROUTER_PREFERRED_MAX_LATENCY_SECONDS` | `5` | Soft provider-routing preference for interactive model turns; `0` disables it |
+| `OPENROUTER_INTERACTIVE_MAX_TOKENS` | `2048` | Completion budget for action-bearing interactive turns |
+| `OPENROUTER_CONVERSATIONAL_MAX_TOKENS` | `768` | Completion budget for short conversational turns |
+
+Interactive and voice turns use OpenRouter's latency ranking. Structured artifact
+generation uses throughput ranking instead, so long outputs do not compete with
+short replies for the same provider preference. Each model request also uses a
+stable hashed affinity key for its conversation, mission, task, or meeting;
+unrelated chats do not share a cache session. The request sends the current
+`max_completion_tokens` field and records first-text-delta and total response
+latency in structured logs.
 
 The opening frame is sent before its durable run snapshot is written. The
 snapshot is queued immediately and terminal closeout waits for that queue, so a

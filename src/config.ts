@@ -890,7 +890,7 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   openRouterFallbackModels: optional("OPENROUTER_FALLBACK_MODELS", "")
     .split(",").map((model) => model.trim()).filter(Boolean),
   // This is a routing preference, not a hard client timeout. Set 0 to omit it.
-  openRouterPreferredMaxLatencySeconds: nonNegativeInt("OPENROUTER_PREFERRED_MAX_LATENCY_SECONDS", 45),
+  openRouterPreferredMaxLatencySeconds: nonNegativeInt("OPENROUTER_PREFERRED_MAX_LATENCY_SECONDS", 5),
   // Used for trusted local-time wording in the model context. UTC remains the
   // safe fallback when no valid IANA timezone is configured.
   timezone: optional("CHUSKY_TIMEZONE", process.env.TZ || "UTC"),
