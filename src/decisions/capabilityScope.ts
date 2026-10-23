@@ -29,7 +29,9 @@ function mentionsSurface(text: string, surface: ExclusiveCapabilitySurface): boo
   return SURFACE_ALIASES[surface].some((alias) => new RegExp(`\\b${escaped(alias)}\\b`, "i").test(text));
 }
 
-/** Detect only explicit boundaries; ordinary mentions of Treg/Monid do not fence a turn. */
+/** Detect only explicit positive boundaries; ordinary or negative mentions of
+ * a provider do not fence a turn. A sentence such as “do not call connected
+ * apps” is a guardrail, not a request to run inside a Composio-only scope. */
 export function resolveExplicitCapabilityScope(text: string): ExclusiveCapabilityScope | undefined {
   const normalized = text.replace(/\s+/g, " ").trim();
   if (!normalized) return undefined;
@@ -38,11 +40,7 @@ export function resolveExplicitCapabilityScope(text: string): ExclusiveCapabilit
     if (!mentionsSurface(normalized, surface)) continue;
     const surfacePattern = SURFACE_ALIASES[surface].map(escaped).join("|");
     const onlyNearSurface = new RegExp(`(?:\\b(?:use|via|through|with|run|call|search)\\b[^.!?\\n]{0,80}\\b(?:${surfacePattern})\\b[^.!?\\n]{0,24}\\bonly\\b|\\bonly\\b[^.!?\\n]{0,24}\\b(?:${surfacePattern})\\b)`, "i");
-    const excludedOtherSurface = /\b(?:not|never|without|no)\b[^.!?\n]{0,80}\b(?:composio|browser|web search|web-search|native tools?|treg|monid)\b/i.test(normalized);
     if (onlyNearSurface.test(normalized)) return { surface, reason: "explicit_only" };
-    if (excludedOtherSurface && new RegExp(`\\b(?:not|never|without|no)\\b[^.!?\\n]{0,80}\\b(?:${surfacePattern})\\b`, "i").test(normalized)) {
-      return { surface, reason: "explicit_exclusion" };
-    }
   }
   return undefined;
 }

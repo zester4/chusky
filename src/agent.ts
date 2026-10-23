@@ -2780,8 +2780,15 @@ async function executeAgent(
   // An explicit "Treg only"/"Monid only" instruction is a hard execution
   // boundary. It is derived from the current request only; prior history can
   // never broaden the current turn's provider scope.
+  // Durable workers receive an internally composed mission/task prompt. It
+  // often contains policy language such as “do not call connected apps” or
+  // “never use browser tools”; that is not an owner request to select a
+  // provider surface. Only an explicit trusted scope supplied by the caller
+  // may fence a durable worker. Inferring a scope from the internal prompt
+  // can otherwise turn a negative guardrail into a positive Composio-only
+  // scope and remove the worker's lifecycle tools entirely.
   const executionScope = options?.executionScope
-    ?? resolveExplicitCapabilityScope(voiceRoutingText);
+    ?? (options?.taskId || options?.missionId || options?.missionStepId ? undefined : resolveExplicitCapabilityScope(voiceRoutingText));
   const sharedScope = channelContext?.scope === "shared";
   const ownerPrivateRun = options?.ownerPrivateRun === true && !sharedScope;
   const voiceScopedAccess = voiceTurn && options?.voiceScopedAccess === true && !ownerPrivateRun && !sharedScope;

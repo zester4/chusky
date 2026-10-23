@@ -14,4 +14,6 @@ test("explicit Treg-only wording becomes a hard provider scope", () => {
 test("ordinary provider mentions do not unexpectedly fence a turn", () => {
   assert.equal(resolveExplicitCapabilityScope("Research Stripe with Treg and compare the result."), undefined);
   assert.deepEqual(resolveExplicitCapabilityScope("Use Monid only for this lookup."), { surface: "monid", reason: "explicit_only" });
+  assert.equal(resolveExplicitCapabilityScope("Use mission lifecycle controls and do not call any connected app."), undefined);
+  assert.equal(resolveExplicitCapabilityScope("Do not use browser tools for this step."), undefined);
 });
