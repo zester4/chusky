@@ -548,7 +548,13 @@ async function main(): Promise<void> {
     await Promise.race([ready, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Relay did not become ready")), 15000).unref())]);
     const currentHour = new Date().getUTCHours();
     const windowStart = `${String(currentHour).padStart(2, "0")}:00`;
-    const windowEnd = `${String(Math.min(23, currentHour + 2)).padStart(2, "0")}:59`;
+    const windowEndHour = Math.min(23, currentHour + 2);
+    const windowEnd = `${String(windowEndHour).padStart(2, "0")}:59`;
+    // The mission validator measures HH:MM windows in whole minutes. Keep
+    // the test budget inside the actual window even at the end of the day;
+    // a fixed 7,200-second budget is invalid for a 22:00–23:59 window.
+    const campaignDailyBudgetSeconds = Math.min(7_200, (windowEndHour * 60 + 59 - currentHour * 60) * 60);
+    const campaignWorkSchedule = { timezone: "UTC", windowStart, windowEnd, dailyBudgetSeconds: campaignDailyBudgetSeconds, cadenceSeconds: 60 };
     const relationshipCampaignSteps = (profile: CampaignProfile, outcome: string): Array<{ id: string; title: string; objective: string; dependsOn?: string[]; allowedTools?: string[] }> => {
       const mapping = campaignMappings[profile];
       const allowed = (stepId: string): string[] | undefined => mapping[stepId] ? [mapping[stepId].tool] : undefined;
@@ -582,13 +588,13 @@ async function main(): Promise<void> {
       { id: "followup", title: "Follow-up", objective: "Send a concise verified follow-up after the meeting.", dependsOn: ["meeting"], allowedTools: ["GMAIL_SEND_EMAIL"] },
       { id: "client", title: "Client", objective: "Create a verified client-care record in the CRM.", dependsOn: ["followup"], allowedTools: ["HUBSPOT_CREATE_TICKET"] },
       { id: "feedback", title: "Feedback", objective: "Read feedback signals and close the mission with a verified receipt.", dependsOn: ["client"], allowedTools: ["GMAIL_LIST_MESSAGES"] },
-    ], { campaignProfile: "baseline", workSchedule: { timezone: "UTC", windowStart, windowEnd, dailyBudgetSeconds: 7200, cadenceSeconds: 60 } });
+    ], { campaignProfile: "baseline", workSchedule: campaignWorkSchedule });
 
-    const lostDeals = await createScenario("re-engage-lost-deals", "campaign", relationshipCampaignSteps("lost_deals", "revive stalled opportunities from the last six to twelve months"), { campaignProfile: "lost_deals", workSchedule: { timezone: "UTC", windowStart, windowEnd, dailyBudgetSeconds: 7200, cadenceSeconds: 60 } });
-    const partners = await createScenario("find-referral-partners", "campaign", relationshipCampaignSteps("partners", "build a qualified referral and integration partner pipeline"), { campaignProfile: "partners", workSchedule: { timezone: "UTC", windowStart, windowEnd, dailyBudgetSeconds: 7200, cadenceSeconds: 60 } });
-    const churned = await createScenario("win-back-churned-customers", "campaign", relationshipCampaignSteps("churned_customers", "bring realistic former customers back before they settle with a competitor"), { campaignProfile: "churned_customers", workSchedule: { timezone: "UTC", windowStart, windowEnd, dailyBudgetSeconds: 7200, cadenceSeconds: 60 } });
-    const recruiting = await createScenario("recruit-right-candidates", "campaign", relationshipCampaignSteps("recruiting", "fill an open role with strong, relevant candidates"), { campaignProfile: "recruiting", workSchedule: { timezone: "UTC", windowStart, windowEnd, dailyBudgetSeconds: 7200, cadenceSeconds: 60 } });
-    const keyAccounts = await createScenario("protect-and-expand-key-accounts", "campaign", relationshipCampaignSteps("key_accounts", "reduce churn risk and find expansion opportunities in active accounts"), { campaignProfile: "key_accounts", workSchedule: { timezone: "UTC", windowStart, windowEnd, dailyBudgetSeconds: 7200, cadenceSeconds: 60 } });
+    const lostDeals = await createScenario("re-engage-lost-deals", "campaign", relationshipCampaignSteps("lost_deals", "revive stalled opportunities from the last six to twelve months"), { campaignProfile: "lost_deals", workSchedule: campaignWorkSchedule });
+    const partners = await createScenario("find-referral-partners", "campaign", relationshipCampaignSteps("partners", "build a qualified referral and integration partner pipeline"), { campaignProfile: "partners", workSchedule: campaignWorkSchedule });
+    const churned = await createScenario("win-back-churned-customers", "campaign", relationshipCampaignSteps("churned_customers", "bring realistic former customers back before they settle with a competitor"), { campaignProfile: "churned_customers", workSchedule: campaignWorkSchedule });
+    const recruiting = await createScenario("recruit-right-candidates", "campaign", relationshipCampaignSteps("recruiting", "fill an open role with strong, relevant candidates"), { campaignProfile: "recruiting", workSchedule: campaignWorkSchedule });
+    const keyAccounts = await createScenario("protect-and-expand-key-accounts", "campaign", relationshipCampaignSteps("key_accounts", "reduce churn risk and find expansion opportunities in active accounts"), { campaignProfile: "key_accounts", workSchedule: campaignWorkSchedule });
 
     const retry = await createScenario("transient-provider-retry", "retry", [{ id: "retry", title: "Retry", objective: "Retry a non-dispatched provider read once and complete with a receipt.", allowedTools: ["GOOGLE_SHEETS_GET"] }]);
     const uncertain = await createScenario("uncertain-write-reconciliation", "uncertain", [{ id: "uncertain", title: "Uncertain write", objective: "Reconcile an accepted-but-uncertain email send without sending twice.", allowedTools: ["GMAIL_SEND_EMAIL", "GMAIL_GET_MESSAGE"] }]);
