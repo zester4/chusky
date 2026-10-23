@@ -509,6 +509,26 @@ test("Neon SDK run writes validate identity and use version-guarded updates", as
   await assert.rejects(() => state.writeSdkRun(42, "thr_test", "run_test", { ...run, updatedAt: 999 }), /timestamps are invalid/);
 });
 
+test("new durable CLI runs carry the row version across sequential admission writes", async () => {
+  const pool = new FakePool();
+  const state = new NeonDurableState(pool as never);
+  const first = { id: "run_cli_sequence", status: "queued", events: [], createdAt: 1_000, updatedAt: 1_000 };
+  pool.reads = [{ run_id: first.id }];
+  await state.writeSdkRun(42, "cli_thread_sequence", first.id, first);
+
+  pool.reads = [{
+    user_id: "42", thread_id: "cli_thread_sequence", run_id: first.id, payload: first,
+    created_at: new Date(1_000), updated_at: new Date(1_000), version: "1",
+  }];
+  const admitted = await state.readSdkRun(42, "cli_thread_sequence", first.id);
+  assert.equal(admitted?.payload.durableVersion, 1);
+
+  const attached = { ...first, taskId: "task_cli_sequence", updatedAt: 1_001, durableVersion: admitted?.payload.durableVersion };
+  pool.reads = [{ run_id: first.id }];
+  await state.writeSdkRun(42, "cli_thread_sequence", first.id, attached, admitted?.payload.durableVersion);
+  assert.equal(pool.calls.at(-1)?.values?.[6], 1, "the follow-up write must use the inserted row version");
+});
+
 test("SDK run content hashes ignore local version metadata but detect persisted changes", () => {
   const run = { id: "run_test", status: "running", events: [], updatedAt: 1_000, durableVersion: 4 };
   const hash = durableSdkRunHash(run);
