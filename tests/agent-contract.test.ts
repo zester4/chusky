@@ -3059,6 +3059,69 @@ test("agent uses the native account boundary and hides the raw Composio account 
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test("an unconnected routed app cannot fall through to unrelated private tools", async () => {
+  const userId = 830019;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const previousJevMode = config.jevMode;
+  const previousJevSurfaces = config.jevSurfaces;
+  const originalFetch = globalThis.fetch;
+  const requests: Array<Record<string, any>> = [];
+  const executed: string[] = [];
+  const providerTool = (name: string) => ({ type: "function", function: { name, description: `Test ${name}`, parameters: { type: "object", properties: {} } } });
+  const session = {
+    sessionId: "missing-app-boundary-session",
+    tools: async () => [
+      providerTool("GMAIL_FETCH_EMAILS"),
+      providerTool("GOOGLECALENDAR_EVENTS_LIST"),
+      providerTool("COMPOSIO_REMOTE_WORKBENCH"),
+      providerTool("COMPOSIO_SEARCH_TOOLS"),
+      providerTool("COMPOSIO_MANAGE_CONNECTIONS"),
+      providerTool("COMPOSIO_MULTI_EXECUTE_TOOL"),
+    ],
+    execute: async (slug: string) => { executed.push(slug); return { successful: true, data: {} }; },
+  };
+  setAgentDependenciesForTests({ composio: {
+    create: async () => session,
+    connectedAccounts: {
+      list: async () => ({ items: [{ id: "ca_gmail", toolkit: { slug: "gmail" }, status: "ACTIVE" }] }),
+    },
+  } });
+  config.jevMode = "off";
+  config.jevSurfaces = new Set(["composio"]);
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    if (String(input).includes("/chat/completions")) {
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, any>;
+      requests.push(body);
+      // Simulate a model trying to reuse a previous Gmail path even though
+      // the current objective is an unconnected Shopify order lookup.
+      return requests.length === 1
+        ? toolResponse("GMAIL_FETCH_EMAILS", "{}", "wrong-tool")
+        : chatResponse({ role: "assistant", content: "This should not be used as the answer." });
+    }
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(userId, "Check why my Shopify order has not shipped and tell me the next step.", [], "test/model");
+    const offered = (requests[0]?.tools ?? []).map((tool: any) => tool.function.name);
+    assert.ok(offered.includes("COMPOSIO_SEARCH_TOOLS"), "connected-app discovery remains available");
+    assert.ok(offered.includes("COMPOSIO_MANAGE_CONNECTIONS"), "connection recovery remains available");
+    assert.ok(!offered.includes("GMAIL_FETCH_EMAILS"));
+    assert.ok(!offered.includes("GOOGLECALENDAR_EVENTS_LIST"));
+    assert.ok(!offered.includes("COMPOSIO_REMOTE_WORKBENCH"));
+    assert.ok(!offered.includes("COMPOSIO_MULTI_EXECUTE_TOOL"));
+    assert.deepEqual(executed, [], "an unrelated provider action must never be dispatched");
+    assert.match(result.text, /shopify|woocommerce|not connected|connect/i);
+    assert.doesNotMatch(result.text, /This should not be used/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    config.jevMode = previousJevMode;
+    config.jevSurfaces = previousJevSurfaces;
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
 test("treats an empty optional connected-account toolkit filter as omitted", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830018);

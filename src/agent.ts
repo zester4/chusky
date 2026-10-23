@@ -56,6 +56,7 @@ import { hasValidImageEnvelope, sniffImageMime } from "./channels/imageMedia.js"
 import { ROUTED_SKILL_REFERENCES, listSkillSummaries, readSkillFile, routedSkillContext, skillContextForBinding } from "./skills/catalog.js";
 import { routeSkillsForTurn } from "./decisions/skillRouter.js";
 import { composioDecisionContext, routeComposioForTurn, toComposioAction, toComposioToolkitInfo, type ComposioAction, type ComposioToolkitInfo } from "./decisions/composioRouter.js";
+import { missingComposioConnectionMessage } from "./composioRouting.js";
 import { recordTurnMode } from "./decisions/telemetry.js";
 import { decideTurnAction, isClearlyConversational } from "./decisions/actionGate.js";
 import type { MissionRoutingCache } from "./decisions/missionRoutingCache.js";
@@ -3615,6 +3616,28 @@ async function executeAgent(
     composioRoutePromise,
     nativeToolRoutePromise,
   ]);
+  // A routed app that is not connected is a terminal capability state for
+  // this turn, not an invitation to try another owner's private app. Keep
+  // discovery and connection recovery available, but remove unrelated
+  // provider actions from the model payload. This is intentionally derived
+  // from the current route; it never becomes a global tool cap.
+  const connectionRequiredToolkits = [...new Set([
+    ...(composioDecision?.unconnectedToolkits ?? []),
+    ...(composioDecision?.route?.needsConnection ? composioDecision.route.preferredToolkits.filter((toolkit) => !composioDecision.route?.connectedToolkits.includes(toolkit)) : []),
+  ].map((toolkit) => toolkit.trim().toLowerCase()).filter(Boolean))];
+  const composioConnectionBlocked = Boolean(
+    composioDecision?.route?.needsConnection
+      && connectionRequiredToolkits.length
+      && !(allow?.size && [...allow].some((slug) => isProviderActionSlug(slug.trim().toUpperCase()))),
+  );
+  const composioConnectionRecoveryTools = new Set([
+    "COMPOSIO_SEARCH_TOOLS",
+    "COMPOSIO_MANAGE_CONNECTIONS",
+    "CHUCK_LIST_CONNECTED_ACCOUNTS",
+  ]);
+  const connectionBlockMessage = composioConnectionBlocked && composioDecision?.route
+    ? missingComposioConnectionMessage(composioDecision.route)
+    : undefined;
   // Generic Composio gateways are transport mechanisms, not capability
   // grants. Only exact actions selected by this turn's route, an explicit
   // worker allowlist, or a persisted mission-step route may pass through
@@ -3853,7 +3876,10 @@ async function executeAgent(
   // block, not only the static system prompt. Memory, route cards, upgrade
   // notes, and prior assistant messages can all contain old implementation
   // vocabulary from before the provider-neutral boundary was introduced.
-  const dynamicSystemContext = sanitizeModelFacingText(`${currentTurnContract}\n\n${capabilityPlanningInstruction}\n\n${temporalContext}${accountContext ? `\n\n${accountContext}` : ""}${composioRouteContext ? `\n\n${composioRouteContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\n${mediaRequest ? "Media skill preflight" : "Relevant project skill guidance"} (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}${imageRetryContext}`);
+  const connectionBlockContext = connectionBlockMessage
+    ? `\n\nCURRENT CAPABILITY BLOCK: ${connectionBlockMessage} Do not read, answer from, or substitute any unrelated connected app. Do not use prior tool results as evidence for this request. Keep COMPOSIO_SEARCH_TOOLS and COMPOSIO_MANAGE_CONNECTIONS available only to help the owner connect the mapped app, then stop and explain the exact next step.`
+    : "";
+  const dynamicSystemContext = sanitizeModelFacingText(`${currentTurnContract}\n\n${capabilityPlanningInstruction}\n\n${temporalContext}${accountContext ? `\n\n${accountContext}` : ""}${composioRouteContext ? `\n\n${composioRouteContext}` : ""}${connectionBlockContext}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\n${mediaRequest ? "Media skill preflight" : "Relevant project skill guidance"} (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}${imageRetryContext}`);
   const promptHistory = (voiceTurn ? boundedVoiceHistory(history) : history).map((message) => ({
     ...message,
     // Preserve the user's exact wording while preventing prior assistant
@@ -3949,6 +3975,7 @@ async function executeAgent(
   let checkpointPersistenceUnavailable = false;
   let interactiveContinuationExtensions = 0;
   let successfulToolCalls = 0;
+  let connectionBlockViolation = false;
 
   const persistRun = async (status: AgentRunRecord["status"], eventType: string, output?: string, eventData?: Record<string, unknown>): Promise<void> => {
     if (options?.ephemeral || voiceTurn || earlyConversational) return;
@@ -4117,7 +4144,10 @@ async function executeAgent(
         return name === forcedApproval.toolSlug && !deny.has(name) && (!allow || allow.has(name));
       })
       : undefined;
-    const routedToolsWithApproval = [...routedTools, ...connectedMcpTools, ...(approvalResumeTool ? [approvalResumeTool] : [])]
+    const capabilityScopedRoutedTools = composioConnectionBlocked && !forcedApproval
+      ? routedTools.filter((tool) => composioConnectionRecoveryTools.has(toolSchemaName(tool)))
+      : routedTools;
+    const routedToolsWithApproval = [...capabilityScopedRoutedTools, ...(composioConnectionBlocked && !forcedApproval ? [] : connectedMcpTools), ...(approvalResumeTool ? [approvalResumeTool] : [])]
       .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index);
     const imageSafeTools = roundMediaSelection
       ? routedToolsWithApproval.filter((tool) => toolSchemaName(tool) !== "COMPOSIO_MULTI_EXECUTE_TOOL")
@@ -4417,6 +4447,10 @@ async function executeAgent(
         // supplied (an empty allowlist means no tools at all).
         const toolIsAllowed = modelAvailableTools.some((tool) => toolSchemaName(tool) === slug)
           && (!allow || allow.has(slug));
+        if (composioConnectionBlocked && isProviderActionSlug(slug)) {
+          connectionBlockViolation = true;
+          throw new Error(`${connectionBlockMessage ?? "The requested connected app is not connected."} No unrelated provider action was attempted.`);
+        }
         if (executionScope && !toolBelongsToCapabilityScope(slug, executionScope)) {
           throw new Error(`Tool ${slug} is outside this run's ${capabilityScopeLabel(executionScope)} scope.`);
         }
@@ -5085,6 +5119,7 @@ async function executeAgent(
             const record = candidate as any;
             const name = composioActionSlug(String(record?.slug ?? record?.toolSlug ?? record?.tool_slug ?? record?.function?.name ?? record?.name ?? ""));
             if (!isProviderActionSlug(name) || deny.has(name) || allow && !allow.has(name)
+              || composioConnectionBlocked
               || executionScope && !toolBelongsToCapabilityScope(name, executionScope)
               || !voiceModelAllowed(name) || voiceToolPolicy && !voiceToolkitAllowed(name, voiceToolPolicy)) continue;
             const tool = exactComposioModelTool(candidate, name);
@@ -5281,6 +5316,12 @@ async function executeAgent(
           messages.push({ role: "user", content: [{ type: "text", text: `Retrieved saved image asset ${String(asset.name ?? "image")}. Inspect it as visual reference for the current task.` }, { type: "image_url", image_url: { url: `data:${mediaType};base64,${bytes.toString("base64")}` } }] });
         }
       }
+    }
+    if (connectionBlockViolation) {
+      const message = connectionBlockMessage ?? "The requested connected app is not connected yet. Connect it, then retry this request.";
+      await persistRun("completed", "run.capability_blocked", message, { toolkits: connectionRequiredToolkits.slice(0, 8) });
+      recordTurnMode({ mode: "action", reason: "connected_app_not_connected", noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision), capabilityFailureReply: true });
+      return { text: message, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionRoutingCache: missionRoutingResult, ...(privateLinks.length ? { privateLinks } : {}) };
     }
     if (pendingBrowserVisualContextMessage) messages.push(pendingBrowserVisualContextMessage);
     if (browserRunStopped) {
