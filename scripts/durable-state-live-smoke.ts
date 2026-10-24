@@ -3,8 +3,6 @@ import { resolve } from "node:path";
 import dotenv from "dotenv";
 import Redis from "ioredis";
 import { Pool } from "pg";
-import { securePostgresConnectionString } from "../src/postgresConnection.js";
-import { reserveDurableSmokeScope } from "../src/durableSmokeGuard.js";
 
 dotenv.config({ path: process.env.CHUSKY_ENV_FILE ?? resolve(process.cwd(), ".env") });
 
@@ -13,19 +11,32 @@ if (!databaseUrl || !process.env.REDIS_URL) {
   throw new Error("DURABLE_STATE_DATABASE_URL (or BETTER_AUTH_DATABASE_URL) and REDIS_URL are required.");
 }
 
-// Configure before importing store/config so this exercises Chusky's normal
-// Redis session core plus the real Neon durable-domain repository.
+// Configure before importing any module that reads src/config.ts. This keeps
+// CHUSKY_ENV_FILE effective when the smoke runs from a local PowerShell
+// checkout with a staging-only env file.
 process.env.DURABLE_STATE_ENABLED = "true";
-process.env.DURABLE_STATE_DATABASE_URL = databaseUrl;
 process.env.DURABLE_STATE_SDK_RUNS_ENABLED = "true";
+process.env.DURABLE_STATE_SDK_TABLES_ENABLED = "true";
+process.env.DURABLE_STATE_DATABASE_URL = databaseUrl;
 
-const expectedDomains = ["assets", "conversation", "memories", "profile", "sdk"];
+const { securePostgresConnectionString } = await import("../src/postgresConnection.js");
+const { DURABLE_SESSION_DOMAINS } = await import("../src/neonDurableState.js");
+const { reserveDurableSmokeScope } = await import("../src/durableSmokeGuard.js");
+
+const expectedDomains = [...DURABLE_SESSION_DOMAINS];
 const userId = 8_000_000_000_000_000 + randomInt(0, 1_000_000);
 const marker = `durable-state-smoke-${randomInt(1_000_000, 9_999_999)}`;
 const threadId = `thr_smoke_${randomInt(1_000_000, 9_999_999)}`;
 const runId = `run_smoke_${randomInt(1_000_000, 9_999_999)}`;
 const sessionKey = `chuck:session:${userId}`;
 const domainsKey = `chuck:session-domains:${userId}`;
+const domainCacheKeys = expectedDomains.map((domain) => `chuck:session-domain:${userId}:${domain}`);
+const sdkTablesKey = `chuck:sdk-tables:${userId}`;
+const sdkThreadsKey = `chuck:sdk-threads:${userId}`;
+const sdkRunKey = `chuck:sdk-run:${userId}:${threadId}:${runId}`;
+const sdkRunListKey = `chuck:sdk-runs:${userId}:${threadId}`;
+const sdkRunUsageKey = `chuck:sdk-run-usage:${userId}`;
+const smokeRedisKeys = [sessionKey, domainsKey, ...domainCacheKeys, sdkTablesKey, sdkThreadsKey, sdkRunKey, sdkRunListKey, sdkRunUsageKey];
 const reservationKey = `chuck:durable-state-live-smoke:${userId}`;
 const reservationToken = randomUUID();
 const pool = new Pool({ connectionString: securePostgresConnectionString(databaseUrl), max: 1, connectionTimeoutMillis: 10_000 });
@@ -40,13 +51,13 @@ async function main(): Promise<void> {
     releaseSmokeScope = await reserveDurableSmokeScope(userId, reservationToken, {
       async hasNeonRows(ownerId) {
         const result = await pool.query<{ present: boolean }>(
-          "SELECT EXISTS (SELECT 1 FROM public.chusky_session_domain WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_sdk_run WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_conversation_message WHERE user_id = $1) AS present",
+          "SELECT EXISTS (SELECT 1 FROM public.chusky_session_domain WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_sdk_run WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_sdk_thread WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_sdk_audit_event WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_sdk_idempotency WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_conversation_message WHERE user_id = $1) AS present",
           [ownerId],
         );
         return result.rows[0]?.present === true;
       },
       async hasRedisSessionKeys() {
-        return (await redis.exists(sessionKey, domainsKey)) > 0;
+        return (await redis.exists(...smokeRedisKeys)) > 0;
       },
       async acquireReservation(_ownerId, token) {
         return await redis.set(reservationKey, token, "EX", 600, "NX") === "OK";
@@ -65,7 +76,10 @@ async function main(): Promise<void> {
     const store = await import("../src/store.js");
     await store.initStore();
     stage = "load-session";
-    const session = await store.getSession(userId);
+    // Load the SDK projection explicitly. Ordinary chat reads intentionally do
+    // not load it, and a smoke that manually injects sdkThreads into such a
+    // partial session would test an unsupported stale-write path.
+    const session = await store.getSessionWithSdkTables(userId);
     session.history = [{ role: "user", content: marker }];
     session.totalMessages = 1;
     session.sdkThreads = [{
@@ -94,6 +108,10 @@ async function main(): Promise<void> {
       "SELECT COUNT(*)::int AS records FROM public.chusky_sdk_run WHERE user_id = $1 AND thread_id = $2 AND run_id = $3",
       [userId, threadId, runId],
     );
+    const threadRows = await pool.query<{ records: number }>(
+      "SELECT COUNT(*)::int AS records FROM public.chusky_sdk_thread WHERE user_id = $1 AND thread_id = $2",
+      [userId, threadId],
+    );
     const sdkDomain = await pool.query<{ embedded_runs: number }>(
       "SELECT COALESCE(SUM(jsonb_array_length(thread.value->'runs')), 0)::int AS embedded_runs FROM public.chusky_session_domain CROSS JOIN LATERAL jsonb_array_elements(payload->'sdkThreads') AS thread(value) WHERE user_id = $1 AND domain = 'sdk'",
       [userId],
@@ -117,9 +135,10 @@ async function main(): Promise<void> {
       sdkRunRoundTrip: restoredRun?.output === marker,
       allDomainsPresent: expectedDomains.every((domain) => presentDomains.includes(domain)),
       oneRunRow: runRows.rows[0]?.records === 1,
+      oneThreadProjection: threadRows.rows[0]?.records === 1,
       noEmbeddedRuns: sdkDomain.rows[0]?.embedded_runs === 0,
       oneMessageRow: messageRows.rows[0]?.records === 1,
-      unchangedDomainVersions: domainVersions.rows[0]?.total === 5,
+      unchangedDomainVersions: domainVersions.rows[0]?.total === expectedDomains.length,
       unchangedSdkRunVersion: runVersion.rows[0]?.version === 1,
     };
     if (Object.values(smokeChecks).some((passed) => !passed)) {
@@ -131,14 +150,15 @@ async function main(): Promise<void> {
     // use Neon's durable profile/domains and recent message table, not return a
     // blank session or depend on cache payloads.
     stage = "expire-redis-cache-and-recover-from-neon";
-    const expiredKeys = await redis.del(`chuck:session:${userId}`, `chuck:session-domains:${userId}`);
-    const recovered = await store.getSession(userId);
+    const expiredKeys = await redis.del(...smokeRedisKeys);
+    const recovered = await store.getSessionWithSdkTables(userId);
     stage = "read-sdk-run-after-cache-expiry";
+    const recoveredDirectRun = await store.getSdkRun(userId, threadId, runId);
     const recoveredWithRuns = await store.getSessionWithSdkRuns(userId, threadId);
     const recoveredThread = recovered.sdkThreads?.find((thread) => thread.id === threadId);
     const recoveredRun = recoveredWithRuns.sdkThreads?.find((thread) => thread.id === threadId)?.runs.find((run) => run.id === runId);
     if (recovered.history?.[0]?.content !== marker || recovered.model !== session.model
-      || !recoveredThread || recoveredThread.runs.length !== 0 || recoveredRun?.output !== marker) {
+      || !recoveredThread || recoveredThread.runs.length !== 0 || recoveredDirectRun?.output !== marker || recoveredRun?.output !== marker) {
       throw new Error("Expired Redis session did not recover its recent context and profile from Neon.");
     }
 
@@ -148,8 +168,10 @@ async function main(): Promise<void> {
       expiredRedisCacheRecoveredFromNeon: true,
       domains: result.rows.map(({ domain, records }) => ({ domain, records })),
       sdkRunRows: runRows.rows[0]?.records ?? 0,
+      sdkThreadRows: threadRows.rows[0]?.records ?? 0,
+      directSdkRunReadBack: recoveredDirectRun?.output === marker,
       conversationRows: messageRows.rows[0]?.records ?? 0,
-      unchangedRepeatSaveKeptDomainAndRunVersions: domainVersions.rows[0]?.total === 5 && runVersion.rows[0]?.version === 1,
+      unchangedRepeatSaveKeptDomainAndRunVersions: domainVersions.rows[0]?.total === expectedDomains.length && runVersion.rows[0]?.version === 1,
       embeddedSdkRuns: sdkDomain.rows[0]?.embedded_runs ?? 0,
       redisKeysExpiredForRecoveryTest: expiredKeys,
       payloadInspected: false,
@@ -163,14 +185,17 @@ async function main(): Promise<void> {
     const cleanup = releaseSmokeScope ? await Promise.allSettled([
       pool.query("DELETE FROM public.chusky_session_domain WHERE user_id = $1", [userId]),
       pool.query("DELETE FROM public.chusky_sdk_run WHERE user_id = $1", [userId]),
+      pool.query("DELETE FROM public.chusky_sdk_thread WHERE user_id = $1", [userId]),
+      pool.query("DELETE FROM public.chusky_sdk_audit_event WHERE user_id = $1", [userId]),
+      pool.query("DELETE FROM public.chusky_sdk_idempotency WHERE user_id = $1", [userId]),
       pool.query("DELETE FROM public.chusky_conversation_message WHERE user_id = $1", [userId]),
-      redis.del(sessionKey, domainsKey),
+      redis.del(...smokeRedisKeys),
     ]) : [];
     const reservationRelease = releaseSmokeScope
       ? await Promise.allSettled([releaseSmokeScope()])
       : [];
     const leftovers = releaseSmokeScope ? await pool.query<{ present: boolean }>(
-      "SELECT EXISTS (SELECT 1 FROM public.chusky_session_domain WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_sdk_run WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_conversation_message WHERE user_id = $1) AS present",
+      "SELECT EXISTS (SELECT 1 FROM public.chusky_session_domain WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_sdk_run WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_sdk_thread WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_sdk_audit_event WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_sdk_idempotency WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_conversation_message WHERE user_id = $1) AS present",
       [userId],
     ) : undefined;
     await Promise.allSettled([pool.end(), redis.quit()]);
@@ -180,7 +205,7 @@ async function main(): Promise<void> {
       throw new Error("The live smoke could not confirm cleanup of its isolated test records.");
     }
     console.log(JSON.stringify(releaseSmokeScope
-      ? { isolatedTestDataCleaned: true, redisSessionKeysRemoved: cleanup[3]?.status === "fulfilled" ? cleanup[3].value : 0 }
+      ? { isolatedTestDataCleaned: true, redisSessionKeysRemoved: cleanup.at(-1)?.status === "fulfilled" ? cleanup.at(-1)!.value : 0 }
       : { syntheticScopeCleanupSkipped: true }));
   }
   if (runError) throw runError;
