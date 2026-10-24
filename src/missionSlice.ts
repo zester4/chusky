@@ -92,6 +92,12 @@ export async function settleMissionSlice({ task, mission, currentMissionStep, re
   if (finalized?.status === "blocked" || finalized?.status === "failed") return { status: "blocked" as const, message: finalized.error ?? "Autonomous mission needs evidence or repair", checkpoint: finalized.checkpoint, nextAction: finalized.nextAction };
   const refreshed = await getMission(task.userId, mission.id);
   if (refreshed) {
+    // The final step may be complete while this worker still owns a running
+    // task lease. Return a terminal task outcome, but defer mission closeout
+    // until settleTaskRun durably marks this task completed.
+    if (refreshed.status === "running" && refreshed.steps.length > 0 && refreshed.steps.every((step) => step.status === "completed")) {
+      return { status: "completed" as const, message: "Mission steps are complete; terminal closeout will commit after task settlement.", result: result.text, checkpoint: refreshed.checkpoint };
+    }
     await reconcileMissionExecution(task.userId, mission.id, enqueue, task.id);
     if (task.missionStepId && refreshed.activeStepIds?.length && !refreshed.activeStepIds.includes(task.missionStepId)) {
       return { status: "completed" as const, message: "Mission branch completed; the next dependency-ready branch was scheduled.", result: result.text, checkpoint: refreshed.checkpoint };

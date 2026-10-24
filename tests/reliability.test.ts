@@ -36,7 +36,7 @@ test("native expired resume does not create an approval loop", async () => {
   assert.equal(waiting?.status, "running");
   assert.equal((await listApprovals(ownerId)).filter((item) => item.toolSlug === "CHUCK_MISSION_RESUME").length, 0);
   const completion = await nativeTool(ownerId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId: "verify", result: "Existing result checked" }) as { stepCompletion?: string; status?: string };
-  assert.ok(completion.stepCompletion === "not_ready" || completion.status === "completed");
+  assert.ok(completion.stepCompletion === "not_ready" || completion.status === "completed" || completion.status === "running");
   assert.equal((await listApprovals(ownerId)).filter((item) => item.toolSlug === "CHUCK_MISSION_RESUME").length, 0);
 });
 

@@ -193,8 +193,8 @@ test("the durable worker can carry a receipt-gated mission slice to completion",
       await recordTrustedMissionEvidence(userId, mission.id, [{ id: "receipt-golden", kind: "tool_receipt", summary: "Provider confirmed the send", ref: "receipt://golden", verified: true, verifiedBy: "system" }], "send");
       await completeMissionStep(userId, mission.id, "send", "Provider receipt recorded.");
       const finalized = await finalizeMissionIfReady(userId, mission.id, { blockOnUnresolved: true });
-      assert.equal(finalized?.status, "completed");
-      return { status: "completed" as const, message: "Mission completed", result: finalized?.result };
+      assert.equal(finalized?.status, "running");
+      return { status: "completed" as const, message: "Mission step completed; worker settlement will close the mission", result: "Provider receipt recorded." };
     },
   });
 

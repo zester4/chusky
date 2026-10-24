@@ -258,19 +258,29 @@ try {
 
   const deadline = Date.now() + timeoutMs;
   let finalMission = await getMission(userId, mission.id);
-  while (finalMission && !["completed", "blocked", "failed", "cancelled"].includes(finalMission.status) && Date.now() < deadline) {
+  let tasks = (await listTasks(userId)).filter((task) => task.missionId === mission.id);
+  let terminalMissionObservedWithUnsettledTask = false;
+  while (finalMission && Date.now() < deadline) {
+    const missionTerminal = ["completed", "blocked", "failed", "cancelled"].includes(finalMission.status);
+    const tasksTerminal = tasks.length > 0 && tasks.every((task) => ["completed", "blocked", "failed", "cancelled"].includes(task.status));
+    if (missionTerminal && tasks.some((task) => !["completed", "cancelled"].includes(task.status))) terminalMissionObservedWithUnsettledTask = true;
+    if (missionTerminal && tasksTerminal) break;
     await new Promise((resolve) => setTimeout(resolve, 1000));
     finalMission = await getMission(userId, mission.id);
+    tasks = (await listTasks(userId)).filter((task) => task.missionId === mission.id);
   }
   console.error("[live-smoke] mission terminal state: " + (finalMission?.status ?? "missing"));
-  const tasks = (await listTasks(userId)).filter((task) => task.missionId === mission.id);
+  tasks = (await listTasks(userId)).filter((task) => task.missionId === mission.id);
+  const allTasksCompleted = tasks.length === stages.length && tasks.every((task) => task.status === "completed");
   const result = {
-    ok: finalMission?.status === "completed",
+    ok: finalMission?.status === "completed" && allTasksCompleted && !terminalMissionObservedWithUnsettledTask,
     missionId: mission.id,
     userId,
     status: finalMission?.status,
     modelCalls,
     taskStatuses: tasks.map((task) => ({ id: task.id, stepId: task.missionStepId, status: task.status, attempts: task.attempt })),
+    allTasksCompleted,
+    terminalMissionObservedWithUnsettledTask,
     delays,
     timeoutMs,
   };

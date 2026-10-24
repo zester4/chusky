@@ -139,6 +139,13 @@ export async function reconcileMissionExecution(userId: number, missionId: strin
     && (!active.has(task.missionStepId) || finalized.steps.find((step) => step.id === task.missionStepId)?.status !== "running"));
   await Promise.all(obsoleteTasks.map((task) => cancelTask(userId, task.id)));
 
+  // Cancelling stale queued tasks may have removed the last non-terminal task
+  // that was preventing closeout. Re-check after cleanup so API/native step
+  // completion can close a mission immediately, while an active worker still
+  // remains protected by preserveTaskId until its settlement.
+  const afterTaskCleanup = await finalizeMissionIfReady(userId, missionId, { blockOnUnresolved: true }) ?? finalized;
+  if (afterTaskCleanup.status !== "running") return afterTaskCleanup;
+
   let scheduled: MissionRecord | undefined;
   try {
     scheduled = await scheduleMissionSteps(userId, finalized, enqueue);

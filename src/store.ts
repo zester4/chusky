@@ -11143,6 +11143,13 @@ export async function finalizeMissionIfReady(userId: number, id: string, options
   let mission = await getMission(userId, id);
   if (!mission || mission.status !== "running" || mission.steps.some((step) => step.status !== "completed")) return mission;
 
+  // Mission and task state are persisted separately. A worker can complete
+  // the final step while its own task lease is still running, so do not expose
+  // a terminal mission until every associated task is terminal as well. The
+  // worker retries this closeout immediately after its task settlement.
+  const tasks = await listTasksForMission(userId, id);
+  if (tasks.some((task) => !["completed", "cancelled"].includes(task.status))) return mission;
+
   if (mission.verification?.mode === "strict") {
     mission = await verifyMission(userId, id) ?? mission;
     if (!mission.verification?.verified) {
@@ -12011,6 +12018,14 @@ export async function settleTaskRun(userId: number, id: string, leaseToken: stri
     runAt: retryable ? Date.now() + (delayMs ?? 0) : normalized.status === "queued" ? normalized.runAt : undefined,
   }, taskEvent(eventType, normalized.message, task.attempt));
   if (settled) {
+    if (settled.status === "completed" && settled.missionId) {
+      await finalizeMissionIfReady(userId, settled.missionId, { blockOnUnresolved: true }).catch((error) => {
+        // Task settlement is authoritative and must not be rolled back if a
+        // closeout projection has a transient failure. A later reconciliation
+        // can safely retry this idempotent transition.
+        logger.warn({ err: error, userId, taskId: id, missionId: settled.missionId }, "Mission closeout after task settlement failed");
+      });
+    }
     await finalizeTerminalTaskProjection(settled);
   }
   return settled;
