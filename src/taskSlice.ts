@@ -187,7 +187,11 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
         ? activeMission.steps.find((step) => step.id === task.missionStepId && step.status === "running" && activeMission.activeStepIds?.includes(step.id))
         : activeMission.steps.find((step) => step.status === "running" && activeMission.activeStepIds?.includes(step.id)) ?? activeMission.steps.find((step) => step.id === activeMission.currentStepId && step.status === "running")
       : undefined;
-    const autonomyDecision = await decideAutonomyStep({
+    // The deployed staging smoke runner owns a deterministic model boundary;
+    // do not let Jev turn an engine-only lifecycle test into a provider call.
+    const autonomyDecision = mission?.executionMode === "durable_engine_smoke"
+      ? { proposedAction: "act_now", effectiveAction: "act_now" }
+      : await decideAutonomyStep({
       objective: mission?.objective ?? task.objective,
       items: [{
         kind: mission ? "mission" : "task",

@@ -1321,6 +1321,8 @@ export interface MissionRecord {
   /** A2A context supplied by the delegating agent; optional for legacy missions. */
   a2aContextId?: string;
   a2aPushNotifications?: MissionA2APushNotificationConfig[];
+  /** Internal staging-only execution mode used by the durable engine smoke runner. */
+  executionMode?: "durable_engine_smoke";
   /** Monotonic revision used to prevent concurrent workers from overwriting state. */
   version: number;
 }
@@ -10570,6 +10572,7 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
       })),
     } : {}),
     ...(typeof mission.a2aContextId === "string" && mission.a2aContextId.trim() ? { a2aContextId: mission.a2aContextId.trim().slice(0, 200) } : {}),
+    ...(mission.executionMode === "durable_engine_smoke" ? { executionMode: "durable_engine_smoke" as const } : { executionMode: undefined }),
     a2aPushNotifications: Array.isArray(mission.a2aPushNotifications) ? mission.a2aPushNotifications.slice(-10).filter((item): item is MissionA2APushNotificationConfig => Boolean(item) && typeof item === "object" && typeof item.id === "string" && typeof item.url === "string" && typeof item.signingSecretCiphertext === "string").map((item) => ({
       id: item.id.slice(0, 160),
       url: item.url.slice(0, 2000),
@@ -10591,6 +10594,7 @@ type MissionCreateInput = Pick<MissionRecord, "title" | "objective" | "definitio
   verificationMode?: "legacy" | "strict";
   workSchedule?: MissionWorkSchedule;
   a2aContextId?: string;
+  executionMode?: MissionRecord["executionMode"];
   steps?: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number; input?: Record<string, unknown>; outputSchema?: Record<string, unknown>; evidenceRequired?: string[]; compensationObjective?: string; retryBackoffSeconds?: number; parallelGroup?: string; allowedTools?: string[] }>;
 };
 
@@ -10726,6 +10730,7 @@ export async function createMission(userId: number, input: MissionCreateInput): 
     evidence: [],
     verification: { mode: verificationMode, requiredEvidence, verified: false, unresolved: requiredEvidence },
     ...(typeof input.a2aContextId === "string" && input.a2aContextId.trim() ? { a2aContextId: input.a2aContextId.trim().slice(0, 200) } : {}),
+    ...(input.executionMode === "durable_engine_smoke" ? { executionMode: input.executionMode } : {}),
     version: 0,
   });
   return backend.createMissionIfAbsent(userId, mission);

@@ -112,6 +112,7 @@ import { settleMissionSlice } from "./missionSlice.js";
 import { diagnoseMission } from "./reliability/missionDoctor.js";
 import { classifyTriggerWebhookSessionFailure } from "./triggerWebhookErrors.js";
 import { reconcileAllUserSchedules } from "./scheduler.js";
+import { LIVE_MISSION_SMOKE_EXECUTION_MODE, normalizeLiveMissionSmokeDelays, runLiveMissionSmokeAgent, verifyLiveMissionSmokeSecret } from "./reliability/liveMissionSmoke.js";
 import { buildPhoneCallOutcomePrompt, fallbackPhoneCallOutcome, parsePhoneCallOutcome } from "./calls/outcome.js";
 import { schedulePhoneCallFollowUps } from "./calls/followUp.js";
 import { scorePhoneCallTrace } from "./calls/voiceEvaluation.js";
@@ -3543,12 +3544,15 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
       const execute = async (attempt: number) => workflow.run(`execute-task-${attempt}`, async () => {
         const run = await executeDurableTask(payload, {
           workerId: `workflow:${workflow.workflowRunId ?? "task"}:${attempt}`,
-          execute: (task, leaseSignal) => task.taskKind === "web_session_reconciliation"
-            ? executeWebSessionReconciliationTask(task)
-            : executeTaskSlice(task, leaseSignal, {
+          execute: async (task, leaseSignal) => {
+            if (task.taskKind === "web_session_reconciliation") return executeWebSessionReconciliationTask(task);
+            const smokeMission = task.missionId ? await getMission(payload.userId, task.missionId) : undefined;
+            return executeTaskSlice(task, leaseSignal, {
               workflowRunId: workflow.workflowRunId, attempt, sdkTaskMessage, sdkTaskSkillInstructions, sdkDurationSeconds, withUserLock,
               sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options),
-            }),
+              ...(smokeMission?.executionMode === LIVE_MISSION_SMOKE_EXECUTION_MODE ? { runAgent: runLiveMissionSmokeAgent } : {}),
+            });
+          },
         });
         return { claimed: run.claimed, status: run.task?.status, runAt: run.task?.runAt, taskId: run.task?.id, missionId: run.task?.missionId };
       });
@@ -4043,6 +4047,67 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
     // it to confirm the replacement worker owns the local port; /health below
     // remains the deeper Telegram-token and persistence diagnostic.
     app.get("/health/live", (c) => c.json({ ok: true, agent: "Chusky", mode: "webhook" }));
+
+    // This is deliberately absent unless a staging operator opts in with a
+    // dedicated secret and feature flag. It creates only synthetic missions;
+    // the worker still uses the deployed QStash/Redis/Neon path.
+    const stagingMissionSmokeAuthorized = (c: Context): boolean => {
+      if (process.env.STAGING_LIVE_MISSION_SMOKE_ENABLED !== "true") return false;
+      return verifyLiveMissionSmokeSecret(c.req.header("x-chusky-staging-smoke-secret"), process.env.STAGING_LIVE_MISSION_SMOKE_SECRET);
+    };
+    app.post("/internal/staging/mission-smoke", async (c) => {
+      if (!stagingMissionSmokeAuthorized(c)) return c.json({ ok: false, error: "not found" }, 404);
+      const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+      const userId = Number(process.env.STAGING_LIVE_MISSION_SMOKE_USER_ID);
+      if (!Number.isSafeInteger(userId) || userId <= 0) return c.json({ ok: false, error: "staging smoke owner is not configured" }, 503);
+      try {
+        const delays = normalizeLiveMissionSmokeDelays(body.delaysSeconds);
+        const mission = await createMission(userId, {
+          title: "Staging durable engine smoke",
+          objective: "Exercise three durable sleep and wake continuations through the deployed QStash worker.",
+          definitionOfDone: "All three synthetic stages complete after real QStash wakes without a model-provider or connected-app call.",
+          executionMode: LIVE_MISSION_SMOKE_EXECUTION_MODE,
+          idempotencyKey: `staging-live-mission-smoke:${randomUUID()}`,
+          budget: { maxDurationSeconds: 1800, maxLifetimeSeconds: 1800, maxSteps: 10, maxSlices: 30, maxToolCalls: 30, maxCost: 1 },
+          steps: delays.map((delaySeconds, index) => ({
+            id: `staging-smoke-${index + 1}`,
+            title: `Staging smoke stage ${index + 1}`,
+            objective: `Staging smoke stage ${index + 1}: Wait ${delaySeconds} seconds, wake through QStash, verify the checkpoint, and complete this stage.`,
+            ...(index ? { dependsOn: [`staging-smoke-${index}`] } : {}),
+          })),
+        });
+        const started = mission.status === "queued" ? await startMission(userId, mission.id) : mission;
+        if (!started) return c.json({ ok: false, error: "staging smoke mission could not start" }, 409);
+        const scheduled = await reconcileMissionExecution(userId, started.id, enqueueTaskWorkflow);
+        if (!scheduled) return c.json({ ok: false, error: "staging smoke mission could not be scheduled" }, 503);
+        return c.json({ ok: true, missionId: scheduled.id, userId, status: scheduled.status, delaysSeconds: delays, poll: `/internal/staging/mission-smoke/${scheduled.id}` }, 202);
+      } catch (error) {
+        const status = error instanceof MissionEnqueueError ? 503 : 400;
+        return c.json({ ok: false, error: error instanceof Error ? error.message : "staging smoke mission could not be created" }, status);
+      }
+    });
+    app.get("/internal/staging/mission-smoke/:id", async (c) => {
+      if (!stagingMissionSmokeAuthorized(c)) return c.json({ ok: false, error: "not found" }, 404);
+      const userId = Number(process.env.STAGING_LIVE_MISSION_SMOKE_USER_ID);
+      const id = c.req.param("id");
+      if (!Number.isSafeInteger(userId) || userId <= 0 || !/^mis_[A-Za-z0-9_-]{1,160}$/.test(id)) return c.json({ ok: false, error: "invalid staging smoke mission" }, 400);
+      const mission = await getMission(userId, id);
+      if (!mission || mission.executionMode !== LIVE_MISSION_SMOKE_EXECUTION_MODE) return c.json({ ok: false, error: "staging smoke mission not found" }, 404);
+      const tasks = await listTasksForMission(userId, mission.id);
+      return c.json({
+        ok: true,
+        mission: {
+          id: mission.id,
+          status: mission.status,
+          checkpoint: mission.checkpoint,
+          nextAction: mission.nextAction,
+          error: mission.error,
+          steps: mission.steps.map((step) => ({ id: step.id, status: step.status, attempts: step.attempts, result: step.result })),
+          events: mission.events.slice(-20),
+        },
+        tasks: tasks.map((task) => ({ id: task.id, stepId: task.missionStepId, status: task.status, attempt: task.attempt, checkpoint: task.checkpoint, nextAction: task.nextAction, error: task.error, events: task.events.slice(-5) })),
+      });
+    });
 
     // Deep health check — validates bot token live
     app.get("/health", async (c) => {
