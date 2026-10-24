@@ -4160,7 +4160,7 @@ async function executeAgent(
     const imageSafeTools = roundMediaSelection
       ? routedToolsWithApproval.filter((tool) => toolSchemaName(tool) !== "COMPOSIO_MULTI_EXECUTE_TOOL")
       : routedToolsWithApproval;
-    const modelAvailableTools = (noToolTurn
+    const rawModelAvailableTools = (noToolTurn
       ? (voiceFastLane || voiceToolFreeTurn ? [] : routedToolsWithApproval.filter((tool) => toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS"))
       : roundMediaSelection
       ? imageSafeTools.map((tool) => {
@@ -4177,6 +4177,23 @@ async function executeAgent(
         };
       })
       : routedToolsWithApproval).map(compactModelToolDefinition);
+    // A normal owner turn can route a large native fallback plus exact
+    // connected-app schemas before the model has said which app it needs.
+    // Prefer progressive discovery for that first round: the agent still has
+    // its search/schema gateways and can admit exact tools immediately after
+    // discovery, but the provider never receives an unrelated schema wall.
+    const discoveryFirst = !durableExecution && !options?.meetingId && round === 0 && rawModelAvailableTools.length > 0
+      && JSON.stringify(rawModelAvailableTools).length > 20_000;
+    const modelAvailableTools = (discoveryFirst
+      ? rawModelAvailableTools.filter((tool) => {
+        const name = toolSchemaName(tool);
+        return name === "CHUCK_FIND_TOOLS"
+          || COMPOSIO_GATEWAY_TOOLS.has(name)
+          || explicitAllowedTools.some((allowed) => toolSchemaName(allowed) === name)
+          || revealedNativeTools.has(name)
+          || revealedComposioTools.has(name);
+      })
+      : rawModelAvailableTools);
     const modelToolSchemaChars = JSON.stringify(modelAvailableTools).length;
     const modelConversationCharBudget = Math.max(
       MIN_MODEL_CONVERSATION_CHARS,
@@ -4206,6 +4223,7 @@ async function executeAgent(
       explicitGrantCount: explicitAllowedTools.length,
       composioDiscovery: composioDiscoveryTools.map((tool) => toolSchemaName(tool)),
       composioExactCount: routedComposioTools.length,
+      discoveryFirst,
       modelToolSchemaChars,
       modelConversationCharBudget,
     }, "Model tool payload prepared");
