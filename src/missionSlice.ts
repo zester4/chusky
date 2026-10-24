@@ -53,7 +53,7 @@ export async function settleMissionSlice({ task, mission, currentMissionStep, re
     const message = uncertainExternal
       ? `Mission worker has an uncertain dispatched provider action for ${currentMissionStep?.title ?? "the active step"}. The outcome must be reconciled before any retry.`
       : `Mission worker has a dispatched provider action that did not return a successful outcome for ${currentMissionStep?.title ?? "the active step"}. Inspect the provider result before resuming.`;
-    const accounted = await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMissionBeforeAccounting?.checkpoint ?? mission.checkpoint, nextAction: "Inspect the provider receipt/state, then resume this same mission only after the outcome is known.", toolCalls: missionToolCallCount(result), cost: result.cost, blockedReason: message });
+    const accounted = await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMissionBeforeAccounting?.checkpoint ?? mission.checkpoint, nextAction: "Inspect the provider receipt/state, then resume this same mission only after the outcome is known.", toolCalls: missionToolCallCount(result), cost: result.cost, blockedReason: message, deferBlockedUntilTaskSettlement: true });
     return { status: "blocked", message: accounted?.error ?? message, checkpoint: accounted?.checkpoint ?? mission.checkpoint, nextAction: accounted?.nextAction ?? "Inspect the provider receipt/state, then resume this same mission only after the outcome is known.", failureClass: uncertainExternal ? "provider_uncertain" : "provider_failed" };
   }
   if (!missionSliceHasPersistedProgress(before, missionSliceAfter)) {
@@ -69,6 +69,7 @@ export async function settleMissionSlice({ task, mission, currentMissionStep, re
       nextAction: noProgressNextAction,
       toolCalls: missionToolCallCount(result),
       cost: result.cost,
+      deferBlockedUntilTaskSettlement: true,
       ...(externalAttempt ? { blockedReason: noProgressMessage } : {}),
     });
     if (externalAttempt || accounted?.status === "blocked") {

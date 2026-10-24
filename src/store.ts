@@ -11654,7 +11654,7 @@ export async function checkpointMission(userId: number, id: string, checkpoint: 
   });
 }
 
-export async function recordMissionSlice(userId: number, id: string, input: { checkpoint?: string; nextAction?: string; toolCalls?: number; cost?: number; blockedReason?: string }): Promise<MissionRecord | undefined> {
+export async function recordMissionSlice(userId: number, id: string, input: { checkpoint?: string; nextAction?: string; toolCalls?: number; cost?: number; blockedReason?: string; deferBlockedUntilTaskSettlement?: boolean }): Promise<MissionRecord | undefined> {
   const saved = await mutateMission(userId, id, (mission) => {
     // A worker response can arrive after cancellation or terminal closeout.
     // Preserve those terminal records exactly; late accounting must not alter
@@ -11672,22 +11672,27 @@ export async function recordMissionSlice(userId: number, id: string, input: { ch
     const budgetExceeded = durationExceeded || consumedSlices > (mission.budget.maxSlices ?? 1000) || toolCalls > mission.budget.maxToolCalls || cost > mission.budget.maxCost;
     const reason = durationExceeded ? durationPreflight.reason ?? "Mission duration budget exhausted." : consumedSlices > (mission.budget.maxSlices ?? 1000) ? "Mission slice budget exhausted." : toolCalls > mission.budget.maxToolCalls ? "Mission tool-call budget exhausted." : cost > mission.budget.maxCost ? "Mission cost budget exhausted." : undefined;
     const blocked = Boolean(input.blockedReason?.trim()) || budgetExceeded;
+    const deferBlocked = blocked && input.deferBlockedUntilTaskSettlement === true && Boolean(input.blockedReason?.trim()) && !budgetExceeded;
     const blockedReason = input.blockedReason?.trim().slice(0, 2000) || reason;
     const nextAction = blocked
       ? budgetExceeded ? "Increase the mission budget or revise the objective before resuming." : input.nextAction?.slice(0, 2000) ?? mission.nextAction
       : input.nextAction?.slice(0, 2000) ?? mission.nextAction;
     const checkpoint = input.checkpoint?.slice(0, 8000) ?? mission.checkpoint;
     return {
-      status: blocked ? "blocked" : "running",
+      status: blocked && !deferBlocked ? "blocked" : "running",
       checkpoint,
       ...(input.checkpoint !== undefined ? { checkpointHistory: appendMissionCheckpoint(mission, checkpoint, nextAction, "checkpoint", mission.currentStepId, now) } : {}),
       nextAction,
-      error: blockedReason,
+      ...(blocked && !deferBlocked ? { error: blockedReason } : { error: undefined }),
       consumedSteps,
       consumedSlices,
       toolCalls,
       cost,
-      events: [...mission.events, missionEvent(budgetExceeded ? "budget_exhausted" : blocked ? "blocked" : "checkpointed", blockedReason ?? input.nextAction ?? "Mission slice completed.", now)],
+      events: [...mission.events, missionEvent(
+        budgetExceeded ? "budget_exhausted" : blocked && !deferBlocked ? "blocked" : "checkpointed",
+        deferBlocked ? `Task settlement will commit the blocked mission state: ${blockedReason}` : blockedReason ?? input.nextAction ?? "Mission slice completed.",
+        now,
+      )],
     };
   });
   if (saved?.status === "blocked" && saved.error === "Mission duration budget would be exceeded.") return await extendMissionDurationIfEligible(userId, id) ?? saved;
@@ -11930,19 +11935,33 @@ export async function releaseTaskLease(userId: number, id: string, leaseToken: s
 }
 
 async function reconcileTerminalMissionTask(task: TaskRecord): Promise<void> {
-  if (task.status !== "failed" || !task.missionId || !task.missionStepId) return;
+  if (!["blocked", "failed"].includes(task.status) || !task.missionId || !task.missionStepId) return;
   const mission = await getMission(task.userId, task.missionId);
   if (!mission) return;
+  const missionTasks = await listTasksForMission(task.userId, task.missionId);
+  const unsettledTasks = missionTasks.some((candidate) => !["completed", "blocked", "failed", "cancelled"].includes(candidate.status));
+  const terminalStatus = task.status === "blocked" ? "blocked" as const : "failed" as const;
+  const stepStatus = task.status === "blocked" ? "blocked" as const : "failed" as const;
   await mutateMission(task.userId, mission.id, (current) => {
-    if (["completed", "cancelled", "failed"].includes(current.status)) return undefined;
+    if (["completed", "cancelled", "failed", "blocked", "waiting", "paused"].includes(current.status)) return undefined;
     const step = current.steps.find((candidate) => candidate.id === task.missionStepId);
     if (!step || ["completed", "cancelled"].includes(step.status)) return undefined;
     const now = Date.now();
     const steps = current.steps.map((candidate) => candidate.id === task.missionStepId
-      ? { ...candidate, status: "failed" as const, result: (task.error ?? task.result ?? "Task failed").slice(0, 12000), updatedAt: now }
+      ? { ...candidate, status: stepStatus, result: (task.error ?? task.result ?? `Task ${terminalStatus}`).slice(0, 12000), updatedAt: now }
       : candidate);
     const activeStepIds = (current.activeStepIds ?? []).filter((candidate) => candidate !== task.missionStepId);
-    return { status: "failed", steps, activeStepIds, currentStepId: activeStepIds[0], error: (task.error ?? "A mission step exhausted its retry budget.").slice(0, 2000), nextAction: "Repair or replan the failed step before resuming the mission.", waiting: undefined, events: [...current.events, missionEvent("step_failed", `Mission step ${step.title} failed after the task retry budget was exhausted.`)] };
+    const reason = (task.error ?? `Mission step ${step.title} became ${terminalStatus}.`).slice(0, 2000);
+    const message = `Mission step ${step.title} became ${terminalStatus}; ${unsettledTasks ? "the remaining task workers must settle before the mission enters its terminal state." : "the mission is now awaiting repair or resume."}`;
+    return {
+      ...(unsettledTasks ? { status: "running" as const } : { status: terminalStatus }),
+      steps,
+      activeStepIds,
+      currentStepId: activeStepIds[0],
+      ...(unsettledTasks ? { error: undefined, nextAction: "A mission branch is blocked; wait for remaining task workers to settle before repairing or resuming the mission." } : { error: reason, nextAction: terminalStatus === "failed" ? "Repair or replan the failed step before resuming the mission." : "Review the blocked step, then repair or resume this mission." }),
+      waiting: undefined,
+      events: [...current.events, missionEvent(terminalStatus === "failed" ? "step_failed" : "blocked", message, now, task.missionStepId)],
+    };
   });
 }
 

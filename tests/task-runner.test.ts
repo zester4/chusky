@@ -1,6 +1,6 @@
 import test, { before } from "node:test";
 import assert from "node:assert/strict";
-import { claimTask, completeMissionStep, completeTask, createMission, createTask, finalizeMissionIfReady, getMission, getTask, initStore, listTasks, recordTrustedMissionEvidence, renewTaskLease, settleTaskRun, startMission, updateTask } from "../src/store.js";
+import { claimTask, completeMissionStep, completeTask, createMission, createTask, finalizeMissionIfReady, getMission, getTask, initStore, listTasks, recordMissionSlice, recordTrustedMissionEvidence, renewTaskLease, settleTaskRun, startMission, updateTask } from "../src/store.js";
 import { scheduleMissionSteps } from "../src/missionScheduler.js";
 import { executeDurableTask } from "../src/taskRunner.js";
 
@@ -140,6 +140,42 @@ test("blocked executions retain their checkpoint and emit an audit event", async
   assert.equal(run.task?.checkpoint, "Read-only inspection completed");
   assert.equal(run.task?.nextAction, "Approve the proposed action");
   assert.equal(run.task?.events.at(-1)?.type, "blocked");
+});
+
+test("blocked mission state is committed after the worker task settles", async () => {
+  const userId = 840012;
+  const mission = await createMission(userId, {
+    title: "Ordered blocker projection",
+    objective: "Preserve task and mission terminal ordering",
+    definitionOfDone: "The blocked task and mission agree after settlement.",
+    steps: [{ id: "blocked-step", title: "Blocked step", objective: "Stop with an explicit blocker" }],
+  });
+  const started = await startMission(userId, mission.id);
+  await scheduleMissionSteps(userId, started!, async (_ownerId, taskId) => `workflow_${taskId}`);
+  const task = (await listTasks(userId)).find((candidate) => candidate.missionId === mission.id);
+  assert.ok(task);
+  const claimed = await claimTask(userId, task!.id, "blocked-projection-worker", 120_000);
+  assert.ok(claimed?.lease);
+
+  const pending = await recordMissionSlice(userId, mission.id, {
+    checkpoint: "Provider state needs inspection",
+    nextAction: "Inspect the provider receipt before resuming",
+    blockedReason: "The provider result is uncertain.",
+    deferBlockedUntilTaskSettlement: true,
+  });
+  assert.equal(pending?.status, "running");
+  assert.equal((await getMission(userId, mission.id))?.status, "running");
+
+  const settled = await settleTaskRun(userId, task!.id, claimed!.lease!.token, {
+    status: "blocked",
+    message: "Provider result is uncertain.",
+    checkpoint: "Provider state needs inspection",
+    nextAction: "Inspect the provider receipt before resuming",
+  });
+  assert.equal(settled?.status, "blocked");
+  const blockedMission = await getMission(userId, mission.id);
+  assert.equal(blockedMission?.status, "blocked");
+  assert.equal(blockedMission?.steps.find((step) => step.id === "blocked-step")?.status, "blocked");
 });
 
 test("lease-loss failures block instead of retrying a possibly dispatched native task", async () => {
