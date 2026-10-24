@@ -3287,6 +3287,29 @@ async function executeAgent(
     ? undefined
     : findPendingSavedImagePostRetry(history, currentRequestText, durable.imageAssets);
   const mediaActionRequestText = imageRetryRequest ?? savedImageRetry?.request ?? currentRequestText;
+  // Some native media/artifact actions are deliberately not part of the
+  // broad first-turn catalogue. They are still deterministic prerequisites
+  // for a request that explicitly needs them, however. Keep this preload
+  // small and request-derived so compaction cannot hide the exact capability
+  // while the model still does not receive unrelated native tools.
+  const mediaContextText = [
+    currentRequestText,
+    mediaActionRequestText,
+  ].join("\n");
+  const mediaRequestForPurpose = isMediaGenerationRequest(mediaContextText);
+  const savedImageActionRequested = Boolean(imageRetryRequest || savedImageRetry || currentImagesForMediaAction.length > 0)
+    || (durable.imageAssets.length > 0 && /\b(?:post|publish|share|send|email|attach|include|upload|use|reuse)\b/i.test(mediaContextText))
+    || (/(?:saved|existing|attached|previous|that|this)\s+(?:[\w'-]+\s+){0,5}(?:image|images|photo|picture|asset|logo|banner)\b/i.test(mediaContextText)
+      && /\b(?:post|publish|share|send|email|attach|include|upload|use|reuse)\b/i.test(mediaContextText));
+  const purposePreloadedNativeNames = new Set<string>([
+    ...(mediaRequestForPurpose === "image" ? ["CHUCK_GENERATE_IMAGE"] : []),
+    ...(savedImageActionRequested ? ["CHUCK_SEARCH_IMAGE_ASSETS", "CHUCK_GET_IMAGE_ASSET"] : []),
+    ...(structuredArtifactRequest && /\b(?:email|send|mail|attach)\b/i.test(mediaContextText) ? ["CHUCK_EMAIL_ARTIFACT"] : []),
+    ...(structuredArtifactRequest && /\b(?:upload|drive|dropbox|attach|file|document|artifact)\b/i.test(mediaContextText) ? ["CHUCK_FILE_BRIDGE"] : []),
+  ]);
+  const purposePreloadedNativeTools = purposePreloadedNativeNames.size
+    ? availableTools.filter((tool) => purposePreloadedNativeNames.has(toolSchemaName(tool)))
+    : [];
   const selectMediaForAction = (generatedCount: number): MediaAttachmentSelection | undefined => {
     const savedAssets = channelContext?.scope === "shared" || options?.meetingId ? [] : durable.imageAssets;
     if (imageRetryRequest && currentImagesForMediaAction.length > 0) {
@@ -3740,9 +3763,21 @@ async function executeAgent(
     ...(composioDecision?.unconnectedToolkits ?? []),
     ...(composioDecision?.route?.needsConnection ? composioDecision.route.preferredToolkits.filter((toolkit) => !composioDecision.route?.connectedToolkits.includes(toolkit)) : []),
   ].map((toolkit) => toolkit.trim().toLowerCase()).filter(Boolean))];
+  // A toolkit-level route can be uncertain even when the dependent action
+  // route has already identified a connected account and exact action. Do
+  // not let that broader uncertainty hide a verified connected action; doing
+  // so strands the model with discovery-only tools and makes a valid direct
+  // call fail closed as "not enabled". If no connected exact action exists,
+  // retain the connection-recovery block.
+  const hasConnectedRoutedAction = Boolean(
+    composioDecision?.actions.some((action) => action.connected !== false
+      && (Number(action.probability ?? 0) >= config.jevInjectActionMinProbability || Number(action.verified ?? 0) >= 0.75))
+      || composioDecision?.directTools.some((tool) => isProviderActionSlug(toolName(tool))),
+  );
   const composioConnectionBlocked = Boolean(
     composioDecision?.route?.needsConnection
       && connectionRequiredToolkits.length
+      && !hasConnectedRoutedAction
       && !(allow?.size && [...allow].some((slug) => isProviderActionSlug(slug.trim().toUpperCase()))),
   );
   const composioConnectionRecoveryTools = new Set([
@@ -3812,6 +3847,44 @@ async function executeAgent(
           present.add(slug);
         }
       }
+      // JEV can select an exact connected-app action even when the action
+      // catalogue returned by the router did not include a complete schema.
+      // In that case `directTools` is empty (or incomplete), but the selected
+      // action is still a valid capability grant. Resolve only those exact,
+      // connected candidates through the session's schema surface. This keeps
+      // the model free to use the action it was routed to without reopening a
+      // broad provider catalogue or weakening the execution fence.
+      if (sessionObj) {
+        const routedLoaded: string[] = [];
+        const routedUnavailable: string[] = [];
+        const present = new Set(availableTools.map((tool) => toolName(tool)));
+        const candidates = composioDecision.actions
+          .filter((action) => action.connected !== false)
+          .filter((action) => Number(action.probability ?? 0) >= config.jevInjectActionMinProbability || Number(action.verified ?? 0) >= 0.75)
+          .slice(0, 4)
+          .map((action) => composioActionSlug(String(action.id ?? "")))
+          .filter((slug) => /^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(slug))
+          .filter((slug) => !slug.startsWith("CHUCK_") && !slug.startsWith("MCP_") && !COMPOSIO_GATEWAY_TOOLS.has(slug))
+          .filter((slug) => !(sharedScope && (!allow || !allow.has(slug))))
+          .filter((slug) => !present.has(slug) && !deny.has(slug));
+        const exactTools = await resolveExactComposioModelTools(sessionObj, candidates, signal);
+        for (const slug of candidates) {
+          const resolved = exactTools.get(slug);
+          if (!resolved) { routedUnavailable.push(slug); continue; }
+          const exactTool = resolved.tool;
+          registerComposioToolMetadata(exactTool);
+          const modelTool = meetingComposioAccountAliases
+            ? hideMeetingAccountSelector(addAccountSelector(exactTool))
+            : addAccountSelector(exactTool);
+          availableTools.push(modelTool);
+          if (options?.meetingId) meetingPreloadedTools.push(modelTool);
+          present.add(slug);
+          routedLoaded.push(slug);
+        }
+        if (routedLoaded.length || routedUnavailable.length) {
+          logger.info({ loaded: routedLoaded, unavailable: routedUnavailable, meetingId: options?.meetingId }, "Routed Composio actions reconciled");
+        }
+      }
       // A Jev action can be confidently routed while the SDK's direct-tool
       // response still omits its full schema. In meetings that omission used
       // to leave the model with a route description but no callable action.
@@ -3861,7 +3934,14 @@ async function executeAgent(
       composioRouteContext = `Cached connected-app route for this mission step: ${[...persistedMissionRouting.composioToolkits, ...persistedMissionRouting.composioActions].join(", ")}. Use the gateway and verify the exact schema before execution.`;
     }
   }
-  let noToolTurn = voiceFastLane || voiceToolFreeTurn || turnActionDecision.noActionNeeded;
+  // A batch/turn-level router can conservatively say "no action" while the
+  // Composio action router has already selected a connected, high-confidence
+  // exact action. The exact route is stronger evidence for this turn: keeping
+  // the conversational shortcut here would discard the callable schema below
+  // and strand the model with discovery-only tools. This does not grant new
+  // authority; the existing allow/deny, account, approval, and dispatch
+  // fences still decide whether the selected action may execute.
+  let noToolTurn = voiceFastLane || voiceToolFreeTurn || (turnActionDecision.noActionNeeded && !hasConnectedRoutedAction);
   recordTurnMode({ mode: noToolTurn ? "conversational" : "action", reason: turnActionDecision.reason, noNativeTool: Boolean(nativeToolRoute.noNativeTool), skillsRouted: Boolean(skillRoute), tregRouted: Boolean(tregRoute), composioRouted: Boolean(composioDecision) });
   const revealedNativeTools = new Set<string>();
   const revealedComposioTools = new Set<string>();
@@ -4224,16 +4304,24 @@ async function executeAgent(
     const missionPromptTools = missionPromptRelevant
       ? availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_MISSION_START" || toolSchemaName(tool) === "CHUCK_TOOL_PREFLIGHT")
       : [];
+    // Account discovery is a safe owner-scoped capability and is often phrased
+    // as a question rather than an imperative ("Which accounts are
+    // connected?"). Keep its exact native schema available even when the
+    // conversational gate or bundle router would otherwise choose only the
+    // generic discovery tool.
+    const accountDiscoveryTools = /\b(?:connected accounts?|accounts?\s+(?:are\s+)?connected|oauth accounts?|integrations?)\b/i.test(routingQuery)
+      ? availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_LIST_CONNECTED_ACCOUNTS")
+      : [];
     const routedTools = (
       (voiceFastLane || voiceToolFreeTurn)
         ? []
         : noToolTurn
           ? [...availableTools.filter((tool) => strictCapabilityExposure
             ? toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || (appIntent && toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS") || revealedNativeTools.has(toolSchemaName(tool))
-            : toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS" || revealedNativeTools.has(toolSchemaName(tool))), ...missionPromptTools, ...explicitAllowedTools, ...meetingPreloadedTools, ...preloadedVoiceCapabilityTools]
+            : toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS" || revealedNativeTools.has(toolSchemaName(tool))), ...missionPromptTools, ...accountDiscoveryTools, ...purposePreloadedNativeTools, ...explicitAllowedTools, ...meetingPreloadedTools, ...preloadedVoiceCapabilityTools]
           : missionHintPreload
-            ? [...(strictCapabilityExposure ? routedNativeTools : missionRoutedNativeTools), ...missionPromptTools, ...preloadedMissionTools, ...(strictCapabilityExposure ? composioDiscoveryTools : missionDiscoveryTools), ...explicitAllowedTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools]
-            : [...(strictCapabilityExposure ? routedNativeTools : legacyCompatibleTools), ...missionPromptTools, ...composioDiscoveryTools, ...preloadedMissionTools, ...explicitAllowedTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools, ...preloadedVoiceMcpTools]
+            ? [...(strictCapabilityExposure ? routedNativeTools : missionRoutedNativeTools), ...missionPromptTools, ...accountDiscoveryTools, ...purposePreloadedNativeTools, ...preloadedMissionTools, ...(strictCapabilityExposure ? composioDiscoveryTools : missionDiscoveryTools), ...explicitAllowedTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools]
+            : [...(strictCapabilityExposure ? routedNativeTools : legacyCompatibleTools), ...missionPromptTools, ...accountDiscoveryTools, ...purposePreloadedNativeTools, ...composioDiscoveryTools, ...preloadedMissionTools, ...explicitAllowedTools, ...meetingPreloadedTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed, ...preloadedVoiceCapabilityTools, ...preloadedVoiceMcpTools]
     )
       .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index)
       .filter((tool) => {
@@ -4268,7 +4356,11 @@ async function executeAgent(
       ? routedToolsWithApproval.filter((tool) => toolSchemaName(tool) !== "COMPOSIO_MULTI_EXECUTE_TOOL")
       : routedToolsWithApproval;
     const rawModelAvailableTools = (noToolTurn
-      ? (voiceFastLane || voiceToolFreeTurn ? [] : routedToolsWithApproval.filter((tool) => toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS"))
+      ? (voiceFastLane || voiceToolFreeTurn ? [] : routedToolsWithApproval.filter((tool) =>
+        toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS"
+          || accountDiscoveryTools.some((accountTool) => toolSchemaName(accountTool) === toolSchemaName(tool))
+          || purposePreloadedNativeTools.some((preloaded) => toolSchemaName(preloaded) === toolSchemaName(tool))
+      ))
       : roundMediaSelection
       ? imageSafeTools.map((tool) => {
         const slug = toolSchemaName(tool);
@@ -4291,12 +4383,28 @@ async function executeAgent(
     // discovery, but the provider never receives an unrelated schema wall.
     const discoveryFirst = !durableExecution && !options?.meetingId && rawModelAvailableTools.length > 0
       && JSON.stringify(rawModelAvailableTools).length > 20_000;
+    // A small connected session is already a bounded capability surface. Keep
+    // those exact schemas in the first model payload when no route decision
+    // exists (for example, routing is disabled or unavailable); forcing the
+    // model through discovery in that case makes an explicitly exposed safe
+    // action look unavailable. Large catalogues still use progressive
+    // discovery below, so this does not reopen the provider schema wall.
+    const compactConnectedToolNames = !composioDecision && fullComposioTools.length <= 8
+      ? new Set(fullComposioTools.map((tool) => toolSchemaName(tool)))
+      : new Set<string>();
     const modelAvailableTools = (discoveryFirst
       ? rawModelAvailableTools.filter((tool) => {
         const name = toolSchemaName(tool);
         return name === "CHUCK_FIND_TOOLS"
           || COMPOSIO_GATEWAY_TOOLS.has(name)
           || explicitAllowedTools.some((allowed) => toolSchemaName(allowed) === name)
+          || routedNativeTools.some((routed) => toolSchemaName(routed) === name)
+          || purposePreloadedNativeTools.some((preloaded) => toolSchemaName(preloaded) === name)
+          || routedComposioTools.some((routed) => toolSchemaName(routed) === name)
+          || connectedMcpTools.some((connected) => toolSchemaName(connected) === name)
+          || compactConnectedToolNames.has(name)
+          || missionPromptTools.some((missionTool) => toolSchemaName(missionTool) === name)
+          || accountDiscoveryTools.some((accountTool) => toolSchemaName(accountTool) === name)
           || revealedNativeTools.has(name)
           || revealedComposioTools.has(name);
       })
