@@ -23,15 +23,14 @@ import { TASK_WAIT_MIN_SECONDS } from "../src/taskWait.js";
  *   LIVE_MISSION_TIMEOUT_MS=300000
  */
 
-// Keep the tunnel URL and timing overrides supplied on the command line while
-// making the checked-in local .env authoritative for service credentials. This
-// avoids an injected shell environment accidentally pointing the smoke test at
-// production resources.
+// Load the selected local/staging environment while preserving explicit shell
+// overrides. This lets the runner use a staging env file and a temporary
+// callback tunnel without accidentally replacing those values from .env.
 const suppliedWebhookUrl = process.env.WEBHOOK_URL;
 const suppliedPort = process.env.LIVE_MISSION_PORT;
 const suppliedDelays = process.env.LIVE_MISSION_DELAYS_SECONDS;
 const suppliedTimeout = process.env.LIVE_MISSION_TIMEOUT_MS;
-loadDotenv({ override: true });
+loadDotenv({ path: process.env.CHUSKY_ENV_FILE ?? resolve(process.cwd(), ".env") });
 if (suppliedWebhookUrl) process.env.WEBHOOK_URL = suppliedWebhookUrl;
 if (suppliedPort) process.env.LIVE_MISSION_PORT = suppliedPort;
 if (suppliedDelays) process.env.LIVE_MISSION_DELAYS_SECONDS = suppliedDelays;
