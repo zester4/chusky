@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { Client, Receiver } from "@upstash/qstash";
+import { config as loadDotenv } from "dotenv";
 import type { AgentResult } from "../src/agent.js";
 import type { TaskSliceContext } from "../src/taskSlice.js";
 import type { MissionWaitRequest } from "../src/nativeTools.js";
@@ -60,6 +61,10 @@ interface Scenario {
 }
 
 async function main(): Promise<void> {
+  // The live script is run directly with Node/tsx, so no framework has loaded
+  // .env for it. Load the selected local/staging file before checking QStash
+  // credentials, while preserving explicitly exported shell variables.
+  loadDotenv({ path: process.env.CHUSKY_ENV_FILE ?? resolve(process.cwd(), ".env") });
   if (!process.argv.includes("--apply")) throw new Error("Pass --apply to publish synthetic real QStash messages.");
   for (const name of ["QSTASH_TOKEN", "QSTASH_CURRENT_SIGNING_KEY", "QSTASH_NEXT_SIGNING_KEY"]) {
     if (!process.env[name]) throw new Error(`Missing ${name}`);
