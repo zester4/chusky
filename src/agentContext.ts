@@ -24,6 +24,15 @@ function compactModelContent(content: ApiMessage["content"], maxChars = MAX_MODE
   return `${content.slice(0, head)}\n[… older tool output compacted for this model round …]\n${content.slice(-tail)}`;
 }
 
+function compactConversationContent(content: string, maxChars: number): string {
+  if (content.length <= maxChars) return content;
+  const marker = "\n[… older conversation context compacted for this model round …]";
+  if (maxChars <= marker.length) return content.slice(0, Math.max(0, maxChars));
+  const head = Math.floor((maxChars - marker.length) * 0.62);
+  const tail = maxChars - marker.length - head;
+  return `${content.slice(0, head)}${marker}${content.slice(-tail)}`;
+}
+
 /**
  * Keep the durable in-memory transcript intact, but send a bounded working
  * window to the model. OpenAI-compatible APIs require each tool result to
@@ -61,9 +70,10 @@ export function compactModelMessages(messages: ApiMessage[], maxMessages = MAX_M
   const summary = summaryOverride ?? `Earlier in-turn context was compacted to keep the model request bounded. Full tool results remain available in the durable run state; retrieve them by call ID if needed.${omittedToolIds.length ? ` Omitted tool call IDs: ${omittedToolIds.join(", ")}.` : ""}\n${summaryLines.join("\n") || "Earlier tool exchanges remain available through their verified outcomes in the current run."}`;
 
   // Keep the latest exchange intact whenever possible, but put a hard bound on
-  // retained tool payloads. This prevents several 8–20k provider responses
-  // from being resent on every round without deleting the user objective or
-  // the current assistant/tool pair.
+  // retained conversation and tool payloads. This prevents a large saved chat
+  // plus a large tool catalogue from exceeding the provider prompt limit on a
+  // new turn. Durable history remains unchanged; only this model request is
+  // compacted.
   const contentLength = (items: ApiMessage[]) => items.reduce((total, item) => total + (typeof item.content === "string" ? item.content.length : JSON.stringify(item.content ?? "").length), 0);
   let chars = contentLength(retained);
   const wasOverBudget = chars > maxChars;
@@ -76,13 +86,33 @@ export function compactModelMessages(messages: ApiMessage[], maxMessages = MAX_M
       retained[index] = { ...message, content: compacted };
     }
   }
+  if (chars > maxChars) {
+    // Historical user/assistant messages are safe to shorten as long as the
+    // current request and complete assistant tool-call envelopes are retained.
+    // Tool-call messages must remain byte-complete for provider validation.
+    for (let index = 0; index < retained.length && chars > maxChars; index++) {
+      const message = retained[index];
+      if ((message.role !== "user" && message.role !== "assistant") || typeof message.content !== "string" || message.tool_calls?.length) continue;
+      const excess = chars - maxChars;
+      const target = Math.max(256, message.content.length - excess);
+      if (target >= message.content.length) continue;
+      const compacted = compactConversationContent(message.content, target);
+      chars -= message.content.length - compacted.length;
+      retained[index] = { ...message, content: compacted };
+    }
+  }
   return [...systemMessages, ...(omitted.length || wasOverBudget || hadLargeToolResult ? [{ role: "system" as const, content: summary }] : []), ...retained];
 }
 
-export async function compactModelMessagesWithSummary(messages: ApiMessage[], existingSummary?: string): Promise<{ messages: ApiMessage[]; summary?: string }> {
-  const compacted = compactModelMessages(messages);
+export async function compactModelMessagesWithSummary(
+  messages: ApiMessage[],
+  existingSummary?: string,
+  maxMessages = MAX_MODEL_CONTEXT_MESSAGES,
+  maxChars = MAX_MODEL_CONTEXT_CHARS,
+): Promise<{ messages: ApiMessage[]; summary?: string }> {
+  const compacted = compactModelMessages(messages, maxMessages, maxChars);
   if (existingSummary || compacted.length === messages.length) return { messages: compacted, ...(existingSummary ? { summary: existingSummary } : {}) };
-  const { omitted } = compactionWindow(messages, MAX_MODEL_CONTEXT_MESSAGES);
+  const { omitted } = compactionWindow(messages, maxMessages);
   if (!omitted.length) return { messages: compacted };
   const droppedMessages: SummaryMessage[] = omitted.map((message) => ({
     role: message.role === "user" ? "user" : "assistant",
@@ -96,5 +126,5 @@ export async function compactModelMessagesWithSummary(messages: ApiMessage[], ex
   }));
   const generated = await summarizeConversation({ previousSummaries: [], droppedMessages, retainedMessages }).catch(() => undefined);
   if (!generated) return { messages: compacted };
-  return { messages: compactModelMessages(messages, MAX_MODEL_CONTEXT_MESSAGES, MAX_MODEL_CONTEXT_CHARS, `[ScaleDown in-turn context summary]\n${generated}`), summary: generated };
+  return { messages: compactModelMessages(messages, maxMessages, maxChars, `[ScaleDown in-turn context summary]\n${generated}`), summary: generated };
 }

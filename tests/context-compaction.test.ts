@@ -51,3 +51,21 @@ test("small model contexts remain unchanged apart from no-op copying", () => {
   ];
   assert.deepEqual(compactModelMessages(messages), messages);
 });
+
+test("conversation context is bounded when tool schemas consume the prompt budget", () => {
+  const messages: ApiMessage[] = [
+    { role: "system", content: "kernel" },
+    { role: "user", content: "An older request with important historical context ".repeat(80) },
+    { role: "assistant", content: "An older response with a large amount of prose ".repeat(80) },
+    { role: "user", content: "Current request: read Gmail and check Calendar." },
+  ];
+
+  const compacted = compactModelMessages(messages, 14, 1_500);
+  const chars = compacted
+    .filter((message) => message.role !== "system")
+    .reduce((total, message) => total + (typeof message.content === "string" ? message.content.length : 0), 0);
+
+  assert.ok(chars <= 1_500);
+  assert.ok(compacted.some((message) => String(message.content).includes("Current request: read Gmail")));
+  assert.ok(compacted.some((message) => String(message.content).includes("conversation context compacted")));
+});

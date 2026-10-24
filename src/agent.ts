@@ -109,6 +109,12 @@ export async function reconcileComposioTriggerWebhook(webhookUrl: string): Promi
 // ── OpenRouter fetch ──────────────────────────────────────────────────────────
 const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
 const MAX_TOOL_RESULT_CHARS = 20_000;
+// OpenRouter/provider credit limits can be lower than a model's advertised
+// context window. Reserve a conservative character budget for the complete
+// request, then allocate the remainder to conversation context after the
+// current tool schemas and trusted system context are known.
+const MODEL_PROMPT_CHAR_BUDGET = 88_000;
+const MIN_MODEL_CONVERSATION_CHARS = 3_000;
 const MAX_IMAGE_TRANSFER_BYTES = 25 * 1024 * 1024;
 const MAX_BROWSER_FILE_TRANSFER_BYTES = 100 * 1024 * 1024;
 const BROWSER_VISUAL_CONTEXT_MARKER = "[CHUSKY_BROWSER_VISUAL_FEEDBACK:v1]";
@@ -4169,6 +4175,11 @@ async function executeAgent(
         };
       })
       : routedToolsWithApproval;
+    const modelToolSchemaChars = JSON.stringify(modelAvailableTools).length;
+    const modelConversationCharBudget = Math.max(
+      MIN_MODEL_CONVERSATION_CHARS,
+      MODEL_PROMPT_CHAR_BUDGET - staticSystemPrompt.length - dynamicSystemContext.length - modelToolSchemaChars,
+    );
     const toolCounts = modelAvailableTools.reduce((counts, tool) => {
       const name = toolSchemaName(tool);
       const key = name.startsWith("CHUCK_")
@@ -4193,16 +4204,18 @@ async function executeAgent(
       explicitGrantCount: explicitAllowedTools.length,
       composioDiscovery: composioDiscoveryTools.map((tool) => toolSchemaName(tool)),
       composioExactCount: routedComposioTools.length,
+      modelToolSchemaChars,
+      modelConversationCharBudget,
     }, "Model tool payload prepared");
     const compactedContext = inTurnContextSummary
-      ? { messages: compactModelMessages(messages, undefined, undefined, `[ScaleDown in-turn context summary]\n${inTurnContextSummary}`), summary: inTurnContextSummary }
+      ? { messages: compactModelMessages(messages, undefined, modelConversationCharBudget, `[ScaleDown in-turn context summary]\n${inTurnContextSummary}`), summary: inTurnContextSummary }
       // A generated ScaleDown summary is itself another model request. Never
       // pay that hidden round before the first answer; deterministic bounded
       // compaction is enough for the initial request. Later tool rounds may
       // use the richer summary when history actually overflows.
       : round === 0
-        ? { messages: compactModelMessages(messages), summary: undefined }
-        : await compactModelMessagesWithSummary(messages);
+        ? { messages: compactModelMessages(messages, undefined, modelConversationCharBudget), summary: undefined }
+        : await compactModelMessagesWithSummary(messages, undefined, undefined, modelConversationCharBudget);
     const modelMessages = compactedContext.messages;
     inTurnContextSummary ??= compactedContext.summary;
     if (modelMessages.length !== messages.length || modelMessages.some((message, index) => message.content !== messages[index]?.content)) {
