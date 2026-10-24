@@ -22,6 +22,7 @@ import { TASK_WAIT_MIN_SECONDS } from "../src/taskWait.js";
  *   LIVE_MISSION_PORT=8091
  *   LIVE_MISSION_DELAYS_SECONDS=60,60,60
  *   LIVE_MISSION_TIMEOUT_MS=300000
+ *   LIVE_MISSION_STORE_READ_TIMEOUT_MS=20000
  */
 
 // Load the selected local/staging environment while preserving explicit shell
@@ -66,6 +67,24 @@ if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 30_000 || timeoutMs > 3_600_
 const minimumTimeoutMs = delays.reduce((total, delay) => total + delay, 0) * 1000 + 120_000;
 if (timeoutMs < minimumTimeoutMs) {
   throw new Error(`LIVE_MISSION_TIMEOUT_MS must be at least ${minimumTimeoutMs}ms for ${delays.join(",")} second waits plus QStash/network headroom.`);
+}
+const storeReadTimeoutMs = Number(process.env.LIVE_MISSION_STORE_READ_TIMEOUT_MS ?? "20000");
+if (!Number.isSafeInteger(storeReadTimeoutMs) || storeReadTimeoutMs < 1_000 || storeReadTimeoutMs > 120_000) {
+  throw new Error("LIVE_MISSION_STORE_READ_TIMEOUT_MS must be a whole number from 1000 to 120000.");
+}
+
+function withTimeout<T>(operation: Promise<T>, timeout: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return new Promise<T>((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeout}ms. Check Redis connectivity and the staging network.`)), timeout);
+    operation.then(resolve, reject);
+  }).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function main(): Promise<void> {
@@ -257,20 +276,48 @@ try {
   console.error("[live-smoke] mission " + mission.id + " scheduled through QStash");
 
   const deadline = Date.now() + timeoutMs;
-  let finalMission = await getMission(userId, mission.id);
-  let tasks = (await listTasks(userId)).filter((task) => task.missionId === mission.id);
+  const readState = async () => {
+    const [currentMission, allTasks] = await withTimeout(
+      Promise.all([getMission(userId, mission.id), listTasks(userId)]),
+      storeReadTimeoutMs,
+      "Durable mission state read",
+    );
+    return {
+      mission: currentMission,
+      tasks: allTasks.filter((task) => task.missionId === mission.id),
+    };
+  };
+  let state = await readState();
+  let finalMission = state.mission;
+  let tasks = state.tasks;
   let terminalMissionObservedWithUnsettledTask = false;
+  let lastProgress = "";
+  let lastProgressAt = 0;
   while (finalMission && Date.now() < deadline) {
+    const elapsedSeconds = Math.floor((Date.now() - (deadline - timeoutMs)) / 1000);
+    const taskSummary = tasks.map((task) => `${task.missionStepId ?? task.id}:${task.status}`).join(",") || "none";
+    const progress = `t+${elapsedSeconds}s mission=${finalMission.status} tasks=${taskSummary}`;
+    if (progress !== lastProgress || Date.now() - lastProgressAt >= 10_000) {
+      console.error("[live-smoke] " + progress);
+      lastProgress = progress;
+      lastProgressAt = Date.now();
+    }
     const missionTerminal = ["completed", "blocked", "failed", "cancelled"].includes(finalMission.status);
     const tasksTerminal = tasks.length > 0 && tasks.every((task) => ["completed", "blocked", "failed", "cancelled"].includes(task.status));
     if (missionTerminal && tasks.some((task) => !["completed", "cancelled"].includes(task.status))) terminalMissionObservedWithUnsettledTask = true;
     if (missionTerminal && tasksTerminal) break;
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    finalMission = await getMission(userId, mission.id);
-    tasks = (await listTasks(userId)).filter((task) => task.missionId === mission.id);
+    await sleep(1000);
+    state = await readState();
+    finalMission = state.mission;
+    tasks = state.tasks;
+  }
+  if (finalMission && Date.now() >= deadline && !["completed", "blocked", "failed", "cancelled"].includes(finalMission.status)) {
+    console.error(`[live-smoke] timed out after ${timeoutMs}ms while mission remained ${finalMission.status}.`);
   }
   console.error("[live-smoke] mission terminal state: " + (finalMission?.status ?? "missing"));
-  tasks = (await listTasks(userId)).filter((task) => task.missionId === mission.id);
+  state = await readState();
+  finalMission = state.mission;
+  tasks = state.tasks;
   const allTasksCompleted = tasks.length === stages.length && tasks.every((task) => task.status === "completed");
   const result = {
     ok: finalMission?.status === "completed" && allTasksCompleted && !terminalMissionObservedWithUnsettledTask,
