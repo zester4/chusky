@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { compactModelMessages } from "../src/agentContext.js";
+import { compactModelMessages, compactModelToolDefinition } from "../src/agentContext.js";
 import type { ApiMessage } from "../src/types.js";
 
 test("model context compaction keeps system prompts and a complete recent tool exchange", () => {
@@ -68,4 +68,32 @@ test("conversation context is bounded when tool schemas consume the prompt budge
   assert.ok(chars <= 1_500);
   assert.ok(compacted.some((message) => String(message.content).includes("Current request: read Gmail")));
   assert.ok(compacted.some((message) => String(message.content).includes("conversation context compacted")));
+});
+
+test("model tool compaction preserves the callable contract while trimming verbose prose", () => {
+  const tool = {
+    type: "function",
+    function: {
+      name: "COMPOSIO_EXAMPLE_ACTION",
+      description: "A".repeat(2_000),
+      parameters: {
+        type: "object",
+        properties: {
+          order_id: { type: "string", description: "B".repeat(1_000) },
+          status: { type: "string", enum: ["open", "closed"] },
+        },
+        required: ["order_id"],
+        additionalProperties: false,
+        examples: [{ order_id: "example" }],
+      },
+    },
+  };
+
+  const compacted = compactModelToolDefinition(tool);
+  assert.equal(compacted.function.name, tool.function.name);
+  assert.deepEqual(compacted.function.parameters.required, ["order_id"]);
+  assert.deepEqual(compacted.function.parameters.properties.status.enum, ["open", "closed"]);
+  assert.equal(compacted.function.parameters.examples, undefined);
+  assert.ok(compacted.function.description.length < 700);
+  assert.ok(compacted.function.parameters.properties.order_id.description.length < 300);
 });

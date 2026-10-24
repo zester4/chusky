@@ -79,7 +79,7 @@ import type { SubagentActivityUpdate } from "./subagents/contracts.js";
 import { resolveComposioRoute } from "./composioRouting.js";
 import { buildArtifactEmailArguments, type ArtifactEmailFile } from "./artifactEmail.js";
 import { buildArtifactUploadArguments } from "./artifactBridge.js";
-import { boundMissionContext, compactModelMessages, compactModelMessagesWithSummary, contextSearchQuery } from "./agentContext.js";
+import { boundMissionContext, compactModelMessages, compactModelMessagesWithSummary, compactModelToolDefinition, contextSearchQuery } from "./agentContext.js";
 import { bindVoicePolicyAccount, normalizeVoiceToolPolicy, normalizeVoiceToolkit, voicePolicyAllowsExecution, voiceToolkitAllowed, voiceToolkitForAction, type VoiceToolPolicy } from "./calls/voiceToolPolicy.js";
 import { ATTENTION_PULSE_IDENTITY, CAPABILITY_ROUTING_KERNEL, FAST_CAPABILITY_ROUTING_KERNEL, compactActionCustomization, compactConversationalCustomization, compactMissionCustomization, composeSystemPrompt } from "./prompt.js";
 import { contextPrompt } from "./contextGraph.js";
@@ -4160,7 +4160,7 @@ async function executeAgent(
     const imageSafeTools = roundMediaSelection
       ? routedToolsWithApproval.filter((tool) => toolSchemaName(tool) !== "COMPOSIO_MULTI_EXECUTE_TOOL")
       : routedToolsWithApproval;
-    const modelAvailableTools = noToolTurn
+    const modelAvailableTools = (noToolTurn
       ? (voiceFastLane || voiceToolFreeTurn ? [] : routedToolsWithApproval.filter((tool) => toolSchemaName(tool) === "COMPOSIO_SEARCH_TOOLS"))
       : roundMediaSelection
       ? imageSafeTools.map((tool) => {
@@ -4176,7 +4176,7 @@ async function executeAgent(
           },
         };
       })
-      : routedToolsWithApproval;
+      : routedToolsWithApproval).map(compactModelToolDefinition);
     const modelToolSchemaChars = JSON.stringify(modelAvailableTools).length;
     const modelConversationCharBudget = Math.max(
       MIN_MODEL_CONVERSATION_CHARS,

@@ -4,6 +4,44 @@ import { summarizeConversation, type SummaryMessage } from "./conversationSummar
 const MAX_MODEL_TOOL_RESULT_CHARS = 3_500;
 const MAX_MODEL_CONTEXT_MESSAGES = 14;
 const MAX_MODEL_CONTEXT_CHARS = 30_000;
+const MODEL_TOOL_DESCRIPTION_LIMIT = 600;
+const MODEL_SCHEMA_DESCRIPTION_LIMIT = 240;
+
+function compactSchemaDescriptions(value: unknown, descriptionLimit: number): unknown {
+  if (Array.isArray(value)) return value.map((item) => compactSchemaDescriptions(item, descriptionLimit));
+  if (!value || typeof value !== "object") return value;
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (key === "examples" || key === "example") continue;
+    if (key === "description" && typeof item === "string" && item.length > descriptionLimit) {
+      output[key] = `${item.slice(0, descriptionLimit - 1).trimEnd()}…`;
+      continue;
+    }
+    output[key] = compactSchemaDescriptions(item, descriptionLimit);
+  }
+  return output;
+}
+
+/**
+ * Keep the executable tool contract complete while trimming verbose provider
+ * prose from the model request. The full definitions remain in the trusted
+ * execution catalog and are used for validation and dispatch.
+ */
+export function compactModelToolDefinition(tool: any): any {
+  if (!tool?.function || typeof tool.function !== "object") return tool;
+  return {
+    ...tool,
+    function: {
+      ...tool.function,
+      ...(typeof tool.function.description === "string"
+        ? { description: tool.function.description.length > MODEL_TOOL_DESCRIPTION_LIMIT ? `${tool.function.description.slice(0, MODEL_TOOL_DESCRIPTION_LIMIT - 1).trimEnd()}…` : tool.function.description }
+        : {}),
+      ...(tool.function.parameters && typeof tool.function.parameters === "object"
+        ? { parameters: compactSchemaDescriptions(tool.function.parameters, MODEL_SCHEMA_DESCRIPTION_LIMIT) }
+        : {}),
+    },
+  };
+}
 
 /** Prefer the active mission step over its large continuation prompt for owner-context retrieval. */
 export function contextSearchQuery(userMessage: string, missionStepObjective?: string): string {
