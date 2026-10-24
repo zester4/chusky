@@ -90,6 +90,7 @@ test("derived mission tools are preload hints and include the live Composio sear
 test("mission worker fences provider tools while retaining lifecycle controls", () => {
   const allowed = missionWorkerToolAllowlist(["GMAIL_SEND_EMAIL", "HUBSPOT_CREATE_NOTE"]);
   assert.deepEqual(allowed?.filter((tool) => tool === "GMAIL_SEND_EMAIL" || tool === "HUBSPOT_CREATE_NOTE"), ["GMAIL_SEND_EMAIL", "HUBSPOT_CREATE_NOTE"]);
+  assert.equal(allowed?.includes("COMPOSIO_EXECUTE_TOOL"), true, "explicit provider steps need the single-action gateway when direct schemas are unavailable");
   assert.equal(allowed?.includes("GITHUB_DELETE_REPOSITORY"), false);
   for (const control of MISSION_WORKER_CONTROL_TOOLS) assert.equal(allowed?.includes(control), true);
   assert.ok(missionWorkerToolAllowlist(["COMPOSIO_MULTI_EXECUTE_TOOL"])?.includes("COMPOSIO_EXECUTE_TOOL"));

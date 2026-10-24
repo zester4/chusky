@@ -90,6 +90,20 @@ export function missionWorkerToolAllowlist(stepTools?: string[], inheritedTools?
   // step requests batching so a model retry is not blocked by an incomplete
   // permission fence.
   if (selected.has("COMPOSIO_MULTI_EXECUTE_TOOL")) selected.add("COMPOSIO_EXECUTE_TOOL");
+  // Explicit mission steps may name an exact connected-app action while the
+  // owner's ToolRouter session exposes only gateway schemas. The planner
+  // strips COMPOSIO_EXECUTE_TOOL from persisted step fences because it is
+  // supervisor-owned, so restore the narrow single-action gateway at worker
+  // runtime whenever the step grants at least one exact provider action.
+  // The action fence is still enforced by the agent: the gateway can execute
+  // only a discovered action present in this step's exact allowlist.
+  const hasExactProviderAction = [...selected].some((tool) =>
+    /^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(tool)
+    && !tool.startsWith("CHUCK_")
+    && !tool.startsWith("COMPOSIO_")
+    && !tool.startsWith("MCP_"),
+  );
+  if (hasExactProviderAction) selected.add("COMPOSIO_EXECUTE_TOOL");
   return [...new Set([...controls, ...selected])];
 }
 
