@@ -21,8 +21,9 @@ import { TASK_WAIT_MIN_SECONDS } from "../src/taskWait.js";
  * Optional:
  *   LIVE_MISSION_PORT=8091
  *   LIVE_MISSION_DELAYS_SECONDS=60,60,60
- *   LIVE_MISSION_TIMEOUT_MS=300000
+ *   LIVE_MISSION_TIMEOUT_MS=900000
  *   LIVE_MISSION_STORE_READ_TIMEOUT_MS=20000
+ *   LIVE_MISSION_USE_JEV=true (optional; disabled by default for the scripted model boundary)
  */
 
 // Load the selected local/staging environment while preserving explicit shell
@@ -37,6 +38,12 @@ if (suppliedWebhookUrl) process.env.WEBHOOK_URL = suppliedWebhookUrl;
 if (suppliedPort) process.env.LIVE_MISSION_PORT = suppliedPort;
 if (suppliedDelays) process.env.LIVE_MISSION_DELAYS_SECONDS = suppliedDelays;
 if (suppliedTimeout) process.env.LIVE_MISSION_TIMEOUT_MS = suppliedTimeout;
+// This smoke test owns the model boundary: the scripted agent below is the
+// deterministic model substitute. Keep Jev out of the durable QStash timing
+// test unless the operator explicitly opts in, otherwise a slow/rate-limited
+// routing request can look like a task-worker or QStash failure.
+const useJev = process.env.LIVE_MISSION_USE_JEV === "true";
+if (!useJev) process.env.JEV_MODE = "off";
 
 const publicUrl = (process.env.WEBHOOK_URL ?? "").replace(/\/+$/, "");
 if (!publicUrl) throw new Error("Set WEBHOOK_URL to the temporary public tunnel URL.");
@@ -59,12 +66,16 @@ if (delays.length !== 3) throw new Error("LIVE_MISSION_DELAYS_SECONDS must conta
 if (delays.some((delay) => delay < TASK_WAIT_MIN_SECONDS)) {
   throw new Error(`LIVE_MISSION_DELAYS_SECONDS values must be at least ${TASK_WAIT_MIN_SECONDS} seconds because CHUCK_TASK_WAIT enforces the production minimum.`);
 }
-const defaultTimeoutMs = Math.max(180_000, delays.reduce((total, delay) => total + delay, 0) * 1000 + 120_000);
+// QStash delivery and a temporary public tunnel can each add minutes during a
+// real staging run. The test must leave room for every scheduled wake instead
+// of failing while a valid durable worker is still executing.
+const qstashHeadroomMs = 600_000;
+const defaultTimeoutMs = Math.max(900_000, delays.reduce((total, delay) => total + delay, 0) * 1000 + qstashHeadroomMs);
 const timeoutMs = Number(process.env.LIVE_MISSION_TIMEOUT_MS ?? String(defaultTimeoutMs));
 if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 30_000 || timeoutMs > 3_600_000) {
   throw new Error("LIVE_MISSION_TIMEOUT_MS must be a whole number from 30000 to 3600000.");
 }
-const minimumTimeoutMs = delays.reduce((total, delay) => total + delay, 0) * 1000 + 120_000;
+const minimumTimeoutMs = delays.reduce((total, delay) => total + delay, 0) * 1000 + qstashHeadroomMs;
 if (timeoutMs < minimumTimeoutMs) {
   throw new Error(`LIVE_MISSION_TIMEOUT_MS must be at least ${minimumTimeoutMs}ms for ${delays.join(",")} second waits plus QStash/network headroom.`);
 }
@@ -107,6 +118,7 @@ const [
   import("../src/workflows.js"),
 ]);
 console.error("[live-smoke] modules loaded");
+console.error("[live-smoke] Jev autonomy routing: " + (useJev ? "enabled by LIVE_MISSION_USE_JEV=true" : "disabled for deterministic model-boundary testing"));
 
 type ScriptedOptions = {
   taskId?: string;
@@ -328,6 +340,7 @@ try {
     taskStatuses: tasks.map((task) => ({ id: task.id, stepId: task.missionStepId, status: task.status, attempts: task.attempt })),
     allTasksCompleted,
     terminalMissionObservedWithUnsettledTask,
+    jevRouting: useJev ? "enabled" : "disabled",
     delays,
     timeoutMs,
   };
