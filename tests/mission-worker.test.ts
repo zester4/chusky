@@ -119,6 +119,19 @@ test("a supervisor-resumed timer remains a post-wake continuation for the same s
   assert.equal(missionHasTimerWakeContinuation(mission, "second_readback"), false);
 });
 
+test("scheduler bookkeeping cannot consume a timer wake marker", () => {
+  const mission = {
+    status: "running" as const,
+    currentStepId: "checkpoint_and_wait",
+    activeStepIds: ["checkpoint_and_wait"],
+    events: [
+      { id: "wake", type: "resumed" as const, message: "Timer wait reached 2026-10-01T19:14:04.000Z.", at: 1, stepId: "checkpoint_and_wait" },
+      { id: "scheduled", type: "step_started" as const, message: "Scheduler reconciliation metadata changed.", at: 2 },
+    ],
+  };
+  assert.equal(missionHasTimerWakeContinuation(mission, "checkpoint_and_wait"), true);
+});
+
 test("a timer wake follows the updated active frontier when its durable task still names the completed step", () => {
   const mission = {
     status: "running" as const,

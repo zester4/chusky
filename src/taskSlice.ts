@@ -127,6 +127,16 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
           const current = await getMission(task.userId, mission.id);
           if (!current || current.status !== "running") return { status: "blocked" as const, message: "The mission timer wake-up no longer matches its persisted wait.", checkpoint: current?.checkpoint ?? mission.checkpoint, nextAction: "Inspect the mission wait state before retrying." };
           mission = current;
+          // Another recovery worker may have won the compare-and-set wake
+          // between our initial read and resumeMissionFromTimer(). The task
+          // still owns the same continuation, so preserve the post-wake
+          // contract instead of treating this replay as a fresh slice and
+          // calling CHUCK_TASK_WAIT again.
+          if (missionHasTimerWakeContinuation(current, task.missionStepId)) {
+            missionTimerResumed = true;
+            missionWakeCheckpoint = current.checkpoint;
+            missionWakeNextAction = current.nextAction ?? "Continue from the saved timer checkpoint.";
+          }
         } else {
           mission = resumed;
           missionTimerResumed = true;
