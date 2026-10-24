@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { addRecallMeeting, claimAgentUpgrade, completeMissionStep, createMission, createWebTelegramLinkCode, finalizeMissionIfReady, getApproval, getMission, getSession, initStore, listAgentRuns, listMissions, listTasks, redeemWebTelegramLinkCode, saveSession, setApprovalStatus, startMission, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { stableSdkUserId } from "../src/sdkIdentity.js";
-import { appendPreviewLinks, cleanModelText, getReconnectUrl, getToolkitStatesPage, invalidateSession, isSuccessfulCalendarResult, listConnectedAccounts, openRouterAttemptTimeoutMs, OpenRouterTimeoutError, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, repairComposioSearchArguments, resolveComposioAccountSelector, runAgent, searchTools, transcriptionFormatForMimeType, voiceComposioToolSlugs, voiceFastLaneEligible, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
+import { appendPreviewLinks, cleanModelText, executeExactComposioAction, getReconnectUrl, getToolkitStatesPage, invalidateSession, isSuccessfulCalendarResult, listConnectedAccounts, openRouterAttemptTimeoutMs, OpenRouterTimeoutError, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, repairComposioSearchArguments, resolveComposioAccountSelector, runAgent, searchTools, transcriptionFormatForMimeType, voiceComposioToolSlugs, voiceFastLaneEligible, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { formatAgentUpgradeNotice, loadAgentUpgrade } from "../src/upgradeNotice.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -2918,6 +2918,136 @@ test("does not guess an account when a toolkit has multiple active connections",
   assert.equal(resolveComposioAccountSelector("GMAIL_LIST_THREADS", undefined, accounts), undefined);
   assert.equal(resolveComposioAccountSelector("GMAIL_LIST_THREADS", "personal-inbox", accounts), "personal-inbox");
   assert.equal(resolveComposioAccountSelector("GOOGLECALENDAR_EVENTS_LIST", "gmail", accounts), "gmail");
+});
+
+test("rejects foreign-toolkit IDs and aliases before exact connected-app execution", async () => {
+  const userId = 830021;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const executed: any[] = [];
+  const accounts = [
+    { id: "ca_gmail", alias: "work-inbox", toolkit: { slug: "gmail" }, status: "ACTIVE" },
+    { id: "ca_calendar", alias: "work-calendar", toolkit: { slug: "googlecalendar" }, status: "ACTIVE" },
+  ];
+  setAgentDependenciesForTests({ composio: {
+    create: async () => ({
+      sessionId: "foreign-selector-session",
+      tools: async () => [{ type: "function", function: { name: "GMAIL_LIST_THREADS", parameters: { type: "object" } } }],
+      execute: async (...args: any[]) => { executed.push(args); return { successful: true }; },
+    }),
+    connectedAccounts: { list: async () => ({ items: accounts }) },
+  } });
+  await assert.rejects(
+    () => executeExactComposioAction(userId, "GMAIL_LIST_THREADS", { account: "ca_calendar" }),
+    /does not belong to the requested app action/i,
+  );
+  await assert.rejects(
+    () => executeExactComposioAction(userId, "GMAIL_LIST_THREADS", { account: "work-calendar" }),
+    /does not belong to the requested app action/i,
+  );
+  assert.equal(executed.length, 0, "foreign IDs and aliases must not reach Composio");
+  await executeExactComposioAction(userId, "GMAIL_LIST_THREADS", { account: "gmail" });
+  assert.deepEqual(executed, [["GMAIL_LIST_THREADS", {}, { account: "work-inbox" }]], "same-toolkit shorthand must normalize to the connected alias");
+});
+
+test("resolves cross-toolkit alias collisions by action toolkit and rejects same-toolkit normalized collisions", () => {
+  const crossToolkitCollision = [
+    { id: "ca_gmail", alias: "work-inbox", toolkit: "gmail", status: "ACTIVE" },
+    { id: "ca_calendar", alias: "work inbox", toolkit: "googlecalendar", status: "ACTIVE" },
+  ];
+  assert.equal(resolveComposioAccountSelector("GMAIL_LIST_THREADS", "work_inbox", crossToolkitCollision), "work-inbox");
+  assert.equal(resolveComposioAccountSelector("GOOGLECALENDAR_EVENTS_LIST", "work_inbox", crossToolkitCollision), "work inbox");
+
+  const sameToolkitNormalizedCollision = [
+    { id: "ca_work", alias: "Work Inbox", toolkit: "gmail", status: "ACTIVE" },
+    { id: "ca_personal", alias: "work-inbox", toolkit: "gmail", status: "ACTIVE" },
+  ];
+  assert.throws(
+    () => resolveComposioAccountSelector("GMAIL_LIST_THREADS", "work_inbox", sameToolkitNormalizedCollision),
+    /matches multiple active accounts/i,
+  );
+});
+
+test("rejects foreign-toolkit selectors inside COMPOSIO_MULTI_EXECUTE_TOOL before provider dispatch", async () => {
+  const userId = 830022;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const executed: any[] = [];
+  const accounts = [
+    { id: "ca_gmail", alias: "work-inbox", toolkit: { slug: "gmail" }, status: "ACTIVE" },
+    { id: "ca_calendar", alias: "work-calendar", toolkit: { slug: "googlecalendar" }, status: "ACTIVE" },
+  ];
+  const session = {
+    sessionId: "foreign-batch-selector-session",
+    tools: async () => [
+      { type: "function", function: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", parameters: { type: "object" } } },
+      { type: "function", function: { name: "COMPOSIO_SEARCH_TOOLS", parameters: { type: "object" } } },
+      { type: "function", function: { name: "GMAIL_LIST_THREADS", parameters: { type: "object" } } },
+    ],
+    execute: async (...args: any[]) => { executed.push(args); return { successful: true, data: { results: [] } }; },
+  };
+  const originalFetch = globalThis.fetch;
+  setAgentDependenciesForTests({ composio: {
+    create: async () => session,
+    connectedAccounts: { list: async () => ({ items: accounts }) },
+  } });
+  let responseIndex = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    if (String(input).includes("/chat/completions")) {
+      responseIndex += 1;
+      return responseIndex === 1
+        ? toolResponse("COMPOSIO_MULTI_EXECUTE_TOOL", JSON.stringify({ tools: [{ tool_slug: "GMAIL_LIST_THREADS", arguments: { account: "ca_calendar" } }] }))
+        : chatResponse({ role: "assistant", content: "I rejected the foreign account selector before dispatch." });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(userId, "Read my Gmail threads.", [], "test/model", undefined, undefined, undefined, undefined, undefined, { ownerPrivateRun: true });
+    assert.match(result.text, /rejected the foreign account selector/i);
+    assert.equal(executed.length, 0, "a foreign nested account must never reach the multi-execute provider call");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("normalizes same-toolkit shorthand inside COMPOSIO_MULTI_EXECUTE_TOOL", async () => {
+  const userId = 830023;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const executed: any[] = [];
+  const session = {
+    sessionId: "same-toolkit-batch-selector-session",
+    tools: async () => [
+      { type: "function", function: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", parameters: { type: "object" } } },
+      { type: "function", function: { name: "GMAIL_LIST_THREADS", parameters: { type: "object" } } },
+    ],
+    execute: async (...args: any[]) => { executed.push(args); return { successful: true, data: { results: [{ successful: true }] } }; },
+  };
+  const originalFetch = globalThis.fetch;
+  setAgentDependenciesForTests({ composio: {
+    create: async () => session,
+    connectedAccounts: { list: async () => ({ items: [
+      { id: "ca_gmail", alias: "work-inbox", toolkit: { slug: "gmail" }, status: "ACTIVE" },
+      { id: "ca_calendar", alias: "work-calendar", toolkit: { slug: "googlecalendar" }, status: "ACTIVE" },
+    ] }) },
+  } });
+  let responseIndex = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    if (String(input).includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    if (String(input).includes("/chat/completions")) {
+      responseIndex += 1;
+      return responseIndex === 1
+        ? toolResponse("COMPOSIO_MULTI_EXECUTE_TOOL", JSON.stringify({ tools: [{ tool_slug: "GMAIL_LIST_THREADS", arguments: { account: "gmail" } }] }))
+        : chatResponse({ role: "assistant", content: "I read the Gmail threads." });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(userId, "Read my Gmail threads.", [], "test/model", undefined, undefined, undefined, undefined, undefined, { ownerPrivateRun: true });
+    assert.match(result.text, /read the Gmail threads/i);
+    assert.equal(executed.length, 1);
+    assert.equal(executed[0]?.[0], "COMPOSIO_MULTI_EXECUTE_TOOL");
+    assert.equal(executed[0]?.[1]?.tools?.[0]?.arguments?.account, "work-inbox");
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test("lists only safe connected-account metadata", async () => {

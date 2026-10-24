@@ -943,6 +943,16 @@ function composioActionBelongsToToolkit(slug: string, toolkit: string): boolean 
   return Boolean(action && app && (action === app || action.startsWith(app)));
 }
 
+function activeAccountsMatchingSelector(
+  selector: string,
+  accounts: ReadonlyArray<ConnectedComposioAccount>,
+): ConnectedComposioAccount[] {
+  const selectorKey = normalizedComposioAccountKey(selector);
+  if (!selectorKey) return [];
+  return accounts.filter((account) => normalizedComposioAccountKey(account.id) === selectorKey
+    || normalizedComposioAccountKey(account.alias ?? "") === selectorKey);
+}
+
 /**
  * Models sometimes copy the private toolkit label from the prompt into the
  * account selector (for example `gmail`) even though Composio expects the
@@ -959,13 +969,16 @@ export function resolveComposioAccountSelector(
   const active = accounts.filter((account) => account.status.toUpperCase() === "ACTIVE");
   if (!active.length) return selector;
   const selectorKey = selector ? normalizedComposioAccountKey(selector) : "";
-  const exact = selectorKey
-    ? active.find((account) => normalizedComposioAccountKey(account.id) === selectorKey
-      || normalizedComposioAccountKey(account.alias ?? "") === selectorKey)
-    : undefined;
-  if (exact) return exact.alias ?? exact.id;
-
   const toolkitAccounts = active.filter((account) => composioActionBelongsToToolkit(toolSlug, account.toolkit));
+  const exactMatches = selectorKey ? activeAccountsMatchingSelector(selector!, active) : [];
+  const exactToolkitMatches = exactMatches.filter((account) => composioActionBelongsToToolkit(toolSlug, account.toolkit));
+  if (exactMatches.length && !exactToolkitMatches.length) {
+    throw new Error("The selected Composio account does not belong to the requested app action; no provider action was attempted.");
+  }
+  if (exactToolkitMatches.length > 1) {
+    throw new Error("The selected Composio account selector matches multiple active accounts for the requested app; no provider action was attempted.");
+  }
+  if (exactToolkitMatches.length === 1) return exactToolkitMatches[0].alias ?? exactToolkitMatches[0].id;
   if (toolkitAccounts.length !== 1) return selector;
   const toolkitKey = normalizedComposioAccountKey(toolkitAccounts[0].toolkit);
   // An explicit selector must be the action's toolkit shorthand. An unknown
