@@ -103,6 +103,9 @@ test("model-driven replans inherit and cannot widen the active step tool fence",
     { title: "Next", allowedTools: ["SAFE_TOOL"] },
     { title: "Later", allowedTools: ["SAFE_TOOL"] },
   ]);
+  assert.deepEqual(constrainMissionReplanTools([{ title: "Replacement", allowedTools: [] }], ["READ_TOOL", "WRITE_TOOL"]), [
+    { title: "Replacement", allowedTools: ["READ_TOOL", "WRITE_TOOL"] },
+  ], "an empty replan fence inherits the existing unfinished-plan authority");
   assert.deepEqual(constrainMissionReplanTools([{ title: "No tools", allowedTools: ["EMAIL_SEND"] }], []), [
     { title: "No tools", allowedTools: [] },
   ]);

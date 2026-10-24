@@ -113,7 +113,11 @@ export function constrainMissionReplanTools<T extends { allowedTools?: string[] 
   const allowed = new Set(currentAllowedTools);
   return steps.map((step) => ({
     ...step,
-    allowedTools: (step.allowedTools ?? [...allowed]).filter((tool) => allowed.has(tool)),
+    // Model replans sometimes emit an empty array when they mean “use the
+    // existing mission authority.” Treat that as inheritance only when a
+    // non-empty parent fence exists. An explicitly fenced non-empty list is
+    // still narrowed to the parent authority, so a replan cannot widen it.
+    allowedTools: (step.allowedTools?.length ? step.allowedTools : [...allowed]).filter((tool) => allowed.has(tool)),
   }));
 }
 

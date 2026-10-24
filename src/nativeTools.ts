@@ -2963,7 +2963,18 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
       const activeStepTools = runtime.missionStepId
         ? existing.steps.find((step) => step.id === runtime.missionStepId)?.allowedTools
         : undefined;
-      const constrainedSteps = constrainMissionReplanTools(steps, activeStepTools);
+      // A replan may replace the current step with a newly named step. The
+      // old implementation constrained every replacement to only the current
+      // step's fence, which discarded already-approved write tools belonging
+      // to later unfinished steps (for example: a read step followed by a
+      // calendar-create step). Inherit the union of existing unfinished
+      // fences, never the whole account catalogue; this preserves the
+      // mission's original authority without allowing a replan to widen it.
+      const unfinishedMissionTools = [...new Set(existing.steps
+        .filter((step) => step.status !== "completed")
+        .flatMap((step) => step.allowedTools ?? []))];
+      const replanFence = [...new Set([...(activeStepTools ?? []), ...unfinishedMissionTools])];
+      const constrainedSteps = constrainMissionReplanTools(steps, replanFence.length ? replanFence : undefined);
       const rejected = (mission: NonNullable<typeof existing>, completedStepIds: string[], reason: string) => ({
         operation: "mission_replan" as const,
         status: "rejected" as const,
