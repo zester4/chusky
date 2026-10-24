@@ -19,30 +19,30 @@ process.env.DURABLE_STATE_SDK_RUNS_ENABLED = "true";
 process.env.DURABLE_STATE_SDK_TABLES_ENABLED = "true";
 process.env.DURABLE_STATE_DATABASE_URL = databaseUrl;
 
-const { securePostgresConnectionString } = await import("../src/postgresConnection.js");
-const { DURABLE_SESSION_DOMAINS } = await import("../src/neonDurableState.js");
-const { reserveDurableSmokeScope } = await import("../src/durableSmokeGuard.js");
-
-const expectedDomains = [...DURABLE_SESSION_DOMAINS];
-const userId = 8_000_000_000_000_000 + randomInt(0, 1_000_000);
-const marker = `durable-state-smoke-${randomInt(1_000_000, 9_999_999)}`;
-const threadId = `thr_smoke_${randomInt(1_000_000, 9_999_999)}`;
-const runId = `run_smoke_${randomInt(1_000_000, 9_999_999)}`;
-const sessionKey = `chuck:session:${userId}`;
-const domainsKey = `chuck:session-domains:${userId}`;
-const domainCacheKeys = expectedDomains.map((domain) => `chuck:session-domain:${userId}:${domain}`);
-const sdkTablesKey = `chuck:sdk-tables:${userId}`;
-const sdkThreadsKey = `chuck:sdk-threads:${userId}`;
-const sdkRunKey = `chuck:sdk-run:${userId}:${threadId}:${runId}`;
-const sdkRunListKey = `chuck:sdk-runs:${userId}:${threadId}`;
-const sdkRunUsageKey = `chuck:sdk-run-usage:${userId}`;
-const smokeRedisKeys = [sessionKey, domainsKey, ...domainCacheKeys, sdkTablesKey, sdkThreadsKey, sdkRunKey, sdkRunListKey, sdkRunUsageKey];
-const reservationKey = `chuck:durable-state-live-smoke:${userId}`;
-const reservationToken = randomUUID();
-const pool = new Pool({ connectionString: securePostgresConnectionString(databaseUrl), max: 1, connectionTimeoutMillis: 10_000 });
-const redis = new Redis(process.env.REDIS_URL, { maxRetriesPerRequest: 1, connectTimeout: 10_000 });
-
 async function main(): Promise<void> {
+  // Keep dynamic imports inside the async entrypoint: the repository executes
+  // TypeScript as CommonJS, where top-level await is not supported by tsx.
+  const { securePostgresConnectionString } = await import("../src/postgresConnection.js");
+  const { DURABLE_SESSION_DOMAINS } = await import("../src/neonDurableState.js");
+  const { reserveDurableSmokeScope } = await import("../src/durableSmokeGuard.js");
+  const expectedDomains = [...DURABLE_SESSION_DOMAINS];
+  const userId = 8_000_000_000_000_000 + randomInt(0, 1_000_000);
+  const marker = `durable-state-smoke-${randomInt(1_000_000, 9_999_999)}`;
+  const threadId = `thr_smoke_${randomInt(1_000_000, 9_999_999)}`;
+  const runId = `run_smoke_${randomInt(1_000_000, 9_999_999)}`;
+  const sessionKey = `chuck:session:${userId}`;
+  const domainsKey = `chuck:session-domains:${userId}`;
+  const domainCacheKeys = expectedDomains.map((domain) => `chuck:session-domain:${userId}:${domain}`);
+  const sdkTablesKey = `chuck:sdk-tables:${userId}`;
+  const sdkThreadsKey = `chuck:sdk-threads:${userId}`;
+  const sdkRunKey = `chuck:sdk-run:${userId}:${threadId}:${runId}`;
+  const sdkRunListKey = `chuck:sdk-runs:${userId}:${threadId}`;
+  const sdkRunUsageKey = `chuck:sdk-run-usage:${userId}`;
+  const smokeRedisKeys = [sessionKey, domainsKey, ...domainCacheKeys, sdkTablesKey, sdkThreadsKey, sdkRunKey, sdkRunListKey, sdkRunUsageKey];
+  const reservationKey = `chuck:durable-state-live-smoke:${userId}`;
+  const reservationToken = randomUUID();
+  const pool = new Pool({ connectionString: securePostgresConnectionString(databaseUrl), max: 1, connectionTimeoutMillis: 10_000 });
+  const redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: 1, connectTimeout: 10_000 });
   let runError: unknown;
   let stage = "initialize-store";
   let releaseSmokeScope: (() => Promise<void>) | undefined;
