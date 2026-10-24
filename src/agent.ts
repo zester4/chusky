@@ -933,11 +933,103 @@ function splitAccountSelector(args: Record<string, unknown>): { account?: string
   return { account, arguments: arguments_ };
 }
 
-async function composioExecute(sessionObj: any, slug: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<any> {
+function normalizedComposioAccountKey(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function composioActionBelongsToToolkit(slug: string, toolkit: string): boolean {
+  const action = normalizedComposioAccountKey(slug);
+  const app = normalizedComposioAccountKey(toolkit);
+  return Boolean(action && app && (action === app || action.startsWith(app)));
+}
+
+/**
+ * Models sometimes copy the private toolkit label from the prompt into the
+ * account selector (for example `gmail`) even though Composio expects the
+ * owner's connected-account alias or ID. Resolve that shorthand only when it
+ * maps to exactly one active account for the action's toolkit. Never guess
+ * between multiple accounts and never bind an account to another toolkit.
+ */
+export function resolveComposioAccountSelector(
+  toolSlug: string,
+  selector: string | undefined,
+  accounts: ReadonlyArray<ConnectedComposioAccount> | undefined,
+): string | undefined {
+  if (!accounts?.length) return selector;
+  const active = accounts.filter((account) => account.status.toUpperCase() === "ACTIVE");
+  if (!active.length) return selector;
+  const selectorKey = selector ? normalizedComposioAccountKey(selector) : "";
+  const exact = selectorKey
+    ? active.find((account) => normalizedComposioAccountKey(account.id) === selectorKey
+      || normalizedComposioAccountKey(account.alias ?? "") === selectorKey)
+    : undefined;
+  if (exact) return exact.alias ?? exact.id;
+
+  const toolkitAccounts = active.filter((account) => composioActionBelongsToToolkit(toolSlug, account.toolkit));
+  if (toolkitAccounts.length !== 1) return selector;
+  const toolkitKey = normalizedComposioAccountKey(toolkitAccounts[0].toolkit);
+  // An explicit selector must be the action's toolkit shorthand. An unknown
+  // selector remains untouched so Composio can reject it rather than Chusky
+  // silently choosing an account the model did not identify.
+  if (selector && selectorKey !== toolkitKey) return selector;
+  return toolkitAccounts[0].alias ?? toolkitAccounts[0].id;
+}
+
+function normalizeComposioBatchAccounts(
+  args: Record<string, unknown>,
+  accounts: ReadonlyArray<ConnectedComposioAccount> | undefined,
+): Record<string, unknown> {
+  const key = Array.isArray(args.tools) ? "tools" : Array.isArray(args.items) ? "items" : undefined;
+  if (!key) return args;
+  const items = args[key] as unknown[];
+  return {
+    ...args,
+    [key]: items.map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+      const row = item as Record<string, unknown>;
+      const rawToolSlug = row.tool_slug ?? row.toolSlug ?? row.slug;
+      const toolSlug = typeof rawToolSlug === "string" ? rawToolSlug : "";
+      const rowArguments = row.arguments ?? row.input;
+      const normalizedRowAccount = resolveComposioAccountSelector(
+        toolSlug,
+        typeof row.account === "string" ? row.account : undefined,
+        accounts,
+      );
+      const normalizedArguments = rowArguments && typeof rowArguments === "object" && !Array.isArray(rowArguments)
+        ? { ...(rowArguments as Record<string, unknown>) }
+        : rowArguments;
+      if (normalizedArguments && typeof normalizedArguments === "object" && !Array.isArray(normalizedArguments)) {
+        const selected = splitAccountSelector(normalizedArguments as Record<string, unknown>);
+        const nestedAccount = resolveComposioAccountSelector(toolSlug, selected.account, accounts);
+        if (nestedAccount) (normalizedArguments as Record<string, unknown>).account = nestedAccount;
+        else if (selected.account) delete (normalizedArguments as Record<string, unknown>).account;
+      }
+      return {
+        ...row,
+        ...(normalizedRowAccount ? { account: normalizedRowAccount } : {}),
+        ...(Object.hasOwn(row, "input") ? { input: normalizedArguments } : { arguments: normalizedArguments }),
+      };
+    }),
+  };
+}
+
+async function composioExecute(
+  sessionObj: any,
+  slug: string,
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+  accounts?: ReadonlyArray<ConnectedComposioAccount>,
+): Promise<any> {
   const options = signal ? { signal } : undefined;
-  if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") return abortable(sessionObj.execute(slug, args, options), signal);
+  if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") {
+    return abortable(sessionObj.execute(slug, normalizeComposioBatchAccounts(args, accounts), options), signal);
+  }
   const selected = splitAccountSelector(args);
-  const executeOptions = selected.account || signal ? { ...(selected.account ? { account: selected.account } : {}), ...(signal ? { signal } : {}) } : undefined;
+  const account = resolveComposioAccountSelector(slug, selected.account, accounts);
+  if (account && account !== selected.account) {
+    logger.debug({ tool: slug, selectorNormalized: true }, "Normalized a Composio toolkit account selector");
+  }
+  const executeOptions = account || signal ? { ...(account ? { account } : {}), ...(signal ? { signal } : {}) } : undefined;
   const result = await abortable(sessionObj.execute(slug, selected.arguments, executeOptions), signal);
   // Composio session.execute() returns { data, error, logId }, whereas direct
   // tools.execute() includes `successful`. Preserve explicit failures and make
@@ -2216,12 +2308,12 @@ export async function getScopedComposioTools(userId: number, allowedSlugs: strin
   }
   const nameOf = (tool: any): string => String(tool?.function?.name ?? tool?.name ?? "");
   const byName = new Map(available.map((tool) => [nameOf(tool), addAccountSelector(tool)]));
+  const connectedAccounts = await listConnectedAccounts(userId).catch(() => []);
   const missing = unique.filter((slug) => !byName.has(slug));
   const requiredMissing = missing.filter((slug) => !optional.has(slug));
   if (requiredMissing.length) {
     if (options?.objective) {
-      const accounts = await listConnectedAccounts(userId).catch(() => []);
-      const route = resolveComposioRoute(options.objective, accounts.map((account) => account.toolkit));
+      const route = resolveComposioRoute(options.objective, connectedAccounts.map((account) => account.toolkit));
       if (route?.needsConnection) throw new UnavailableComposioToolsError(requiredMissing, route.preferredToolkits);
     }
     // A stale slug becomes a durable supervisor request instead of a terminal
@@ -2233,7 +2325,7 @@ export async function getScopedComposioTools(userId: number, allowedSlugs: strin
     missing,
     execute: (slug, args, signal) => {
       if (!byName.has(slug)) throw new Error(`Composio tool ${slug} was not delegated to this worker.`);
-      return composioExecute(sessionObj, slug, args, signal);
+      return composioExecute(sessionObj, slug, args, signal, connectedAccounts);
     },
   };
 }
@@ -2382,7 +2474,8 @@ function createSessionOutcomeReadAdapter(userId: number, sessionObj: any, tools:
       const toolkit = String(raw.toolkit?.slug ?? raw.toolkit ?? slug.split("_")[0]).toLowerCase();
       const accounts = (await listConnectedAccounts(userId, toolkit)).filter((account) => account.status.toUpperCase() === "ACTIVE");
       const selector = splitAccountSelector(args).account;
-      const account = selector ? accounts.find((item) => item.id === selector || item.alias === selector) : accounts.length === 1 ? accounts[0] : undefined;
+      const resolvedSelector = resolveComposioAccountSelector(slug, selector, accounts);
+      const account = resolvedSelector ? accounts.find((item) => item.id === resolvedSelector || item.alias === resolvedSelector) : accounts.length === 1 ? accounts[0] : undefined;
       if (!account) throw new Error("Provider verification requires an active owned connection; select the account explicitly when multiple accounts are connected.");
       resolved.set(slug, { schema, accountId: account.id, alias: account.alias, version: raw.version ?? "latest" });
       return true;
@@ -2391,7 +2484,8 @@ function createSessionOutcomeReadAdapter(userId: number, sessionObj: any, tools:
       const action = resolved.get(slug);
       if (!action) return composioExecute(sessionObj, slug, args, signal);
       const selected = splitAccountSelector(args);
-      if (selected.account && selected.account !== action.accountId && selected.account !== action.alias) throw new Error("Provider verification account does not match the active owned connection.");
+      const resolvedSelector = resolveComposioAccountSelector(slug, selected.account, [{ id: action.accountId, alias: action.alias, toolkit: slug.split("_", 1)[0], status: "ACTIVE" }]);
+      if (resolvedSelector && resolvedSelector !== action.accountId && resolvedSelector !== action.alias) throw new Error("Provider verification account does not match the active owned connection.");
       validateToolArgumentsAgainstSchema(slug, selected.arguments, action.schema);
       return abortable(composio.tools.execute(slug, { userId: composioUserId(userId), connectedAccountId: action.accountId, version: action.version, arguments: selected.arguments }, signal ? { signal } : undefined), signal);
     },
@@ -5113,7 +5207,7 @@ async function executeAgent(
             deniedToolSlugs: deny,
             signal,
           });
-          if (execResult === undefined) execResult = await composioExecute(sessionObj, slug, executionArgs, signal);
+          if (execResult === undefined) execResult = await composioExecute(sessionObj, slug, executionArgs, signal, connectedAccountSnapshot);
         }
         if (readCacheKey && !hasCachedRead) inTurnReadResults.set(readCacheKey, execResult);
         if (options?.meetingId && meetingCalendarTargets.some(isMeetingCalendarAvailabilityTool) && isSuccessfulCalendarResult(execResult)) {

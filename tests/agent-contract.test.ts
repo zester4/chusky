@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { addRecallMeeting, claimAgentUpgrade, completeMissionStep, createMission, createWebTelegramLinkCode, finalizeMissionIfReady, getApproval, getMission, getSession, initStore, listAgentRuns, listMissions, listTasks, redeemWebTelegramLinkCode, saveSession, setApprovalStatus, startMission, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { stableSdkUserId } from "../src/sdkIdentity.js";
-import { appendPreviewLinks, cleanModelText, getReconnectUrl, getToolkitStatesPage, invalidateSession, isSuccessfulCalendarResult, listConnectedAccounts, openRouterAttemptTimeoutMs, OpenRouterTimeoutError, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, repairComposioSearchArguments, runAgent, searchTools, transcriptionFormatForMimeType, voiceComposioToolSlugs, voiceFastLaneEligible, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
+import { appendPreviewLinks, cleanModelText, getReconnectUrl, getToolkitStatesPage, invalidateSession, isSuccessfulCalendarResult, listConnectedAccounts, openRouterAttemptTimeoutMs, OpenRouterTimeoutError, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, repairComposioSearchArguments, resolveComposioAccountSelector, runAgent, searchTools, transcriptionFormatForMimeType, voiceComposioToolSlugs, voiceFastLaneEligible, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { formatAgentUpgradeNotice, loadAgentUpgrade } from "../src/upgradeNotice.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -2896,6 +2896,28 @@ test("routes a direct Composio tool to the requested connected-account alias", a
     assert.equal(result.text, "tool complete");
   });
   assert.deepEqual(executed, [{ slug: "TEST_SAFE_TOOL", args: { value: 7 }, options: { account: "work-gmail" } }]);
+});
+
+test("normalizes toolkit-name account selectors for one active connected account", () => {
+  const accounts = [
+    { id: "ca_gmail", alias: "work-inbox", toolkit: "gmail", status: "ACTIVE" },
+    { id: "ca_calendar", alias: "work-calendar", toolkit: "googlecalendar", status: "ACTIVE" },
+  ];
+  assert.equal(resolveComposioAccountSelector("GMAIL_LIST_THREADS", "gmail", accounts), "work-inbox");
+  assert.equal(resolveComposioAccountSelector("GOOGLECALENDAR_EVENTS_LIST", "googlecalendar", accounts), "work-calendar");
+  assert.equal(resolveComposioAccountSelector("GMAIL_LIST_THREADS", undefined, accounts), "work-inbox");
+  assert.equal(resolveComposioAccountSelector("GMAIL_LIST_THREADS", "work-inbox", accounts), "work-inbox");
+});
+
+test("does not guess an account when a toolkit has multiple active connections", () => {
+  const accounts = [
+    { id: "ca_work", alias: "work-inbox", toolkit: "gmail", status: "ACTIVE" },
+    { id: "ca_personal", alias: "personal-inbox", toolkit: "gmail", status: "ACTIVE" },
+  ];
+  assert.equal(resolveComposioAccountSelector("GMAIL_LIST_THREADS", "gmail", accounts), "gmail");
+  assert.equal(resolveComposioAccountSelector("GMAIL_LIST_THREADS", undefined, accounts), undefined);
+  assert.equal(resolveComposioAccountSelector("GMAIL_LIST_THREADS", "personal-inbox", accounts), "personal-inbox");
+  assert.equal(resolveComposioAccountSelector("GOOGLECALENDAR_EVENTS_LIST", "gmail", accounts), "gmail");
 });
 
 test("lists only safe connected-account metadata", async () => {
