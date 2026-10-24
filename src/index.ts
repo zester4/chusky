@@ -2287,7 +2287,7 @@ async function main(): Promise<void> {
         if (!value || typeof value !== "object") return [];
         const step = value as Record<string, unknown>;
         if (typeof step.title !== "string" || typeof step.objective !== "string") return [];
-        return [{ id: typeof step.id === "string" ? step.id : undefined, title: step.title, objective: step.objective, dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((item): item is string => typeof item === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit) }];
+        return [{ id: typeof step.id === "string" ? step.id : undefined, title: step.title, objective: step.objective, dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((item): item is string => typeof item === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit), allowedTools: Array.isArray(step.allowedTools) ? step.allowedTools.filter((item): item is string => typeof item === "string") : undefined }];
       }) : [];
       if (!reason || reason.length > 2_000 || !steps.length) return c.json({ ok: false, error: "reason and at least one valid step are required" }, 400);
       try {
