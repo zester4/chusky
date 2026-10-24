@@ -4,8 +4,8 @@ import { summarizeConversation, type SummaryMessage } from "./conversationSummar
 const MAX_MODEL_TOOL_RESULT_CHARS = 3_500;
 const MAX_MODEL_CONTEXT_MESSAGES = 14;
 const MAX_MODEL_CONTEXT_CHARS = 30_000;
-const MODEL_TOOL_DESCRIPTION_LIMIT = 600;
-const MODEL_SCHEMA_DESCRIPTION_LIMIT = 240;
+const MODEL_TOOL_DESCRIPTION_LIMIT = 320;
+const MODEL_SCHEMA_DESCRIPTION_LIMIT = 120;
 
 function compactSchemaDescriptions(value: unknown, descriptionLimit: number): unknown {
   if (Array.isArray(value)) return value.map((item) => compactSchemaDescriptions(item, descriptionLimit));
