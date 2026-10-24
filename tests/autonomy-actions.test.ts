@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { beginExternalAction, failExternalAction, finishExternalAction, isExternalWriteTool, reconcileExternalActionByRead, repairMissionEvidenceForMission } from "../src/autonomy/actions.js";
+import { beginExternalAction, externalArgumentsHash, failExternalAction, finishExternalAction, isExternalWriteTool, reconcileExternalActionByRead, repairMissionEvidenceForMission } from "../src/autonomy/actions.js";
 import { completeMissionStep, createMission, getExternalAction, getMission, initStore, saveExternalAction, startMission } from "../src/store.js";
 
 test("autonomous external action receipts make successful provider writes idempotent", async () => {
@@ -30,6 +30,87 @@ test("trigger external action receipts prevent duplicate writes after workflow r
   const replay = await beginExternalAction({ ...input, runId: "trigger-agent-event-1-retry" });
   assert.equal(replay.state, "succeeded");
   assert.equal(replay.receipt?.providerId, "msg_trigger_1");
+});
+
+test("mission external action idempotency is scoped to the exact mission step", async () => {
+  await initStore({ memoryOnly: true });
+  const args = { to: "randy@example.com", subject: "Appointment" };
+  const first = await beginExternalAction({
+    userId: 950009,
+    provider: "composio",
+    tool: "GMAIL_SEND_EMAIL",
+    args,
+    runId: "mission-step-a-run",
+    source: { kind: "mission", id: "mis_same_action", missionStepId: "step-a" },
+  });
+  assert.equal(first.state, "new");
+  await finishExternalAction(950009, first.logicalActionId, "sent in step A", "msg-a");
+
+  const second = await beginExternalAction({
+    userId: 950009,
+    provider: "composio",
+    tool: "GMAIL_SEND_EMAIL",
+    args,
+    runId: "mission-step-b-run",
+    source: { kind: "mission", id: "mis_same_action", missionStepId: "step-b" },
+  });
+  assert.equal(second.state, "new", "a distinct mission step must not reuse step A receipt");
+  assert.notEqual(second.logicalActionId, first.logicalActionId);
+  await finishExternalAction(950009, second.logicalActionId, "sent in step B", "msg-b");
+
+  const replay = await beginExternalAction({
+    userId: 950009,
+    provider: "composio",
+    tool: "GMAIL_SEND_EMAIL",
+    args,
+    runId: "mission-step-b-retry",
+    source: { kind: "mission", id: "mis_same_action", missionStepId: "step-b" },
+  });
+  assert.equal(replay.state, "succeeded");
+  assert.equal(replay.receipt?.providerId, "msg-b");
+});
+
+test("mission action keys read compatible legacy receipts only for the same step", async () => {
+  await initStore({ memoryOnly: true });
+  const args = { to: "legacy@example.com", subject: "Legacy appointment" };
+  const argumentsHash = externalArgumentsHash(args);
+  const legacyLogicalActionId = ["mission", "mis_legacy_key", "single", "GMAIL_SEND_EMAIL", argumentsHash].join(":").slice(0, 240);
+  await saveExternalAction({
+    id: "act_legacy_key",
+    userId: 950010,
+    provider: "composio",
+    tool: "GMAIL_SEND_EMAIL",
+    argumentsHash,
+    logicalActionId: legacyLogicalActionId,
+    sourceKind: "mission",
+    sourceId: "mis_legacy_key",
+    missionStepId: "send-email",
+    status: "succeeded",
+    providerId: "legacy-msg-1",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+
+  const sameStep = await beginExternalAction({
+    userId: 950010,
+    provider: "composio",
+    tool: "GMAIL_SEND_EMAIL",
+    args,
+    runId: "legacy-retry",
+    source: { kind: "mission", id: "mis_legacy_key", missionStepId: "send-email" },
+  });
+  assert.equal(sameStep.state, "succeeded");
+  assert.equal(sameStep.logicalActionId, legacyLogicalActionId);
+
+  const differentStep = await beginExternalAction({
+    userId: 950010,
+    provider: "composio",
+    tool: "GMAIL_SEND_EMAIL",
+    args,
+    runId: "legacy-different-step",
+    source: { kind: "mission", id: "mis_legacy_key", missionStepId: "other-step" },
+  });
+  assert.equal(differentStep.state, "new");
 });
 
 test("an uncertain external-write failure is quarantined instead of replayed", async () => {

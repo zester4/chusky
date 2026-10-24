@@ -99,6 +99,29 @@ export interface ExternalActionClaim {
   logicalActionId: string;
 }
 
+function externalActionLogicalId(input: {
+  source?: { kind: string; id: string; occurrenceId?: string; missionStepId?: string };
+  tool: string;
+  argumentsHash: string;
+  includeMissionStep: boolean;
+}): string {
+  const parts = [
+    input.source?.kind ?? "run",
+    input.source?.id ?? "run",
+    input.source?.occurrenceId ?? "single",
+  ];
+  // A mission step is a distinct execution occurrence. Keep it in the
+  // idempotency frontier so two separate steps that intentionally perform the
+  // same provider action with the same arguments do not collapse into one
+  // external write. The legacy form is still read below for records created
+  // before this field was part of the key.
+  if (input.includeMissionStep && input.source?.missionStepId) {
+    parts.push("step", input.source.missionStepId);
+  }
+  parts.push(input.tool, input.argumentsHash);
+  return parts.join(":").slice(0, 240);
+}
+
 export async function beginExternalAction(input: {
   userId: number;
   provider: ExternalActionReceipt["provider"];
@@ -108,35 +131,53 @@ export async function beginExternalAction(input: {
   source?: { kind: string; id: string; occurrenceId?: string; missionStepId?: string };
 }): Promise<ExternalActionClaim> {
   const argumentsHash = externalArgumentsHash(input.args);
-  const logicalActionId = [input.source?.kind ?? "run", input.source?.id ?? input.runId, input.source?.occurrenceId ?? "single", input.tool, argumentsHash].join(":").slice(0, 240);
-  const existing = await getExternalAction(input.userId, logicalActionId);
-  if (existing?.status === "succeeded") return { state: "succeeded", receipt: existing, logicalActionId };
-  const deliveryKey = `autonomy:external-action:${input.userId}:${createHash("sha256").update(logicalActionId).digest("hex")}`;
-  if (existing?.status === "ambiguous" || existing?.status === "failed") return { state: "ambiguous", receipt: existing, logicalActionId };
+  const missionScoped = Boolean(input.source?.missionStepId);
+  const logicalActionId = externalActionLogicalId({ source: input.source, tool: input.tool, argumentsHash, includeMissionStep: missionScoped });
+  const legacyLogicalActionId = missionScoped
+    ? externalActionLogicalId({ source: input.source, tool: input.tool, argumentsHash, includeMissionStep: false })
+    : logicalActionId;
+  let existing = await getExternalAction(input.userId, logicalActionId);
+  // Preserve idempotency for a mission action that was started by an older
+  // deployment, but never borrow a legacy receipt from a different mission
+  // step. Without this ownership check, a same-arguments action in step B
+  // could incorrectly replay step A success after a rolling deployment.
+  if (!existing && legacyLogicalActionId !== logicalActionId) {
+    const legacy = await getExternalAction(input.userId, legacyLogicalActionId);
+    if (legacy
+      && legacy.sourceKind === input.source?.kind
+      && legacy.sourceId === input.source?.id
+      && legacy.missionStepId === input.source?.missionStepId) {
+      existing = legacy;
+    }
+  }
+  const effectiveLogicalActionId = existing?.logicalActionId ?? logicalActionId;
+  if (existing?.status === "succeeded") return { state: "succeeded", receipt: existing, logicalActionId: effectiveLogicalActionId };
+  const deliveryKey = `autonomy:external-action:${input.userId}:${createHash("sha256").update(effectiveLogicalActionId).digest("hex")}`;
+  if (existing?.status === "ambiguous" || existing?.status === "failed") return { state: "ambiguous", receipt: existing, logicalActionId: effectiveLogicalActionId };
   // A process may die after the provider accepts a write but before the
   // success receipt is persisted. Once the execution lease expires, never
   // replay that started action automatically; quarantine it for reconciliation.
   if (existing?.status === "started" && Date.now() - existing.updatedAt >= 30 * 60 * 1000) {
-    const ambiguous = await updateExternalAction(input.userId, logicalActionId, {
+    const ambiguous = await updateExternalAction(input.userId, effectiveLogicalActionId, {
       status: "ambiguous",
       error: "The provider outcome is uncertain. Verify the provider state before manually retrying this action.",
     });
     await completeDelivery(deliveryKey, 365 * 24 * 60 * 60);
-    return { state: "ambiguous", receipt: ambiguous ?? existing, logicalActionId };
+    return { state: "ambiguous", receipt: ambiguous ?? existing, logicalActionId: effectiveLogicalActionId };
   }
   const claimed = await claimDelivery(deliveryKey, 30 * 60 * 1000);
-  if (!claimed) return { state: "in_flight", receipt: existing, logicalActionId };
+  if (!claimed) return { state: "in_flight", receipt: existing, logicalActionId: effectiveLogicalActionId };
   const receipt = await saveExternalAction({
-    id: existing?.id ?? `act_${createHash("sha256").update(`${input.userId}:${logicalActionId}`).digest("hex").slice(0, 48)}`,
-    userId: input.userId, provider: input.provider, tool: input.tool, argumentsHash, logicalActionId,
+    id: existing?.id ?? `act_${createHash("sha256").update(`${input.userId}:${effectiveLogicalActionId}`).digest("hex").slice(0, 48)}`,
+    userId: input.userId, provider: input.provider, tool: input.tool, argumentsHash, logicalActionId: effectiveLogicalActionId,
     ...(input.source?.kind ? { sourceKind: input.source.kind.slice(0, 80) } : {}),
     ...(input.source?.id ? { sourceId: input.source.id.slice(0, 240) } : {}),
     ...(input.source?.missionStepId ? { missionStepId: input.source.missionStepId.slice(0, 160) } : {}),
     ...(typeof input.args.account_alias === "string" ? { account: input.args.account_alias.slice(0, 160) } : {}),
     ...(input.source?.occurrenceId ? { occurrenceId: input.source.occurrenceId } : {}), status: "started", createdAt: existing?.createdAt ?? Date.now(), updatedAt: Date.now(),
   });
-  await appendTraceEvent({ ownerId: input.userId, kind: "receipt", type: "external_action.started", at: Date.now(), correlationId: logicalActionId, summary: `${input.tool} started through ${input.provider}.`, metadata: { provider: input.provider } }).catch(() => undefined);
-  return { state: "new", receipt, logicalActionId };
+  await appendTraceEvent({ ownerId: input.userId, kind: "receipt", type: "external_action.started", at: Date.now(), correlationId: effectiveLogicalActionId, summary: `${input.tool} started through ${input.provider}.`, metadata: { provider: input.provider } }).catch(() => undefined);
+  return { state: "new", receipt, logicalActionId: effectiveLogicalActionId };
 }
 
 export async function finishExternalAction(userId: number, logicalActionId: string, resultSummary: string, providerId?: string, providerActions: TrustedProviderAction[] = []): Promise<ExternalActionReceipt | undefined> {
