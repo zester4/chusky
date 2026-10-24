@@ -115,7 +115,7 @@ const MAX_TOOL_RESULT_CHARS = 20_000;
 // current tool schemas and trusted system context are known.
 // Keep headroom for tokenizer variance and provider key limits (some staging
 // keys cap prompts near 20k tokens even when the model context is larger).
-const MODEL_PROMPT_CHAR_BUDGET = 60_000;
+const MODEL_PROMPT_CHAR_BUDGET = 45_000;
 const MIN_MODEL_CONVERSATION_CHARS = 2_500;
 const MAX_IMAGE_TRANSFER_BYTES = 25 * 1024 * 1024;
 const MAX_BROWSER_FILE_TRANSFER_BYTES = 100 * 1024 * 1024;
@@ -4182,7 +4182,7 @@ async function executeAgent(
     // Prefer progressive discovery for that first round: the agent still has
     // its search/schema gateways and can admit exact tools immediately after
     // discovery, but the provider never receives an unrelated schema wall.
-    const discoveryFirst = !durableExecution && !options?.meetingId && round === 0 && rawModelAvailableTools.length > 0
+    const discoveryFirst = !durableExecution && !options?.meetingId && rawModelAvailableTools.length > 0
       && JSON.stringify(rawModelAvailableTools).length > 20_000;
     const modelAvailableTools = (discoveryFirst
       ? rawModelAvailableTools.filter((tool) => {
