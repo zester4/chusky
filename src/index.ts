@@ -355,7 +355,7 @@ async function main(): Promise<void> {
       }
     };
     void sweepVoiceCalls();
-    voiceReconciliationRecovery = setInterval(() => { void sweepVoiceCalls(); }, 15_000);
+    voiceReconciliationRecovery = setInterval(() => { void sweepVoiceCalls(); }, 60_000); // was 15_000 — crash recovery, not a real-time poll
     if (typeof voiceReconciliationRecovery === "object" && "unref" in voiceReconciliationRecovery) voiceReconciliationRecovery.unref();
   }
 
@@ -377,7 +377,7 @@ async function main(): Promise<void> {
       }
       if (report.leaseLost) logger.warn({ ownersScanned: report.ownersScanned }, "Mission recovery sweep stopped after losing its lease");
     }).catch((error) => logger.warn({ errorClass: error instanceof Error ? error.name : "unknown" }, "Mission recovery sweep failed"));
-  }, 120_000);
+  }, 600_000); // was 120_000 — 10 min is plenty for crash recovery
   if (typeof missionRecovery === "object" && "unref" in missionRecovery) missionRecovery.unref();
   let webSessionReconciliationRecoveryInFlight = false;
   const reconcileWebSessionTasks = async () => {
@@ -396,7 +396,7 @@ async function main(): Promise<void> {
     }
   };
   void reconcileWebSessionTasks();
-  webSessionReconciliationRecovery = setInterval(() => { void reconcileWebSessionTasks(); }, 120_000);
+  webSessionReconciliationRecovery = setInterval(() => { void reconcileWebSessionTasks(); }, 600_000); // was 120_000
   if (typeof webSessionReconciliationRecovery === "object" && "unref" in webSessionReconciliationRecovery) webSessionReconciliationRecovery.unref();
   let taskRecoveryInFlight = false;
   const reconcileQueuedTasks = async () => {
@@ -419,7 +419,7 @@ async function main(): Promise<void> {
     }
   };
   void reconcileQueuedTasks();
-  taskRecovery = setInterval(() => { void reconcileQueuedTasks(); }, 60_000);
+  taskRecovery = setInterval(() => { void reconcileQueuedTasks(); }, 300_000); // was 60_000 — 5 min; fast-exit handles empty state cheaply
   if (typeof taskRecovery === "object" && "unref" in taskRecovery) taskRecovery.unref();
   let scheduleRecoveryInFlight = false;
   const reconcileSchedules = async () => {
@@ -440,17 +440,17 @@ async function main(): Promise<void> {
     }
   };
   void reconcileSchedules();
-  scheduleRecovery = setInterval(() => { void reconcileSchedules(); }, 5 * 60_000);
+  scheduleRecovery = setInterval(() => { void reconcileSchedules(); }, 15 * 60_000); // was 5 * 60_000 — schedule drift is acceptable over 15 min
   if (typeof scheduleRecovery === "object" && "unref" in scheduleRecovery) scheduleRecovery.unref();
   if (config.durableMemoryEnabled) {
-    memoryProjectionRecovery = setInterval(() => { void drainMemoryVectorOutbox(50).catch((error) => logger.warn({ errorType: error instanceof Error ? error.name : "MemoryProjectionError" }, "Memory Vector projection sweep failed")); }, 60_000);
+    memoryProjectionRecovery = setInterval(() => { void drainMemoryVectorOutbox(50).catch((error) => logger.warn({ errorType: error instanceof Error ? error.name : "MemoryProjectionError" }, "Memory Vector projection sweep failed")); }, 120_000); // was 60_000
     if (typeof memoryProjectionRecovery === "object" && "unref" in memoryProjectionRecovery) memoryProjectionRecovery.unref();
-    memoryReflectionRecovery = setInterval(() => { void drainMemoryReflectionQueue(20).catch((error) => logger.warn({ errorType: error instanceof Error ? error.name : "MemoryReflectionError" }, "Memory reflection sweep failed")); }, 60_000);
+    memoryReflectionRecovery = setInterval(() => { void drainMemoryReflectionQueue(20).catch((error) => logger.warn({ errorType: error instanceof Error ? error.name : "MemoryReflectionError" }, "Memory reflection sweep failed")); }, 120_000); // was 60_000
     if (typeof memoryReflectionRecovery === "object" && "unref" in memoryReflectionRecovery) memoryReflectionRecovery.unref();
   }
   daytonaRetentionSweep = setInterval(() => {
     void listSessionOwnerIds(500).then((owners) => Promise.allSettled(owners.map((userId) => daytonaEngine.retentionSweep(userId)))).catch((error) => logger.warn({ errorType: error instanceof Error ? error.name : "DaytonaRetentionError" }, "Daytona retention sweep failed"));
-  }, 15 * 60_000);
+  }, 30 * 60_000); // was 15 * 60_000
   if (typeof daytonaRetentionSweep === "object" && "unref" in daytonaRetentionSweep) daytonaRetentionSweep.unref();
   // Webhook updates are dispatched in the background, so initialize grammY
   // before the HTTP server can accept one. Without this, handleUpdate throws
@@ -779,7 +779,7 @@ async function main(): Promise<void> {
       void recoverSdkWebhooks().catch((error) => logger.warn({ error }, "SDK webhook recovery failed"));
       // SDK webhooks use the same durable outbox as channels. They are sent
       // immediately on enqueue; this is only crash recovery, not polling.
-      sdkWebhookRecovery = setInterval(() => { void recoverSdkWebhooks().catch((error) => logger.warn({ error }, "SDK webhook recovery failed")); }, 120_000);
+      sdkWebhookRecovery = setInterval(() => { void recoverSdkWebhooks().catch((error) => logger.warn({ error }, "SDK webhook recovery failed")); }, 600_000); // was 120_000 — crash recovery only, outbox sends are immediate
       if (typeof sdkWebhookRecovery === "object" && "unref" in sdkWebhookRecovery) sdkWebhookRecovery.unref();
     }
 

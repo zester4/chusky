@@ -288,6 +288,10 @@ export async function recoverAllMissions(enqueue: MissionTaskEnqueuer, options: 
 
   try {
     const ownerIds = (await listMissionOwnerIds()).sort((left, right) => left - right);
+    // Fast-exit: if no accounts have ever created a mission, release the lease
+    // immediately — the owner-list read already paid the Redis cost, but all
+    // subsequent cursor reads and per-owner scans are avoided.
+    if (!ownerIds.length) return total;
     const maxOwners = Math.max(1, Math.floor(options.maxOwners ?? 1000));
     const ownerCursor = await getMissionRecoveryOwnerCursor();
     const cursorIndex = ownerCursor === undefined ? 0 : ownerIds.findIndex((userId) => userId > ownerCursor);

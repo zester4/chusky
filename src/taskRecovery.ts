@@ -92,6 +92,9 @@ export async function recoverQueuedTaskWorkflows(
     const now = options.now ?? Date.now();
     const ownerIds = await listTaskOwnerIds(maxOwners);
     report.owners = ownerIds.length;
+    // Fast-exit: skip the expensive per-owner scan when no tasks exist at all.
+    // Acquiring the lease already cost 1 Redis command; this saves all the rest.
+    if (!ownerIds.length) return report;
 
     for (const userId of ownerIds) {
       if (leaseLost) break;
