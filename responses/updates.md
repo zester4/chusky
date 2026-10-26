@@ -131,7 +131,10 @@ The production Neon database audit revealed:
 | `src/neonDurableState.ts` | Added 60s cache for `healthStatus()`; added pool pre-check fast-exit for voice reconciliation claims. |
 | `src/sdkApi.ts` | Stripped `run.delta` from persisted run events; removed duplicate snapshot writes on tool activities; added 10s singleflight cache for Better Auth session and organization membership resolution. |
 | `chusky-web/lib/polling-policy.ts` | Changed return-refresh cooldown to 5 min (300s); relaxed dashboard refresh intervals. |
-| `chusky-web/components/app/chat-page.tsx` | Used `DASHBOARD_RETURN_REFRESH_COOLDOWN_MS`; guarded run recovery timer against idle polling. |
+| `chusky-web/lib/live-sync.ts` | Initialized `lastRefreshAtRef` to `Date.now()` so tab returns respect the 5-minute cooldown instead of treating 0 as expired. |
+| `chusky-web/components/app/authenticated-app.tsx` | Fixed root cause of tab-switch reload: prevented unmounting the entire application tree on Better Auth session focus events by caching the verified user ID. |
+| `chusky-web/components/app/chat-page.tsx` | Initialized `lastReturnRefreshAtRef` to `Date.now()`; enforced `DASHBOARD_RETURN_REFRESH_COOLDOWN_MS` (5 min). |
+| `chusky-web/components/app/app-shell.tsx` | Initialized `lastActivityRefreshAtRef` to `Date.now()`; prevented repeated activity polling on focus. |
 | `chusky-web/components/app/meetings-page.tsx` | Aligned polling to `DASHBOARD_REFRESH_INTERVAL_MS`. |
 | `chusky-web/components/app/operations-dashboard.tsx` | Aligned polling to `DASHBOARD_REFRESH_INTERVAL_MS`. |
 
