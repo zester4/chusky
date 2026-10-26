@@ -127,10 +127,25 @@ The production Neon database audit revealed:
 | `src/taskRecovery.ts` | Added fast-exit on empty owner index. |
 | `src/missionRecovery.ts` | Added fast-exit on empty owner index. |
 | `src/config.ts` | Changed `durableStorageMetricsRetentionDays` default from 30 to 7 days. |
-| `src/store.ts` | Increased metrics flush timer to 300s; aligned query metrics pruning to retention config. |
+| `src/store.ts` | Increased metrics flush timer to 300s; aligned query metrics pruning to retention config; added 60s in-memory TTL caching for `getTelegramUserIdForWebAuth`, `getWebAuthUserIdForTelegram`, and `findCompanyBrandingByDomain` with event-based cache invalidation. |
 | `src/neonDurableState.ts` | Added 60s cache for `healthStatus()`; added pool pre-check fast-exit for voice reconciliation claims. |
-| `src/sdkApi.ts` | Stripped `run.delta` from persisted run events; removed duplicate snapshot writes on tool activities. |
+| `src/sdkApi.ts` | Stripped `run.delta` from persisted run events; removed duplicate snapshot writes on tool activities; added 10s singleflight cache for Better Auth session and organization membership resolution. |
 | `chusky-web/lib/polling-policy.ts` | Changed return-refresh cooldown to 5 min (300s); relaxed dashboard refresh intervals. |
 | `chusky-web/components/app/chat-page.tsx` | Used `DASHBOARD_RETURN_REFRESH_COOLDOWN_MS`; guarded run recovery timer against idle polling. |
 | `chusky-web/components/app/meetings-page.tsx` | Aligned polling to `DASHBOARD_REFRESH_INTERVAL_MS`. |
 | `chusky-web/components/app/operations-dashboard.tsx` | Aligned polling to `DASHBOARD_REFRESH_INTERVAL_MS`. |
+
+---
+
+## 6. Real-Time Upstash Log Audit & Redis Traffic Breakdown
+
+An audit of the real-time Upstash Redis log revealed:
+1. **Old Container Rollover Traffic (`10:21:59`)**: The prior container (IP `184.72.40.155`) was running the previous aggressive sweeper loops (task sweeper every 10s, mission sweeper every 15s, outbox sweeper every 1s).
+2. **New Container Cold Boot (`10:23:11`)**: The new container connected (`152.55.177.255`), ran the one-time boot recovery check, and then went completely silent for 44 seconds (0 sweeper commands between `10:23:14` and `10:23:58`), verifying the relaxed background intervals.
+3. **Empty-Database Hydration Burst (`10:23:58` - `10:24:03`)**: Because the Upstash Redis account was brand new and empty, when user `72020117437160` opened the dashboard, every key missed cache. The backend queried Neon and hydrated all session domains (`profile`, `sdk`, `conversation`, `assets`, `calls`, `autonomy`), tasks, and approvals into Redis via `EVAL / SETEX`. This is a one-time cold cache event.
+4. **Parallel In-Request Redundancy (Eliminated)**: Six concurrent dashboard requests (`/overview`, `/activity`, `/threads`, `/approvals`, etc.) each called:
+   - `better-auth:session` (6 times in 1s)
+   - `chuck:web-telegram:web:*` (6 times in 1s)
+   - `chuck:organization:branding-domain:*` (repeated on page loads)
+   
+   These redundant queries have now been eliminated via in-memory singleflight deduplication and short TTL caching.

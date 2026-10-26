@@ -10131,8 +10131,21 @@ export async function getCompanyBranding(organizationId: string): Promise<Compan
   return value ? cleanCompanyBranding(value) : undefined;
 }
 
+const BRANDING_CACHE_TTL_MS = 60_000;
+const brandingDomainCache = new Map<string, { value: CompanyBranding | undefined; expiresAt: number }>();
+
+export function invalidateCompanyBrandingCache(hostname?: string): void {
+  if (hostname) {
+    const clean = normalizeHostname(hostname);
+    if (clean) brandingDomainCache.delete(clean);
+  } else {
+    brandingDomainCache.clear();
+  }
+}
+
 export async function saveCompanyBranding(record: CompanyBranding): Promise<CompanyBranding> {
   const clean = cleanCompanyBranding(record);
+  if (clean.customDomain) invalidateCompanyBrandingCache(clean.customDomain);
   await backend.saveCompanyBranding(clean);
   return clean;
 }
@@ -10140,8 +10153,13 @@ export async function saveCompanyBranding(record: CompanyBranding): Promise<Comp
 export async function findCompanyBrandingByDomain(hostname: string): Promise<CompanyBranding | undefined> {
   const cleanHost = normalizeHostname(hostname);
   if (!cleanHost) return undefined;
+  const now = Date.now();
+  const cached = brandingDomainCache.get(cleanHost);
+  if (cached && cached.expiresAt > now) return cached.value ? cleanCompanyBranding(cached.value) : undefined;
   const value = await backend.findCompanyBrandingByDomain(cleanHost);
-  return value ? cleanCompanyBranding(value) : undefined;
+  const cleaned = value ? cleanCompanyBranding(value) : undefined;
+  brandingDomainCache.set(cleanHost, { value: cleaned, expiresAt: now + BRANDING_CACHE_TTL_MS });
+  return cleaned;
 }
 
 export async function canSpend(uid: number, estimatedCost = 0): Promise<boolean> {
@@ -13783,6 +13801,9 @@ export async function redeemWebTelegramLinkCode(code: string, telegramUserId: nu
   const clean = code.trim();
   if (!webTelegramCodePattern.test(clean) || !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0) return "invalid";
   const redemption = await backend.redeemWebTelegramLinkCode(hashCliSecret(clean), telegramUserId);
+  if (redemption.webAuthUserId) {
+    invalidateWebTelegramLinkCache(redemption.webAuthUserId, telegramUserId);
+  }
   if (redemption.sourceUserId && (redemption.status === "linked" || redemption.status === "already_linked")) {
     try {
       await reassignChannelIdentity("telegram", String(telegramUserId), undefined, telegramUserId, redemption.sourceUserId);
@@ -13815,21 +13836,45 @@ export async function migrateTelegramOwnedProjects(telegramUserId: number, canon
   return migrated;
 }
 
+const WEB_TELEGRAM_LINK_CACHE_TTL_MS = 60_000;
+const webToTelegramCache = new Map<string, { value: number | undefined; expiresAt: number }>();
+const telegramToWebCache = new Map<number, { value: string | undefined; expiresAt: number }>();
+
+export function invalidateWebTelegramLinkCache(webAuthUserId?: string, telegramUserId?: number): void {
+  if (webAuthUserId) webToTelegramCache.delete(webAuthUserId.trim());
+  if (telegramUserId) telegramToWebCache.delete(telegramUserId);
+  if (!webAuthUserId && !telegramUserId) {
+    webToTelegramCache.clear();
+    telegramToWebCache.clear();
+  }
+}
+
 export async function getTelegramUserIdForWebAuth(webAuthUserId: string): Promise<number | undefined> {
   const owner = webAuthUserId.trim();
-  return owner && owner.length <= 200 ? backend.getTelegramUserIdForWebAuth(owner) : undefined;
+  if (!owner || owner.length > 200) return undefined;
+  const now = Date.now();
+  const cached = webToTelegramCache.get(owner);
+  if (cached && cached.expiresAt > now) return cached.value;
+  const resolved = await backend.getTelegramUserIdForWebAuth(owner);
+  webToTelegramCache.set(owner, { value: resolved, expiresAt: now + WEB_TELEGRAM_LINK_CACHE_TTL_MS });
+  return resolved;
 }
 
 export async function unlinkWebTelegramLink(webAuthUserId: string, telegramUserId: number): Promise<boolean> {
   const owner = webAuthUserId.trim();
   if (!owner || owner.length > 200 || !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0) return false;
+  invalidateWebTelegramLinkCache(owner, telegramUserId);
   return backend.unlinkWebTelegramLink(owner, telegramUserId);
 }
 
 export async function getWebAuthUserIdForTelegram(telegramUserId: number): Promise<string | undefined> {
-  return Number.isSafeInteger(telegramUserId) && telegramUserId > 0
-    ? backend.getWebAuthUserIdForTelegram(telegramUserId)
-    : undefined;
+  if (!Number.isSafeInteger(telegramUserId) || telegramUserId <= 0) return undefined;
+  const now = Date.now();
+  const cached = telegramToWebCache.get(telegramUserId);
+  if (cached && cached.expiresAt > now) return cached.value;
+  const resolved = await backend.getWebAuthUserIdForTelegram(telegramUserId);
+  telegramToWebCache.set(telegramUserId, { value: resolved, expiresAt: now + WEB_TELEGRAM_LINK_CACHE_TTL_MS });
+  return resolved;
 }
 
 /** Resolve a Telegram transport identity to the canonical web owner when it is linked. */

@@ -261,27 +261,101 @@ const SELF_SERVICE_PROJECT_LIMIT = 10;
 const SELF_SERVICE_SCOPES = new Set<string>(SELF_SERVICE_PROJECT_SCOPES);
 
 type WebAuthSession = { user?: { id?: string; emailVerified?: boolean } } | null;
-const defaultWebAuthSessionResolver = (headers: Headers): Promise<WebAuthSession> => getAuth().api.getSession({ headers }) as Promise<WebAuthSession>;
+
+const WEB_AUTH_SESSION_CACHE_TTL_MS = 10_000;
+const webAuthSessionCache = new Map<string, { session: WebAuthSession; expiresAt: number }>();
+const webAuthSessionInFlight = new Map<string, Promise<WebAuthSession>>();
+
+const defaultWebAuthSessionResolver = async (headers: Headers): Promise<WebAuthSession> => {
+  const cookie = headers.get("cookie");
+  if (!cookie) return null;
+  const now = Date.now();
+  const cached = webAuthSessionCache.get(cookie);
+  if (cached && cached.expiresAt > now) return cached.session;
+
+  const inFlight = webAuthSessionInFlight.get(cookie);
+  if (inFlight) return inFlight;
+
+  const promise = (getAuth().api.getSession({ headers }) as Promise<WebAuthSession>)
+    .then((session) => {
+      if (session?.user?.id) {
+        webAuthSessionCache.set(cookie, { session, expiresAt: Date.now() + WEB_AUTH_SESSION_CACHE_TTL_MS });
+        if (webAuthSessionCache.size > 500) {
+          const oldestKey = webAuthSessionCache.keys().next().value;
+          if (oldestKey) webAuthSessionCache.delete(oldestKey);
+        }
+      }
+      return session;
+    })
+    .finally(() => {
+      webAuthSessionInFlight.delete(cookie);
+    });
+
+  webAuthSessionInFlight.set(cookie, promise);
+  return promise;
+};
+
 let webAuthSessionResolver = defaultWebAuthSessionResolver;
 type OrganizationAccess = { id: string; role: string } | undefined;
 type OrganizationAccessResolver = (headers: Headers, organizationId: string, userId: string) => Promise<OrganizationAccess>;
+
+const ORG_ACCESS_CACHE_TTL_MS = 10_000;
+const orgAccessCache = new Map<string, { access: OrganizationAccess; expiresAt: number }>();
+const orgAccessInFlight = new Map<string, Promise<OrganizationAccess>>();
+
 const defaultOrganizationAccessResolver: OrganizationAccessResolver = async (headers, organizationId, userId) => {
-  const organization = await getAuth().api.getFullOrganization({ headers, query: { organizationId } }) as {
-    id?: string;
-    members?: Array<{ userId?: string; role?: string }>;
-  } | null;
-  if (organization?.id !== organizationId) return undefined;
-  const member = organization.members?.find((item) => item.userId === userId);
-  return member?.role ? { id: organizationId, role: member.role } : undefined;
+  const cookie = headers.get("cookie") ?? "";
+  const cacheKey = `${cookie}:${organizationId}:${userId}`;
+  const now = Date.now();
+  const cached = orgAccessCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) return cached.access;
+
+  const inFlight = orgAccessInFlight.get(cacheKey);
+  if (inFlight) return inFlight;
+
+  const promise = (async () => {
+    const organization = await getAuth().api.getFullOrganization({ headers, query: { organizationId } }) as {
+      id?: string;
+      members?: Array<{ userId?: string; role?: string }>;
+    } | null;
+    if (organization?.id !== organizationId) return undefined;
+    const member = organization.members?.find((item) => item.userId === userId);
+    return member?.role ? { id: organizationId, role: member.role } : undefined;
+  })()
+    .then((access) => {
+      orgAccessCache.set(cacheKey, { access, expiresAt: Date.now() + ORG_ACCESS_CACHE_TTL_MS });
+      if (orgAccessCache.size > 500) {
+        const oldestKey = orgAccessCache.keys().next().value;
+        if (oldestKey) orgAccessCache.delete(oldestKey);
+      }
+      return access;
+    })
+    .finally(() => {
+      orgAccessInFlight.delete(cacheKey);
+    });
+
+  orgAccessInFlight.set(cacheKey, promise);
+  return promise;
 };
+
 let organizationAccessResolver = defaultOrganizationAccessResolver;
+
+/** Clear web auth session and org access caches (e.g. for testing). */
+export function clearWebAuthSessionCache(): void {
+  webAuthSessionCache.clear();
+  webAuthSessionInFlight.clear();
+  orgAccessCache.clear();
+  orgAccessInFlight.clear();
+}
 
 /** Test-only seam; production always validates the Better Auth session cookie. */
 export function setWebAuthSessionResolverForTests(resolver?: (headers: Headers) => Promise<WebAuthSession>): void {
+  clearWebAuthSessionCache();
   webAuthSessionResolver = resolver ?? defaultWebAuthSessionResolver;
 }
 /** Test-only seam; production always checks Better Auth's organization membership. */
 export function setOrganizationAccessResolverForTests(resolver?: OrganizationAccessResolver): void {
+  clearWebAuthSessionCache();
   organizationAccessResolver = resolver ?? defaultOrganizationAccessResolver;
 }
 
