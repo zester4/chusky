@@ -454,6 +454,7 @@ export class NeonDurableState {
   private queryMetricFlushInFlight?: Promise<void>;
   private queryMetricFlushRetryAt = 0;
   private queryMetricFlushBackoffMs = 0;
+  private cachedHealthStatus?: { status: DurableStateStatus; expiresAt: number };
 
   constructor(private readonly database: TransactionPool) {}
 
@@ -548,17 +549,24 @@ export class NeonDurableState {
 
   /** Verify database reachability with a lightweight, non-data-bearing query. */
   async healthStatus(): Promise<DurableStateStatus> {
+    const now = Date.now();
+    if (this.cachedHealthStatus && this.cachedHealthStatus.expiresAt > now) {
+      return this.cachedHealthStatus.status;
+    }
+    let status: DurableStateStatus;
     try {
       await this.measuredQuery(this.database, "SELECT 1");
+      try {
+        await this.assertSessionSchema();
+        status = { enabled: true, reachable: true, schemaReady: true };
+      } catch {
+        status = { enabled: true, reachable: true, schemaReady: false };
+      }
     } catch {
-      return { enabled: true, reachable: false, schemaReady: false };
+      status = { enabled: true, reachable: false, schemaReady: false };
     }
-    try {
-      await this.assertSessionSchema();
-      return { enabled: true, reachable: true, schemaReady: true };
-    } catch {
-      return { enabled: true, reachable: true, schemaReady: false };
-    }
+    this.cachedHealthStatus = { status, expiresAt: now + (status.reachable ? 60_000 : 5_000) };
+    return status;
   }
 
   /** Insert a pending object record idempotently. Reuse is allowed only for the exact same immutable intent. */
@@ -1213,6 +1221,13 @@ export class NeonDurableState {
 
   async claimVoiceCallReconciliations(nowMs: number, limit: number, leaseMs: number, leaseToken: string): Promise<VoiceCallReconciliationRecord[]> {
     if (!Number.isSafeInteger(nowMs) || nowMs <= 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(leaseMs) || leaseMs < 5_000 || leaseMs > 10 * 60_000 || !/^[A-Za-z0-9_-]{1,120}$/.test(leaseToken)) throw new Error("Voice reconciliation claim arguments are invalid.");
+    const peek = await this.measuredQuery<{ exists: number }>(this.database,
+      `SELECT 1 AS exists FROM chusky_voice_call_reconciliation
+       WHERE next_attempt_at <= to_timestamp($1 / 1000.0)
+         AND (status = 'pending' OR lease_until IS NULL OR lease_until <= NOW())
+       LIMIT 1`,
+      [nowMs]);
+    if (!peek.rows.length) return [];
     const client = await this.database.connect();
     try {
       await this.measuredQuery(client, "BEGIN");

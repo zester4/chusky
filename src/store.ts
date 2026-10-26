@@ -2574,7 +2574,7 @@ class RedisBackend implements Backend {
         idempotencyBeforeMs: now - 24 * 60 * 60_000,
         runsBeforeMs: now - config.durableSdkRunRetentionDays * 24 * 60 * 60_000,
       });
-      await this.durableState.pruneQueryMetrics(now - 30 * 24 * 60 * 60_000);
+      await this.durableState.pruneQueryMetrics(now - config.durableStorageMetricsRetentionDays * 24 * 60 * 60_000);
       await this.durableState.pruneStorageMetrics(now - config.durableStorageMetricsRetentionDays * 24 * 60 * 60_000);
       if (durableMemoryConfigured()) await pruneMemoryReflections(now - config.durableStateRetentionDays * 24 * 60 * 60_000);
       this.retentionLastRunAt = now;
@@ -6863,7 +6863,8 @@ export async function initStore(options: { memoryOnly?: boolean; suppressStorage
         : undefined;
       backend = new RedisBackend(r, durableState, config.durableStateSdkRunsEnabled, config.durableStateSdkTablesEnabled, config.durableStateMissionsEnabled, redisCommandMetrics, redisMetricsPublisher);
       if (redisMetricsPublisher || durableState) {
-        redisMetricsFlushTimer = setInterval(() => { void backend.flushStorageMetrics?.(); }, 60_000);
+        // Flush storage/query metrics every 5 minutes (was 60s) to eliminate self-telemetry write bloat
+        redisMetricsFlushTimer = setInterval(() => { void backend.flushStorageMetrics?.(); }, 300_000);
         redisMetricsFlushTimer.unref();
         void backend.flushStorageMetrics?.();
       }

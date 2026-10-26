@@ -960,7 +960,7 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   durableStateRetentionDays: boundedInt("DURABLE_STATE_RETENTION_DAYS", 90, 1, 3650),
   durableSdkAuditRetentionDays: boundedInt("DURABLE_SDK_AUDIT_RETENTION_DAYS", 90, 1, 3650),
   durableSdkRunRetentionDays: boundedInt("DURABLE_SDK_RUN_RETENTION_DAYS", 30, 1, 3650),
-  durableStorageMetricsRetentionDays: boundedInt("DURABLE_STORAGE_METRICS_RETENTION_DAYS", 30, 1, 3650),
+  durableStorageMetricsRetentionDays: boundedInt("DURABLE_STORAGE_METRICS_RETENTION_DAYS", 7, 1, 3650),
   // Neon is canonical per owner only after that owner's mission backfill marker exists.
   durableStateMissionsEnabled: optional("DURABLE_STATE_MISSIONS_ENABLED", "false") === "true",
   // Opt-in Neon object catalog for verified R2 assets; requires migration 0008.

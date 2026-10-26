@@ -1058,9 +1058,18 @@ async function persistSdkRunSnapshot(
 ): Promise<void> {
   const storedDirect = await getSdkRun(userId, threadId, run.id);
   if (storedDirect) {
+    const isTerminal = run.status === "completed" || run.status === "failed" || run.status === "cancelled";
     const mergedEvents = new Map<string, SdkRunRecord["events"][number]>();
     for (const item of [...storedDirect.events, ...run.events]) mergedEvents.set(item.id, item);
-    const events = [...mergedEvents.values()].sort((left, right) => left.at - right.at).slice(-700);
+    const rawEvents = [...mergedEvents.values()].sort((left, right) => left.at - right.at);
+    const events = isTerminal
+      ? rawEvents.filter((item) => item.type !== "run.delta").slice(-500)
+      : [
+          ...rawEvents.filter((item) => item.type === "run.tool_activity").slice(-200),
+          ...rawEvents.filter((item) => item.type === "run.subagent_activity").slice(-300),
+          ...rawEvents.filter((item) => item.type === "run.delta").slice(-10),
+          ...rawEvents.filter((item) => item.type !== "run.tool_activity" && item.type !== "run.subagent_activity" && item.type !== "run.delta").slice(-200),
+        ].sort((left, right) => left.at - right.at);
     const preserveCancellation = storedDirect.status === "cancelled" && run.status !== "cancelled";
     const nextRun: SdkRunRecord = {
       ...run,
@@ -1114,7 +1123,8 @@ async function persistSdkRunSnapshot(
       const events = [
         ...orderedEvents.filter((item) => item.type === "run.tool_activity").slice(-200),
         ...orderedEvents.filter((item) => item.type === "run.subagent_activity").slice(-300),
-        ...orderedEvents.filter((item) => item.type !== "run.tool_activity" && item.type !== "run.subagent_activity").slice(-200),
+        ...orderedEvents.filter((item) => item.type === "run.delta").slice(-10),
+        ...orderedEvents.filter((item) => item.type !== "run.tool_activity" && item.type !== "run.subagent_activity" && item.type !== "run.delta").slice(-200),
       ].sort((left, right) => left.at - right.at);
       const preserveCancellation = stored.status === "cancelled" && run.status !== "cancelled";
       const nextRun: SdkRunRecord = {
@@ -1142,10 +1152,12 @@ async function persistSdkRunSnapshot(
     const mergedEvents = new Map<string, SdkRunRecord["events"][number]>();
     for (const item of [...stored.events, ...run.events]) mergedEvents.set(item.id, item);
     const orderedEvents = [...mergedEvents.values()].sort((left, right) => left.at - right.at);
+    const isTerminalSession = run.status === "completed" || run.status === "failed" || run.status === "cancelled";
     const activityEvents = orderedEvents.filter((item) => item.type === "run.tool_activity").slice(-200);
     const subagentEvents = orderedEvents.filter((item) => item.type === "run.subagent_activity").slice(-300);
-    const otherEvents = orderedEvents.filter((item) => item.type !== "run.tool_activity" && item.type !== "run.subagent_activity").slice(-200);
-    const events = [...activityEvents, ...subagentEvents, ...otherEvents].sort((left, right) => left.at - right.at);
+    const deltaEvents = isTerminalSession ? [] : orderedEvents.filter((item) => item.type === "run.delta").slice(-10);
+    const otherEvents = orderedEvents.filter((item) => item.type !== "run.tool_activity" && item.type !== "run.subagent_activity" && item.type !== "run.delta").slice(-200);
+    const events = [...activityEvents, ...subagentEvents, ...deltaEvents, ...otherEvents].sort((left, right) => left.at - right.at);
     const previousStatus = stored.status;
     const durableVersion = stored.durableVersion;
     const preserveCancellation = stored.status === "cancelled" && run.status !== "cancelled";
@@ -4004,10 +4016,10 @@ export function registerSdkApi(app: Hono): void {
         snapshotWrites = write.catch(() => undefined);
         return write;
       };
-      const publishProgress = async (progress: SdkRunProgress): Promise<void> => {
+      const publishProgress = async (progress: SdkRunProgress, persist = true): Promise<void> => {
         const progressEvent = appendSdkRunProgress(run, progress);
         if (!progressEvent) return;
-        await persistSnapshot();
+        if (persist) await persistSnapshot();
         send({ type: "run.progress", runId: run.id, progress: run.progress });
       };
       let costIncrement = 0;
@@ -4076,11 +4088,8 @@ export function registerSdkApi(app: Hono): void {
               ? progressFromSdkToolCheckpoint(checkpointActivities, latestActiveTool(), run.progress)
               : undefined;
             return persistSnapshot()
-              // Put the raw lifecycle row on the wire first. The following
-              // progress projection then becomes the visible headline rather
-              // than being overwritten by the activity reducer in the web UI.
               .then(() => send({ runId: run.id, ...activityEvent }))
-              .then(() => publishProgress(checkpoint ?? progressFromSdkToolActivity(activity, run.progress)));
+              .then(() => publishProgress(checkpoint ?? progressFromSdkToolActivity(activity, run.progress), false));
           },
           onSubagentActivity: (activity: SubagentActivityUpdate & { parentToolCallId: string }) => {
             const activityEvent = { id: `evt_${randomUUID()}`, type: "run.subagent_activity", at: Date.now(), ...activity };
@@ -4088,7 +4097,7 @@ export function registerSdkApi(app: Hono): void {
             run.updatedAt = activityEvent.at;
             thread.updatedAt = activityEvent.at;
             return persistSnapshot()
-              .then(() => publishProgress(progressFromSdkSubagentActivity(activity, run.progress)))
+              .then(() => publishProgress(progressFromSdkSubagentActivity(activity, run.progress), false))
               .then(() => send({ runId: run.id, ...activityEvent }));
           },
         });

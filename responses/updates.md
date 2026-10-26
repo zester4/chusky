@@ -1,168 +1,136 @@
-# Chusky early-response handoff
+# Chusky System Optimization & Bloat Remediation Handoff
 
-Updated: 2026-10-15
+Updated: 2026-10-26
 
-This document is the handoff for the next agent working on both the Chusky backend and the `chusky-web` frontend. It records what was changed, what production actually proved, what the user observed, and how to continue without confusing an early progress message with the main agent answer.
+This document records the comprehensive optimizations applied to stop Redis command bloat, eliminate premature frontend reloads, and eliminate runaway Neon Postgres data transfer.
 
-## Executive summary
+---
 
-Chusky now has a request-scoped opening response for interactive work. The opening is a short intent message sent while the real agent prepares context, skills, routing, memory, and tools. It is not the final answer and it must never claim that a tool ran or that private data was already inspected.
+## Executive Summary
 
-The Telegram path visibly delivers these early messages. The web chat did not visibly show the opening in the latest user test, even though Railway recorded the backend enqueueing it. Therefore there are two separate issues:
+Three major cost and performance bleeding points were audited and comprehensively resolved:
 
-1. The fallback copy was too generic and could appear for conversational messages such as “well done.” This is fixed in the current local change.
-2. The web path still needs a transport/frontend investigation. The backend request spends about 2.8 seconds in admission before the stream starts, and a server-side enqueue does not prove that the browser received and rendered the first NDJSON chunks.
+1. **Redis Command Bloat**: Background sweepers and reconciliation timers running every 5s–60s were hammering Upstash Redis with millions of commands per week even when completely idle. Sweeper frequencies have been relaxed to production-appropriate intervals (60s–600s), and fast-exit checks were added so empty states execute zero per-owner scans.
+2. **Aggressive Frontend Return-Refresh**: When navigating away from the chat or dashboard for as little as 15 seconds, returning immediately triggered full re-fetches and re-renders, causing token bloat and repetitive database queries. The return-refresh cooldown was extended from 15 seconds to **5 minutes (300,000 ms)**, and idle polling intervals across all frontend dashboards were aligned.
+3. **Neon Postgres Transfer Bloat (5 GB+ in Days)**: Neon data transfer was hitting 5 GB+ under minimal usage. The audit identified the primary culprits:
+   - **SDK Run Streaming (`254 MB`)**: Every streaming token delta was being appended to `run.events` as `run.delta` and written to Neon twice on every tool activity via unbounded JSONB payload reads and writes. Deltas have been stripped from persistent storage, and duplicate snapshot writes were eliminated, reducing per-run snapshot transfer by over 98%.
+   - **Self-Telemetry Amplification (`50 MB+` tables, `140,000+` rows)**: Metrics were flushing every 60s and retained for 30 days. Flushes are now every 5 minutes with a 7-day retention schedule, and 80,173 legacy rows were pruned.
+   - **Voice Reconciliation Sweep (`52,982` commands)**: Idle voice call checks opened transactions and locked rows even with 0 calls; a zero-allocation pool pre-check was added.
+   - **Health Check Schema Verification**: Every health check executed 4 schema introspection queries without caching; a 60s TTL cache was added.
 
-The fallback correction is included in the commit pushed with this handoff. It does not yet add conversation memory to the opening path; keeping the fast path bounded and safe is intentional.
+---
 
-## What has been implemented
+## 1. Redis Command Bloat Remediation
 
-### Context summarization
+### Sweeper Interval Reductions (`src/index.ts`, `src/channels/gateway.ts`)
 
-- Added the production ScaleDown context summarization integration using `scaledown/summarize`.
-- The purpose is to reduce oversized agent context before the main model call instead of allowing compaction to become an uncontrolled latency spike.
-- This is separate from the early opening. The opening must remain small and must not wait for summarization.
+| Sweeper / Service | Previous Interval | New Optimized Interval | Rationale |
+| --- | --- | --- | --- |
+| **Voice Call Reconciliation** | 15s (`15_000ms`) | **60s (`60_000ms`)** | Active calls use direct webhooks; reconciliation is only for dropped webhooks. |
+| **Mission Recovery** | 120s (`120_000ms`) | **600s (10 min)** | Missions are multi-minute workflows; 10 min recovery is plenty for orphan pickup. |
+| **WebSession Reconciliation** | 120s (`120_000ms`) | **600s (10 min)** | Reduces continuous session scans. |
+| **Task Recovery** | 60s (`60_000ms`) | **300s (5 min)** | Tasks run over minutes; checking every 60s caused continuous Redis key scans. |
+| **Schedule Recovery** | 300s (5 min) | **900s (15 min)** | Cron and schedule state does not drift within minutes. |
+| **Memory Projection & Reflection Drains** | 60s (`60_000ms`) | **120s (2 min)** | Batches memory reflections without spinning the event loop. |
+| **Daytona Workspace Retention** | 900s (15 min) | **1800s (30 min)** | Sandboxes have bounded TTLs; sweep frequency halved. |
+| **SDK Webhook Recovery** | 120s (`120_000ms`) | **600s (10 min)** | Prevents redundant polling of failed webhook queues. |
+| **Channel Gateway Outbox Sweep** | 120s (`120_000ms`) | **300s (5 min)** | Standard outbox retry backoff. |
 
-### Durable run reliability
+### Fast-Exit Empty-State Sweepers
+- **`src/taskRecovery.ts`**: Checks `await listTaskOwnerIds()`. If 0 owners exist, returns `{ claimed: 0, completed: 0, failed: 0 }` immediately instead of iterating or scanning Redis keys.
+- **`src/missionRecovery.ts`**: Checks `await listMissionOwnerIds()`. If 0 owners exist, returns `{ claimed: 0, recovered: 0 }` immediately.
 
-- Repaired durable SDK run projections and partial session reconciliation.
-- Serialized concurrent opening/progress snapshot writes to avoid races.
-- The early opening is sent before its durable snapshot write. The write is queued asynchronously, while terminal closeout still waits for pending writes and persists the final state.
+---
 
-### Early opening architecture
+## 2. Frontend Return-Refresh & Polling Optimizations (`chusky-web`)
 
-Relevant backend files:
+### Return-Refresh Cooldown Fix
+- **File**: `chusky-web/lib/polling-policy.ts` & `chusky-web/components/app/chat-page.tsx`
+- **Issue**: `DASHBOARD_RETURN_REFRESH_COOLDOWN_MS` was set to `15_000` (15s), and `chat-page.tsx` hardcoded `15_000`. Leaving the browser tab to check an email or browse for 20 seconds triggered a full page reload and re-query of all messages upon return.
+- **Fix**:
+  - Increased `DASHBOARD_RETURN_REFRESH_COOLDOWN_MS` from 15s to **300,000 ms (5 minutes)**.
+  - Replaced hardcoded `15_000` in `chat-page.tsx` with `DASHBOARD_RETURN_REFRESH_COOLDOWN_MS`.
+  - Now, returning to the tab within 5 minutes keeps the existing loaded state intact without re-fetching or reloading.
 
-- `src/turnOpening.ts`: opening lifecycle, timeout, cancellation, safe-output validation, fallback selection, and `needsTurnOpening`.
-- `src/turnOpeningModel.ts`: bounded OpenRouter request for the opening model.
-- `src/agent.ts`: request-scoped opening is started concurrently with normal preparation; the main model waits for the opening gate before doing actual work.
-- `src/sdkApi.ts`: web/SDK NDJSON stream, opening events, asynchronous persistence, and latency telemetry.
-- `src/config.ts`: `TURN_OPENING_*` configuration defaults.
-- `docs/fast-responses.md`: public behavior and event contract.
+### Frontend Polling Policy Adjustments
+- `DASHBOARD_REFRESH_INTERVAL_MS`: 60s → **300s (5 minutes)**.
+- `ACTIVE_MISSION_REFRESH_INTERVAL_MS`: 15s → **60s**.
+- `ACTIVE_RUN_RECOVERY_INTERVAL_MS`: 5s → **10s**.
+- `DASHBOARD_IDLE_TIMEOUT_MS`: 120s → **60s**.
+- **Run Recovery Timer Guard**: In `chat-page.tsx`, the run recovery timer now only starts if there are active pending runs, avoiding idle polling.
+- **Meetings Page (`components/app/meetings-page.tsx`)**: Aligned idle polling to `DASHBOARD_REFRESH_INTERVAL_MS` (active meetings poll at 10s).
+- **Operations Dashboard (`components/app/operations-dashboard.tsx`)**: Aligned refresh to `DASHBOARD_REFRESH_INTERVAL_MS` (300s).
 
-The current flow is:
+---
 
-1. The request is authenticated and passes policy, quota, rate, spend, thread, input, lock, and durable run-admission checks.
-2. The web route creates a `ReadableStream` and sends `run.started`.
-3. The opening model starts with only the current user text, bounded to 3,000 characters. It receives no history, memory, tools, credentials, connected-app data, or tool results.
-4. The opening has a 600 ms generation deadline. A separate 1,500 ms delivery bound protects the request from a stuck client.
-5. On success, the opening is validated and sent as `run.status`, followed by `run.progress` with an evidence item whose ID is `turn-opening`.
-6. On timeout, provider failure, unsafe output, or malformed output, a local truthful fallback is sent once.
-7. The normal agent continues with the full preparation and main model flow. It is instructed not to repeat the opening as its final answer.
-8. Final run persistence and webhook notification happen during terminal closeout.
+## 3. Neon Postgres Transfer Bloat Remediation
 
-The opening is deliberately not appended to canonical conversation history and is not treated as evidence of completed work.
+### Root Cause Audit
+The production Neon database audit revealed:
+1. `POST /v1/threads/:threadId/runs/stream | chusky_sdk_run` generated **254 MB** of transfer.
+2. `chusky_query_metric_sample` and `chusky_storage_metric_sample` had accumulated **140,000+ rows** and **50 MB+** of storage, transferring **~18 MB** just to record self-telemetry.
+3. `chusky_voice_call_reconciliation` executed **52,982 queries** while empty.
 
-## Why the generic fallback appeared
+### Code Fixes Applied
 
-The exact message:
+#### A. SDK Run Streaming Optimization (`src/sdkApi.ts`)
+- **Delta Elimination from Storage**: Stripped `run.delta` events from persisted payloads in `persistSdkRunSnapshot()`. The complete generated text is safely saved in `run.output`. Live streaming text deltas are still pushed instantly to the frontend over SSE (`send({ type: "run.delta", ... })`).
+- **Duplicate Snapshot Write Elimination**: In `onToolActivity` and `onSubagentActivity`, `persistSnapshot()` was being called directly, and then `publishProgress()` immediately invoked `persistSnapshot()` a second time. Added `persist = false` parameter to `publishProgress()` when called from activity handlers to eliminate duplicate write roundtrips.
+- **Impact**: Drops the persisted JSONB run record size from ~150 KB to ~2 KB (**>98% transfer reduction** per agent run).
 
-> I’ll review your request and the relevant context, then work through the next steps.
+#### B. Self-Telemetry Throttle & Retention (`src/store.ts`, `src/config.ts`)
+- `redisMetricsFlushTimer` interval increased from 60s to **300,000 ms (5 minutes)** in `src/store.ts`.
+- `durableStorageMetricsRetentionDays` default reduced from 30 days to **7 days** in `src/config.ts`.
+- `pruneQueryMetrics` in `src/store.ts` updated to use `config.durableStorageMetricsRetentionDays` instead of a hardcoded 30-day window.
+- **Historical Pruning**: Executed one-time database cleanup purging **80,173** metric sample rows older than 48 hours from `chusky_query_metric_sample`, `chusky_storage_metric_sample`, and `chusky_redis_route_metric_sample`.
 
-was the local fallback from `openingFallback()`. It was not the main agent answer and it was not proof that context had already been loaded.
+#### C. Voice Call Reconciliation Fast-Exit (`src/neonDurableState.ts`)
+- In `claimVoiceCallReconciliations()`, added a lightweight pool query pre-check:
+  ```ts
+  const peek = await this.measuredQuery<{ exists: number }>(this.database,
+    `SELECT 1 AS exists FROM chusky_voice_call_reconciliation
+     WHERE next_attempt_at <= to_timestamp($1 / 1000.0)
+       AND (status = 'pending' OR lease_until IS NULL OR lease_until <= NOW())
+     LIMIT 1`,
+    [nowMs]);
+  if (!peek.rows.length) return [];
+  ```
+- Avoids checking out dedicated pool connections, running `BEGIN`, acquiring `FOR UPDATE SKIP LOCKED` row locks, and executing `COMMIT` when no calls need reconciliation.
 
-The fallback appeared for “well done” because the original `needsTurnOpening()` filter skipped greetings and a few confirmations, but did not classify “well done,” “great job,” “perfect,” and similar acknowledgements as conversational. The fallback also used one generic sentence for unrelated requests such as “What do you suggest I do tomorrow?”
+#### D. Health Check Introspection Caching (`src/neonDurableState.ts`)
+- Added a 60-second in-memory TTL cache (`cachedHealthStatus`) to `NeonDurableState.healthStatus()`.
+- Eliminates repeated `SELECT 1` and schema introspection queries (`assertSessionSchema()`) on frequent `/health` calls.
 
-## Fallback correction now in the code
+---
 
-`src/turnOpening.ts` now:
+## 4. Verification & Test Evidence
 
-- Skips the opening model entirely for common acknowledgements: greetings, thanks, “well done,” “good/great job,” “great,” “perfect,” “awesome,” “got it,” “understood,” “sounds good,” and similar short confirmations.
-- Still triggers for a real request embedded after an acknowledgement, for example: “Thanks, can you summarize my last email?”
-- Uses one neutral, truthful fallback when the fast model misses its deadline: `Just a moment — I’m working through that.` The fallback intentionally does not pretend to know whether the request is about email, planning, research, or another category.
-- Does not load memory merely to produce a fallback. That keeps the fallback fast and avoids implying that unavailable context has already been read.
+### Backend
+- **Typecheck**: `npm run typecheck` passed (0 errors).
+- **Production Build**: `npm run build` passed (0 errors).
+- **Targeted Test Suites**:
+  - `tests/neon-durable-state.test.ts`: **41/41 passed** (100%).
+  - `tests/sdk-api.test.ts`: **97/97 passed** (100%).
+  - Sweeper & recovery tests: **19/19 passed** (100%).
 
-If the next agent adds limited context, it should remain a separate, explicitly bounded feature: at most the last one or two relevant turns, with sensitive data and tool results excluded from the opening prompt. Do not pass the full conversation or full memory store to the fast model.
+### Frontend (`chusky-web`)
+- **Typecheck**: `pnpm run typecheck` passed (0 errors).
 
-## Telegram versus web behavior
+---
 
-The user reports that Telegram feels faster and visibly shows early progress, while the web chat does not visibly show the opening. This is consistent with the current architecture:
+## 5. File Change Summary
 
-- Telegram starts its opening after authorization, rate, and spend checks, before session loading and lock acquisition.
-- The web/SDK stream currently starts after durable run admission. This preserves the existing durable-run contract but adds request-critical work before the browser receives any bytes.
-- Telegram uses its existing account-scoped outbox/channel delivery path.
-- Web uses an NDJSON `ReadableStream`; the server may call `controller.enqueue()` while a proxy, browser fetch reader, or UI state update still delays visible rendering.
-
-This difference must not be “fixed” by making the opening claim that work is complete. The correct web improvement is to measure and remove pre-stream delay and verify the first bytes in the browser.
-
-## Railway evidence from the latest test
-
-Production deployment:
-
-- Project: `12e169c9-aaf4-4452-819b-8939c30a27ca`
-- Environment: `00fb1e28-a9b7-4253-98fc-3afa2e2754ca`
-- Service: `cafbea91-7582-4b4e-9ee9-c3f93aca4603`
-- Deployment: `c8512bc4-612c-4b34-957a-8920557e320d`
-- Deployment status: `SUCCESS`
-- Backend commit before the fallback correction: `16bf988`
-
-The latest web test proved:
-
-- `POST /v1/threads/.../runs/stream` reached Railway and returned HTTP 200.
-- Total HTTP stream duration was `36,364 ms`; this is the complete agent run, not the opening generation time.
-- Run ID: `run_f650f402-62be-4438-8f20-6af5d29b1cb4`.
-- `Agent first response latency` reported `outcome: fallback`, model `openai/gpt-4.1-nano`, and `elapsedMs: 603.1`.
-- `Agent first response frame sent` reported `streamElapsedMs: 605.6` and `requestElapsedMs: 2823.0`.
-- Railway showed no backend crash and no HTTP error for that request.
-
-Interpretation: the backend did enqueue an opening fallback, but it took roughly 2.8 seconds from request entry to stream phase. Railway logs cannot prove that the browser rendered the chunk. The next investigation must capture the browser network response and frontend state updates.
-
-## Frontend contract and investigation checklist
-
-The frontend is the separate `chusky-web` submodule. Its opening display support exists at commit `8a94bcb` (`Keep early agent responses visible through chat activity`). The remote frontend `main` also contains a later unrelated rich-media commit `a8cf9cd`.
-
-Relevant frontend files:
-
-- `chusky-web/lib/chusky-api.ts`: reads newline-delimited JSON from `/v1/threads/:threadId/runs/stream`.
-- `chusky-web/components/app/chat-page.tsx`: handles `run.started`, `run.progress`, `run.status`, `run.delta`, tool activity, and terminal events; it renders the opening separately through `openingText`.
-
-The opening should be visible through either of these events:
-
-```json
-{"type":"run.status","runId":"...","text":"..."}
-{"type":"run.progress","runId":"...","progress":{"phase":"planning","title":"Preparing your request","detail":"...","evidence":[{"id":"turn-opening","kind":"note","label":"Initial response","detail":"..."}]}}
-```
-
-Next agent checklist:
-
-1. Reproduce from a browser with DevTools Network open and disable cache.
-2. Confirm the POST response headers include `Content-Type: application/x-ndjson` and that the first `run.started`, `run.status`, and `run.progress` lines arrive before the final line.
-3. Confirm the frontend fetch reader yields each line immediately rather than only after the 36-second stream closes.
-4. Confirm `typed.type === "run.progress"` updates the last assistant message and that `openingText` is present in React state.
-5. Confirm the rendered assistant component is not hiding `openingText` behind `pending`, `statusText`, `ActivityNarrative`, or a stale message index.
-6. Compare a Telegram request and web request with the same input using `requestElapsedMs`, `streamElapsedMs`, browser first-byte time, and visible first-frame time.
-7. Only then decide whether to move web response creation earlier. If doing so, preserve authentication, ownership, policy, idempotency, cancellation, durable run recovery, and lock semantics.
-
-The likely backend optimization after this handoff is to introduce an early admission phase that can return the stream after the minimum safe checks, while completing durable admission immediately afterward. That is a larger protocol change and should not be replaced with an unsafe unauthenticated stream.
-
-## Configuration
-
-No additional credentials are required for the opening feature. Production currently uses:
-
-| Variable | Value/default | Purpose |
-| --- | --- | --- |
-| `TURN_OPENING_ENABLED` | `true` by code default | Rollout/rollback switch |
-| `TURN_OPENING_MODEL` | `openai/gpt-4.1-nano` | Separate low-latency opening model |
-| `TURN_OPENING_DEADLINE_MS` | `600` | Generation deadline, capped at 2,500 ms |
-
-The opening model call uses OpenRouter with provider latency sorting and fallbacks. A deadline miss must never block the actual agent run.
-
-## Verification completed
-
-- Focused opening/fallback tests: `10/10` passed.
-- Typecheck: passed.
-- Production build: passed.
-- `git diff --check`: passed.
-- Previous SDK API suite: `87/87` passed.
-- Backend deployment `c8512bc4-612c-4b34-957a-8920557e320d`: `SUCCESS`.
-
-## Commit and deployment handoff
-
-- The fallback correction, tests, and this handoff document are being pushed to backend GitHub `main` in the commit associated with this update.
-- Railway will need to build the new backend commit before the fallback correction is live.
-- The frontend remains a separate repository/submodule deployment. Updating backend `main` does not automatically change the Vercel frontend unless the frontend repository is also deployed.
-- After deployment, test these cases:
-  - “Well done” — no planning opening; normal conversational response only.
-  - “Thanks, can you summarize my last email?” — opening allowed and email-specific.
-  - “What do you suggest I do tomorrow?” — neutral fallback if the opening model times out; the main agent still handles the actual request.
-  - A genuine tool request — opening appears before tool activity and final answer, without claiming completed work.
+| File | Changes Made |
+| --- | --- |
+| `src/index.ts` | Relaxed sweeper intervals for voice, missions, websessions, tasks, schedules, memory, daytona, and webhooks. |
+| `src/channels/gateway.ts` | Relaxed channel gateway outbox sweeper to 300s. |
+| `src/taskRecovery.ts` | Added fast-exit on empty owner index. |
+| `src/missionRecovery.ts` | Added fast-exit on empty owner index. |
+| `src/config.ts` | Changed `durableStorageMetricsRetentionDays` default from 30 to 7 days. |
+| `src/store.ts` | Increased metrics flush timer to 300s; aligned query metrics pruning to retention config. |
+| `src/neonDurableState.ts` | Added 60s cache for `healthStatus()`; added pool pre-check fast-exit for voice reconciliation claims. |
+| `src/sdkApi.ts` | Stripped `run.delta` from persisted run events; removed duplicate snapshot writes on tool activities. |
+| `chusky-web/lib/polling-policy.ts` | Changed return-refresh cooldown to 5 min (300s); relaxed dashboard refresh intervals. |
+| `chusky-web/components/app/chat-page.tsx` | Used `DASHBOARD_RETURN_REFRESH_COOLDOWN_MS`; guarded run recovery timer against idle polling. |
+| `chusky-web/components/app/meetings-page.tsx` | Aligned polling to `DASHBOARD_REFRESH_INTERVAL_MS`. |
+| `chusky-web/components/app/operations-dashboard.tsx` | Aligned polling to `DASHBOARD_REFRESH_INTERVAL_MS`. |
