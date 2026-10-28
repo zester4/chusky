@@ -336,10 +336,14 @@ export function voiceComposioToolSlugs(value: string): string[] {
 const VOICE_NATIVE_ACTION_REQUEST_PATTERN = /\b(?:remind(?:er)?|task|email|e-mail|gmail|message|text|sms|telegram|slack|imessage|send|reply|create|update|delete)\b/i;
 
 /** True when a private phone turn is safe to handle without external tools. */
-export function voiceFastLaneEligible(value: string): boolean {
-  const text = value.trim();
+export function voiceFastLaneEligible(value: string, trustedContext = ""): boolean {
+  const request = value.trim().replace(
+    /^The external (?:contact answering the outbound call|caller on the inbound call) said:\s*/i,
+    "",
+  );
+  const text = `${request}\n${trustedContext}`.trim();
   return voiceComposioToolSlugs(text).length === 0 && !VOICE_NATIVE_ACTION_REQUEST_PATTERN.test(text)
-    && /^(?:hi|hello|hey|thanks|thank you|goodbye|bye|yes|no|okay|ok|how are you(?: doing)?(?: today)?|why are you calling(?: me)?)[.!?\s]*$/i.test(text);
+    && /^(?:hi|hello|hey|thanks|thank you|goodbye|bye|yes|no|okay|ok|how are you(?: doing)?(?: today)?|why are you calling(?: me)?)[.!?\s]*$/i.test(request);
 }
 
 export const VOICE_TURN_NATIVE_TOOLS = [
@@ -2921,7 +2925,7 @@ async function executeAgent(
     // The trusted call objective is part of the routing decision. A caller
     // saying only “Hey” must not put a scheduling/email call into the tool-
     // free lane when the objective requires Calendar or Gmail.
-    && voiceFastLaneEligible(`${voiceRoutingText}\n${options?.voiceRoutingHint ?? ""}`);
+    && voiceFastLaneEligible(voiceRoutingText, options?.voiceRoutingHint);
   // A greeting or short social reply does not need a Composio session, MCP
   // discovery, skill routing, memory search, or a native tool catalogue. Keep
   // this conservative gate limited to unmistakable conversation; any action

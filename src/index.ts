@@ -15,7 +15,7 @@ import { updateAttentionRecord } from "./store.js";
 import type { AttentionCandidateRecord, AutonomyProfileRecord, DeliveryPreferenceRecord, ObservationRecord, AutonomyWatchRecord, TriggerEventRecord } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
 import { initStore, getTelegramChatId, createTriggerEventIfAbsent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkRun, getSdkRunById, listSdkRunsForUser, saveSdkRun, saveSdkThread, deleteSdkThread, saveSession, appendMessages, appendPhoneCallTranscriptTurn, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, withScopedKeyLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, listMissionEvents, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, listTasksSince, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, listJobOwnerIds, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, getVoiceInboundRoute, hasVoiceInboundRoutes, updatePhoneCall, appendPhoneCallEvent, enqueueVoiceCallReconciliation, claimVoiceCallReconciliations, completeVoiceCallReconciliation, retryVoiceCallReconciliation, claimVoiceCapacity, releaseVoiceCapacity, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, saveRecallMeetingMissionState, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
-import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, OpenRouterTimeoutError, invalidateSession, transcriptionFormatForMimeType, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
+import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, voiceFastLaneEligible, fetchModels, ApprovalRequiredError, OpenRouterTimeoutError, invalidateSession, transcriptionFormatForMimeType, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
 import type { AgentResult } from "./agent.js";
 import { listOpenTasks, listTasksForMission } from "./store.js";
 import type { ContentPart } from "./types.js";
@@ -1070,7 +1070,7 @@ async function main(): Promise<void> {
       const ticketTrusted = verifyVoiceBridgeTicket(callId, userId, ticket, config.twilioMediaBridgeSecret, Date.now(), ttsModel);
       if (!providerTrusted || !ticketTrusted || !call || !["starting", "bridging", "active"].includes(call.status)) return c.json({ ok: false, error: "stream authorization rejected" }, 403);
       if (!(await claimVoiceCapacity(callId, config.twilioVoiceMaxActiveCalls, config.twilioVoiceMaxCallSeconds * 1000))) return c.json({ ok: false, error: "voice capacity is temporarily full", retryable: true }, 429);
-      return c.json({ ok: true }, 200, { "Cache-Control": "no-store" });
+      return c.json({ ok: true, speculativeVoice: "safe-fast-lane-v1" }, 200, { "Cache-Control": "no-store" });
     });
 
     // Configure this URL as the incoming Voice webhook on the Twilio number.
@@ -1377,6 +1377,11 @@ async function main(): Promise<void> {
       if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000) return c.json({ ok: false, error: "invalid Twilio voice turn" }, 400);
       const call = await getPhoneCall(userId, callId);
       if (!call || !["bridging", "active"].includes(call.status)) return c.json({ ok: false, error: "unknown or inactive call" }, 404);
+      if (speculative && !voiceFastLaneEligible(transcript, call.purpose)) {
+        return new Response(`${JSON.stringify({ type: "skip" })}\n`, {
+          headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff" },
+        });
+      }
       const [rateAllowed, spendAllowed] = await Promise.all([checkRateLimit(userId), canSpend(userId)]);
       if (!rateAllowed) return c.json({ ok: false, error: "rate limit exceeded" }, 429);
       if (!spendAllowed) return c.json({ ok: false, error: "usage cap reached" }, 402);

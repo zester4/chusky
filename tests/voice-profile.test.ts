@@ -12,11 +12,11 @@ test("voice profiles keep spoken output while private owner calls use full conte
     guardrails: ["Do not pressure the caller."], capabilities: ["schedule_lookup", "task_lookup"],
   });
   const prompt = voiceProfileInstructions(profile, "outbound", "Qualify the product demonstration request");
-  assert.match(prompt, /natural plain speech only/i);
-  assert.match(prompt, /Never use Markdown, emojis, brackets/i);
+  assert.match(prompt, /concise plain speech/i);
+  assert.match(prompt, /Do not speak Markdown, emoji, labels, lists/i);
   assert.match(prompt, /VOICE-FIRST OUTPUT/i);
-  assert.match(prompt, /Good voice example/i);
-  assert.match(prompt, /Bad voice example/i);
+  assert.match(prompt, /do not repeat your introduction, purpose, acknowledgment, question, or answer/i);
+  assert.match(prompt, /REPRESENTATION CONTEXT/);
   assert.match(prompt, /OUTBOUND OPENING/i);
   assert.match(prompt, /configured disclosure policy/i);
   assert.match(prompt, /Never claim to be human, a nurse, doctor, lawyer, accountant/i);

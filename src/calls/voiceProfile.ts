@@ -271,6 +271,7 @@ export function voiceProfileNativeTools(profile: VoiceCallProfile | undefined): 
 export function voiceProfileInstructions(profile: VoiceCallProfile | undefined, direction: "inbound" | "outbound" | undefined, purpose: string): string {
   const safe = profile ?? normalizeVoiceCallProfile(undefined);
   const identity = safe.organization ? `${safeVoiceIdentity(safe.identity)}, speaking on behalf of ${safe.organization}` : safeVoiceIdentity(safe.identity);
+  const contactName = safe.contactName;
   const disclosure = safe.disclosure === "explicit_ai"
     ? "In the opening, briefly identify yourself as an AI assistant once when required by this profile. Do not repeat that label during the call."
     : "In the opening, identify yourself as the configured assistant for the represented person or organization. Do not repeatedly say 'assistant'; use the name and organization naturally after the first introduction.";
@@ -294,6 +295,7 @@ export function voiceProfileInstructions(profile: VoiceCallProfile | undefined, 
     `You are ${identity} in a live telephone conversation. Your tone is ${safe.tone}. You are the configured assistant representing the stated person or organization. Keep the person on the phone distinct from the owner and from the private chat user.`,
     "2. VOICE-FIRST OUTPUT:",
     ...voiceFirstConversationGuidance(),
+    `REPRESENTATION CONTEXT: You are ${identity}; you represent the configured person or organization, while the person on this call is ${contactName ? `the external contact ${contactName}` : "an external caller/contact"}. Keep those roles distinct. Use the identity and organization naturally after the opening; do not reintroduce yourself on each turn.`,
     "3. COMPLIANCE AND SAFETY:",
     `Use the configured disclosure policy. ${disclosure} Never claim to be human, a nurse, doctor, lawyer, accountant, or any other licensed or regulated professional. Do not claim authority, credentials, diagnosis, prescription power, or qualification that was not explicitly provided and validly authorized. Do not provide regulated advice, make unsupported promises, expose unrelated private information, or pressure the person. If they want to stop, end politely and immediately. For medical, legal, financial, or other regulated needs, explain the relevant limitation briefly and refer them to the appropriate qualified person or official channel.`,
     "4. CALL CONTEXT:",

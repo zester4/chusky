@@ -1490,10 +1490,13 @@ transient Deepgram disconnects get one bounded reconnect attempt. The voice
 bridge validates Twilio's WebSocket
 signature and a short-lived server-issued stream ticket. It uses Deepgram Flux
 conversational STT turn events plus streaming Flux TTS in Twilio-compatible
-8 kHz μ-law. `EagerEndOfTurn` starts the actual streamed reply early;
-`TurnResumed` cancels it, and a matching `EndOfTurn` reuses that same generation
-and commits it exactly once. Caller speech interrupts TTS and clears Twilio's
-buffered playback. Telephone turns use the dedicated `VOICE_MODEL` and the
+8 kHz μ-law. `EagerEndOfTurn` starts an early tool-free draft only when the
+server verifies the turn is safe for the conversational fast lane;
+`TurnResumed` cancels it, and a matching `EndOfTurn` reuses and commits that
+generation exactly once. Action turns wait for the definitive transcript before
+the tool-capable agent runs, preserving call intent and approval boundaries.
+Caller speech interrupts TTS and clears Twilio's buffered playback. Telephone
+turns use the dedicated `VOICE_MODEL` and the
 same owner-private Composio, MCP, and native tools as private chat, along with
 relevant owner history, memory, and knowledge. Turns remain ephemeral in the
 agent-run ledger; the account's conversation history is retained through the

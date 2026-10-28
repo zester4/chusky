@@ -163,6 +163,14 @@ class HangingAgentStreamResponse:
         yield "never reached"
 
 
+class SkippedSpeculativeAgentStreamResponse:
+    def raise_for_status(self):
+        return None
+
+    async def aiter_lines(self):
+        yield json.dumps({"type": "skip"})
+
+
 class FakeAgentStreamContext:
     def __init__(self, response):
         self.response = response
@@ -194,6 +202,14 @@ class FakeAgentHttp:
 
     async def aclose(self):
         return None
+
+
+class SkipSpeculativeAgentHttp(FakeAgentHttp):
+    def stream(self, method, url, **kwargs):
+        request = {"method": method, "url": url, **kwargs}
+        self.stream_requests.append(request)
+        response = SkippedSpeculativeAgentStreamResponse() if request["json"].get("speculative") else FakeAgentStreamResponse()
+        return FakeAgentStreamContext(response)
 
 
 class CommitRetryHttp:
@@ -326,6 +342,7 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
             self.websocket,
             settings,
             voice_app.BridgeMetrics(),
+            speculative_fast_lane_enabled=True,
         )
         self.addAsyncCleanup(self.call.http.aclose)
         self.addAsyncCleanup(self.call._close_persistent_tts)
@@ -595,7 +612,7 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("elevenlabs.io", opened_urls[0])
         self.assertIn("api.deepgram.com", opened_urls[1])
 
-    async def test_eager_turn_waits_for_one_final_tool_capable_request(self):
+    async def test_eager_turn_starts_and_reuses_one_fast_lane_request(self):
         agent_http = FakeAgentHttp()
         self.call.http = agent_http
         tts_socket = StreamingFakeTtsSocket()
@@ -603,7 +620,7 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         async def fake_connect(_url, **_kwargs):
             return tts_socket
 
-        transcript = "Can you help me with that?"
+        transcript = "Hello."
         deepgram = DeepgramTurnSocket([
             {"type": "TurnInfo", "event": "StartOfTurn", "turn_index": 1, "transcript": ""},
             {"type": "TurnInfo", "event": "EagerEndOfTurn", "turn_index": 1, "transcript": transcript},
@@ -615,21 +632,56 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(agent_http.stream_requests), 1)
         request = agent_http.stream_requests[0]
-        self.assertFalse(request["json"]["speculative"])
+        self.assertTrue(request["json"]["speculative"])
         self.assertEqual(request["json"]["transcript"], transcript)
         self.assertEqual(len(agent_http.posts), 1)
         self.assertTrue(agent_http.posts[0]["url"].endswith("/commit-turn"))
         self.assertEqual(agent_http.posts[0]["json"]["text"], "I can help you with that.")
         self.assertEqual([event["type"] for event in tts_socket.sent].count("Speak"), 1)
         latency = self.call.metrics.snapshot(1)["twilio"]["latencyMs"]
-        self.assertEqual(latency["eagerToFirstAudio"]["count"], 0)
+        self.assertEqual(latency["eagerToFirstAudio"]["count"], 1)
         self.assertEqual(latency["endOfTurnToFirstAudio"]["count"], 1)
 
-    async def test_eager_draft_cannot_speak_or_execute_before_caller_finishes(self):
-        self.call._request_agent_stream = AsyncMock()
-        await self.call._start_draft("Please book it", 1)
+    async def test_eager_draft_starts_only_after_authorization_protocol_is_enabled(self):
+        self.call._request_agent_stream = AsyncMock(return_value=voice_app.VoiceTurnResult(text="Hello there.", cost=0))
+        await self.call._start_draft("Hello.", 1)
+        await self.call.draft_task
+        self.call._request_agent_stream.assert_awaited_once_with("Hello.", speculative=True)
+
+        self.call.speculative_fast_lane_enabled = False
+        self.call._request_agent_stream.reset_mock()
+        self.call.draft_task = None
+        await self.call._start_draft("Hello.", 2)
         self.call._request_agent_stream.assert_not_called()
         self.assertIsNone(self.call.draft_task)
+
+    async def test_server_skipped_action_draft_falls_through_to_one_tool_capable_turn(self):
+        agent_http = SkipSpeculativeAgentHttp()
+        self.call.http = agent_http
+        tts_socket = StreamingFakeTtsSocket()
+
+        async def fake_connect(_url, **_kwargs):
+            return tts_socket
+
+        self.call.draft_transcript = "Please book it."
+        self.call.draft_turn_index = 2
+        self.call.draft_task = asyncio.create_task(self.call._request_agent_stream("Please book it.", speculative=True))
+        with patch.object(voice_app, "connect", fake_connect):
+            await self.call._respond_final("Please book it.", 2)
+
+        self.assertEqual([request["json"]["speculative"] for request in agent_http.stream_requests], [True, False])
+        self.assertEqual(len(agent_http.posts), 1)
+        self.assertEqual(agent_http.posts[0]["json"]["text"], "I can help you with that.")
+
+    async def test_tool_progress_is_spoken_at_most_once_per_turn(self):
+        self.call.settings.tool_progress_delay_ms = 0
+        self.call._send_persistent_tts = AsyncMock()
+
+        await self.call._delayed_tool_progress()
+        await self.call._delayed_tool_progress()
+
+        self.call._send_persistent_tts.assert_awaited_once()
+        self.assertTrue(self.call.tool_progress_spoken)
 
     async def test_flux_updates_are_used_when_final_event_has_no_transcript(self):
         agent_http = FakeAgentHttp()
