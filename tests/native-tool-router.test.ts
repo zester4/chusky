@@ -109,6 +109,34 @@ test("native discovery searches the full compact catalog and can return a comple
   assert.ok(found.every((item) => !Object.hasOwn(item, "parameters")));
 });
 
+test("computer and Daytona file requests discover the code family including computer tools", () => {
+  for (const query of ["Use the computer to inspect files", "Open my Daytona workspace", "List my files", "Create a folder in my workspace"]) {
+    const found = searchNativeToolManifest(query);
+    assert.ok(found.length > 0, `expected native tools for ${query}`);
+    assert.ok(found.every((item) => item.bundle === "code"), `expected only code-family tools for ${query}`);
+    assert.ok(found.some((item) => item.slug === "CHUCK_COMPUTER_WORKSPACE"));
+    assert.ok(found.some((item) => item.slug === "CHUCK_COMPUTER_LIST_FILES"));
+  }
+});
+
+test("computer requests route Daytona tools without exposing the E2B browser", async () => {
+  const restore = withConfig({ nativeToolLoading: "bundle", jevNativeToolRouting: false });
+  try {
+    const computerTools = [
+      ...tools(),
+      { type: "function", function: { name: "CHUCK_COMPUTER_WORKSPACE", description: "Create or inspect the private Daytona computer workspace", parameters: { type: "object", properties: {} } } },
+      { type: "function", function: { name: "CHUCK_COMPUTER_LIST_FILES", description: "List files in the Daytona computer workspace", parameters: { type: "object", properties: {} } } },
+      { type: "function", function: { name: "CHUCK_COMPUTER_EXECUTE", description: "Run a command in the Daytona computer workspace", parameters: { type: "object", properties: {} } } },
+    ];
+    const route = await routeNativeToolsForTurn(computerTools, "Use the computer to inspect files");
+    const names = route.tools.map((tool: any) => tool.function.name);
+    assert.ok(names.includes("CHUCK_COMPUTER_WORKSPACE"));
+    assert.ok(names.includes("CHUCK_COMPUTER_LIST_FILES"));
+    assert.ok(names.includes("CHUCK_COMPUTER_EXECUTE"));
+    assert.ok(!names.includes("CHUCK_BROWSER"), "the E2B browser remains a separate capability");
+  } finally { restore(); }
+});
+
 test("structured data requests can discover Monid without naming the provider", () => {
   for (const query of ["census demographics", "weather forecast", "onchain wallet data", "public dataset API", "verified business contacts", "AI citation visibility", "YouTube transcripts", "compare customer reviews", "local service prospects", "videos outperforming for creators", "SEO keyword evidence", "competitor ad intelligence", "scrape public product pages"]) {
     const found = searchDiscoveredToolManifest(query);

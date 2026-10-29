@@ -83,7 +83,7 @@ const BUNDLE_TERMS: Record<NativeToolBundle, string[]> = {
   browser: ["browser", "website", "web", "page", "login", "vault", "password", "form", "click", "scroll", "checkout"],
   meetings: ["meeting", "zoom", "meet", "teams", "webex", "call", "participant", "transcript"],
   artifacts: ["pdf", "document", "docx", "spreadsheet", "excel", "presentation", "slide", "artifact", "image", "video"],
-  code: ["code", "file", "folder", "sandbox", "app", "build", "deploy", "terminal", "repository", "git"],
+  code: ["code", "computer", "daytona", "file", "folder", "sandbox", "workspace", "app", "build", "deploy", "terminal", "repository", "git"],
   autonomy: ["task", "mission", "reminder", "follow-up", "followup", "schedule", "delegate", "attention", "proactive", "loop", "lead", "leads", "prospect", "prospects", "campaign", "pipeline", "qualification"],
   monid: ["monid", "dataset", "census", "demographic", "weather", "forecast", "social", "market", "onchain", "chain", "blockchain", "business", "contact", "verified", "email", "target", "company", "local", "prospect", "enrichment", "partnership", "citation", "visibility", "youtube", "transcript", "creator", "outlier", "outperforming", "performance", "review", "reviews", "content", "seo", "keyword", "advertising", "advertiser", "ads", "scrape", "scraping", "crawl", "extract"],
   intelligence: ["treg", "mcp", "research", "enrich", "company", "person", "seo", "search", "provider", "data"],
@@ -214,6 +214,7 @@ function inferredFamily(query: string): NativeToolBundle | undefined {
   if (/\bbrowser\b|\bwebsite\b|\bwebpage\b|\bweb form\b/.test(normalized)) return "browser";
   if (/\bmeeting\b|\bmeetings\b|\bzoom call\b|\btranscript\b/.test(normalized)) return "meetings";
   if (/\bpdf\b|\bspreadsheet\b|\bexcel\b|\bpresentation\b|\bartifact\b|\bimage\b|\bvideo\b/.test(normalized)) return "artifacts";
+  if (/\b(?:computer|daytona|file|files|folder|folders|sandbox|workspace|terminal|repository|git)\b/.test(normalized)) return "code";
   return undefined;
 }
 
