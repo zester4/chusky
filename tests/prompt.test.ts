@@ -42,6 +42,7 @@ test("every composed prompt carries the explicit instruction order and turn cont
   assert.match(prompt, /Verify the postcondition that matters to the user/);
   assert.match(prompt, /do not repeat an answer in different words/i);
   assert.match(prompt, /Interpret indirect or colloquial requests by the outcome the user intends/i);
+  assert.match(prompt, /A correction replaces the earlier value; a changed or cancelled goal retires its old actions/i);
   assert.match(prompt, /After saying you will check something, return with the finding or a clear blocker/i);
   assert.ok(prompt.indexOf(INSTRUCTION_ORDER_KERNEL) < prompt.indexOf(REASONING_AND_ACTION_KERNEL));
   assert.ok(prompt.indexOf(REASONING_AND_ACTION_KERNEL) < prompt.indexOf(TURN_EXECUTION_KERNEL));

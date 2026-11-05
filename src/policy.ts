@@ -206,6 +206,8 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
   if (slug === "CHUCK_MISSION_COMPENSATE" && String(args.action ?? "") === "inspect") return "private";
   if (slug === "CHUCK_TREG_CALL") return isAutonomousTregCatalogCall(args) ? "private" : "approval_required";
   if (APPROVAL_NATIVE_TOOLS.has(slug)) return "approval_required";
+  if (slug === "CHUCK_CAMOFOX_CLICK" || slug === "CHUCK_CAMOFOX_TYPE") return "approval_required";
+  if (slug.startsWith("CHUCK_CAMOFOX_")) return "private";
   if (TREG_AUTONOMOUS_TOOLS.has(slug)) return "private";
   if (MONID_AUTONOMOUS_TOOLS.has(slug)) return "private";
   if (PRIVATE_NATIVE_TOOLS.has(slug) || PRIVATE_COMPOSIO_META_TOOLS.has(slug)) return "private";

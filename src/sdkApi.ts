@@ -1090,7 +1090,7 @@ function approvalView(approval: { id: string; status: string; toolSlug: string; 
 }
 
 function threadView(thread: SdkThreadRecord) { return { id: thread.id, externalId: thread.externalId, metadata: thread.metadata, createdAt: new Date(thread.createdAt).toISOString(), updatedAt: new Date(thread.updatedAt).toISOString() }; }
-type PrivateRunLink = { url: string; expiresAt?: number; label: string };
+type PrivateRunLink = { url: string; expiresAt?: number; label: string; kind?: "browser_handoff" | "browser_live_view" };
 
 function runView(threadId: string, run: SdkRunRecord, privateLinks?: PrivateRunLink[]) {
   const { agentInstructions: _privateInstructions, companyProjectId: _privateCompanyProjectId, organizationId: _organizationId, ownerPrivateRun: _privateOwnerRun, durableVersion: _durableVersion, durablePayloadHash: _durablePayloadHash, ...visible } = run;
@@ -1677,7 +1677,11 @@ function idempotency(c: any, session: Awaited<ReturnType<typeof getSession>>, fi
 
 /** Persist an idempotency result without saving a caller's stale session snapshot. */
 async function recordSdkIdempotency(userId: number, key: string, fingerprint: string, response: unknown): Promise<void> {
-  await saveSdkIdempotency(userId, key, fingerprint, response);
+  // Signed browser URLs are bearer credentials; keep them response-only.
+  const persistedResponse = response && typeof response === "object" && !Array.isArray(response)
+    ? Object.fromEntries(Object.entries(response).filter(([field]) => field !== "privateLinks"))
+    : response;
+  await saveSdkIdempotency(userId, key, fingerprint, persistedResponse);
 }
 
 async function sdkIdempotency(c: any, userId: number, fingerprint: string): Promise<{ replay?: unknown; key?: string; mismatch?: boolean }> {

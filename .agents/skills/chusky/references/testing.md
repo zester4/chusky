@@ -95,6 +95,9 @@ Maintain fixtures for:
 20. A normal Composio post/email action automatically receives only the explicitly requested current, generated, or saved image through its exact schema; ambiguous image selection or multi-action batches stop before provider execution, and bytes, signed URLs, and asset IDs stay out of model arguments.
 21. If an image-aware action asks the owner to reattach its missing image, the next attachment resumes that exact still-authorized user request through the image-aware adapter; cancellation or unrelated follow-up breaks the continuation, and text-only fallback never executes.
 22. A generated image whose private asset save fails remains available during the current run, but the tool result clearly reports that it cannot be reused in a later turn.
+23. A provider-neutral `CHUCK_COMPUTER` grant or denial resolves to the canonical Daytona computer slug; a missed route can expose that exact schema for one retry only for an explicit private-owner computer request, never for a shared, voice, or durable worker run.
+24. A newer user correction replaces the earlier value without reviving a retired or cancelled goal; preserve still-relevant confirmed facts and completed work, and do not repeat resolved questions or actions.
+25. For the synthetic multi-turn cases in `benchmarks/agent-understanding/cases.json`, grade intent fidelity, context use, corrections, clarification quality, repetition, tool choice, verified outcome, and safety separately. Voice cases must also preserve the configured represented-party identity and caller role.
 
 For browser domain coverage, run `npm run e2b:domain:live-matrix` with the
 E2B template configured. The matrix uses one isolated sandbox per provider and

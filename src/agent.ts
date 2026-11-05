@@ -143,6 +143,7 @@ function removeStaleBrowserVisualContext(messages: ApiMessage[]): void {
 
 function startsNewBrowserVisualObservation(slug: string, args: Record<string, unknown>): boolean {
   if (["CHUCK_BROWSER_OBSERVE", "CHUCK_BROWSER_ACT", "CHUCK_BROWSER_EXTRACT", "CHUCK_BROWSER_AGENT"].includes(slug)) return true;
+  if (["CHUCK_CAMOFOX_CLICK", "CHUCK_CAMOFOX_DISMISS_OVERLAYS", "CHUCK_CAMOFOX_EXTRACT", "CHUCK_CAMOFOX_HISTORY", "CHUCK_CAMOFOX_NAVIGATE", "CHUCK_CAMOFOX_OPEN", "CHUCK_CAMOFOX_PAGE_STATE", "CHUCK_CAMOFOX_SCROLL", "CHUCK_CAMOFOX_SNAPSHOT", "CHUCK_CAMOFOX_SCREENSHOT", "CHUCK_CAMOFOX_TYPE", "CHUCK_CAMOFOX_WAIT"].includes(slug)) return true;
   return slug === "CHUCK_BROWSER" && typeof args.action === "string" && BROWSER_VISUAL_FEEDBACK_ACTIONS.has(args.action);
 }
 
@@ -2368,6 +2369,39 @@ export async function executeExactComposioAction(userId: number, toolSlug: strin
 
 // ── Agent result ──────────────────────────────────────────────────────────────
 
+export type AgentPrivateLink = {
+  url: string;
+  expiresAt?: number;
+  label: string;
+  kind?: "browser_handoff" | "browser_live_view";
+};
+
+export function prepareCamofoxLiveViewDelivery(result: unknown, now = Date.now()): {
+  modelResult: Record<string, unknown>;
+  privateLink?: AgentPrivateLink;
+} {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    throw new Error("Camofox returned an invalid open-tab result.");
+  }
+  const { liveViewerUrl, liveViewerExpiresInSeconds, ...modelResult } = result as Record<string, unknown>;
+  if (liveViewerUrl === undefined) return { modelResult };
+  if (typeof liveViewerUrl !== "string" || !Number.isInteger(liveViewerExpiresInSeconds) || (liveViewerExpiresInSeconds as number) < 1) {
+    throw new Error("Camofox returned an invalid live-view link.");
+  }
+  let url: URL;
+  try {
+    url = new URL(liveViewerUrl);
+  } catch {
+    throw new Error("Camofox returned an invalid live-view link.");
+  }
+  if (url.protocol !== "https:") throw new Error("Camofox returned an insecure live-view link.");
+  const expiresAt = now + (liveViewerExpiresInSeconds as number) * 1000;
+  return {
+    modelResult: { ...modelResult, liveViewerIssued: true, liveViewerExpiresAt: expiresAt },
+    privateLink: { url: url.toString(), expiresAt, label: "Open live browser view", kind: "browser_live_view" },
+  };
+}
+
 export interface AgentResult {
   text: string;
   toolsUsed: string[];
@@ -2381,7 +2415,7 @@ export interface AgentResult {
   generatedFiles?: { data: Buffer; name: string; contentType: string; artifactId: string; type: string }[];
   speech?: { data: Buffer; mediaType: string };
   /** Short-lived bearer links are delivered separately and excluded from history. */
-  privateLinks?: { url: string; expiresAt?: number; label: string }[];
+  privateLinks?: AgentPrivateLink[];
   /** Internal durable continuation request; never delivered as a user reminder. */
   taskWait?: TaskWaitRequest;
   /** Internal durable continuation request for an exact provider callback. */
@@ -2574,7 +2608,7 @@ export interface AgentRunOptions {
   /** Report safe specialist lifecycle metadata in the same durable chat run. */
   onSubagentActivity?: (activity: SubagentActivityUpdate & { parentToolCallId: string }) => void | Promise<void>;
   /** Deliver an owner-private browser/vault link as soon as the tool creates it. */
-  onPrivateLink?: (link: { url: string; expiresAt?: number; label: string }) => void | Promise<void>;
+  onPrivateLink?: (link: AgentPrivateLink) => void | Promise<void>;
   /** Bind the internal task-wait tool to the task currently being executed. */
   taskId?: string;
   /** Bind mission controls and accounting to the autonomous slice currently executing. */
@@ -2963,7 +2997,9 @@ async function executeAgent(
     }
   };
 
-  let allow = options?.toolAllow === undefined ? undefined : new Set(options.toolAllow);
+  let allow = options?.toolAllow === undefined
+    ? undefined
+    : new Set(options.toolAllow.map(canonicalNativeToolSlug));
   const voiceToolPolicy = voiceTurn ? normalizeVoiceToolPolicy(options?.voiceToolPolicy) : undefined;
   let meetingComposioAccountAliases = options?.meetingComposioAccountAliases;
   const toolsDisabled = allow?.size === 0;
@@ -3018,7 +3054,7 @@ async function executeAgent(
 
   if (onStatus) await onStatus(humanProgressStatus("preparing"));
 
-  const deny = new Set(options?.toolDeny ?? []);
+  const deny = new Set((options?.toolDeny ?? []).map(canonicalNativeToolSlug));
   // Composio sessions expose discovery and execution meta-tools by default.
   // Keep the model context bounded: direct actions explicitly allowlisted for
   // this run remain available, while the model can discover any other action
@@ -4125,7 +4161,7 @@ async function executeAgent(
   const retrievedImages: AgentResult["retrievedImages"] = [];
   const generatedFiles: AgentResult["generatedFiles"] = [];
   const privateLinks: NonNullable<AgentResult["privateLinks"]> = [];
-  const reportPrivateLink = async (link: { url: string; expiresAt?: number; label: string }): Promise<void> => {
+  const reportPrivateLink = async (link: AgentPrivateLink): Promise<void> => {
     privateLinks.push(link);
     try {
       await options?.onPrivateLink?.(link);
@@ -4297,7 +4333,7 @@ async function executeAgent(
       ? availableTools.filter((tool) => COMPOSIO_GATEWAY_TOOLS.has(toolSchemaName(tool)))
       : [];
     const requiredWorkerTools = (options?.taskId || options?.missionId) && options.toolAllow?.length
-      ? availableTools.filter((tool) => options.toolAllow!.includes(toolSchemaName(tool)))
+      ? availableTools.filter((tool) => Boolean(allow?.has(toolName(tool))))
       : [];
     const missionControlTools = options?.missionId
       ? availableTools.filter((tool) => MISSION_WORKER_CONTROL_TOOLS.includes(toolSchemaName(tool) as typeof MISSION_WORKER_CONTROL_TOOLS[number]))
@@ -4655,7 +4691,7 @@ async function executeAgent(
     let pendingBrowserVisualContextMessage: ApiMessage | undefined;
     for (const call of toolCalls) {
       const slug = canonicalNativeToolSlug(call.function.name);
-      const browserTool = slug === "CHUCK_BROWSER" || slug.startsWith("CHUCK_BROWSER_");
+      const browserTool = slug === "CHUCK_BROWSER" || slug.startsWith("CHUCK_BROWSER_") || slug.startsWith("CHUCK_CAMOFOX_");
       if (!toolsUsed.includes(slug)) toolsUsed.push(slug);
 
       if (onStatus) await onStatus(toolStatus(slug));
@@ -4725,7 +4761,27 @@ async function executeAgent(
               ? "This image-bearing action cannot use COMPOSIO_MULTI_EXECUTE_TOOL. No connected-app provider action was attempted. Retry with COMPOSIO_EXECUTE_TOOL for one exact provider action and schema-valid arguments; preserve the normal approval and account-scope checks, then verify the provider result."
               : "This image-bearing action cannot use COMPOSIO_MULTI_EXECUTE_TOOL. No connected-app provider action was attempted, and direct COMPOSIO_EXECUTE_TOOL is not available to this run. Use an allowed single-action path or request the required access; do not send or post a text-only fallback.");
           }
-          throw new Error(`Tool ${slug} is not enabled for this run.`);
+          const schemaAvailable = availableTools.some((tool) => toolSchemaName(tool) === slug);
+          const canRecoverNativeRouteMiss = slug === "CHUCK_DAYTONA_COMPUTER"
+            && schemaAvailable
+            && !allow
+            && !deny.has(slug)
+            && ownerPrivateRun
+            && !sharedScope
+            && !voiceTurn
+            && !options?.taskId
+            && !options?.missionId
+            && !options?.meetingId
+            && !turnActionDecision.noActionNeeded
+            && /\b(?:computer|desktop|workspace|terminal|daytona)\b/i.test(currentRequestText);
+          if (canRecoverNativeRouteMiss) {
+            revealedNativeTools.add(slug);
+            throw new Error(`The native capability ${slug} is available in this private run but was omitted from the initial route. Its exact schema is now available for the next model round; retry only if it matches the user's request. Normal authorization and approval checks still apply.`);
+          }
+          if (allow && !allow.has(slug)) {
+            throw new Error(`Tool ${slug} is not included in this run's explicit allowlist. Do not retry it; use CHUCK_REQUEST_ADDITIONAL_TOOLS if this worker supports grants, or report the missing capability.`);
+          }
+          throw new Error(`Tool ${slug} is not enabled for this run's current capability scope.`);
         }
         if (voiceTurn && ["CHUCK_GET_IMAGE_ASSET", "CHUCK_SEARCH_IMAGE_ASSETS", "CHUCK_SAVE_IMAGE_ASSET", "CHUCK_FORGET_IMAGE_ASSET"].includes(slug)) {
           throw new Error("Saved image context is isolated from live phone turns; use the current call transcript or ask the owner to continue in private chat.");
@@ -5173,6 +5229,14 @@ async function executeAgent(
             await reportPrivateLink(delivery.privateLink);
             execResult = delivery.modelResult;
           }
+          if (slug === "CHUCK_CAMOFOX_OPEN") {
+            const delivery = prepareCamofoxLiveViewDelivery(execResult);
+            if (delivery.privateLink) {
+              if (!ownerPrivateRun) throw new Error("Camofox live-view links can only be delivered in a private owner run.");
+              await reportPrivateLink(delivery.privateLink);
+            }
+            execResult = delivery.modelResult;
+          }
           if ((slug === "CHUCK_BROWSER_HANDOFF" || slug === "CHUCK_VAULT_LOGIN" || slug === "CHUCK_BROWSER") && execResult && typeof execResult === "object") {
             const vaultResult = execResult as { browserHandoff?: unknown };
             const handoff = ((slug === "CHUCK_VAULT_LOGIN" || slug === "CHUCK_BROWSER") && vaultResult.browserHandoff && typeof vaultResult.browserHandoff === "object"
@@ -5180,7 +5244,7 @@ async function executeAgent(
               : execResult) as { url?: unknown; handoffId?: unknown; status?: unknown; expiresAt?: unknown; message?: unknown; sandboxId?: unknown; shoppingPlan?: unknown };
             const url = typeof handoff.url === "string" ? handoff.url.trim() : "";
             if ((slug === "CHUCK_BROWSER_HANDOFF" || (slug === "CHUCK_BROWSER" && vaultResult.browserHandoff)) && !/^https:\/\//i.test(url)) throw new Error("Browser backend did not return a valid private browser handoff link");
-            if (url) await reportPrivateLink({ url, expiresAt: typeof handoff.expiresAt === "number" ? handoff.expiresAt : undefined, label: "Open your private browser session" });
+            if (url) await reportPrivateLink({ url, expiresAt: typeof handoff.expiresAt === "number" ? handoff.expiresAt : undefined, label: "Open your private browser session", kind: "browser_handoff" });
             // The model only needs confirmation that delivery will occur. Do
             // not put a short-lived bearer URL into model context, run state,
             // logs, or the saved conversation history.
@@ -5223,9 +5287,9 @@ async function executeAgent(
             const { __browserVisualFeedback: _visualMarker, ...browserResult } = execResult as Record<string, unknown>;
             execResult = browserResult;
           }
-          if ((slug === "CHUCK_DAYTONA_COMPUTER" || slug.startsWith("CHUCK_BROWSER") || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object" && ("__daytonaScreenshot" in execResult || "__browserScreenshot" in execResult)) {
+          if ((slug === "CHUCK_DAYTONA_COMPUTER" || slug.startsWith("CHUCK_BROWSER") || slug === "CHUCK_DAYTONA_APP" || slug === "CHUCK_CAMOFOX_SCREENSHOT") && execResult && typeof execResult === "object" && ("__daytonaScreenshot" in execResult || "__browserScreenshot" in execResult)) {
             const screenshot = execResult as unknown as { base64: string; mediaType: string; sizeBytes?: number; app?: { id?: string; status?: string }; url?: string; __browserVisualFeedback?: boolean };
-            const browserToolResult = slug.startsWith("CHUCK_BROWSER");
+            const browserToolResult = slug.startsWith("CHUCK_BROWSER") || slug === "CHUCK_CAMOFOX_SCREENSHOT";
             const internalBrowserVisualFeedback = browserToolResult && screenshot.__browserVisualFeedback === true;
             const screenshotBytes = Buffer.from(screenshot.base64, "base64");
             const screenshotType = String(screenshot.mediaType).toLowerCase().split(";", 1)[0];

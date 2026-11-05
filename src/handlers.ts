@@ -832,7 +832,10 @@ async function saveTelegramConversation(ctx: Context, userId: number, text: stri
 async function sendPrivateBrowserLinks(ctx: Context, links: Awaited<ReturnType<typeof runAgent>>["privateLinks"], delivered = new Set<string>()): Promise<void> {
   for (const link of links ?? []) {
     if (delivered.has(link.url)) continue;
-    await ctx.reply(`${link.label}\n\nThis private link expires soon. Complete the website step there, then return here and say continue.`, {
+    const description = link.kind === "browser_live_view"
+      ? "This private live view lets you watch the open browser tab. The link expires soon."
+      : "This private link expires soon. Complete the website step there, then return here and say continue.";
+    await ctx.reply(`${link.label}\n\n${description}`, {
       link_preview_options: { is_disabled: true },
       reply_markup: {
         inline_keyboard: [[{ text: link.label, url: link.url }]],
@@ -847,7 +850,7 @@ function telegramAgentOptions(ctx: Context, receivedAt: number, deliveredPrivate
   return {
     ...(!shared ? { ownerPrivateRun: true } : {}),
     ...(shared ? { instructions: sharedGroupInstructions("Telegram"), toolDeny: [...SHARED_GROUP_TOOL_DENY] } : {}),
-    ...(!shared ? { onPrivateLink: async (link: { url: string; expiresAt?: number; label: string }) => { await sendPrivateBrowserLinks(ctx, [link], deliveredPrivateLinks); } } : {}),
+    ...(!shared ? { onPrivateLink: async (link: { url: string; expiresAt?: number; label: string; kind?: "browser_handoff" | "browser_live_view" }) => { await sendPrivateBrowserLinks(ctx, [link], deliveredPrivateLinks); } } : {}),
     temporalContext: { messageReceivedAt: receivedAt, timezone: config.timezone },
   };
 }

@@ -20,5 +20,5 @@ const sharedChannelDeniedTools = new Set<string>(SHARED_CHANNEL_TOOL_DENY);
 
 export function isSharedChannelToolDenied(slug: string): boolean {
   const canonical = slug;
-  return sharedChannelDeniedTools.has(canonical);
+  return sharedChannelDeniedTools.has(canonical) || canonical.startsWith("CHUCK_CAMOFOX_");
 }

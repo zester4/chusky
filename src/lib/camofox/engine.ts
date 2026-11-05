@@ -32,9 +32,9 @@ export function getCamofoxUserId(auth: CamofoxAuth): string {
   }
 
   const digest = createHash("sha256")
-    .update(`thinky:camofox:v1:${process.env.BETTER_AUTH_URL ?? "thinky"}:${principalId}`)
+    .update(`chusky:camofox:v1:${process.env.BETTER_AUTH_URL ?? "chusky"}:${principalId}`)
     .digest("hex");
-  return `thinky_${digest}`;
+  return `chusky_${digest}`;
 }
 
 export function validateCamofoxTargetUrl(value: string): string {
@@ -64,7 +64,7 @@ function getCamofoxConfig() {
   const baseUrlValue = process.env.CAMOFOX_BASE_URL?.trim();
   const accessKey = process.env.CAMOFOX_ACCESS_KEY?.trim();
   if (!baseUrlValue || !accessKey) {
-    throw new Error("CAMOFOX_BASE_URL and CAMOFOX_ACCESS_KEY must be configured for the Eve service.");
+    throw new Error("CAMOFOX_BASE_URL and CAMOFOX_ACCESS_KEY must be configured for Camofox.");
   }
 
   let baseUrl: URL;
@@ -111,7 +111,6 @@ export async function camofoxRequest(
     try {
       response = await fetch(url, {
         ...init,
-        cache: "no-store",
         credentials: "omit",
         headers: requestHeaders(init.headers, accessKey, Boolean(init.body)),
         redirect: "error",
@@ -142,9 +141,10 @@ export async function camofoxRequest(
   }
 }
 
-function requestHeaders(existing: HeadersInit | undefined, accessKey: string, hasBody: boolean): Headers {
+function requestHeaders(existing: RequestInit["headers"], accessKey: string, hasBody: boolean): Headers {
   const headers = new Headers(existing);
   headers.set("Accept", "application/json");
+  headers.set("Cache-Control", "no-store");
   headers.set("Authorization", `Bearer ${accessKey}`);
   if (hasBody) {
     headers.set("Content-Type", "application/json");

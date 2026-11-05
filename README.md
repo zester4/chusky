@@ -42,7 +42,7 @@ The sections below are the detailed self-hosting and operations reference.
 | Connected apps | Composio app discovery, account connections, and a large catalog of provider actions | Uses the account's connected apps; availability depends on the selected action and connection |
 | Conversations | Telegram, authenticated dashboard and CLI, linked Slack, WhatsApp, Sendblue, Twilio SMS, regular X DMs, and optional encrypted XChat, plus voice and meeting workflows | Features and media support vary by channel; shared conversations do not inherit private account history |
 | Durable work | Owner-scoped tasks, missions, reminders, recurring jobs, triggers, and resumable workflows | Production durability requires Redis; scheduled and continued work also requires QStash |
-| Workspaces and media | Optional Daytona computer workspaces, generated media, and verified artifacts | Automated website browsing is disabled pending a replacement |
+| Workspaces and media | Optional Daytona computer workspaces, generated media, and verified artifacts | Owner-private Camofox browser tools require a separately configured browser service |
 | Developer access | REST API and TypeScript SDK, plus A2A and remote MCP integrations | Project scopes, stable user identity, budgets, and approvals are enforced server-side |
 
 See [channel support and operating model](#channel-support-and-operating-model)

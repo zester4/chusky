@@ -14,6 +14,24 @@ test("native catalog includes core agent capabilities", () => {
   }
 });
 
+test("Camofox exposes every attached operation as an owner-private native tool", () => {
+  const expected = [
+    "CHUCK_CAMOFOX_CLICK", "CHUCK_CAMOFOX_CLOSE", "CHUCK_CAMOFOX_DISMISS_OVERLAYS",
+    "CHUCK_CAMOFOX_DOWNLOADS", "CHUCK_CAMOFOX_EXTRACT", "CHUCK_CAMOFOX_HANDOFF",
+    "CHUCK_CAMOFOX_HISTORY", "CHUCK_CAMOFOX_LINKS", "CHUCK_CAMOFOX_LIST_TABS",
+    "CHUCK_CAMOFOX_LIVE_VIEWER", "CHUCK_CAMOFOX_NAVIGATE", "CHUCK_CAMOFOX_OPEN",
+    "CHUCK_CAMOFOX_PAGE_STATE", "CHUCK_CAMOFOX_SCREENSHOT", "CHUCK_CAMOFOX_SCROLL",
+    "CHUCK_CAMOFOX_SNAPSHOT", "CHUCK_CAMOFOX_TYPE", "CHUCK_CAMOFOX_WAIT",
+  ];
+  const names = new Set(chuckTools.map((tool) => tool.function.name));
+  for (const name of expected) {
+    assert.equal(names.has(name), true, name);
+    const schema = chuckTools.find((tool) => tool.function.name === name)!.function.parameters;
+    assert.equal(schema.additionalProperties, false, `${name} rejects unknown arguments`);
+    assert.equal(modelFacingChuckTools.some((tool) => tool.function.name === name), true, `${name} reaches discovery`);
+  }
+});
+
 test("mission doctor requires one bounded mission id", () => {
   validateNativeToolArguments("CHUCK_MISSION_DOCTOR", { id: "mis_diagnose" });
   assert.throws(() => validateNativeToolArguments("CHUCK_MISSION_DOCTOR", {}), /requires argument: id/);

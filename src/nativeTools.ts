@@ -39,6 +39,7 @@ import {
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
 import { e2bBrowserEngine } from "./lib/e2b/index.js";
+import { executeCamofoxTool } from "./lib/camofox/tools.js";
 import { E2BBrowserError, E2BBrowserHandoffWaitingError } from "./lib/e2b/errors.js";
 import { browserHandoffWaitingResult } from "./lib/e2b/contracts.js";
 import { isTrustedBrowserUrlObservation } from "./lib/e2b/contracts.js";
@@ -1804,6 +1805,13 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
     throw new Error("Only Chusky can review specialist actions.");
   }
   validateNativeToolArguments(slug, args);
+  if (slug.startsWith("CHUCK_CAMOFOX_")) {
+    if (!runtime.ownerPrivateRun || runtime.sharedConversation) {
+      throw new Error("Camofox is available only in a private owner conversation.");
+    }
+    return abortableToolCall(runtime, () =>
+      executeCamofoxTool(userId, slug, args, runtime.signal ?? new AbortController().signal));
+  }
   switch (slug) {
     case "CHUCK_FIND_TOOLS": {
       const allowed = (runtime.availableToolCatalog ?? runtime.toolCatalog)

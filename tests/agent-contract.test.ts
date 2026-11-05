@@ -332,6 +332,133 @@ async function withAgentMocks(responses: Response[], execute: (slug: string, arg
   }
 }
 
+test("private Daytona computer grants accept the model-facing CHUCK_COMPUTER alias", async () => {
+  const userId = 831310;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const requests: Array<Record<string, any>> = [];
+  const originalComputer = daytonaEngine.computer;
+  const executed: Array<Record<string, unknown>> = [];
+  (daytonaEngine as any).computer = async (_owner: number, args: Record<string, unknown>) => {
+    executed.push(args);
+    return { status: "running" };
+  };
+  try {
+    await withAgentMocks([
+      toolResponse("CHUCK_COMPUTER", '{"action":"status"}'),
+      chatResponse({ role: "assistant", content: "The computer workspace is running." }),
+    ], async () => assert.fail("A granted native computer action must not dispatch through Composio"), async () => {
+      const result = await runAgent(userId, "Check my desktop status.", [], "test/model", undefined, undefined, undefined, undefined, undefined, {
+        ephemeral: true,
+        ownerPrivateRun: true,
+        toolAllow: ["CHUCK_COMPUTER"],
+      });
+      assert.equal(result.text, "The computer workspace is running.");
+      assert.deepEqual(result.toolsSucceeded, ["CHUCK_DAYTONA_COMPUTER"]);
+      assert.equal(requests[0]?.tools?.some((tool: any) => tool.function.name === "CHUCK_COMPUTER"), true);
+      assert.deepEqual(executed.map(({ action }) => action), ["status"]);
+    }, false, undefined, (body) => requests.push(body));
+  } finally {
+    (daytonaEngine as any).computer = originalComputer;
+  }
+});
+
+test("an explicitly requested private computer tool omitted by routing is revealed for one retry", async () => {
+  const userId = 831311;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const previous = {
+    jevMode: config.jevMode,
+    jevSurfaces: config.jevSurfaces,
+    jevNativeToolRouting: config.jevNativeToolRouting,
+    jevTurnBatchRouting: config.jevTurnBatchRouting,
+  };
+  const requests: Array<Record<string, any>> = [];
+  const originalComputer = daytonaEngine.computer;
+  const executed: Array<Record<string, unknown>> = [];
+  (daytonaEngine as any).computer = async (_owner: number, args: Record<string, unknown>) => {
+    executed.push(args);
+    return { status: "running" };
+  };
+  config.jevMode = "enforce";
+  config.jevSurfaces = new Set(["native"]);
+  config.jevNativeToolRouting = true;
+  config.jevTurnBatchRouting = false;
+  setJevClientForTests(new JevClient({ apiKey: "test-jev-key", fetchImpl: (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    const answers = Object.fromEntries(Object.entries<any>(body.questions ?? {}).map(([key, question]) => {
+      if (question.type === "noul") return [key, { type: "noul", noul: 0.98 }];
+      const criteria = question.criteria ?? {};
+      return [key, {
+        type: "choice",
+        choice: "__none__",
+        confidence: 0.99,
+        probabilities: Object.fromEntries(Object.keys(criteria).map((id) => [id, id === "__none__" ? 0.99 : 0.01 / Math.max(1, Object.keys(criteria).length - 1)])),
+      }];
+    }));
+    return new Response(JSON.stringify({ model: body.model, answers }), { status: 200 });
+  }) as typeof fetch }));
+  try {
+    await withAgentMocks([
+      toolResponse("CHUCK_COMPUTER", '{"action":"status"}', "missed-route"),
+      toolResponse("CHUCK_COMPUTER", '{"action":"status"}', "routed-retry"),
+      chatResponse({ role: "assistant", content: "The computer workspace is running." }),
+    ], async () => assert.fail("A native computer action must not dispatch through Composio"), async () => {
+      const result = await runAgent(userId, "Inspect my Daytona desktop status.", [], "test/model", undefined, undefined, undefined, undefined, undefined, {
+        ephemeral: true,
+        ownerPrivateRun: true,
+      });
+      assert.equal(result.text, "The computer workspace is running.");
+      assert.deepEqual(result.toolsSucceeded, ["CHUCK_DAYTONA_COMPUTER"]);
+      const firstRoundTools = requests[0]?.tools?.map((tool: any) => tool.function.name) ?? [];
+      const retryTools = requests[1]?.tools?.map((tool: any) => tool.function.name) ?? [];
+      assert.ok(!firstRoundTools.includes("CHUCK_COMPUTER"), "the mock router must reproduce an omitted route");
+      assert.ok(retryTools.includes("CHUCK_COMPUTER"), "only the requested exact schema should be revealed");
+      const correction = requests[1]?.messages?.find((message: any) => message.role === "tool")?.content ?? "";
+      assert.match(correction, /omitted from the initial route/i);
+      assert.deepEqual(executed.map(({ action }) => action), ["status"]);
+    }, false, undefined, (body) => requests.push(body));
+  } finally {
+    Object.assign(config, previous);
+    setJevClientForTests(undefined);
+    (daytonaEngine as any).computer = originalComputer;
+  }
+});
+
+test("private computer routing recovery never widens explicit grants or denials", async () => {
+  const userId = 831312;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const originalComputer = daytonaEngine.computer;
+  let executions = 0;
+  (daytonaEngine as any).computer = async () => { executions++; return { status: "running" }; };
+  try {
+    for (const options of [
+      { toolAllow: ["CHUCK_LIST_REMINDERS"] },
+      { toolDeny: ["CHUCK_COMPUTER"] },
+    ]) {
+      const requests: Array<Record<string, any>> = [];
+      await withAgentMocks([
+        toolResponse("CHUCK_COMPUTER", '{"action":"status"}', `blocked-${requests.length}`),
+        chatResponse({ role: "assistant", content: "The computer capability is not available in this run." }),
+      ], async () => assert.fail("A blocked native computer action must not dispatch through Composio"), async () => {
+        await runAgent(userId, "Inspect my Daytona desktop status.", [], "test/model", undefined, undefined, undefined, undefined, undefined, {
+          ephemeral: true,
+          ownerPrivateRun: true,
+          ...options,
+        });
+        const tools = requests[0]?.tools?.map((tool: any) => tool.function.name) ?? [];
+        assert.ok(!tools.includes("CHUCK_COMPUTER"));
+        const correction = requests[1]?.messages?.find((message: any) => message.role === "tool")?.content ?? "";
+        assert.doesNotMatch(correction, /omitted from the initial route/i);
+      }, false, undefined, (body) => requests.push(body));
+    }
+    assert.equal(executions, 0);
+  } finally {
+    (daytonaEngine as any).computer = originalComputer;
+  }
+});
+
 test("mission provider allowlists receive the routed direct action schema", async () => {
   const userId = 831236;
   await initStore({ memoryOnly: true });

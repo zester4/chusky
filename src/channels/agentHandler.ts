@@ -47,7 +47,9 @@ function reply(conversation: ChuskyConversation, text: string, idempotencySeed: 
 /** Private handoff links are never written to Chusky conversation history. */
 function withPrivateLinks(text: string, links: Awaited<ReturnType<typeof runAgent>>["privateLinks"]): string {
   if (!links?.length) return text;
-  return `${text}\n\n${links.map((link) => `${link.label}: ${link.url}\nThis private link expires soon; complete the website step, then reply “continue”.`).join("\n\n")}`;
+  return `${text}\n\n${links.map((link) => link.kind === "browser_live_view"
+    ? `${link.label}: ${link.url}\nThis private live view lets you watch the open browser tab. The link expires soon.`
+    : `${link.label}: ${link.url}\nThis private link expires soon; complete the website step, then reply “continue”.`).join("\n\n")}`;
 }
 
 function agentInstructions(conversation: ChuskyConversation): string | undefined {
