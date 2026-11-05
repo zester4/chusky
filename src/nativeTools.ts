@@ -106,6 +106,17 @@ import { beginLinkOAuth, cancelLinkSpendRequest, completeApprovedLinkCheckout, c
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
+const RETIRED_BROWSER_TOOL_NAMES = new Set([
+  "CHUCK_LINK_INSPECT_CHECKOUT",
+  "CHUCK_LINK_EXECUTE_PAYMENT",
+  "CHUCK_LINK_CONFIRM_ORDER",
+  "CHUCK_LINK_COMPLETE_CHECKOUT",
+]);
+
+function isRetiredBrowserTool(slug: string): boolean {
+  return /^(?:CHUCK_BROWSER(?:_|$)|CHUCK_VAULT_|CHUCK_SHOPPING_)/.test(slug)
+    || RETIRED_BROWSER_TOOL_NAMES.has(slug);
+}
 
 function isBrowserObservationTimeout(error: unknown): boolean {
   if (error instanceof E2BBrowserError && error.code === "action_timeout") return true;
@@ -1781,6 +1792,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
 async function nativeToolInternal(userId: number, slug: string, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<unknown> {
   const canonicalSlug = canonicalNativeToolSlug(slug);
   if (canonicalSlug !== slug) return nativeTool(userId, canonicalSlug, args, runtime);
+  if (isRetiredBrowserTool(slug)) throw new Error("Automated website browsing is unavailable until the replacement browser is installed.");
   if (!config.elenaEnabled && isElenaToolSlug(slug)) throw new Error(elenaDisabledMessage());
   if (runtime.sharedConversation && isSharedChannelToolDenied(slug)) {
     throw new Error(`${slug} is available only in a private owner conversation`);
@@ -3383,7 +3395,12 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
     case "CHUCK_LINK_STATUS":
     case "CHUCK_LINK_WALLET_STATUS": return linkWalletStatus(userId);
     case "CHUCK_LINK_PAYMENT_METHODS": return linkPaymentMethods(userId);
-    case "CHUCK_LINK_CREATE_SPEND_REQUEST": return createLinkSpendRequest(userId, args);
+    case "CHUCK_LINK_CREATE_SPEND_REQUEST": {
+      if (args.executionMethod !== "link_pay_token" && !(typeof args.ucpCheckoutId === "string" && args.ucpCheckoutId.trim())) {
+        throw new Error("Browser-based Link checkout is unavailable. Use a UCP checkout or an explicit Link Pay Token flow.");
+      }
+      return createLinkSpendRequest(userId, args);
+    }
     case "CHUCK_LINK_INSPECT_CHECKOUT": return inspectLinkPayTokenCheckout(userId, args);
     case "CHUCK_LINK_MPP_DISCOVER": return discoverLinkMppPayment(userId, args);
     case "CHUCK_LINK_MPP_PAY": return payLinkMppRequest(userId, args);

@@ -28,7 +28,7 @@
 | Tasks | TASK_CREATE, CHECKPOINT, WAIT, COMPLETE |
 | Missions | MISSION_START, STEP_COMPLETE, WAIT_EVENT, EVIDENCE, VERIFY |
 | Daytona computer | WORKSPACE, EXECUTE, PTY, COMPUTER, GIT, FILE_DETAILS |
-| E2B browser | BROWSER, BROWSER_HANDOFF, BROWSER_VERIFY, BROWSER_SESSION_HEALTH |
+| Third-party website interaction | Unavailable until the replacement browser is installed |
 | Artifacts | CREATE_PDF/DOCUMENT/PRESENTATION/SPREADSHEET, ARTIFACT register |
 | Reminders / jobs | SET_REMINDER, SCHEDULE_JOB |
 | Delegation | DELEGATE_SUBAGENT |

@@ -51,15 +51,17 @@ change.
   memory, tasks, and delivery state. Production paths require Redis.
 - `src/skills/` and `.chusky/skills/` are distinct: the former loads trusted
   runtime skills; the latter contains the project's installed skill content.
-- `src/vault/`, `src/shopping/`, `cloudflare/vault-worker/`, and Daytona code
-  define private browser, credential, shopping, and Cloudflare boundaries.
+- `src/vault/`, `src/shopping/`, and `cloudflare/vault-worker/` contain legacy
+  website identity and shopping code; these capabilities are not exposed to the
+  agent while automated browsing is retired. Daytona owns computer, file, and
+  code execution workflows.
 - `chusky-web/` is an authenticated Next.js product dashboard using the
   first-party `/v1` API. Never put provider credentials or server secrets in
   browser code.
 
 ## Safety and data rules
 
-- Keep private histories, memories, approvals, files, tasks, browser sessions,
+- Keep private histories, memories, approvals, files, tasks,
   and connected accounts scoped to the authenticated Chusky account.
 - Never log or return tokens, passwords, raw credentials, raw media, full
   private provider payloads, or unredacted tool arguments.

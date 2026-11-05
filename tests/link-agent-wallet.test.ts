@@ -81,21 +81,17 @@ test("Link wallet tools are owner-private and payment creation uses Link approva
     "CHUCK_LINK_WALLET_STATUS",
     "CHUCK_LINK_PAYMENT_METHODS",
     "CHUCK_LINK_CREATE_SPEND_REQUEST",
-    "CHUCK_LINK_INSPECT_CHECKOUT",
     "CHUCK_LINK_MPP_DISCOVER",
     "CHUCK_LINK_MPP_PAY",
     "CHUCK_LINK_UCP_SEARCH",
     "CHUCK_LINK_UCP_CREATE_CHECKOUT",
     "CHUCK_LINK_UCP_COMPLETE_CHECKOUT",
-    "CHUCK_LINK_CONFIRM_ORDER",
     "CHUCK_LINK_WAIT_FOR_APPROVAL",
-    "CHUCK_LINK_EXECUTE_PAYMENT",
     "CHUCK_LINK_RECEIPT",
     "CHUCK_LINK_REPORT_OUTCOME",
     "CHUCK_LINK_SPEND_STATUS",
     "CHUCK_LINK_SPEND_LIST",
     "CHUCK_LINK_SPEND_CANCEL",
-    "CHUCK_LINK_COMPLETE_CHECKOUT",
     "CHUCK_LINK_WALLET_DISCONNECT",
   ];
   for (const name of names) {
@@ -109,31 +105,28 @@ test("Link wallet tools are owner-private and payment creation uses Link approva
   assert.equal(requiresToolApproval("CHUCK_LINK_CONNECT", {}, false, true), true);
   assert.equal(requiresToolApproval("CHUCK_LINK_WALLET_CONNECT", {}, false, true), true);
   assert.equal(requiresToolApproval("CHUCK_LINK_WALLET_DISCONNECT", {}, false, true), true);
+  for (const name of ["CHUCK_LINK_INSPECT_CHECKOUT", "CHUCK_LINK_EXECUTE_PAYMENT", "CHUCK_LINK_CONFIRM_ORDER", "CHUCK_LINK_COMPLETE_CHECKOUT"]) {
+    assert.equal(chuckTools.some((tool) => tool.function.name === name), false, name);
+  }
 });
 
-test("Link lifecycle schemas keep approval waiting bounded and expose verified checkout transports", () => {
+test("Link lifecycle keeps approval waits bounded and exposes browser-free payment transports", () => {
   const wait = chuckTools.find((item) => item.function.name === "CHUCK_LINK_WAIT_FOR_APPROVAL");
-  const execute = chuckTools.find((item) => item.function.name === "CHUCK_LINK_EXECUTE_PAYMENT");
+  const mpp = chuckTools.find((item) => item.function.name === "CHUCK_LINK_MPP_PAY");
+  const ucp = chuckTools.find((item) => item.function.name === "CHUCK_LINK_UCP_COMPLETE_CHECKOUT");
   const receipt = chuckTools.find((item) => item.function.name === "CHUCK_LINK_RECEIPT");
   assert.ok(wait);
-  assert.ok(execute);
+  assert.ok(mpp);
+  assert.ok(ucp);
   assert.ok(receipt);
   const waitSchema = wait.function.parameters as { properties?: Record<string, { maximum?: number; enum?: string[] }> };
   assert.equal(waitSchema.properties?.waitSeconds.maximum, 30);
-  const executeSchema = execute.function.parameters as { properties?: Record<string, { enum?: string[] }> };
-  assert.deepEqual(executeSchema.properties?.executionMethod.enum, ["browser", "link_pay_token"]);
   const receiptSchema = receipt.function.parameters as { required?: string[] };
   assert.deepEqual(receiptSchema.required, ["spendRequestId"]);
-});
-
-test("Link spend schema requires the owner-visible purchase context and exact amount", () => {
-  const tool = chuckTools.find((item) => item.function.name === "CHUCK_LINK_CREATE_SPEND_REQUEST");
-  assert.ok(tool);
-  const schema = tool.function.parameters as { required?: string[]; properties?: Record<string, { minimum?: number; minLength?: number; maximum?: number }> };
-  assert.deepEqual(schema.required, ["amount", "currency", "context"]);
-  assert.equal(schema.properties?.amount.minimum, 1);
-  assert.equal(schema.properties?.amount.maximum, 50_000);
-  assert.equal(schema.properties?.context.minLength, 100);
+  const spend = chuckTools.find((item) => item.function.name === "CHUCK_LINK_CREATE_SPEND_REQUEST");
+  assert.ok(spend);
+  const spendSchema = spend.function.parameters as { properties?: Record<string, { enum?: string[] }> };
+  assert.deepEqual(spendSchema.properties?.executionMethod.enum, ["link_pay_token"]);
 });
 
 test("Link protocol validation binds LPT to a Stripe account and MPP to a network", () => {
@@ -163,9 +156,3 @@ test("Link status projections preserve only safe step-up recovery metadata", () 
   assert.doesNotMatch(JSON.stringify(view), /Do not trust|4111111111111111|card_secret/);
 });
 
-test("Link spend schema lets LPT resolve merchant identity from the Stripe account", () => {
-  const schema = chuckTools.find((item) => item.function.name === "CHUCK_LINK_CREATE_SPEND_REQUEST")?.function.parameters as { properties?: Record<string, unknown> };
-  assert.ok(schema.properties?.merchantName);
-  assert.ok(schema.properties?.merchantUrl);
-  assert.deepEqual((schema as { required?: string[] }).required, ["amount", "currency", "context"]);
-});

@@ -26,7 +26,7 @@ that the deliverable is complete or usable.
 - Register only the exact workspace-relative path returned by generation with `CHUCK_ARTIFACT`; never invent or silently repair a filename.
 - For code, run the relevant build or test.
 - For data files, spot-check structure and a few values.
-- For app outputs, use `CHUCK_COMPUTER_APP` verify → start → visual → review, then `CHUCK_COMPUTER_PREVIEW` for a temporary HTTPS link. Website QA belongs to browser-pro/E2B.
+- For app outputs, use `CHUCK_COMPUTER_APP` verify → start → visual → review, then `CHUCK_COMPUTER_PREVIEW` for a temporary HTTPS link. This verifies the local app, not third-party websites.
 
 ## Common Deliverable Types
 

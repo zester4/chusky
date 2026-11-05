@@ -20,7 +20,7 @@ deployment, deletion, or permission changes.
 - Do not exfiltrate private data to arbitrary external endpoints.
 - Treat browser cookies and session state as sensitive.
 - Keep workspaces, sandboxes, volumes, sessions, artifacts, previews, recordings, and desktop leases scoped to the owning account.
-- Never use Computer Use for ordinary websites; route website credentials, cookies, forms, and browser handoffs through browser-pro/E2B.
+- Do not use Computer Use for third-party website navigation, forms, credentials, or browser handoffs; website browsing is currently unavailable.
 
 ## Safe Practices
 

@@ -70,7 +70,7 @@ Load **workspace-pro** for inbox/CRM trigger handling after leads exist.
 | Track durable candidate state | **`CHUCK_LEAD_CAMPAIGN`** (`get`, `list`, candidate record/update) |
 | Internal spreadsheet deliverable | Native verified spreadsheet artifact workflow |
 | Create/update CRM, send/draft email, Slack, connected sheets | **Composio**, only as a separate authorized/approved action |
-| Browse a page only when no API fits | E2B browser (verification) |
+| Website page interaction | Unavailable until the replacement browser is installed |
 | Remember owner ICP, voice, floors | Memory / scratchpad |
 
 ## Scheduled buyer-signal monitoring

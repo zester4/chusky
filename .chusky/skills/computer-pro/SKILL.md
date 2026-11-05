@@ -1,6 +1,6 @@
 ---
 name: computer-pro
-description: Operate Chusky's owner-scoped private computer for code, files, terminals, desktop applications, generated artifacts, and runnable app previews. Use for coding, debugging, local files, artifact generation, desktop applications, local servers, and app previews; use browser-pro for websites and E2B browser work.
+description: Operate Chusky's owner-scoped private computer for code, files, terminals, desktop applications, generated artifacts, and runnable app previews. Website browsing is currently unavailable.
 ---
 
 # Computer Pro
@@ -24,9 +24,9 @@ This is a runtime skill for the agent. It is not a developer guide for implement
   completed verification, unresolved issue, and next action. A zero exit code
   proves only that the command exited successfully; it does not prove the
   artifact, app, deployment, or third-party outcome is correct.
-- If the requested outcome is a website action, route to browser-pro even when
-  a desktop browser happens to be available. Keep computer work and external
-  website work as separate verified phases.
+- If the requested outcome requires interacting with a third-party website,
+  explain that website browsing is temporarily unavailable. Do not attempt it
+  through the desktop or shell.
 
 ## Choose the correct execution boundary
 
@@ -43,9 +43,9 @@ This is a runtime skill for the agent. It is not a developer guide for implement
 | Linux GUI application or local artifact inspection | `CHUCK_COMPUTER` | Acquire a lease for multi-step mutations; inspect accessibility before coordinate actions; release the lease. |
 | Temporary link to an app | `CHUCK_COMPUTER_PREVIEW` | Requires a running service port; return the signed URL and expiry. |
 | PDF/DOCX/PPTX/XLSX deliverable | `CHUCK_CREATE_PDF`, document/presentation tools, `CHUCK_ARTIFACT_QA`, `CHUCK_ARTIFACT` | Generate in the computer workspace, independently QA/render, inspect visually when layout matters, then register the exact returned path. |
-| Website, web form, browser screenshot, sign-in, upload/download | `CHUCK_BROWSER` and browser-pro | This is E2B. Never use Computer Use as a substitute for website automation. |
+| Third-party website interaction | Unavailable | Do not use the desktop, shell, or app preview as a substitute for website browsing. |
 
-If a request crosses boundaries, keep them separate: build the app or artifact in the private computer, then use E2B only when a website must be visited. A preview URL is not evidence that a third-party website was tested.
+If a request crosses boundaries, complete the local computer work and report that any third-party website step remains unavailable. A preview URL is not evidence that a third-party website was tested.
 
 ## Standard computer workflow
 
@@ -78,7 +78,7 @@ The computer tool is for the persistent Linux desktop: GUI editors, office/PDF v
 - Prefer accessibility actions (`accessibility_focus`, `accessibility_invoke`, `accessibility_set_value`) over coordinates. If coordinates are unavoidable, take a fresh screenshot immediately before acting and verify the resulting screen.
 - Use full-resolution screenshots for layout and artifact QA. Recordings are owner-scoped and should be retained only when needed.
 - Process diagnostics are limited to desktop infrastructure (`novnc`, `x11vnc`, `xfce4`, `xvfb`, `desktop`, or `vnc`). Do not guess arbitrary process names.
-- Do not use this tool for ordinary website navigation, web forms, browser screenshots, or third-party login. Route those to `CHUCK_BROWSER`/E2B and browser-pro.
+- Do not use this tool for website navigation, web forms, browser sessions, or third-party login. Website browsing is unavailable until a replacement is installed.
 
 ## Artifact quality contract
 
@@ -102,7 +102,7 @@ For PDFs, prefer `CHUCK_CREATE_PDF` and its structured sections, tables, charts,
 
 ## Human handoff
 
-If a desktop or website flow reaches CAPTCHA, 2FA, passkey, payment/identity verification, or another human-only gate, stop automation and explain the exact next step. For websites, use the private same-session E2B handoff through browser-pro. For computer work, leave the app in a ready state and use the available owner-only desktop/preview handoff; never request secrets in chat. After the owner acts, re-observe and verify before continuing.
+If a desktop flow reaches a human-only gate, stop automation and explain the exact next step. Leave the local app in a ready state for the owner; never request secrets in chat. After the owner acts, re-observe and verify before continuing.
 
 ## Completion standard
 
@@ -120,7 +120,7 @@ Never say “done,” “live,” “pushed,” or “downloadable” without th
 
 - [Workspace hygiene](references/01-workspace-hygiene.md) — always load.
 - [Coding workflow](references/02-coding-workflow.md) — code, builds, and tests.
-- [Desktop automation](references/03-browser-automation.md) — computer GUI boundaries; websites belong to browser-pro/E2B.
+- [Desktop automation](references/03-browser-automation.md) — computer GUI boundaries; third-party website browsing is unavailable.
 - [Debugging](references/04-debugging.md) — reproduce, isolate, fix, verify.
 - [Artifacts and QA](references/05-artifacts-qa.md) — generated deliverables and rendering.
 - [Security boundaries](references/06-security-boundaries.md) — secrets, network, and trust.

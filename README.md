@@ -42,7 +42,7 @@ The sections below are the detailed self-hosting and operations reference.
 | Connected apps | Composio app discovery, account connections, and a large catalog of provider actions | Uses the account's connected apps; availability depends on the selected action and connection |
 | Conversations | Telegram, authenticated dashboard and CLI, linked Slack, WhatsApp, Sendblue, Twilio SMS, regular X DMs, and optional encrypted XChat, plus voice and meeting workflows | Features and media support vary by channel; shared conversations do not inherit private account history |
 | Durable work | Owner-scoped tasks, missions, reminders, recurring jobs, triggers, and resumable workflows | Production durability requires Redis; scheduled and continued work also requires QStash |
-| Workspaces and media | Optional Daytona computer workspaces, E2B browser sessions, generated media, and verified artifacts | Optional provider configuration and capability limits apply |
+| Workspaces and media | Optional Daytona computer workspaces, generated media, and verified artifacts | Automated website browsing is disabled pending a replacement |
 | Developer access | REST API and TypeScript SDK, plus A2A and remote MCP integrations | Project scopes, stable user identity, budgets, and approvals are enforced server-side |
 
 See [channel support and operating model](#channel-support-and-operating-model)
@@ -431,30 +431,23 @@ method metadata with `CHUCK_LINK_PAYMENT_METHODS`. For a purchase, Chusky uses
 `CHUCK_LINK_CREATE_SPEND_REQUEST`; Link sends the owner its own approval request
 for the exact amount. `CHUCK_LINK_WAIT_FOR_APPROVAL` can perform a bounded
 status wait, but it cannot approve or charge anything. After Link reports the
-exact request approved, `CHUCK_LINK_EXECUTE_PAYMENT` uses the private E2B
-browser checkout path to fill the one-time card server-side. Finally,
-`CHUCK_LINK_RECEIPT` returns bounded Link transaction evidence. Chusky does not
-claim merchant fulfillment until both Link and the merchant confirm the result.
+exact request approved, browser-based checkout is unavailable. `CHUCK_LINK_RECEIPT`
+returns bounded Link transaction evidence.
 
-Chusky supports three Link payment routes without exposing credentials to the
-model: the owner-private E2B virtual-card checkout, Stripe-hosted Link Pay
-Token steering when the live checkout exposes the verified Stripe markers, and
-HTTP 402 Machine Payment Protocol (MPP) using a one-time Shared Payment Token.
-For UCP merchants, Chusky can search the catalog, create a checkout, bind its
+Browser-free Link MPP and UCP API flows remain available. MPP uses a one-time
+Shared Payment Token; UCP can search the catalog, create a checkout, bind its
 exact total to a Link spend request, and complete the checkout only after the
-owner approves that request. MPP requests retain the original merchant request
-encrypted server-side; failed or uncertain responses are never replayed
-automatically.
+owner approves. Failed or uncertain MPP responses are never replayed
+automatically. Browser-based virtual-card checkout and checkout-page inspection
+are disabled.
 
-The flow is intentionally provider-neutral at the evidence layer: Link
-receipts, UCP order details, MPP payment receipts, or a verified merchant page
-can confirm the order. Chusky does not claim fulfillment from a model-authored
-message or from Link approval alone. Link wallet tools are unavailable in
-shared rooms and group conversations.
+Link receipts, UCP order details, or MPP payment receipts provide the available
+evidence. Chusky does not claim fulfillment from a model-authored message or
+from Link approval alone. Link wallet tools are unavailable in shared rooms and
+group conversations.
 `LINK_TEST_MODE=true` and `LINK_MAX_SPEND_CENTS` support bounded testing and a
-per-request ceiling; production still requires real Link eligibility,
-registered OAuth credentials, E2B checkout configuration, and
-merchant-specific checkout verification.
+per-request ceiling; production still requires real Link eligibility and
+registered OAuth credentials.
 
 ### TinyFish research, monitoring, search, and page fetch
 
@@ -861,174 +854,11 @@ status, branches, checkout, pull, add, commit, and push. Local operations stay p
 approval-gated. Pull requests, CI checks, reviews, and deployments use verified GitHub/Composio
 tools after local checks pass. Changing `DAYTONA_SNAPSHOT` does not change an existing workspace.
 
-### Kernel-hosted browser (opt-in)
+### Automated website browsing
 
-Set `BROWSER_PROVIDER=kernel`, `KERNEL_BROWSER_OPT_IN=true`, `KERNEL_API_KEY`, and `KERNEL_STEALTH=true` alongside
-the existing E2B configuration. Rebuild the E2B browser template with
-`npm run e2b:template:build` before activating it. E2B runs the trusted controller;
-Kernel hosts Chromium, so existing browser tools, vault guards, fresh observation
-checks, approvals, and owner-scoped files remain in use. The installed Kernel SDK
-is pinned to `0.122.0` in both packages.
+Automated website browsing, saved website identities, browser handoffs, and retailer-shopping workflows are disabled while the replacement browser is being prepared. The retired E2B, Kernel, and dedicated browser providers are not exposed to the agent or `/v1/tools`.
 
-Kernel adds supported automatic CAPTCHA solving with bounded page-clearance
-verification, native visual mouse/keyboard controls, owner-specific persistent
-profiles, private live view, and MP4 replay recordings. Solver success is not proof
-the page cleared; unresolved CAPTCHA and MFA return to private owner takeover.
-hCaptcha availability depends on provider access. No site-wide success rate is promised.
-The separate `KERNEL_BROWSER_OPT_IN` guard is intentional: `BROWSER_PROVIDER=kernel`
-alone must never create a paid Kernel session. Keep `BROWSER_PROVIDER=e2b` and
-`KERNEL_BROWSER_OPT_IN=false` for the normal headed Chrome path.
-
-`CHUCK_BROWSER` actions `auth_start`, `auth_status`, and `auth_resume` provide
-hosted Managed Auth. Supply only website metadata; enter secrets on the private
-hosted form. Connections are looked up from the requesting owner's saved IDs,
-never from arbitrary provider IDs. Profile changes close the previous browser.
-SSO flows requiring additional domains may need operator configuration.
-
-Live-view delivery is provider-neutral when `WEBHOOK_URL` is configured. A
-`stream_start` watch uses a short-lived encrypted Chusky ticket and a read-only
-viewer page; `browserHandoff` uses the same page in interactive mode. The
-ticket is bound to the owner's retained stream, and `stream_status` can return
-the current watch link without persisting the provider URL in plaintext.
-`stream_stop` revokes Chusky's viewer immediately. Kernel's underlying provider
-URL remains valid until the browser ends, so stopping the browser is required
-to revoke a provider URL that was copied outside Chusky. Without a public
-HTTPS `WEBHOOK_URL`, the runtime falls back to the provider's own bearer URL;
-configure `CHUSKY_BROWSER_LIVE_VIEW_SECRET` (or the documented secret fallback)
-for production delivery. Remote failures preserve state and do not
-automatically replay browser mutations. Local tests do not establish live
-provider readiness; build the template and run a public-page smoke test before
-production activation. Existing Daytona computer-use remains separate.
-
-`npm run kernel:browser:check` reports configuration presence without opening a
-browser or printing credentials. After rebuilding and setting the Kernel key,
-`npm run kernel:browser:check -- --live` opens a disposable public example page,
-verifies the remote observation/live-view path, and closes its browser, controller
-and test profile. It does not test CAPTCHA success or a real user's login.
-
-### Dedicated Chusky browser runtime (opt-in)
-
-The standalone [`chusky-browser`](https://github.com/zester4/chusky-browser)
-service can be selected with `CHUSKY_BROWSER_RUNTIME_MODE=dedicated`. Chusky's
-`CHUCK_BROWSER` tool then signs owner-scoped requests to that runtime while the
-existing E2B/Kernel path remains the default fallback. The service owns the
-provider-neutral session manager, reconnectable Redis/Neon leases, fresh
-observation refs, metrics, rate limits, encrypted profile envelopes, and
-owner-only live-view/challenge handoff endpoints; it never returns raw CDP URLs.
-Set `CHUSKY_BROWSER_RUNTIME_URL`, `CHUSKY_BROWSER_RUNTIME_TOKEN`, and the
-matching `CHUSKY_BROWSER_RUNTIME_OWNER_SIGNING_SECRET` only after the dedicated
-service is deployed over HTTPS. E2B auto-provisioning still requires the E2B
-template to expose its configured CDP port (`9222` by default); rebuild the
-template after the committed Docker `EXPOSE 9222 6080 8765` change.
-
-### E2B automated browser
-
-When `E2B_ENABLED=true`, `CHUCK_BROWSER` routes normal browser actions through the
-owner-scoped E2B Playwright/Chromium
-template. E2B keeps a retained headed Playwright process per owner, returns
-bounded accessibility candidates and redacted visible page text, and supports
-public-site navigation, tabs, accessible controls, forms, typing, keyboard
-presses, scrolling, screenshots, and verification. It does not apply a
-site-domain allowlist, but blocks private/local network targets and metadata
-services; individual sites can still require authentication or a human check.
-In owner-private model tool calls, each supported observe/action call is paired
-with a viewport screenshot for the next model decision, while the structured
-accessibility, form, and action-verification result is preserved. A bounded
-multi-action run returns its final screenshot after the sequence.
-Only the newest automatic screenshot remains in the active model context; these
-images are not saved as assets or attached to the user's response. Common
-password, one-time-code, and payment-entry fields are visually masked, but this
-is not general page-wide personal-data redaction. Shared conversations receive
-no automatic screenshot.
-Owner-private uploads, downloads, and screen recordings use bounded file sizes
-and an owner-scoped 30-day file library; uploads require approval. CAPTCHA/2FA,
-SSO, and passkey challenges can expose that same browser through a short-lived
-private noVNC handoff. Daytona continues
-to provide files, artifacts, terminals, and desktop Computer Use; it is not the
-automated browser backend.
-
-Cloudflare Web Bot Auth is an opt-in, transparent identity signal for browser
-requests. Roll it out in two stages. First generate a key with
-`npm run web-bot-auth:generate-key`, set `WEB_BOT_AUTH_ENABLED=true`,
-`WEB_BOT_AUTH_DIRECTORY_URL`, and `WEB_BOT_AUTH_PRIVATE_KEY_B64`, while keeping
-`WEB_BOT_AUTH_SIGN_REQUESTS=false`. Deploy and verify the signed, public-only
-Ed25519 key directory at `/.well-known/http-message-signatures-directory`, then
-submit the directory URL to Cloudflare's BotBase review. During this stage the
-private key is not sent to E2B and browser requests remain unsigned. Only after
-Cloudflare approves Chusky, set `WEB_BOT_AUTH_SIGN_REQUESTS=true` and deploy
-again. The trusted E2B browser then signs each public HTTPS request with RFC
-9421 headers; redirect hops are revalidated by the existing URL safety guard
-and signed for their destination authority. The private key is never passed to
-page JavaScript, model context, tool arguments, history, or logs. This does not
-bypass CAPTCHA or site policies and does not guarantee that every website will
-permit access. After enabling, disabling, or rotating signing, stop and restart
-retained browser sandboxes so the old process environment is removed; toggling
-off stops signing on subsequent commands but does not erase a key from an
-already-running sandbox. Chusky's retained records store only the public key
-thumbprint.
-
-Build the template with `npm run e2b:template:build`, then configure
-`E2B_API_KEY`, `E2B_BROWSER_TEMPLATE`, and `E2B_ENABLED=true`. The template
-installs Google's Chrome for Testing through the pinned `agent-browser` release,
-exposes it at `/usr/local/bin/chrome-for-testing`, and launches it headed
-(`headless: false`) on the retained `:99` display. Playwright's bundled Chromium
-is retained only for the explicit `E2B_BROWSER_ENGINE=chromium` compatibility
-fallback. Run
-`npm run e2b:browser:live-smoke -- https://example.com` after the template is
-available. E2B is the automated browser backend; Daytona remains responsible for
-computer, files, artifacts, terminals, and app work. Set
-`agent-browser` is the production default and attaches Vercel's `agent-browser` CLI to
-the same E2B Chrome for Testing process over CDP. It enriches `snapshot`, `state`, `find`, and
-`observe` results with a bounded accessibility-tree snapshot and tab-aligned
-diagnostics. The existing Playwright/Kernel controller remains the guarded
-action authority, so agent-browser refs are advisory and cannot be used as
-Chusky selectors. Set `E2B_BROWSER_HARNESS=playwright` for the lean fallback,
-or stop and restart a retained browser when changing the harness or
-`E2B_BROWSER_ENGINE`. Health output reports the engine and `headless: false` so
-deployments can verify the real runtime rather than trusting configuration alone.
-
-The provider-neutral session layer is documented in
-[`docs/browser-control-plane.md`](docs/browser-control-plane.md). It provides
-warm-session and region scheduling for registered adapters, opaque CDP broker
-tickets, encrypted profile envelopes, generation-bound refs, reconnectable
-leases, bounded browser metrics, and the shared browser action policy. The
-current retained E2B/Kernel controller adopts its durable leases into this
-layer; it does not expose raw CDP URLs or claim a warm regional fleet unless a
-provider adapter has actually registered one.
-
-### Browser and vault operations
-
-Authenticated website work follows the `browser-pro` runtime skill. Chusky plans the user's goal,
-binds the operation to a clean HTTPS origin and optional account alias, checks session health, uses
-the narrowest accessible browser action, and verifies the result against bounded URL/title/text
-detectors. Saved playbooks are origin-scoped and contain only login labels, safe action names, and
-verification metadata; they never contain passwords, cookies, screenshots, or raw page content.
-
-Routine browsing and ordinary form interaction do not require blanket approval. Checkout, payment,
-account changes, credential changes, sensitive downloads, uploads, and saved-file deletion retain
-their specific approval or block rules. CAPTCHA, 2FA, SSO, passkeys, and device approvals use a
-private browser handoff in the same E2B browser session. Owner-private snapshots can include bounded,
-redacted visible page text; that text is not added to durable browser history.
-Replacing a saved identity logs out its prior browser identities, and aliases allow separate
-personal and work accounts for the same service.
-
-The private Telegram controls are `/browser`, `/browser health`, `/browser audit`, `/browser handoffs`, and
-`/browser revoke <service> [account-alias] [origin]` (with `/browser logout` retained as a compatibility
-alias). Revocation blocks reuse of that saved website identity until a fresh vault login. The shared
-browser workspace remains available for other identities and workspace processes. Saved
-identities are keyed by account, service label, alias, and exact HTTPS origin, so one service label
-can safely represent different websites. The agent can also use `CHUCK_BROWSER_PLAN`,
-`CHUCK_BROWSER_SESSION_HEALTH`, `CHUCK_BROWSER_PLAYBOOK_SAVE`, `CHUCK_BROWSER_PLAYBOOK_LIST`,
-`CHUCK_BROWSER_PLAYBOOK_REMOVE`, `CHUCK_BROWSER_VERIFY`, `CHUCK_BROWSER_AUDIT_LIST`,
-`CHUCK_BROWSER_HANDOFF_STATUS`, and `CHUCK_BROWSER_HANDOFF_COMPLETE`. Human CAPTCHA/2FA handoffs
-remain metadata-only and move from waiting to awaiting verification before the retained session is
-re-authorized.
-While a handoff is waiting for the owner, browser actions return a waiting state and remain blocked;
-after the owner returns, resume the handoff and verify the retained same-origin page before continuing.
-`CHUCK_BROWSER.timeoutMs` controls an individual E2B browser-agent command (120 seconds by default),
-bounded by the configured `E2B_REQUEST_TIMEOUT_MS` ceiling; it cannot disable the timeout.
-`CHUCK_VAULT_SAVE` setup URLs are bearer links delivered directly to the owner rather than copied
-through model output. If a setup page reports an invalid link, request a fresh setup link.
+Daytona remains available for local code, files, terminals, desktop applications, and artifact inspection. Its Computer Use and app-preview tools are not substitutes for navigating or signing in to third-party websites. Use Composio for connected applications and the exposed public-research tools for public information.
 
 ### Images across chat, Daytona, and connected apps
 
@@ -1694,24 +1524,6 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `DAYTONA_CPU` | — | provider default | CPU cores for newly created workspaces, up to 4 |
 | `DAYTONA_MEMORY_GIB` | — | provider default | Memory in GiB for newly created workspaces, up to 8 |
 | `DAYTONA_DISK_GIB` | — | provider default | Disk in GiB for newly created workspaces, up to 10 |
-| `E2B_ENABLED` | automated browser | `false` | Routes normal Playwright browser work through E2B when true |
-| `E2B_API_KEY` | automated browser | — | E2B server-side API key; never expose to the model or client |
-| `E2B_BROWSER_TEMPLATE` | automated browser | `chusky-browser-playwright` | Built E2B template containing Playwright and Chromium |
-| `E2B_ALLOW_INTERNET` | automated browser | `true` | Allow public web access; the browser still blocks local, metadata, private, and reserved network targets |
-| `E2B_TIMEOUT_MS` | automated browser | `900000` | Owner sandbox lifetime, bounded to 60 seconds–24 hours |
-| `E2B_REQUEST_TIMEOUT_MS` | automated browser | `120000` | E2B command/request timeout |
-| `CHUSKY_BROWSER_LIVE_VIEW_SECRET` | browser live view | — | Server-only encryption key for Chusky-hosted viewer tickets; falls back to `CHUSKY_PROJECT_KEY` or `WEBHOOK_SECRET` when blank |
-| `MAX_BROWSER_NO_PROGRESS_CALLS` | automated browser | `8` | Consecutive browser calls with no observed page-state progress before the run stops |
-| `WEB_BOT_AUTH_ENABLED` | browser identity | `false` | Publish the signed Web Bot Auth directory; does not enable request signing |
-| `WEB_BOT_AUTH_SIGN_REQUESTS` | browser identity | `false` | Sign browser requests only after Cloudflare approves the identity |
-| `WEB_BOT_AUTH_DIRECTORY_URL` | browser identity | — | Exact public HTTPS URL ending in `/.well-known/http-message-signatures-directory` |
-| `WEB_BOT_AUTH_PRIVATE_KEY_B64` | browser identity | — | Unique Ed25519 PKCS#8 DER private key, base64 encoded; server/E2B process only |
-| `CHUSKY_BROWSER_TRUST_MODE` | browser trust routing | `balanced` | `strict` reports incomplete identity posture; `balanced` keeps normal headed browsing available |
-| `CHUSKY_BROWSER_OPERATOR_ID` | browser trust routing | `chusky` | Stable operator namespace used with owner/origin hashing; never a page credential |
-| `CHUSKY_BROWSER_REGION` | browser trust routing | `default` | Preferred scheduling/egress region metadata; actual placement remains provider-owned |
-| `CHUSKY_BROWSER_OWNER_CHROME_ENABLED` | browser trust routing | `false` | Reserved for an explicit owner-Chrome adapter; it does not attach to a personal profile today |
-| `CHUSKY_BROWSER_FLAG_THRESHOLD` | browser trust routing | `3` | Challenge/access signals before a bounded owner-origin circuit opens |
-| `CHUSKY_BROWSER_FLAG_COOLDOWN_MS` | browser trust routing | `900000` | Circuit cooldown before another automatic attempt is eligible |
 | `LINK_AGENT_WALLET_ENABLED` | Stripe Link Agent Wallet | `false` | Enable owner-controlled Link spend requests |
 | `LINK_CLIENT_ID` | Stripe Link OAuth | — | Confidential Link OAuth client ID |
 | `LINK_CLIENT_SECRET` | Stripe Link OAuth | — | Server-only Link OAuth client secret |

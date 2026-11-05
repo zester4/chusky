@@ -3,7 +3,7 @@
 Consume Jev's exact route first, then confirm the connected account and action
 schema before any mutation. Verify inventory, cart, order, or payment state
 from the provider; a successful tool call is not proof that the business state
-changed. Use browser-pro only when the needed operation is genuinely UI-only.
+changed. If the needed operation is genuinely UI-only, report that website browsing is unavailable.
 
 | Prefer | Typical use |
 |--------|-------------|
@@ -18,4 +18,4 @@ changed. Use browser-pro only when the needed operation is genuinely UI-only.
 
 **Skill pairing:** launch-pro, billing-ops-pro, support-desk-pro, retention-pro.
 
-If the storefront has no API toolkit, use the E2B browser + vault — not random Composio long-tail.
+If the storefront has no supported API action, do not switch to a browser or guess a Composio action; explain the limitation.

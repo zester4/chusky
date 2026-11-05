@@ -79,7 +79,6 @@ test("uses explicit native policies and gates only side-effecting Composio batch
   assert.equal(toolApprovalPolicy("CHUCK_ATTENTION_PULSE"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_DAYTONA_MOVE_FILES"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_FORGET_MEMORY"), "approval_required");
-  assert.equal(toolApprovalPolicy("CHUCK_BROWSER_PLAYBOOK_REMOVE"), "approval_required");
   assert.equal(toolApprovalPolicy("CHUCK_MEETING_PROFILE_UPDATE"), "approval_required");
   assert.equal(toolApprovalPolicy("CHUCK_TREG_OAUTH_REVOKE"), "approval_required");
   assert.equal(toolApprovalPolicy("CHUCK_TINYFISH_SEARCH"), "private");
@@ -99,15 +98,6 @@ test("uses explicit native policies and gates only side-effecting Composio batch
   assert.equal(toolApprovalPolicy("CHUCK_MISSION_COMPENSATE", { action: "inspect" }), "private");
   assert.equal(requiresToolApproval("CHUCK_MISSION_COMPENSATE", { action: "inspect" }), false);
   for (const name of ["CHUCK_MEETING_JOIN", "CHUCK_MEETING_LIST", "CHUCK_MEETING_STATUS", "CHUCK_MEETING_LEAVE"]) assert.equal(toolApprovalPolicy(name), "private", name);
-  for (const name of ["CHUCK_BROWSER_HANDOFF", "CHUCK_BROWSER_HANDOFF_STATUS", "CHUCK_BROWSER_HANDOFF_COMPLETE", "CHUCK_BROWSER_HANDOFF_RESUME"]) {
-    assert.equal(toolApprovalPolicy(name, { id: "bh_existing" }), "private", name);
-    assert.equal(requiresToolApproval(name, { id: "bh_existing" }, true, true), false, `${name} must ignore force approval`);
-    assert.equal(requiresToolApproval(name, { id: "bh_existing" }, true, false), false, `${name} must ignore force approval outside owner mode`);
-  }
-  for (const name of ["CHUCK_BROWSER_OBSERVE", "CHUCK_BROWSER_ACT", "CHUCK_BROWSER_EXTRACT", "CHUCK_BROWSER_AGENT"]) {
-    assert.equal(toolApprovalPolicy(name), "private", name);
-    assert.equal(requiresToolApproval(name, {}, true, true), false, `${name} must not become approval-gated by a generic run override`);
-  }
   for (const name of ["CHUCK_MEETING_CONTEXT_LOOKUP", "CHUCK_MEETING_CONTACT_CAPTURE", "CHUCK_MEETING_CONTACTS_LIST", "CHUCK_MEETING_FOLLOWUP_SCHEDULE"]) {
     assert.equal(toolApprovalPolicy(name), "private", name);
   }
@@ -178,17 +168,10 @@ test("owner-private runs keep routine actions direct and preserve high-impact ap
     ["CHUCK_FORGET_MEMORY", {}],
     ["CHUCK_SCRATCHPAD_CLEAR", {}],
     ["CHUCK_DAYTONA_VOLUME", { action: "delete", volumeId: "vol_1" }],
-    ["CHUCK_BROWSER", { action: "invoke", nodeId: "node_1", vaultAction: "delete_account" }],
     ["COMPOSIO_EXECUTE_TOOL", { tool_slug: "GOOGLECALENDAR_DELETE_EVENT", arguments: { eventId: "evt_1" } }],
     ["COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GITHUB_DELETE_REPOSITORY", arguments: { owner: "me", repo: "old" } }] }],
   ] as Array<[string, Record<string, unknown>]>) {
     assert.equal(requiresToolApproval(slug, args, false, true), true, `${slug} must pause before deleting`);
-  }
-  assert.equal(requiresToolApproval("CHUCK_BROWSER", { action: "invoke", vaultAction: "unknown" }, false, true), false);
-  assert.equal(requiresToolApproval("CHUCK_BROWSER", { action: "invoke", vaultAction: "place_order" }, false, true), true);
-  assert.equal(requiresToolApproval("CHUCK_BROWSER", { action: "click", nodeId: "node_1" }, false, true), false, "ordinary browsing stays autonomous");
-  for (const action of ["upload", "upload_files", "download_delete", "recording_delete", "clipboard_read", "clipboard_write"]) {
-    assert.equal(requiresToolApproval("CHUCK_BROWSER", { action }, false, true), true, `${action} requires owner approval`);
   }
   assert.equal(requiresToolApproval("CHUCK_MEDIA_BRIDGE", { toolSlug: "LINKEDIN_CREATE_LINKED_IN_POST", arguments: { text: "Update" } }, false, true), false);
   assert.equal(requiresToolApproval("CHUCK_MEDIA_BRIDGE", { toolSlug: "GITHUB_PUSH_COMMITS", arguments: {} }, false, true), true);

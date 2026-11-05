@@ -311,8 +311,6 @@ import { posthog } from "./posthog.js";
 import { recoverAllMissions } from "./missionRecovery.js";
 import { drainMemoryVectorOutbox } from "./memory/durable.js";
 import { drainMemoryReflectionQueue } from "./memory/reflection.js";
-import { e2bBrowserEngine } from "./lib/e2b/browser.js";
-import { browserLiveViewFrameOrigin, renderBrowserLiveView } from "./lib/e2b/liveView.js";
 import { PhotonBridge } from "./channels/photon.js";
 import type { ChannelProvider } from "./channels/contracts.js";
 
@@ -462,7 +460,6 @@ async function main(): Promise<void> {
   await bot.api.setMyCommands([
     { command: "start", description: "Open Chusky" },
     { command: "home", description: "Open your agent workspace" },
-    { command: "browser", description: "Website sessions and playbooks" },
     { command: "help", description: "See commands and capabilities" },
     { command: "api", description: "Create and manage project API keys" },
     { command: "connect", description: "Connect an app account" },
@@ -478,20 +475,6 @@ async function main(): Promise<void> {
   const photonBridge = config.photonEnabled ? new PhotonBridge({ gateway: channelGateway }) : undefined;
   if (photonBridge) await photonBridge.start();
   const app = new Hono();
-  // The URL is a short-lived bearer handoff, not a public browser catalogue.
-  // The ticket is checked against the owner's currently retained stream so a
-  // stopped stream revokes the Chusky viewer even if its URL is still copied.
-  app.get("/browser/live/:ticket", async (c) => {
-    const ticket = c.req.param("ticket");
-    const claim = await e2bBrowserEngine.resolveBrowserLiveView(ticket);
-    if (!claim) return c.json({ ok: false, error: "browser live view expired or revoked" }, 404);
-    const frameOrigin = browserLiveViewFrameOrigin(claim);
-    c.header("Cache-Control", "no-store, private");
-    c.header("Referrer-Policy", "no-referrer");
-    c.header("X-Content-Type-Options", "nosniff");
-    c.header("Content-Security-Policy", `default-src 'none'; style-src 'unsafe-inline'; frame-src ${frameOrigin}; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`);
-    return c.html(renderBrowserLiveView(claim));
-  });
   app.post("/tinyfish/monitor/:userId/:monitorKey/:signature", async (c) => {
     if (!config.tinyFishApiKey) return c.json({ ok: false, error: "monitor callbacks are not configured" }, 503);
     const userId = Number(c.req.param("userId"));

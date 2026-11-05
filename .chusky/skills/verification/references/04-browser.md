@@ -1,14 +1,3 @@
-# Verify browser and vault flows
+# Website Verification Unavailable
 
-## Checklist
-
-- Accessibility/tree or screenshot confirms the target state
-- Login only via vault path; no secrets in attention or chat
-- Playbook steps matched intent classification
-- Handoff used for CAPTCHA/2FA instead of guessing
-- Final URL/state matches the goal
-
-## Never claim
-
-- Logged in without session health evidence
-- Checkout complete without confirmation page/API evidence
+Automated website browsing, saved website identities, and browser handoffs are retired until the replacement browser is installed. Do not claim website navigation, login, form submission, or checkout verification. Use Composio for supported connected-app operations; Daytona is limited to local computer and artifact work.

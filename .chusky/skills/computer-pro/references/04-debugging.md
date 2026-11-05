@@ -1,6 +1,6 @@
 # Debugging Specialist Mode
 
-Systematic debugging when code or desktop-application flows fail on the private computer. Website/browser failures belong to the E2B browser skill.
+Systematic debugging when code or desktop-application flows fail on the private computer. Automated website browsing is unavailable.
 
 The Jev route selects the execution boundary; it does not select the root
 cause. Keep the failing objective, environment, and workspace scope fixed while
@@ -32,7 +32,7 @@ independently after the local fix.
 
 - Read full logs instead of the first line only.
 - For long-running work, inspect durable PTY/session status and logs before starting another process.
-- For desktop failures, inspect display state and accessibility before using coordinates; for web failures, use browser-pro/E2B diagnostics.
+- For desktop failures, inspect display state and accessibility before using coordinates.
 - For artifact failures, separate structural/rendering errors from editorial or accessibility review.
 - Binary-search recent changes when something “just broke.”
 - Reduce the problem to a minimal reproduction when the full system is noisy.

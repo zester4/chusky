@@ -33,9 +33,9 @@ export const WORKER_SKILL_BINDINGS: Record<Exclude<CapabilityWorkerName, "chusky
     },
   dexter: {
       primary: ["computer-pro"],
-      supporting: ["agent-browser", "browser-pro", "verification", "handoff"],
+      supporting: ["verification", "handoff"],
       requiredReferences: {
-        "computer-pro": ["references/03-browser-automation.md", "references/05-artifacts-qa.md"],
+        "computer-pro": ["references/05-artifacts-qa.md"],
       },
     },
   elena: {

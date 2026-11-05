@@ -1,4 +1,6 @@
-# Shopping Engine
+# Retired Shopping Engine
+
+> Status: retailer-shopping workflows are disabled with automated website browsing. Do not expose or invoke these tools until a replacement browser is installed. The material below is historical implementation context only.
 
 Chusky shopping is a general website workflow. It must not be implemented as
 Amazon-only logic or as a list of hard-coded login instructions.

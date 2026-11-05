@@ -85,12 +85,8 @@ their existing routing behavior. The shared
 signal aborts in-flight Jev and catalogue requests, so routing remains within
 the configured per-turn budget. Deadline aborts do not open the breaker.
 
-Browser routing is used only when `CHUCK_BROWSER_NEXT` is called for an
-inspected E2B browser page. It does not add a Jev request to ordinary chat or
-public web search. In shadow mode the Jev result is telemetry only; in enforce
-mode it may select an inspected low-risk candidate. Low confidence, unavailable
-Jev, or any high-impact candidate falls back to deterministic guidance and the
-existing approval policy.
+Automated browser routing is retired. Public web search and connected-app
+routing remain separate capabilities and do not imply website interaction.
 
 Native-tool Jev ranking is separately opt-in with
 `JEV_NATIVE_TOOL_ROUTING=true` and `native` added to `JEV_SURFACES`. The

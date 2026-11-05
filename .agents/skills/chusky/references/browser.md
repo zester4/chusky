@@ -1,4 +1,6 @@
-# Browser, Vault, and Cloudflare Broker
+# Retired Browser, Vault, and Cloudflare Broker
+
+> Status: the agent-facing automated browser, saved website identity, browser handoff, and shopping workflows are retired pending a replacement. Do not follow the historical operational instructions below or expose these tools. Daytona remains for local computer, code, files, and artifact work; it is not a website-browser substitute.
 
 This reference documents Chusky's implemented browser and website-identity path.
 It is the source of truth for agents changing the E2B automated browser, the

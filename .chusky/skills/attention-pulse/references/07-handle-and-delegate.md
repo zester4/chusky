@@ -47,7 +47,7 @@ Escalate to the owner only when:
 
 - A real choice is required (pricing, hire, legal, strategy)
 - Approval gate blocks the action
-- Identity/verification or human browser handoff is required
+- Identity/verification or a user-only step blocks the authorized workflow
 - Authority is missing or conflicting
 
 Digest = short decision request, not a status essay. See `05-digest.md`.

@@ -54,7 +54,6 @@ export function deriveMissionToolHints(objective: string): string[] {
   if (/email|gmail|outlook|slack|notion|calendar|github|crm|stripe|invoice|ticket|message|post|send|publish|supplier|call|phone|app|connected/.test(text)) {
     for (const tool of ["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_EXECUTE_TOOL", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_MANAGE_CONNECTIONS"]) selected.add(tool);
   }
-  if (/browser|website|web page|click|form|login/.test(text)) selected.add("CHUCK_BROWSER");
   if (/build|code|develop|deploy|landing page|test suite|run tests|run the tests|repository|repo/.test(text)) {
     selected.add("CHUCK_DAYTONA_EXECUTE");
     selected.add("CHUCK_DAYTONA_WORKSPACE");

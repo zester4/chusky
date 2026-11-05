@@ -18,7 +18,7 @@ References:
 | Packet schema | `references/packet.md` |
 | Specialist delegation | `references/01-specialist.md` |
 | Resume and failure | `references/02-resume.md` |
-| Human / browser handoff | `references/03-human-browser.md` |
+| Website interaction unavailable | `references/03-human-browser.md` |
 
 ## Rules
 

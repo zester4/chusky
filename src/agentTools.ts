@@ -410,7 +410,7 @@ const skillGuidedToolDescriptions: Record<string, string> = {
   CHUCK_ARTIFACT: "Create, register, reconcile, retain, clean, inspect, and deliver owner-scoped Daytona artifacts. For PDF, DOCX, PPTX, or XLSX work, first read the corresponding runtime skill under `.chusky/skills/` and follow its authoring and QA gates, including structural validation and page-by-page rendering before delivery. Use workspace-relative paths, preserve returned artifact IDs, and treat previews/download URLs as temporary handoffs unless the tool explicitly says otherwise.",
 };
 
-export const chuckTools: NativeToolDefinition[] = [...baseChuckTools, ...shoppingAndBrowserTools, ...toolReliabilityTools]
+const allChuckTools: NativeToolDefinition[] = [...baseChuckTools, ...shoppingAndBrowserTools, ...toolReliabilityTools]
   .map((tool) => {
     const name = canonicalNativeToolSlug(tool.function.name);
     const description = skillGuidedToolDescriptions[name] ?? normalizeOwnerPrivatePolicyDescription(tool.function.description);
@@ -435,6 +435,25 @@ export const chuckTools: NativeToolDefinition[] = [...baseChuckTools, ...shoppin
   })
   .filter((tool) => config.elenaEnabled || !isElenaToolSlug(tool.function.name));
 
+const retiredAgentToolNames = new Set([
+  "CHUCK_LINK_INSPECT_CHECKOUT",
+  "CHUCK_LINK_EXECUTE_PAYMENT",
+  "CHUCK_LINK_CONFIRM_ORDER",
+  "CHUCK_LINK_COMPLETE_CHECKOUT",
+]);
+
+export const chuckTools: NativeToolDefinition[] = allChuckTools.filter((tool) =>
+  !/^(?:CHUCK_BROWSER(?:_|$)|CHUCK_VAULT_|CHUCK_SHOPPING_)/.test(tool.function.name)
+  && !retiredAgentToolNames.has(tool.function.name));
+
+const daytonaAppToolSchema = chuckTools.find((tool) => tool.function.name === "CHUCK_DAYTONA_APP") as any;
+daytonaAppToolSchema.function.description = "Operate a durable app project in Daytona for local scaffold, code verification, server start/stop, status, logs, branch, and list workflows. Start returns a signed preview URL for the owner to inspect. Automated screenshot capture, visual review, and release handoff are unavailable until the replacement browser is installed.";
+const daytonaAppProperties = daytonaAppToolSchema.function.parameters.properties as Record<string, unknown>;
+daytonaAppProperties.action = { type: "string", enum: ["scaffold", "verify", "start", "status", "logs", "branch", "stop", "list"] };
+delete daytonaAppProperties.passed;
+delete daytonaAppProperties.summary;
+delete daytonaAppProperties.target;
+
 // Kept in the native catalog for existing SDK/API clients and resumed runs,
 // but image transfer is now resolved transparently at Composio dispatch.
 export const modelFacingChuckTools: NativeToolDefinition[] = chuckTools
@@ -450,7 +469,7 @@ export const modelFacingChuckTools: NativeToolDefinition[] = chuckTools
   }));
 
 const browserToolParameters = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER")?.function.parameters as any;
-const browserTool = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER") as any;
+const browserTool = allChuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER") as any;
 if (browserTool) {
   browserTool.function.description = browserTool.function.description
     .replace("owner-scoped E2B Playwright browser", "owner-scoped configured browser (dedicated real-Chromium runtime when CHUSKY_BROWSER_RUNTIME_MODE=dedicated, otherwise E2B)")
@@ -461,7 +480,7 @@ if (browserTool) {
     .replace("reads fresh retained E2B state", "reads fresh retained provider state")
     + " Dedicated mode is a real headed Chromium service behind the provider-neutral CHUCK_BROWSER contract. Prefer CHUCK_BROWSER_OBSERVE and CHUCK_BROWSER_ACT one bounded action at a time; use CHUCK_BROWSER_AGENT and E2B-only form/file helpers only when the selected provider supports them. With BROWSER_PROVIDER=kernel the E2B controller can also connect to Kernel Chromium when dedicated mode is off, but Kernel additionally requires KERNEL_BROWSER_OPT_IN=true because it is a paid adapter. stream_start returns a short-lived Chusky-hosted watch URL when WEBHOOK_URL is configured; it is read-only by default. Use mode=interactive only for an explicit human handoff. stream_status reissues the active watch URL, and stream_stop revokes Chusky viewer access; stopping the browser is still required to revoke an already-copied provider URL. auth_start collects login through a private hosted form, auth_status checks it without restarting, and auth_resume attaches the verified profile to a new task browser. Never put secrets in tool arguments.";
 }
-for (const tool of chuckTools) {
+for (const tool of allChuckTools) {
   if (!tool.function.name.startsWith("CHUCK_BROWSER")) continue;
   tool.function.description = tool.function.description
     .replaceAll("retained E2B browser session", "retained provider browser session")
@@ -517,7 +536,7 @@ taskCreateToolSchema.function.description = "Create a NEW durable task; this too
 /** Validate local-tool arguments at the execution boundary, not just in the model prompt. */
 export function validateNativeToolArguments(name: string, args: Record<string, unknown>): void {
   const canonicalName = canonicalNativeToolSlug(name);
-  const tool = chuckTools.find((item) => item.function.name === canonicalName);
+  const tool = allChuckTools.find((item) => item.function.name === canonicalName);
   if (!tool) throw new Error(`Unknown native tool: ${name}`);
   if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error(`${name} arguments must be an object`);
   if (canonicalName === "CHUCK_MISSION_START" && Object.hasOwn(args, "id")) {

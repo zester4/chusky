@@ -81,11 +81,8 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_PLAN_DELEGATION",
   "CHUCK_RESOLVE_SUBAGENT_TOOL_REQUEST",
   "CHUCK_REVIEW_SUBAGENT_ACTION",
-  "CHUCK_VAULT_SAVE", "CHUCK_VAULT_LIST", "CHUCK_VAULT_STATUS", "CHUCK_VAULT_LOGIN", "CHUCK_VAULT_LOGOUT",
-  "CHUCK_LINK_STATUS", "CHUCK_LINK_WALLET_STATUS", "CHUCK_LINK_PAYMENT_METHODS", "CHUCK_LINK_CREATE_SPEND_REQUEST", "CHUCK_LINK_INSPECT_CHECKOUT", "CHUCK_LINK_MPP_DISCOVER", "CHUCK_LINK_MPP_PAY", "CHUCK_LINK_UCP_SEARCH", "CHUCK_LINK_UCP_CREATE_CHECKOUT", "CHUCK_LINK_UCP_COMPLETE_CHECKOUT", "CHUCK_LINK_CONFIRM_ORDER", "CHUCK_LINK_WAIT_FOR_APPROVAL", "CHUCK_LINK_EXECUTE_PAYMENT", "CHUCK_LINK_RECEIPT", "CHUCK_LINK_REPORT_OUTCOME", "CHUCK_LINK_SPEND_STATUS", "CHUCK_LINK_SPEND_LIST", "CHUCK_LINK_SPEND_CANCEL", "CHUCK_LINK_COMPLETE_CHECKOUT",
-  "CHUCK_BROWSER", "CHUCK_BROWSER_RETAILER_START", "CHUCK_BROWSER_OBSERVE", "CHUCK_BROWSER_ACT", "CHUCK_BROWSER_EXTRACT", "CHUCK_BROWSER_AGENT", "CHUCK_DAYTONA_COMPUTER", "CHUCK_BROWSER_PLAN", "CHUCK_BROWSER_NEXT", "CHUCK_BROWSER_SESSION_HEALTH", "CHUCK_BROWSER_PLAYBOOK_SAVE", "CHUCK_BROWSER_PLAYBOOK_LIST", "CHUCK_BROWSER_VERIFY", "CHUCK_BROWSER_AUDIT_LIST",
-  "CHUCK_BROWSER_HANDOFF", "CHUCK_BROWSER_HANDOFF_STATUS", "CHUCK_BROWSER_HANDOFF_COMPLETE", "CHUCK_BROWSER_HANDOFF_RESUME",
-  "CHUCK_SHOPPING_START", "CHUCK_SHOPPING_LIST", "CHUCK_SHOPPING_SELECT_RETAILER", "CHUCK_SHOPPING_UPDATE", "CHUCK_SHOPPING_CANCEL", "CHUCK_SHOPPING_PAUSE", "CHUCK_SHOPPING_RESUME", "CHUCK_SHOPPING_SAVE_SITE", "CHUCK_SHOPPING_LIST_SITES",
+  "CHUCK_LINK_STATUS", "CHUCK_LINK_WALLET_STATUS", "CHUCK_LINK_PAYMENT_METHODS", "CHUCK_LINK_CREATE_SPEND_REQUEST", "CHUCK_LINK_MPP_DISCOVER", "CHUCK_LINK_MPP_PAY", "CHUCK_LINK_UCP_SEARCH", "CHUCK_LINK_UCP_CREATE_CHECKOUT", "CHUCK_LINK_UCP_COMPLETE_CHECKOUT", "CHUCK_LINK_WAIT_FOR_APPROVAL", "CHUCK_LINK_RECEIPT", "CHUCK_LINK_REPORT_OUTCOME", "CHUCK_LINK_SPEND_STATUS", "CHUCK_LINK_SPEND_LIST", "CHUCK_LINK_SPEND_CANCEL",
+  "CHUCK_DAYTONA_COMPUTER",
   "CHUCK_TASK_WAIT",
   "CHUCK_MISSION_START", "CHUCK_MISSION_LIST", "CHUCK_MISSION_GET", "CHUCK_MISSION_CHECKPOINT",
   "CHUCK_MISSION_PAUSE", "CHUCK_MISSION_RESUME", "CHUCK_MISSION_CANCEL", "CHUCK_MISSION_BLOCK", "CHUCK_MISSION_COMPLETE", "CHUCK_MISSION_WAIT_EVENT", "CHUCK_MISSION_STEP_COMPLETE", "CHUCK_MISSION_REPLAN",
@@ -100,32 +97,12 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_MEETING_TRANSCRIPT_SEARCH", "CHUCK_MEETING_PROFILE_GET",
 ]);
 
-// These browser primitives only inspect or execute bounded, non-consequential
-// page interactions. High-impact website actions still go through CHUCK_BROWSER
-// and its vaultAction policy; these tools must not inherit a generic approval
-// override simply because they are native tools.
-const BROWSER_AUTONOMOUS_TOOLS = new Set([
-  "CHUCK_BROWSER_RETAILER_START",
-  "CHUCK_BROWSER_OBSERVE",
-  "CHUCK_BROWSER_ACT",
-  "CHUCK_BROWSER_EXTRACT",
-  "CHUCK_BROWSER_AGENT",
-]);
-
-// Handoff lifecycle operations only inspect or transition Chusky's own
-// owner-scoped browser state. They must never be converted into an approval
-// prompt, including when a caller supplies a generic force-approval flag.
-const BROWSER_HANDOFF_CONTROL_TOOLS = new Set([
-  "CHUCK_BROWSER_HANDOFF", "CHUCK_BROWSER_HANDOFF_STATUS", "CHUCK_BROWSER_HANDOFF_COMPLETE", "CHUCK_BROWSER_HANDOFF_RESUME",
-]);
-
 // Removing durable data or altering an already-authorized control boundary
-// remains approval-gated. Ordinary task, reminder, memory, browser, and
+// remains approval-gated. Ordinary task, reminder, memory, and
 // communication work is autonomous.
 const APPROVAL_NATIVE_TOOLS = new Set([
   "CHUCK_FORGET_MEMORY", "CHUCK_FORGET_IMAGE_ASSET", "CHUCK_SCRATCHPAD_CLEAR", "CHUCK_DAYTONA_SET_FILE_PERMISSIONS",
-  "CHUCK_BROWSER_PLAYBOOK_REMOVE", "CHUCK_MEETING_CONTACT_DELETE", "CHUCK_MEETING_TRANSCRIPT_DELETE", "CHUCK_MISSION_COMPENSATE",
-  "CHUCK_SHOPPING_REMOVE_SITE", "CHUCK_BROWSER_SESSION_REVOKE", "CHUCK_MEETING_PROFILE_UPDATE",
+  "CHUCK_MEETING_CONTACT_DELETE", "CHUCK_MEETING_TRANSCRIPT_DELETE", "CHUCK_MISSION_COMPENSATE", "CHUCK_MEETING_PROFILE_UPDATE",
   "CHUCK_MONID_RUN",
   // OAuth start/revoke change an external account authorization.
   "CHUCK_TREG_OAUTH_START", "CHUCK_TREG_OAUTH_REVOKE", "CHUCK_LINK_CONNECT", "CHUCK_LINK_WALLET_CONNECT", "CHUCK_LINK_WALLET_DISCONNECT",
@@ -217,16 +194,6 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
   if (slug === "CHUCK_TREG_ADMIN") return isTregAdminReadAction(String(args.action ?? "")) ? "private" : "approval_required";
   if (slug === "CHUCK_MISSION_START" && Number(args.maxAutomaticExtensions ?? 0) > 0) return "approval_required";
   if (TINYFISH_AUTONOMOUS_TOOLS.has(slug)) return "private";
-  if (slug === "CHUCK_BROWSER") {
-    // Unknown browser claims are validated by the E2B/vault guard against the
-    // freshly inspected accessible control. Do not turn an ambiguous model
-    // claim into a generic approval card; risky controls must declare their
-    // exact action and then pass the matching approval boundary.
-    if (["checkout", "place_order", "purchase", "change_address", "add_payment_method", "download_sensitive"].includes(String(args.vaultAction ?? ""))) return "approval_required";
-    if (["upload", "upload_files", "download_delete", "recording_delete", "clipboard_read", "clipboard_write"].includes(String(args.action ?? ""))) return "approval_required";
-    return "private";
-  }
-  if (slug === "CHUCK_BROWSER_NEXT") return "private";
   if (slug === "CHUCK_DAYTONA_GIT") {
     // Daytona is Chusky's private workspace; only pushing leaves it.
     return String(args.action ?? "") === "push" ? "approval_required" : "private";
@@ -263,7 +230,6 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
 const STATUSES: Record<string, string> = {
   CHUCK_TREG_PLAN: "🧭 I’m mapping the Treg research steps…",
   CHUCK_TREG_ADMIN: "🔐 I’m checking your Treg workspace…",
-  CHUCK_BROWSER_RETAILER_START: "🌐 I’m opening the fastest verified site entry point…",
   CHUCK_LEAD_CAMPAIGN: "🎯 I’m setting up a durable, source-backed lead campaign…",
   CHUCK_FIND_TOOLS: "🧭 I’m finding the relevant tools…",
   CHUCK_SEARCH_SKILLS: "🧭 I’m bringing in the relevant guidance…",
@@ -332,25 +298,6 @@ const STATUSES: Record<string, string> = {
   CHUCK_DAYTONA_CODE: "🐍 I’m running code in my computer workspace…",
   CHUCK_DAYTONA_LSP: "🧩 I’m inspecting my workspace with code intelligence…",
   CHUCK_DAYTONA_GIT: "🔀 I’m working with the repository…",
-  CHUCK_BROWSER: "🌐 I’m browsing with my private browser workspace…",
-  CHUCK_VAULT_SAVE: "🔐 I’m opening a private encrypted website-login form…",
-  CHUCK_VAULT_LIST: "🔐 I’m checking the connected websites…",
-  CHUCK_VAULT_STATUS: "🔐 I’m checking my secure browser session…",
-  CHUCK_VAULT_LOGIN: "🔐 I’m signing in through my encrypted website identity…",
-  CHUCK_VAULT_LOGOUT: "🔐 I’m ending Chusky’s saved browser session…",
-  CHUCK_BROWSER_HANDOFF: "🔐 I’m preparing a private browser handoff…",
-  CHUCK_BROWSER_HANDOFF_STATUS: "🔐 I’m checking the private browser handoff…",
-  CHUCK_BROWSER_HANDOFF_COMPLETE: "🔐 I’m verifying the private browser handoff…",
-  CHUCK_SHOPPING_START: "🛒 I’m setting up your shopping plan…",
-  CHUCK_SHOPPING_LIST: "🛒 I’m checking your shopping plans…",
-  CHUCK_SHOPPING_SELECT_RETAILER: "🛒 I’m selecting that retailer…",
-  CHUCK_SHOPPING_UPDATE: "🛒 I’m updating your shopping plan…",
-  CHUCK_SHOPPING_CANCEL: "🛒 I’m cancelling that shopping plan…",
-  CHUCK_SHOPPING_PAUSE: "🛒 I’m preserving your shopping session while you complete that website step…",
-  CHUCK_SHOPPING_RESUME: "🛒 I’m resuming your retained shopping browser…",
-  CHUCK_SHOPPING_SAVE_SITE: "🛒 I’m saving that shopping site for you…",
-  CHUCK_SHOPPING_LIST_SITES: "🛒 I’m checking your saved shopping sites…",
-  CHUCK_SHOPPING_REMOVE_SITE: "🛒 I’m removing that saved shopping site…",
   CHUCK_ARTIFACT: "📦 I’m preparing your deliverable…",
   CHUCK_EMAIL_ARTIFACT: "✉️ I’m attaching the deliverable to email…",
   CHUCK_CREATE_PDF: "📄 I’m building and checking your PDF…",
@@ -403,8 +350,8 @@ export function isRiskyToolSlug(slug: string, args?: Record<string, unknown>): b
  */
 const OWNER_PRIVATE_DELETION_TOOLS = new Set([
   "CHUCK_FORGET_MEMORY", "CHUCK_FORGET_IMAGE_ASSET", "CHUCK_SCRATCHPAD_CLEAR",
-  "CHUCK_BROWSER_PLAYBOOK_REMOVE", "CHUCK_MEETING_CONTACT_DELETE", "CHUCK_MEETING_TRANSCRIPT_DELETE",
-  "CHUCK_SHOPPING_REMOVE_SITE", "CHUCK_DAYTONA_DELETE_FILE", "CHUCK_DAYTONA_DELETE_WORKSPACE",
+  "CHUCK_MEETING_CONTACT_DELETE", "CHUCK_MEETING_TRANSCRIPT_DELETE",
+  "CHUCK_DAYTONA_DELETE_FILE", "CHUCK_DAYTONA_DELETE_WORKSPACE",
 ]);
 const DELETION_ACTION_PATTERN = /(^|_)(DELETE|REMOVE|DESTROY|ERASE|PURGE|TRASH|FORGET|CLEAR)(_|$)/i;
 
@@ -493,10 +440,8 @@ export function requiresToolApproval(slug: string, args: Record<string, unknown>
   if (canonicalPolicySlug(slug) === "CHUCK_MONID_RUN") return true;
   if (canonicalPolicySlug(slug) === "CHUCK_TREG_ADMIN") return forceApproval || !isTregAdminReadAction(String(args.action ?? ""));
   if (triggerRun) return forceApproval || triggerCriticalToolCall(slug, args);
-  if (BROWSER_HANDOFF_CONTROL_TOOLS.has(canonicalPolicySlug(slug))) return false;
   if (TINYFISH_AUTONOMOUS_TOOLS.has(canonicalPolicySlug(slug))) return false;
   if (slug === "CHUCK_LEAD_CAMPAIGN") return false;
-  if (BROWSER_AUTONOMOUS_TOOLS.has(canonicalPolicySlug(slug))) return false;
   if (slug === "CHUCK_TREG_CALL" && isAutonomousTregCatalogCall(args)) return false;
   if (TREG_AUTONOMOUS_TOOLS.has(slug)) return false;
   if (MONID_AUTONOMOUS_TOOLS.has(slug)) return false;

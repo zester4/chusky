@@ -14,7 +14,6 @@ import { artifactVisualQaScript } from "./artifactQa.js";
 import { artifactRendererImage } from "./renderer.js";
 import { getDaytonaClient } from "./client.js";
 import { CancellationError, throwIfAborted } from "../../cancellation.js";
-import { e2bBrowserEngine } from "../e2b/browser.js";
 import { isExpired, retentionFromSeconds, visualDiffStatus } from "./retention.js";
 import type { DaytonaAppResult, DaytonaArtifactDelivery, DaytonaCodeResult, DaytonaCommandResult, DaytonaComputerLease, DaytonaFileInfo, DaytonaGitResult, DaytonaPreviewResult, DaytonaPtyResult, DaytonaSandboxMetrics, DaytonaSessionResult, DaytonaScreenshotResult, DaytonaSnapshotResult, DaytonaVolumeResult, DaytonaWorkspaceInfo } from "./types.js";
 
@@ -2493,6 +2492,7 @@ export class DaytonaEngine {
 
   async app(userId: number, args: Record<string, unknown>): Promise<DaytonaAppResult | { apps: DaytonaAppRecord[] } | (DaytonaScreenshotResult & { app: DaytonaAppRecord; url: string; expiresAt: number })> {
     const action = boundedText(args.action, "action", 20);
+    if (["visual", "review", "release"].includes(action)) throw new DaytonaInputError("Automated app screenshots, visual reviews, and release handoffs are unavailable until the replacement browser is installed. Use the signed preview for owner inspection.");
     const sandbox = await this.getOrCreateWorkspace(userId);
     const stored = await getDaytonaWorkspace(userId);
     const apps = [...(stored?.apps ?? [])];
@@ -2628,29 +2628,7 @@ export class DaytonaEngine {
         : existing;
       return result(app, latestOutput);
     }
-    if (action === "review") {
-      const visual = existing.verification?.visual;
-      if (!visual || visual.status !== "captured" || Date.now() - visual.capturedAt > 10 * 60 * 1000) throw new DaytonaInputError("Capture a fresh visual screenshot with action=visual before recording a review.");
-      const summary = boundedText(args.summary, "summary", 2000);
-      const passed = args.passed === true;
-      const verification: DaytonaAppVerification = {
-        ...(existing.verification ?? { status: "pending", checks: [] }),
-        visual: { status: passed ? "passed" : "failed", summary, capturedAt: visual.capturedAt, reviewedAt: Date.now(), ...(visual.qa ? { qa: visual.qa } : {}) },
-      };
-      return result(await update(index, { ...existing, status: passed ? "ready_for_review" : "failed", verification, release: { status: "not_requested" }, updatedAt: Date.now() }));
-    }
-    if (action === "release") {
-      const verification = existing.verification;
-      if (verification?.status !== "passed" || verification.visual?.status !== "passed") {
-        throw new DaytonaInputError("Release handoff requires a passing current verification and an honest passing visual review.");
-      }
-      if (existing.customization?.status !== "detected") {
-        throw new DaytonaInputError("Customize the scaffold before release. The source check found no changes beyond the starter foundation.");
-      }
-      const target = args.target ? boundedText(args.target, "target", 200) : "external deployment";
-      return result(await update(index, { ...existing, status: "ready_to_publish", release: { status: "awaiting_approval", target, requestedAt: Date.now() }, updatedAt: Date.now() }));
-    }
-    if (action !== "visual" && action !== "start") throw new DaytonaInputError("Unsupported app action");
+    if (action !== "start") throw new DaytonaInputError("Unsupported app action");
     let app = existing;
     if (action === "start") {
       // Re-run on every start so a later edit cannot inherit an old green
@@ -2689,27 +2667,7 @@ export class DaytonaEngine {
       }
       return result(app);
     }
-    if (!app.ptySessionId || !app.previewUrl) throw new DaytonaInputError("Start the app before visual verification.");
-    const preview = await sandbox.getSignedPreviewUrl(app.port, expiry);
-    const url = String(preview.url);
-    await e2bBrowserEngine.browser(userId, { action: "open", url });
-    const visual = await e2bBrowserEngine.browser(userId, { action: "screenshot" });
-    if (!visual || typeof visual !== "object" || !("__browserScreenshot" in visual)) {
-      throw new DaytonaInputError("E2B did not return a verified app preview screenshot.");
-    }
-    const screenshot = visual as unknown as DaytonaScreenshotResult & { __browserScreenshot: true };
-    const snapshot = await e2bBrowserEngine.browser(userId, { action: "snapshot" }) as any;
-    const accessibleNodes = Array.isArray(snapshot?.accessibility?.children) ? snapshot.accessibility.children.length : 0;
-    const screenshotBytes = Number((screenshot as any).sizeBytes ?? 0);
-    const visualChecks = [
-      screenshotBytes >= 1 ? "screenshot-bytes" : "screenshot-missing",
-      accessibleNodes >= 3 ? "accessible-content" : "accessible-content-missing",
-      /^https:\/\//i.test(url) ? "signed-https-preview" : "signed-preview-missing",
-    ];
-    const visualQaPassed = visualChecks.every((check) => !check.endsWith("missing"));
-    if (!visualQaPassed) throw new DaytonaInputError(`Automated visual preflight failed: ${visualChecks.filter((check) => check.endsWith("missing")).join(", ")}`);
-    app = await update(index, { ...app, status: "running", previewUrl: url, previewExpiresAt: Date.now() + expiry * 1000, verification: { ...(app.verification as DaytonaAppVerification), visual: { status: "captured", capturedAt: Date.now(), qa: { status: "passed", checks: visualChecks } } }, updatedAt: Date.now() });
-    return { ...screenshot, app, url, expiresAt: app.previewExpiresAt! };
+    return result(app);
   }
 
   async createSnapshot(userId: number, name: string): Promise<DaytonaSnapshotResult> {

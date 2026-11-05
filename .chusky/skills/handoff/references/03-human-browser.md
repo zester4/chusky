@@ -1,17 +1,6 @@
-# Human and browser handoff
+# Website Interaction Unavailable
 
-Use when CAPTCHA, 2FA, age gates, or site challenges block automation.
+Automated website browsing and browser handoffs are retired until the replacement browser is installed. Do not promise that Chusky can inspect, resume, or verify a website session.
 
-## Packet to human
+If a requested action requires a third-party website, explain the limitation and stop before using Daytona desktop, shell commands, or arbitrary HTTP requests as a substitute. Daytona remains available for local files, code, applications, and artifact work.
 
-- Why handoff is needed
-- Exact URL / service
-- What they should complete
-- What Chusky will do after resume
-- Expiry of the handoff session
-
-## Rules
-
-- Never ask the human to paste passwords into chat if vault/handoff UI exists
-- Pause shopping/browser flows cleanly
-- On complete: verify session health before continuing automation

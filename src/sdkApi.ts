@@ -1455,20 +1455,6 @@ async function sdkAgentOptions(body: RunBody, runId?: string, parentRunId?: stri
   return { ...privateRun, ...(scopedOrganizationId ? { organizationId: scopedOrganizationId } : {}), ...(allow ? { toolAllow: allow } : {}), ...(deny ? { toolDeny: deny } : {}), ...(requireApproval ? { toolRequireApproval: requireApproval } : {}), ...limits, ...(blocks.length ? { instructions: blocks.join("\n\n").slice(0, 24000) } : {}), ...(runId ? { runId } : {}), ...(parentRunId ? { parentRunId } : {}) };
 }
 
-export function browserFileDownloadResponse(file: import("./lib/e2b/types.js").E2BBrowserFileRecord, bytes: Buffer, now = Date.now()): Response {
-  if (file.expiresAt <= now || bytes.byteLength !== file.size || bytes.byteLength < 1 || bytes.byteLength > 100 * 1024 * 1024) {
-    throw new Error("Browser file is expired or failed its size verification");
-  }
-  const filename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "browser-file.bin";
-  return new Response(bytes, { headers: {
-    "Content-Type": file.contentType,
-    "Content-Length": String(bytes.byteLength),
-    "Content-Disposition": `attachment; filename="${filename}"`,
-    "Cache-Control": "private, no-store",
-    "X-Content-Type-Options": "nosniff",
-  } });
-}
-
 function sdkFileObjectId(fileId: string): string | undefined {
   return /^file_[A-Za-z0-9_-]{1,120}$/.test(fileId) ? `obj_${fileId.slice("file_".length)}` : undefined;
 }
@@ -4349,13 +4335,7 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/artifacts/:id/download", async (c) => {
     const owner = sdkUser(c)!;
     const id = c.req.param("id");
-    if (id.startsWith("bf_")) {
-      const file = (await getSession(owner.userId)).browserFiles?.find((item) => item.id === id && item.expiresAt > Date.now());
-      if (!file) return apiError(c, 404, "artifact_unavailable", "Browser file not found or expired.");
-      if (!r2Configured()) return apiError(c, 503, "storage_unavailable", "Private browser file storage is not configured.");
-      try { return browserFileDownloadResponse(file, await readR2Object(file.key)); }
-      catch (error) { return apiError(c, 404, "artifact_unavailable", error instanceof Error ? error.message : "Browser file download unavailable."); }
-    }
+    if (id.startsWith("bf_")) return apiError(c, 404, "artifact_unavailable", "Artifact not found.");
     try {
       const delivery = await daytonaEngine.streamArtifact(owner.userId, id);
       return new Response(Readable.toWeb(delivery.stream) as unknown as any, { headers: { "Content-Type": delivery.contentType, "Content-Length": String(delivery.size), "Content-Disposition": `attachment; filename="${delivery.name.replace(/[^a-zA-Z0-9._-]/g, "_")}"`, "Cache-Control": "private, max-age=300" } });

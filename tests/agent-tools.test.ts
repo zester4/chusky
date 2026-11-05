@@ -200,10 +200,10 @@ test("tool reliability diagnostics are explicit and image transfer is resolved i
   assert.deepEqual(qa.function.parameters.properties.type.enum, ["pdf", "docx", "presentation", "spreadsheet"]);
 });
 
-test("owner-private call, meeting, browser, Git, and preflight descriptions agree with central approval policy", () => {
+test("owner-private call, meeting, Git, and preflight descriptions agree with central approval policy", () => {
   for (const name of [
     "CHUCK_START_PHONE_CALL", "CHUCK_MEETING_JOIN", "CHUCK_MEETING_PROFILE_UPDATE",
-    "CHUCK_DAYTONA_APP", "CHUCK_DAYTONA_GIT", "CHUCK_BROWSER",
+    "CHUCK_DAYTONA_APP", "CHUCK_DAYTONA_GIT",
     "CHUCK_EMAIL_ARTIFACT", "CHUCK_TOOL_PREFLIGHT",
   ]) {
     const tool = chuckTools.find((entry) => entry.function.name === name);
@@ -324,23 +324,21 @@ test("image generation exposes a bounded multiple-image count", () => {
   assert.equal(properties.count?.maximum, 10);
 });
 
-test("Daytona accessibility search exposes a valid matching mode", () => {
-  for (const name of ["CHUCK_DAYTONA_COMPUTER", "CHUCK_BROWSER"]) {
-    const tool = chuckTools.find((item) => item.function.name === name);
-    const properties = tool?.function.parameters.properties as Record<string, { enum?: string[] }>;
-    assert.deepEqual(properties.nameMatch?.enum, ["exact", "substring", "regex"]);
+test("website browser capabilities are absent while Daytona remains available", () => {
+  const names = new Set(chuckTools.map((tool) => tool.function.name));
+  assert.ok([...names].every((name) => !/^(?:CHUCK_BROWSER(?:_|$)|CHUCK_VAULT_|CHUCK_SHOPPING_)/.test(name)));
+  for (const name of ["CHUCK_DAYTONA_COMPUTER", "CHUCK_DAYTONA_PTY", "CHUCK_DAYTONA_CODE", "CHUCK_DAYTONA_LIST_FILES", "CHUCK_DAYTONA_WRITE_FILE"]) {
+    assert.ok(names.has(name), name);
   }
-  assert.throws(() => validateNativeToolArguments("CHUCK_BROWSER", { action: "find", name: "OpenRouter", nameMatch: "OpenRouter" }), /unsupported value/);
-  validateNativeToolArguments("CHUCK_BROWSER", { action: "find", name: "OpenRouter", nameMatch: "substring" });
-});
-
-test("browser verification exposes bounded dynamic waits and failure detectors", () => {
-  validateNativeToolArguments("CHUCK_BROWSER_VERIFY", {
-    waitMs: 2_000,
-    pollMs: 500,
-    detectors: [{ textIncludes: "success", textExcludes: "error", required: true }],
-  });
-  assert.throws(() => validateNativeToolArguments("CHUCK_BROWSER_VERIFY", { waitMs: 30_001, detectors: [{ textIncludes: "success" }] }), /waitMs.*(?:maximum|at most)/i);
+  assert.equal(modelFacingChuckTools.some((tool) => /^(?:CHUCK_BROWSER(?:_|$)|CHUCK_VAULT_|CHUCK_SHOPPING_)/.test(tool.function.name)), false);
+  const computer = chuckTools.find((item) => item.function.name === "CHUCK_DAYTONA_COMPUTER");
+  const properties = computer?.function.parameters.properties as Record<string, { enum?: string[] }>;
+  assert.deepEqual(properties.nameMatch?.enum, ["exact", "substring", "regex"]);
+  const app = chuckTools.find((item) => item.function.name === "CHUCK_DAYTONA_APP");
+  const appActions = (app?.function.parameters.properties as Record<string, { enum?: string[] }>).action.enum;
+  assert.ok(appActions?.includes("start"));
+  assert.ok(appActions?.includes("verify"));
+  assert.ok(!appActions?.some((action) => ["visual", "review", "release"].includes(action)));
 });
 
 test("Daytona browser tools are not exposed or accepted", () => {
@@ -371,7 +369,7 @@ test("native tool validation enforces nested JSON-schema constraints", () => {
   assert.throws(() => validateNativeToolArguments("CHUCK_ATTENTION_STATE", { action: "list", kind: "autonomy_watch", toolSlugs: ["not a slug"] }), /toolSlugs\[0\].*pattern/i);
   assert.throws(() => validateNativeToolArguments("CHUCK_TASK_LIST", null as never), /arguments must be an object/i);
   assert.throws(() => validateNativeToolArguments("CHUCK_MISSION_VERIFY", { id: "m1", verifiedBy: "human" }), /verifiedBy.*not allowed/i);
-  assert.throws(() => validateNativeToolArguments("CHUCK_BROWSER_VERIFY", { detectors: [{ password: "no" }] }), /password.*not allowed/i);
+  assert.throws(() => validateNativeToolArguments("CHUCK_BROWSER_VERIFY", { detectors: [{ textIncludes: "success" }] }), /unknown|not found|unsupported/i);
 });
 
 test("tool argument validation bounds payload size and nesting before dispatch", () => {

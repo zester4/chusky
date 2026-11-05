@@ -6,6 +6,7 @@ const DEFAULT_SKILLS_ROOT = path.resolve(process.cwd(), ".chusky", "skills");
 const MAX_SKILLS = 200;
 const MAX_SKILL_FILE_BYTES = 256 * 1024;
 const MAX_CONTEXT_CHARS = 24_000;
+const DISABLED_SKILL_DIRECTORIES = new Set(["browser-pro", "agent-browser", "kernel-agent-browser"]);
 const STOP_WORDS = new Set(["a", "an", "and", "are", "can", "create", "for", "how", "i", "in", "is", "it", "make", "of", "on", "the", "to", "use", "with"]);
 const FALLBACK_GENERIC_TERMS = new Set([
   ...STOP_WORDS,
@@ -74,7 +75,6 @@ const ROUTED_SKILLS: Array<{ name: string; triggers: string[] }> = [
   { name: "voice-call-pro", triggers: ["phone call", "outbound call", "inbound call", "twilio", "collections call"] },
   { name: "workspace-pro", triggers: ["inbox", "email triage", "calendar change", "github pr", "trello", "workspace"] },
   { name: "computer-pro", triggers: ["daytona", "sandbox", "computer use", "desktop", "terminal", "local file", "run a command", "build locally", "app preview", "artifact qa"] },
-  { name: "browser-pro", triggers: ["browser", "browse the web", "navigate website", "website navigation", "website form", "web form", "fill out a form", "upload to a website", "download from a website", "form", "add to cart", "cart", "shopping", "checkout", "retailer", "sign in to a website", "log in to a website"] },
   { name: "research-pro", triggers: ["research", "competitor analysis", "sources", "evidence brief"] },
   { name: "project-pro", triggers: ["project plan", "milestone", "status update", "roadmap"] },
   { name: "writing-pro", triggers: ["draft email", "rewrite", "copywriting", "proposal copy"] },
@@ -219,7 +219,7 @@ async function skillDirectories(root: string): Promise<string[]> {
   const entries = await readdir(root, { withFileTypes: true });
   const directories: string[] = [];
   for (const entry of entries.slice(0, MAX_SKILLS)) {
-    if (!entry.isDirectory()) continue;
+    if (!entry.isDirectory() || DISABLED_SKILL_DIRECTORIES.has(entry.name)) continue;
     const directory = path.join(root, entry.name);
     const info = await lstat(directory);
     if (info.isSymbolicLink()) continue;
@@ -269,7 +269,6 @@ export async function listSkillSummaries(root = DEFAULT_SKILLS_ROOT): Promise<Ar
 export const ROUTED_SKILL_REFERENCES: Record<string, string[]> = {
   "fullstack-guardian": ["references/design-template.md"],
   "ui-ux-pro-max": ["references/pro-rules.md", "references/quick-reference.md"],
-  "browser-pro": ["references/retailer-playbook.md", "references/tool-contract.md", "references/recovery-matrix.md"],
   "treg": ["references/runtime-contract.md", "references/provider-selection.md", "references/research-workflows.md"],
   "monid": ["references/engine-playbooks.md", "references/lead-sourcing.md", "references/local-prospects.md", "references/research-briefs.md"],
 };

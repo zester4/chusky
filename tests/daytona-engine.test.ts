@@ -541,23 +541,9 @@ test("app projects create an isolated branch, verify before preview, retain evid
   assert.match(logs.output, /ran:/);
   const refreshed = await e.app(820015, { action: "status", id: "client-portal" }) as any;
   assert.equal(refreshed.status, "running");
-  const originalBrowser = e2bBrowserEngine.browser;
-  e2bBrowserEngine.browser = async (_userId, args) => args.action === "open"
-    ? { opened: "https://preview.test/signed/5173" }
-    : args.action === "snapshot"
-      ? { accessibility: { children: [{ role: "main" }, { role: "heading" }, { role: "link" }] } }
-      : { __browserScreenshot: true, mediaType: "image/jpeg", base64: "preview", sizeBytes: 7 };
-  try {
-    const screenshot = await e.app(820015, { action: "visual", id: "client-portal" }) as any;
-    assert.equal(screenshot.__browserScreenshot, true);
-  } finally {
-    e2bBrowserEngine.browser = originalBrowser;
+  for (const action of ["visual", "review", "release"]) {
+    await assert.rejects(() => e.app(820015, { action, id: "client-portal" }), /unavailable until the replacement browser/i);
   }
-  const reviewed = await e.app(820015, { action: "review", id: "client-portal", passed: true, summary: "Readable desktop layout and expected content are visible." }) as any;
-  assert.equal(reviewed.verification.visual.status, "passed");
-  const release = await e.app(820015, { action: "release", id: "client-portal", target: "Vercel preview" }) as any;
-  assert.equal(release.status, "ready_to_publish");
-  assert.equal(release.release.status, "awaiting_approval");
   const stopped = await e.app(820015, { action: "stop", id: "client-portal" }) as any;
   assert.equal(stopped.status, "stopped");
   assert.equal(stopped.ptySessionId, undefined);

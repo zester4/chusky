@@ -68,19 +68,17 @@ test("routes core engineering and growth skills deterministically", () => {
   assert.ok(meet.includes("meeting-pro"));
 });
 
-test("routes browser and shopping requests to browser-pro and loads its guidance", async () => {
+test("does not route website automation requests to retired browser skills", async () => {
   for (const query of [
     "Browse Walmart and add two sweaters to my cart",
     "Fill out this website form",
     "Sign in to a website and complete checkout",
   ]) {
-    assert.ok(routedSkillNames(query).includes("browser-pro"), `expected browser-pro for ${query}`);
+    assert.ok(!routedSkillNames(query).includes("browser-pro"), `browser-pro must stay unavailable for ${query}`);
   }
-  const context = await routedSkillContext("Browse Walmart and add two sweaters to my cart");
-  assert.match(context, /### browser-pro \((?:primary|supporting)\)/);
-  assert.match(context, /classify → plan → acquire → observe → act → verify → checkpoint/);
-  assert.match(context, /Domino's/);
-  assert.match(context, /final order\/payment control/);
+  const skills = await searchSkills("browser", 50);
+  assert.ok(skills.every((skill) => !["browser-pro", "agent-browser", "kernel-agent-browser"].includes(skill.name)));
+  await assert.rejects(() => readSkillFile("browser-pro"), /not found/);
 });
 
 test("routes game requests to game-scaffold", () => {
