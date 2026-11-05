@@ -2008,6 +2008,7 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
     });
     case "CHUCK_MONID_RUN_GET": return monidGateway().getRun(userId, text(args.runId, 100), runtime.organizationId);
     case "CHUCK_MONID_RUNS_LIST": return monidGateway().listRuns(userId, args.limit === undefined ? 10 : Number(args.limit), runtime.organizationId);
+    case "CHUCK_MONID_STOP": return monidGateway().stopRun(userId, text(args.runId, 100), runtime.organizationId);
     case "CHUCK_MONID_BALANCE": return monidGateway().balance(runtime.organizationId);
     case "CHUCK_MONID_USAGE": {
       const dayKey = args.dayKey ? text(args.dayKey, 10) : new Date().toISOString().slice(0, 10);

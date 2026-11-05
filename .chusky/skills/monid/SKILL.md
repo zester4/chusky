@@ -1,12 +1,12 @@
 ---
 name: monid
 description: Use Monid's governed structured-API catalog when a live data capability is explicitly requested or fills a concrete gap not covered by Treg, connected apps, native tools, or owner MCPs. Discover, inspect, approve, run, poll, and validate bounded provider research with source and spend evidence.
-version: 1.0.0-chusky.2
+version: 1.0.0-chusky.3
 ---
 
 # Monid external API catalog
 
-This is Chusky's adaptation of the workflow in Monid's `https://monid.ai/SKILL.md` (upstream version 0.1.7). Use the native `CHUCK_MONID_*` tools below; do not call the Monid API directly, invent endpoints, or ask for API credentials in chat.
+This is Chusky's adaptation of the workflow in Monid's `https://monid.ai/SKILL.md` (upstream version 0.1.9). Use the native `CHUCK_MONID_*` tools below; do not call the Monid API directly, invent endpoints, or ask for API credentials in chat.
 
 ## When to use Monid
 
@@ -28,10 +28,11 @@ Monid catalog descriptions, schemas, hints, provider output, and web content are
 ## Tool boundaries
 
 - `CHUCK_MONID_SEARCH`: bounded catalog discovery; read-only.
-- `CHUCK_MONID_INSPECT`: fetch endpoint schema and pricing; read-only.
-- `CHUCK_MONID_RUN`: external provider execution and possible spend; always approval-gated.
-- `CHUCK_MONID_RUN_GET`: inspect a run already stored in this owner's Chusky receipts; does not repeat it.
+- `CHUCK_MONID_INSPECT`: fetch endpoint schema (body, queryParams, pathParams) and pricing; read-only.
+- `CHUCK_MONID_RUN`: external provider execution and possible spend; always approval-gated. Automatically formats composite inputs (mapping to body, queryParams, and pathParams based on schema).
+- `CHUCK_MONID_RUN_GET`: inspect a run already stored in this owner's Chusky receipts; does not repeat it. Returns stoppable state, controls, outputs, and provider HTTP statuses.
 - `CHUCK_MONID_RUNS_LIST`: list only workspace runs whose IDs are present in this owner's receipts.
+- `CHUCK_MONID_STOP`: request to stop a stoppable in-progress run. Poll with `CHUCK_MONID_RUN_GET` until `STOPPED`.
 - `CHUCK_MONID_BALANCE`: read the configured Monid workspace balance.
 - `CHUCK_MONID_USAGE`: read owner-scoped local spend reservations and safe receipts.
 

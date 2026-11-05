@@ -21,4 +21,4 @@ Use Monid as an optional server-side external API catalog, alongside the existin
 
 Monid's current OAuth quickstart says platform OAuth client credentials are issued by Monid support; the current Chusky adapter uses server-side API keys and does not implement per-user OAuth. Monid's published Terms include a restriction on automated/nonhuman access, while its agent skill and API documentation describe agent use. Keep the integration disabled until the operator resolves that terms conflict with Monid for the intended deployment. Do not use it for data subject to regulatory regimes excluded by Monid's published Terms.
 
-The checked upstream skill was version 0.1.7 from `https://monid.ai/SKILL.md`. API details should be rechecked against the official Monid API docs before changing request contracts because the catalog and pricing can change.
+The checked upstream skill was version 0.1.9 from `https://monid.ai/SKILL.md`. API details should be rechecked against the official Monid API docs before changing request contracts because the catalog and pricing can change.

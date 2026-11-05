@@ -113,7 +113,65 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function numberAt(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
+  if (isRecord(value) && typeof value.value === "number" && Number.isFinite(value.value) && value.value >= 0) {
+    return value.value;
+  }
+  return undefined;
+}
+
+function extractPriceDetails(priceRow: Record<string, unknown>): {
+  priceType: string;
+  listedPrice: number | undefined;
+  flatFee: number;
+} {
+  const defaultPrice = isRecord(priceRow.default) ? priceRow.default : undefined;
+  const activePrice = defaultPrice ?? priceRow;
+  const priceType = String(activePrice.type ?? activePrice.model ?? priceRow.type ?? priceRow.model ?? "").toUpperCase();
+  const listedPrice = numberAt(activePrice.amount) ?? numberAt(activePrice.unitPrice) ?? numberAt(priceRow.amount) ?? numberAt(priceRow.unitPrice);
+  const flatFee = numberAt(activePrice.flatFee) ?? numberAt(priceRow.flatFee) ?? 0;
+  return { priceType, listedPrice, flatFee };
+}
+
+function adaptCompositeInput(input: Record<string, unknown>, inspectedSchema?: unknown): Record<string, unknown> {
+  const isAlreadyComposite = "body" in input || "queryParams" in input || "pathParams" in input;
+  if (isAlreadyComposite) {
+    return {
+      ...(isRecord(input.body) ? { body: input.body } : {}),
+      ...(isRecord(input.queryParams) ? { queryParams: input.queryParams } : {}),
+      ...(isRecord(input.pathParams) ? { pathParams: input.pathParams } : {}),
+    };
+  }
+
+  const inspected = isRecord(inspectedSchema) ? inspectedSchema : {};
+  const endpointInput = isRecord(inspected.input) ? inspected.input : isRecord(inspected.inputSchema) ? inspected.inputSchema : {};
+  const querySchema = isRecord(endpointInput.queryParams) ? endpointInput.queryParams : undefined;
+  const pathSchema = isRecord(endpointInput.pathParams) ? endpointInput.pathParams : undefined;
+  const bodySchema = isRecord(endpointInput.body) ? endpointInput.body : undefined;
+
+  const queryKeys = new Set(querySchema && isRecord(querySchema.properties) ? Object.keys(querySchema.properties) : []);
+  const pathKeys = new Set(pathSchema && isRecord(pathSchema.properties) ? Object.keys(pathSchema.properties) : []);
+  const bodyKeys = new Set(bodySchema && isRecord(bodySchema.properties) ? Object.keys(bodySchema.properties) : []);
+
+  const queryParams: Record<string, unknown> = {};
+  const pathParams: Record<string, unknown> = {};
+  const body: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(input)) {
+    if (pathKeys.has(key)) {
+      pathParams[key] = value;
+    } else if (queryKeys.has(key) && !bodyKeys.has(key)) {
+      queryParams[key] = value;
+    } else {
+      body[key] = value;
+    }
+  }
+
+  return {
+    ...(Object.keys(body).length > 0 ? { body } : {}),
+    ...(Object.keys(queryParams).length > 0 ? { queryParams } : {}),
+    ...(Object.keys(pathParams).length > 0 ? { pathParams } : {}),
+  };
 }
 
 async function readBoundedResponse(response: Response, maxBytes: number): Promise<string> {
@@ -232,16 +290,17 @@ export class MonidGateway {
     if (!query) throw new Error("Provide a short Monid capability query.");
     const limit = Math.max(1, Math.min(10, Math.floor(limitInput)));
     const { data } = await this.request("POST", "/v1/discover", organizationId, { query, limit });
-    const results = Array.isArray(data.results) ? data.results.slice(0, limit).filter(isRecord).map((row) => ({
+    const rawItems = Array.isArray(data.items) ? data.items : Array.isArray(data.results) ? data.results : [];
+    const results = rawItems.slice(0, limit).filter(isRecord).map((row) => ({
       ...(typeof row.provider === "string" ? { provider: boundedText(row.provider, 64) } : {}),
-      ...(typeof row.providerName === "string" ? { providerName: boundedText(row.providerName, 120) } : {}),
+      ...(typeof (row.providerDisplayName ?? row.providerName) === "string" ? { providerName: boundedText(row.providerDisplayName ?? row.providerName, 120) } : {}),
       ...(typeof row.endpoint === "string" ? { endpoint: boundedText(row.endpoint, 300) } : {}),
-      ...(typeof row.description === "string" ? { description: boundedText(row.description, 1_000) } : {}),
+      ...(typeof (row.displayDescription ?? row.description) === "string" ? { description: boundedText(row.displayDescription ?? row.description, 1_000) } : {}),
       ...(row.price !== undefined ? { price: safeValue(row.price) } : {}),
       ...(row.metrics !== undefined ? { metrics: safeValue(row.metrics) } : {}),
       ...(row.verified !== undefined ? { verified: row.verified === true } : {}),
       ...(row.hints !== undefined ? { hints: boundedResult(row.hints) } : {}),
-    })) : [];
+    }));
     return { query, results, count: results.length };
   }
 
@@ -250,7 +309,8 @@ export class MonidGateway {
     const { data } = await this.request("POST", "/v1/inspect", organizationId, { provider, endpoint });
     return boundedResult({
       id: data.id, provider: data.provider ?? provider, providerName: data.providerName, endpoint: data.endpoint ?? endpoint,
-      description: data.description, summary: data.summary, inputSchema: data.inputSchema, price: data.price ?? data.pricing, pricing: data.pricing,
+      description: data.description, summary: data.summary, input: data.input, inputSchema: data.inputSchema ?? data.input,
+      price: data.price ?? data.pricing, pricing: data.pricing ?? data.price,
       docUrl: data.docUrl, notes: data.notes, usage: data.usage, metrics: data.metrics, verified: data.verified, hints: data.hints,
     });
   }
@@ -258,13 +318,11 @@ export class MonidGateway {
   async run(options: { userId: number; provider: unknown; endpoint: unknown; input: unknown; maxSpendUsd?: number; missionId?: string; organizationId?: string }): Promise<unknown> {
     if (!config.monidEnabled) throw new Error("Monid is disabled.");
     const { provider, endpoint } = endpointArgs(options.provider, options.endpoint);
-    const input = validateInput(options.input);
+    const rawInput = validateInput(options.input);
     const inspected = await this.inspect(provider, endpoint, options.organizationId);
     const inspectedRow = isRecord(inspected) ? inspected : {};
     const price = isRecord(inspectedRow.pricing) ? inspectedRow.pricing : isRecord(inspectedRow.price) ? inspectedRow.price : {};
-    const priceType = String(price.type ?? price.model ?? "").toUpperCase();
-    const listedPrice = numberAt(price.amount) ?? numberAt(price.unitPrice);
-    const flatFee = numberAt(price.flatFee) ?? 0;
+    const { priceType, listedPrice, flatFee } = extractPriceDetails(price);
     const requestedCap = options.maxSpendUsd;
     let estimateUsd: number;
     if (requestedCap !== undefined && (!Number.isFinite(requestedCap) || requestedCap <= 0)) throw new Error("maxSpendUsd must be greater than zero.");
@@ -272,13 +330,13 @@ export class MonidGateway {
       if (requestedCap === undefined) throw new Error("This endpoint charges per result. Provide maxSpendUsd so Chusky can reserve a bounded allowance before running it.");
       if (listedPrice === undefined) throw new Error("Monid did not return a verifiable per-result price; this endpoint cannot be run safely.");
       if (flatFee > requestedCap) throw new Error(`The inspected flat fee is $${flatFee.toFixed(6)}, above the supplied maxSpendUsd.`);
-      const exposure = perResultExposure(input, listedPrice, flatFee);
+      const exposure = perResultExposure(rawInput, listedPrice, flatFee);
       if (exposure > requestedCap) throw new Error(`The inspected price and result limit estimate $${exposure.toFixed(6)}, above the supplied maxSpendUsd.`);
       estimateUsd = requestedCap;
-    } else if (priceType === "PER_CALL") {
-      if (listedPrice === undefined) throw new Error("Monid did not return a verifiable per-call price; this endpoint cannot be run safely.");
-      estimateUsd = requestedCap ?? Math.max(0.000001, listedPrice + flatFee);
-      if (listedPrice + flatFee > estimateUsd) throw new Error(`The inspected per-call price is $${(listedPrice + flatFee).toFixed(6)}, above the supplied maxSpendUsd.`);
+    } else if (priceType === "PER_CALL" || priceType === "PER_UNIT" || priceType === "METERED") {
+      if (listedPrice === undefined && requestedCap === undefined) throw new Error("Monid did not return a verifiable price; this endpoint cannot be run safely.");
+      estimateUsd = requestedCap ?? Math.max(0.000001, (listedPrice ?? 0) + flatFee);
+      if (listedPrice !== undefined && listedPrice + flatFee > estimateUsd) throw new Error(`The inspected price is $${(listedPrice + flatFee).toFixed(6)}, above the supplied maxSpendUsd.`);
     } else {
       throw new Error("Monid did not return a supported PER_CALL or PER_RESULT price; this endpoint cannot be run safely.");
     }
@@ -292,8 +350,9 @@ export class MonidGateway {
     };
     await this.deps.saveReceipt(receipt);
     const startedAt = this.now();
+    const formattedInput = adaptCompositeInput(rawInput, inspectedRow);
     try {
-      const response = await this.request("POST", "/v1/run", options.organizationId, { provider, endpoint, input });
+      const response = await this.request("POST", "/v1/run", options.organizationId, { provider, endpoint, input: formattedInput });
       const row = response.data;
       const runId = typeof row.runId === "string" ? boundedText(row.runId, 100) : undefined;
       if (response.status === 202 || normalizeState(row.status) === "running") {
@@ -373,6 +432,16 @@ export class MonidGateway {
 
   async balance(organizationId?: string): Promise<unknown> {
     const { data } = await this.request("GET", "/v1/wallet/balance", organizationId);
+    return boundedResult(data);
+  }
+
+  async stopRun(userId: number, runIdInput: string, organizationId?: string): Promise<unknown> {
+    const runId = boundedText(runIdInput, 100);
+    if (!/^[A-Za-z0-9_-]{8,100}$/.test(runId)) throw new Error("Invalid Monid run ID.");
+    const receipts = await this.deps.listReceipts(userId, 200, organizationId);
+    const receipt = receipts.find((item) => item.runId === runId && item.userId === userId && item.organizationId === organizationId);
+    if (!receipt) throw new Error("That Monid run is not in this owner's saved receipts.");
+    const { data } = await this.request("POST", `/v1/runs/${encodeURIComponent(runId)}/stop`, organizationId);
     return boundedResult(data);
   }
 
