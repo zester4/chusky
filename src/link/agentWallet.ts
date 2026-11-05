@@ -3,7 +3,7 @@ import type { CreateSpendRequestParams, Link, PaymentMethod, SpendRequest, Trans
 import { config } from "../config.js";
 import { decryptCredential, encryptCredential, type EncryptedCredential } from "../vault/crypto.js";
 import { e2bBrowserEngine } from "../lib/e2b/index.js";
-import { assertSafeBrowserUrl } from "../lib/e2b/urlSafety.js";
+import { assertSafeBrowserUrl } from "../urlSafety.js";
 import { verifyBrowserResult, type BrowserDetector } from "../vault/browserOps.js";
 import {
   clearLinkWallet,

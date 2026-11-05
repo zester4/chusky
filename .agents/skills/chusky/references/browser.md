@@ -12,9 +12,10 @@ The Camofox adapter exposes separate `CHUCK_CAMOFOX_*` native tools for tabs,
 navigation, accessibility snapshots, links, screenshots, page state, scrolling,
 typing, clicking, waiting, downloads, extraction, overlays, live viewing, and
 human handoff. These tools are only callable in a private owner conversation.
-`CHUCK_CAMOFOX_OPEN` issues a 10-minute signed viewer link when available.
-Chusky sends it through the private-link UI (including a dedicated dashboard
-live-view card) and strips the bearer URL from model context and saved history.
+`CHUCK_CAMOFOX_OPEN` issues a signed viewer link that expires after 10 minutes
+when available. The dashboard renders the read-only viewer directly in chat
+and keeps human handoff links separate. Chusky strips the bearer URL from model
+context and saved history.
 The server hashes the authenticated Chusky owner ID before passing it to Camofox;
 never accept a Camofox user ID, service URL, or access key from model arguments.
 

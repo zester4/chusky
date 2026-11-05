@@ -117,7 +117,7 @@ import { listApprovalEscalations, runDueApprovalEscalations, scheduleApprovalEsc
 import { buildOperatorTimeline } from "./reliability/timeline.js";
 import { diagnoseMission } from "./reliability/missionDoctor.js";
 import { checkExecutionQuota, reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
-import { assertSafeBrowserUrl } from "./lib/e2b/urlSafety.js";
+import { assertSafeBrowserUrl } from "./urlSafety.js";
 import { durableStorageMetrics } from "./store.js";
 import { elenaDisabledMessage, isElenaApproval } from "./proactive/featureFlag.js";
 

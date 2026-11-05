@@ -1,4 +1,4 @@
-import { assertSafeBrowserUrl } from "./lib/e2b/urlSafety.js";
+import { assertSafeBrowserUrl } from "./urlSafety.js";
 
 const MAX_RESPONSE_BYTES = 1_500_000;
 const MAX_TEXT_CHARS = 24_000;

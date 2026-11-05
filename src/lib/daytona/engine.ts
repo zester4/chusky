@@ -6,7 +6,6 @@ import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import PptxGenJS from "pptxgenjs";
 import { config } from "../../config.js";
-import { guardVaultWorkspaceAccess } from "../../vault/browserGuard.js";
 import { acquireDaytonaComputerLeaseLock, clearDaytonaWorkspace, getDaytonaWorkspace, getSession, releaseDaytonaComputerLeaseLock, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactProvenance, type ArtifactRetention, type ArtifactRegistrationIntent, type ArtifactType, type DaytonaAppCheck, type DaytonaAppFramework, type DaytonaAppRecord, type DaytonaAppVerification, type DaytonaWorkspaceRecord } from "../../store.js";
 import { buildAppTemplateFiles, DAYTONA_APP_ARCHETYPES, DAYTONA_APP_STYLES, resolveAppDesign, type DaytonaAppArchetype, type DaytonaAppStyle } from "./appTemplates.js";
 import { DaytonaInputError } from "./errors.js";
@@ -2044,7 +2043,6 @@ export class DaytonaEngine {
     if (action === "get") return { sandboxId: sandbox.id, sessionId: id, session: safeSessionSummary(await sandbox.process.getSession(id)) };
     if (action === "execute") {
       const command = boundedText(args.command, "command", DAYTONA_MAX_COMMAND_LENGTH);
-      await guardVaultWorkspaceAccess(userId, sandbox.id, command, "session command");
       const result = await sandbox.process.executeSessionCommand(id, { command, runAsync: args.runAsync === true, suppressInputEcho: args.suppressInputEcho === true }, boundedInt(args.timeoutSeconds, 60, DAYTONA_MAX_EXECUTION_SECONDS));
       const output = String(result.output ?? result.stdout ?? "");
       return { sandboxId: sandbox.id, sessionId: id, commandId: result.cmdId, output: output.slice(0, DAYTONA_MAX_OUTPUT_CHARS), stdout: String(result.stdout ?? "").slice(0, DAYTONA_MAX_OUTPUT_CHARS), stderr: String(result.stderr ?? "").slice(0, DAYTONA_MAX_OUTPUT_CHARS), exitCode: result.exitCode };
@@ -2074,7 +2072,6 @@ export class DaytonaEngine {
       if (!args.commandId) throw new DaytonaInputError("commandId is required for input; use the commandId returned by the matching execute action.");
       const commandId = boundedIdentifier(args.commandId, "commandId");
       const input = boundedText(args.input, "input", 8000);
-      await guardVaultWorkspaceAccess(userId, sandbox.id, input, "session input");
       await sandbox.process.sendSessionCommandInput(id, commandId, input);
       return { sandboxId: sandbox.id, sessionId: id, commandId };
     }
@@ -2113,7 +2110,6 @@ export class DaytonaEngine {
     if (!context) throw new DaytonaInputError("Interpreter context is no longer available");
     if (action === "run") {
       const code = boundedText(args.code, "code", DAYTONA_MAX_COMMAND_LENGTH);
-      await guardVaultWorkspaceAccess(userId, sandbox.id, code, "interpreter code");
       const stdout: string[] = [];
       const stderr: string[] = [];
       let result: Awaited<ReturnType<typeof sandbox.codeInterpreter.runCode>>;
@@ -2207,7 +2203,6 @@ export class DaytonaEngine {
     }
     const sandbox = await this.getOrCreateWorkspace(userId);
     const normalizedCwd = cwd ? safeDaytonaPath(cwd, "cwd") : undefined;
-    await guardVaultWorkspaceAccess(userId, sandbox.id, `${normalized}\n${normalizedCwd ?? ""}`, "command");
     const normalizedTimeout = boundedInt(timeoutSeconds, 60, DAYTONA_MAX_EXECUTION_SECONDS);
     if (signal) return this.executeCancellable(userId, sandbox, normalized, normalizedCwd, normalizedTimeout, signal);
     let result: { exitCode?: number; result?: string; artifacts?: { stdout?: string } };
@@ -2311,7 +2306,6 @@ export class DaytonaEngine {
   async listFiles(userId: number, path?: string, depth?: number): Promise<DaytonaFileInfo[]> {
     const sandbox = await this.getOrCreateWorkspace(userId);
     const normalizedPath = path ? safeDaytonaPath(path) : ".";
-    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath);
     let files: FileInfo[];
     try {
       files = await sandbox.fs.listFiles(normalizedPath, { depth: boundedInt(depth, 1, 5) }) as FileInfo[];
@@ -2333,7 +2327,6 @@ export class DaytonaEngine {
   async readFile(userId: number, path: string, maxChars?: number): Promise<{ path: string; content: string; truncated: boolean; exists?: boolean; nextAction?: string }> {
     const sandbox = await this.getOrCreateWorkspace(userId);
     const normalizedPath = safeDaytonaPath(path);
-    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "file path");
     let bytes: Buffer;
     try {
       bytes = await sandbox.fs.downloadFile(normalizedPath);
@@ -2361,7 +2354,6 @@ export class DaytonaEngine {
     const normalizedContent = String(content ?? "");
     if (normalizedContent.length > DAYTONA_MAX_FILE_CONTENT) throw new DaytonaInputError(`content must be at most ${DAYTONA_MAX_FILE_CONTENT} characters`);
     const sandbox = await this.getOrCreateWorkspace(userId);
-    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "file path");
     await sandbox.fs.uploadFile(Buffer.from(normalizedContent, "utf8"), normalizedPath);
     return { path: normalizedPath, bytes: Buffer.byteLength(normalizedContent, "utf8") };
   }
@@ -2371,7 +2363,6 @@ export class DaytonaEngine {
     if (!Buffer.isBuffer(content) || content.length < 1) throw new DaytonaInputError("binary content must not be empty");
     if (content.length > DAYTONA_MAX_ARTIFACT_BYTES) throw new DaytonaInputError(`binary content must be at most ${DAYTONA_MAX_ARTIFACT_BYTES} bytes`);
     const sandbox = await this.getOrCreateWorkspace(userId);
-    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "file path");
     await sandbox.fs.uploadFile(content, normalizedPath);
     return { path: normalizedPath, bytes: content.length };
   }
@@ -2380,7 +2371,6 @@ export class DaytonaEngine {
     const normalizedPath = safeDaytonaPath(path);
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > DAYTONA_MAX_ARTIFACT_BYTES) throw new DaytonaInputError("Invalid binary file size limit");
     const sandbox = await this.getOrCreateWorkspace(userId);
-    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "file path");
     const details = await sandbox.fs.getFileDetails(normalizedPath) as { size?: number; isDir?: boolean };
     const size = Number(details.size);
     if (details.isDir || !Number.isSafeInteger(size) || size < 1 || size > maxBytes) throw new DaytonaInputError("Image file is empty, a directory, or exceeds the transfer size limit");
@@ -2396,7 +2386,6 @@ export class DaytonaEngine {
     const replacement = String(newValue ?? "");
     if (replacement.length > 8000) throw new DaytonaInputError("newValue must be at most 8000 characters");
     const sandbox = await this.getOrCreateWorkspace(userId);
-    await guardVaultWorkspaceAccess(userId, sandbox.id, `${paths.join("\n")}\n${search}`, "replace files");
     const result = await sandbox.fs.replaceInFiles(paths, search, replacement);
     return { sandboxId: sandbox.id, files: result.slice(0, 100) };
   }
@@ -2411,7 +2400,6 @@ export class DaytonaEngine {
     const group = input.group === undefined ? undefined : boundedIdentifier(input.group, "group", 80);
     if (!mode && !owner && !group) throw new DaytonaInputError("permissions must include mode, owner, or group");
     const sandbox = await this.getOrCreateWorkspace(userId);
-    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "file permissions");
     await sandbox.fs.setFilePermissions(normalizedPath, { ...(mode ? { mode } : {}), ...(owner ? { owner } : {}), ...(group ? { group } : {}) });
     return { sandboxId: sandbox.id, path: normalizedPath, updated: true };
   }
@@ -2421,7 +2409,6 @@ export class DaytonaEngine {
     const normalizedPattern = String(pattern ?? "").trim();
     if (!normalizedPattern || normalizedPattern.length > 200) throw new DaytonaInputError("pattern must be 1-200 characters");
     const normalizedPath = path ? safeDaytonaPath(path) : ".";
-    await guardVaultWorkspaceAccess(userId, sandbox.id, `${normalizedPath}\n${normalizedPattern}`, "file search");
     return sandbox.fs.findFiles(normalizedPath, normalizedPattern);
   }
 
@@ -2430,14 +2417,12 @@ export class DaytonaEngine {
     const normalizedPattern = String(pattern ?? "").trim();
     if (!normalizedPattern || normalizedPattern.length > 200) throw new DaytonaInputError("pattern must be 1-200 characters");
     const normalizedPath = path ? safeDaytonaPath(path) : ".";
-    await guardVaultWorkspaceAccess(userId, sandbox.id, `${normalizedPath}\n${normalizedPattern}`, "file search");
     return sandbox.fs.searchFiles(normalizedPath, normalizedPattern);
   }
 
   async fileDetails(userId: number, path: string): Promise<unknown> {
     const sandbox = await this.getOrCreateWorkspace(userId);
     const normalizedPath = safeDaytonaPath(path);
-    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "file path");
     try {
       return { path: normalizedPath, exists: true, ...(await sandbox.fs.getFileDetails(normalizedPath)) };
     } catch (error) {
@@ -2458,7 +2443,6 @@ export class DaytonaEngine {
   async createFolder(userId: number, path: string): Promise<{ path: string; created: boolean }> {
     const normalizedPath = safeDaytonaPath(path);
     const sandbox = await this.getOrCreateWorkspace(userId);
-    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "folder path");
     await sandbox.fs.createFolder(normalizedPath, "755");
     return { path: normalizedPath, created: true };
   }
@@ -2467,7 +2451,6 @@ export class DaytonaEngine {
     const normalizedSource = safeDaytonaPath(source, "source");
     const normalizedDestination = safeDaytonaPath(destination, "destination");
     const sandbox = await this.getOrCreateWorkspace(userId);
-    await guardVaultWorkspaceAccess(userId, sandbox.id, `${normalizedSource}\n${normalizedDestination}`, "file move");
     await sandbox.fs.moveFiles(normalizedSource, normalizedDestination);
     return { source: normalizedSource, destination: normalizedDestination, moved: true };
   }
@@ -2475,7 +2458,6 @@ export class DaytonaEngine {
   async deleteFile(userId: number, path: string, recursive = false): Promise<{ path: string; deleted: boolean }> {
     const normalizedPath = safeDaytonaPath(path);
     const sandbox = await this.getOrCreateWorkspace(userId);
-    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "file path");
     await sandbox.fs.deleteFile(normalizedPath, recursive);
     return { path: normalizedPath, deleted: true };
   }
@@ -2813,7 +2795,6 @@ export class DaytonaEngine {
       return result;
     }
     if (action === "process_status") return readOnly(() => computer.getProcessStatus(computerProcessName(args.processName, "novnc")));
-    if (action === "process_logs" || action === "process_errors") await guardVaultWorkspaceAccess(userId, sandbox.id, action, "desktop diagnostics");
     if (action === "recording_list") {
       const listed = await readOnly(() => computer.recording.list());
       const reconciled = await reconcileRecordings(listed);
@@ -2970,7 +2951,6 @@ export class DaytonaEngine {
     if (action === "create") {
       const id = requestedId ?? `chusky-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       if (known.has(id)) throw new DaytonaInputError("A PTY session with that id already exists");
-      await guardVaultWorkspaceAccess(userId, sandbox.id, `${args.cwd ?? ""}\n${args.input ?? ""}`, "terminal input");
       const output = collectPtyOutput();
       const handle = await sandbox.process.createPty({ id, cwd: args.cwd ? safeDaytonaPath(args.cwd, "cwd") : undefined, cols: boundedNumber(args.cols, 120, 300), rows: boundedNumber(args.rows, 30, 200), onData: output.onData });
       await handle.waitForConnection();
@@ -2991,7 +2971,6 @@ export class DaytonaEngine {
     }
     if (action !== "read" && action !== "write") throw new DaytonaInputError(`Unsupported PTY action: ${action}`);
     const output = collectPtyOutput();
-    await guardVaultWorkspaceAccess(userId, sandbox.id, args.action === "write" ? args.input : id, "terminal input");
     const handle = await sandbox.process.connectPty(id, { onData: output.onData });
     try {
       await handle.waitForConnection();
