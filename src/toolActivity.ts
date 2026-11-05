@@ -162,6 +162,7 @@ export function nativeActivityActionLabel(toolSlug: string, args?: ActivityCallA
   if (upper === "CHUCK_MONID_RUN") return `Running the research action${providerSuffix}`;
   if (upper === "CHUCK_MONID_RUN_GET") return "Checking the research run";
   if (upper === "CHUCK_MONID_RUNS_LIST") return "Listing research runs";
+  if (upper === "CHUCK_MONID_STOP") return "Stopping the research run";
   if (upper === "CHUCK_MONID_BALANCE" || upper === "CHUCK_MONID_USAGE") return "Checking usage";
 
   if (upper === "COMPOSIO_REMOTE_BASH_TOOL") return "Running a remote shell command";
