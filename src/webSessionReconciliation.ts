@@ -132,8 +132,9 @@ export async function recoverWebSessionReconciliationTasks(
   options: { maxOwners?: number; now?: number } = {},
 ): Promise<WebSessionReconciliationRecoveryReport> {
   const ownerIds = await listTaskOwnerIds(Math.max(1, Math.min(MAX_RECOVERY_OWNERS, Math.floor(options.maxOwners ?? MAX_RECOVERY_OWNERS))));
-  const now = options.now ?? Date.now();
   const report: WebSessionReconciliationRecoveryReport = { owners: ownerIds.length, checked: 0, republished: 0, skipped: 0, failures: [] };
+  if (!ownerIds.length) return report;
+  const now = options.now ?? Date.now();
   for (const userId of ownerIds) {
     const tasks = await listOpenTasks(userId);
     for (const task of tasks) {
