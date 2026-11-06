@@ -190,6 +190,7 @@ test("bounded Treg research and catalog reads are autonomous while catalog write
   const autonomous = [
     "CHUCK_TREG_PLAN", "CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_MY_TOOLS",
     "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_COMPANY_JOBS_SEARCH", "CHUCK_TREG_RESOLVE",
+    "CHUCK_TREG_EMAIL_FIND", "CHUCK_TREG_PHONE_FIND", "CHUCK_TREG_COMPANIES_SIMILAR",
     "CHUCK_TREG_BALANCE", "CHUCK_TREG_USAGE", "CHUCK_TREG_OAUTH_STATUS", "CHUCK_TREG_OAUTH_CONNECTIONS",
   ];
   for (const slug of autonomous) {
@@ -201,8 +202,12 @@ test("bounded Treg research and catalog reads are autonomous while catalog write
   assert.equal(toolApprovalPolicy("CHUCK_TREG_CALL", { endpointId: "treg.companies.search", method: "GET" }), "private");
   assert.equal(requiresToolApproval("CHUCK_TREG_CALL", { endpointId: "treg.companies.search", method: "GET" }), false);
   assert.equal(requiresToolApproval("CHUCK_TREG_CALL", { endpointId: "treg.companies.search", method: "GET" }, true), false);
+  assert.equal(toolApprovalPolicy("CHUCK_TREG_CALL", { endpointId: "treg.people.email.find", method: "POST" }), "private");
+  assert.equal(requiresToolApproval("CHUCK_TREG_CALL", { endpointId: "treg.people.email.find", method: "POST" }), false);
+  assert.equal(toolApprovalPolicy("CHUCK_TREG_CALL", { endpointId: "treg.companies.similar", method: "POST" }), "private");
+  assert.equal(requiresToolApproval("CHUCK_TREG_CALL", { endpointId: "treg.companies.similar", method: "POST" }), false);
   for (const args of [
-    {}, { endpointId: "treg.companies.enrich" }, { endpointId: "treg.ads.campaign.update", method: "PATCH" },
+    {}, { endpointId: "treg.ads.campaign.update", method: "PATCH" },
     { endpointId: "treg.ads.campaign.create", method: "POST" }, { endpointId: "stripe/charges" },
     { endpointId: "https://api.example.com/charge", method: "GET" },
   ]) {

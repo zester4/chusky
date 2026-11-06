@@ -907,6 +907,123 @@ test("native Treg dispatch routes through the gateway boundary", async () => {
   }
 });
 
+test("TregGateway findEmail discovers and verifies emails with domain matching", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  try {
+    const fetchMock: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("/catalog/endpoints/")) {
+        return new Response(JSON.stringify({ id: "treg.people.email.find", method: "POST", title: "Find work email", provider: "treg", price_usd: 0.005 }), { status: 200 });
+      }
+      if (url.includes("/call/treg.people.email.find")) {
+        const headers = new Headers();
+        headers.set("X-Treg-Call-Id", "call_email_123");
+        headers.set("X-Treg-Cost-Micro", "5000");
+        headers.set("X-Treg-Served-By", "quickenrich");
+        return new Response(JSON.stringify({
+          output: { email: "satya@microsoft.com", first_name: "Satya", last_name: "Nadella", full_name: "Satya Nadella", domain: "microsoft.com" },
+          _treg: {
+            served_by: "quickenrich",
+            domain_match: true,
+            verification: { verdict: "valid" },
+            advice: "Address verified deliverable by provider SMTP probe",
+          },
+        }), { status: 200, headers });
+      }
+      return new Response("Not found", { status: 404 });
+    };
+
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
+      recordReceipt: async () => {},
+      fetchImpl: fetchMock,
+    });
+
+    const result = await gateway.findEmail({
+      userId: 1,
+      fullName: "Satya Nadella",
+      domain: "microsoft.com",
+    });
+
+    assert.equal(result.email, "satya@microsoft.com");
+    assert.equal(result.verified, true);
+    assert.equal(result.domainMatch, true);
+    assert.equal(result.servedBy, "quickenrich");
+    assert.equal(result.totalCostUsd, 0.005);
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+  }
+});
+
+test("TregGateway findPhone and similarCompanies retrieve and normalize responses", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  try {
+    const fetchMock: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("/catalog/endpoints/")) {
+        const id = url.split("/catalog/endpoints/")[1]?.split("?")[0] || "treg.mock";
+        return new Response(JSON.stringify({ id, method: "POST", title: "Mock endpoint", provider: "treg", price_usd: 0.01 }), { status: 200 });
+      }
+      if (url.includes("/call/treg.people.phone.find")) {
+        const headers = new Headers();
+        headers.set("X-Treg-Call-Id", "call_phone_456");
+        headers.set("X-Treg-Cost-Micro", "10000");
+        headers.set("X-Treg-Served-By", "blitzapi");
+        return new Response(JSON.stringify({
+          output: { phone: "+14155550199", full_name: "Patrick Collison", country: "US" },
+          _treg: { served_by: "blitzapi", verification: { verdict: "valid" } },
+        }), { status: 200, headers });
+      }
+      if (url.includes("/call/treg.companies.similar")) {
+        const headers = new Headers();
+        headers.set("X-Treg-Call-Id", "call_sim_789");
+        headers.set("X-Treg-Cost-Micro", "8900");
+        headers.set("X-Treg-Served-By", "tomba");
+        return new Response(JSON.stringify({
+          output: {
+            companies: [
+              { domain: "adyen.com", name: "Adyen", similarity: 0.94, employees: 3500 },
+              { domain: "checkout.com", name: "Checkout.com", similarity: 0.88, employees: 2000 },
+            ],
+          },
+        }), { status: 200, headers });
+      }
+      return new Response("Not found", { status: 404 });
+    };
+
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
+      recordReceipt: async () => {},
+      fetchImpl: fetchMock,
+    });
+
+    const phoneRes = await gateway.findPhone({
+      userId: 1,
+      linkedinUrl: "https://www.linkedin.com/in/patrickcollison",
+    });
+    assert.equal(phoneRes.phone, "+14155550199");
+    assert.equal(phoneRes.verified, true);
+    assert.equal(phoneRes.servedBy, "blitzapi");
+
+    const simRes = await gateway.similarCompanies({
+      userId: 1,
+      domain: "stripe.com",
+    });
+    assert.equal(simRes.companies.length, 2);
+    assert.equal(simRes.companies[0]?.domain, "adyen.com");
+    assert.equal(simRes.companies[0]?.employeeCount, 3500);
+    assert.equal(simRes.companies[1]?.domain, "checkout.com");
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+  }
+});
+
 test("native Treg resolution cannot widen a trusted signal-monitor budget", async () => {
   let received: Record<string, unknown> | undefined;
   const gateway = { resolveDataNeed: async (options: Record<string, unknown>) => (received = options) } as unknown as TregGateway;

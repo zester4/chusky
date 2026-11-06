@@ -117,10 +117,73 @@ export interface TregCompanySearchResult {
   domain?: string;
   industry?: string;
   employeeCount?: number;
+  employeeRange?: string;
   location?: string;
   description?: string;
   sourceUrls?: string[];
   providerScore?: number;
+}
+
+export interface TregEmailFindResult {
+  email?: string;
+  fullName?: string;
+  firstName?: string;
+  lastName?: string;
+  domain?: string;
+  domainMatch?: boolean;
+  status?: string;
+  verified?: boolean;
+  verificationVerdict?: string;
+  advice?: string;
+  confidence?: number;
+  providerScore?: number;
+  servedBy?: string;
+  tried?: string[];
+  callId: string;
+  totalCostUsd: number;
+  pending: boolean;
+  warnings: string[];
+}
+
+export interface TregPhoneFindResult {
+  phone?: string;
+  fullName?: string;
+  domain?: string;
+  domainMatch?: boolean;
+  country?: string;
+  phoneType?: string;
+  verified?: boolean;
+  verificationVerdict?: string;
+  advice?: string;
+  providerScore?: number;
+  servedBy?: string;
+  tried?: string[];
+  callId: string;
+  totalCostUsd: number;
+  pending: boolean;
+  warnings: string[];
+}
+
+export interface TregSimilarCompanyItem {
+  domain: string;
+  name?: string;
+  similarityScore?: number;
+  industry?: string;
+  employeeCount?: number;
+  location?: string;
+}
+
+export interface TregSimilarCompaniesResult {
+  seedDomain: string;
+  companies: TregSimilarCompanyItem[];
+  endpoint: string;
+  callId: string;
+  servedBy?: string;
+  tried?: string[];
+  totalCostUsd: number;
+  pending: boolean;
+  warnings: string[];
+  generatedAt: string;
 }
 
 export interface TregCompanyJobResult {
