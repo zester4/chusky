@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { config } from "../config.js";
-import type { TregCallReceipt, TregCategory, TregCompanyJobResult, TregCompanySearchResult, TregEndpointHit, TregEvidenceBundle, TregEvidenceItem, TregOAuthConnection, TregOwnTool, TregPersonSearchResult, TregPlatformOption } from "./types.js";
+import type { TregCallReceipt, TregCategory, TregCompanyJobResult, TregCompanySearchResult, TregEmailFindResult, TregEndpointHit, TregEvidenceBundle, TregEvidenceItem, TregOAuthConnection, TregOwnTool, TregPersonSearchResult, TregPhoneFindResult, TregPlatformOption, TregSimilarCompaniesResult, TregSimilarCompanyItem } from "./types.js";
 import type { TregSpendGuard } from "./spend.js";
 import type { TregEndpointJudge } from "../decisions/tregRouter.js";
 import { buildTregAdminRequest, sanitizeTregAdminResult } from "./management.js";
@@ -303,14 +303,18 @@ function normalizePersonSearchRow(row: JsonObject): TregPersonSearchResult {
 }
 
 function normalizeCompanySearchRow(row: JsonObject): TregCompanySearchResult {
-  const count = numberOrUndefined(row.employee_count ?? row.employees);
+  const count = numberOrUndefined(row.employee_count ?? row.employees ?? row.employeeCount ?? row.headcount);
+  const range = typeof (row.employee_range ?? row.company_size ?? row.size ?? row.headcount_range) === "string"
+    ? String(row.employee_range ?? row.company_size ?? row.size ?? row.headcount_range).slice(0, 80)
+    : undefined;
   const score = providerScore(row);
   return {
     ...(typeof (row.name ?? row.company ?? row.company_name) === "string" ? { name: String(row.name ?? row.company ?? row.company_name).slice(0, 240) } : {}),
     ...(typeof (row.domain ?? row.website) === "string" ? { domain: String(row.domain ?? row.website).slice(0, 240) } : {}),
     ...(typeof row.industry === "string" ? { industry: row.industry.slice(0, 200) } : {}),
     ...(count !== undefined && Number.isSafeInteger(count) && count >= 0 ? { employeeCount: count } : {}),
-    ...(typeof (row.location ?? row.country) === "string" ? { location: String(row.location ?? row.country).slice(0, 160) } : {}),
+    ...(range ? { employeeRange: range } : {}),
+    ...(typeof (row.location ?? row.country ?? row.primary_country) === "string" ? { location: String(row.location ?? row.country ?? row.primary_country).slice(0, 160) } : {}),
     ...(typeof row.description === "string" ? { description: row.description.slice(0, 1000) } : {}),
     ...(sourceUrls(row) ? { sourceUrls: sourceUrls(row) } : {}),
     ...(score === undefined ? {} : { providerScore: score }),
@@ -372,11 +376,15 @@ function normalizeCompanyPayload(result: unknown, hit: TregEndpointHit): TregEvi
   const payload = providerPayload(result);
   const row = isObject(payload) ? payload : {};
   const score = providerScore(row);
+  const count = row.employees ?? row.employee_count ?? row.employeeCount ?? row.headcount;
+  const range = row.employee_range ?? row.company_size ?? row.size ?? row.headcount_range;
   return [
-    evidence("company_name", row.name ?? row.company, hit, score),
+    evidence("company_name", row.name ?? row.company ?? row.company_name, hit, score),
     evidence("domain", row.domain ?? row.website, hit, score),
     evidence("industry", row.industry, hit, score),
-    evidence("employee_count", row.employees ?? row.employee_count, hit, score),
+    evidence("employee_count", count, hit, score),
+    evidence("employee_range", range, hit, score),
+    evidence("location", row.location ?? row.country ?? row.primary_country, hit, score),
     evidence("description", row.description, hit, score),
   ].filter((item): item is TregEvidenceItem => Boolean(item));
 }
@@ -689,6 +697,242 @@ export class TregGateway {
       ...(jobs.some((job) => !job.postedAt || !job.sourceUrls?.length && !job.jobUrl) ? ["Some listings lack a posting date or source link; treat those rows as lower-quality evidence."] : []),
     ];
     return { query, jobs, endpoint, callId: response.receipt.callId, ...(route.servedBy || response.receipt.servedBy ? { servedBy: route.servedBy ?? response.receipt.servedBy } : {}), ...((route.tried ?? response.receipt.routeTried)?.length ? { tried: route.tried ?? response.receipt.routeTried } : {}), totalCostUsd: response.receipt.costUsd, warnings, incomplete: route.pending || response.receipt.pending === true || Boolean(route.ignoredFilters?.length || response.receipt.ignoredFilters?.length), generatedAt: new Date().toISOString() };
+  }
+
+  async findEmail(options: {
+    userId: number;
+    fullName?: string;
+    firstName?: string;
+    lastName?: string;
+    domain?: string;
+    linkedinUrl?: string;
+    verify?: boolean;
+    missionId?: string;
+    maxSpendUsd?: number;
+    organizationId?: string;
+  }): Promise<TregEmailFindResult> {
+    const fullName = options.fullName?.trim();
+    const firstName = options.firstName?.trim();
+    const lastName = options.lastName?.trim();
+    const domain = options.domain?.trim();
+    const linkedinUrl = options.linkedinUrl?.trim();
+
+    if (!linkedinUrl && !(domain && (fullName || (firstName && lastName)))) {
+      throw new Error("Provide either a linkedinUrl OR domain with name (fullName or firstName and lastName) to find an email.");
+    }
+
+    const endpoint = "treg.people.email.find";
+    const maxSpendUsd = options.maxSpendUsd ?? config.tregPerCallSoftCapUsd;
+    const body: JsonObject = {
+      ...(fullName ? { full_name: fullName } : {}),
+      ...(firstName ? { first_name: firstName } : {}),
+      ...(lastName ? { last_name: lastName } : {}),
+      ...(domain ? { domain } : {}),
+      ...(linkedinUrl ? { linkedin_url: linkedinUrl } : {}),
+    };
+
+    const response = await this.call({
+      userId: options.userId,
+      endpointId: endpoint,
+      method: "POST",
+      body,
+      routeVerify: options.verify !== false,
+      missionId: options.missionId,
+      organizationId: options.organizationId,
+      estimateUsd: maxSpendUsd,
+      routeMaxCostUsd: maxSpendUsd,
+    });
+
+    const route = routeMetadata(response.result);
+    const payload = providerPayload(response.result);
+    const row = isObject(payload) ? payload : {};
+    const email = typeof row.email === "string" ? row.email.trim() : typeof row.work_email === "string" ? row.work_email.trim() : undefined;
+    const pending = response.receipt.pending === true;
+
+    const tregBlock = isObject(response.result) && isObject((response.result as JsonObject)._treg) ? (response.result as JsonObject)._treg as JsonObject : {};
+    const verificationBlock = isObject(tregBlock.verification) ? tregBlock.verification as JsonObject : {};
+    const verificationVerdict = typeof verificationBlock.verdict === "string" ? verificationBlock.verdict : undefined;
+    const domainMatch = typeof tregBlock.domain_match === "boolean" ? tregBlock.domain_match : undefined;
+    const advice = typeof tregBlock.advice === "string" ? tregBlock.advice : undefined;
+
+    const rawStatus = String(row.status ?? row.email_status ?? row.deliverability ?? "").toLowerCase().slice(0, 80);
+    const verified = verificationVerdict === "valid" || verificationVerdict === "verified" || row.verified === true || rawStatus === "valid" || rawStatus === "verified";
+    const confidence = numberOrUndefined(row.confidence ?? row.score);
+
+    const warnings: string[] = [
+      ...(pending ? ["Treg is still processing this email find. Do not retry; inspect the existing Treg call first."] : []),
+      ...(!email && !pending ? ["No email address found for the given identity."] : []),
+      ...(email && !verified && !pending ? [advice || "An email was returned without verified deliverability; verify before outreach."] : []),
+      ...(domainMatch === false ? ["The mailbox domain returned does not match the requested domain."] : []),
+      ...(response.receipt.costIsEstimate ? ["Displayed cost is the locally reserved estimate."] : []),
+    ];
+
+    return {
+      email,
+      fullName: typeof (row.full_name ?? row.name) === "string" ? String(row.full_name ?? row.name) : fullName,
+      firstName: typeof row.first_name === "string" ? String(row.first_name) : firstName,
+      lastName: typeof row.last_name === "string" ? String(row.last_name) : lastName,
+      domain: typeof row.domain === "string" ? String(row.domain) : domain,
+      ...(domainMatch !== undefined ? { domainMatch } : {}),
+      ...(rawStatus ? { status: rawStatus } : {}),
+      ...(verified !== undefined ? { verified } : {}),
+      ...(verificationVerdict ? { verificationVerdict } : {}),
+      ...(advice ? { advice } : {}),
+      ...(confidence !== undefined ? { confidence } : {}),
+      ...(providerScore(row) !== undefined ? { providerScore: providerScore(row) } : {}),
+      ...(route.servedBy || response.receipt.servedBy ? { servedBy: route.servedBy ?? response.receipt.servedBy } : {}),
+      ...((route.tried ?? response.receipt.routeTried)?.length ? { tried: route.tried ?? response.receipt.routeTried } : {}),
+      callId: response.receipt.callId,
+      totalCostUsd: response.receipt.costUsd,
+      pending,
+      warnings,
+    };
+  }
+
+  async findPhone(options: {
+    userId: number;
+    fullName?: string;
+    domain?: string;
+    email?: string;
+    linkedinUrl?: string;
+    verify?: boolean;
+    missionId?: string;
+    maxSpendUsd?: number;
+    organizationId?: string;
+  }): Promise<TregPhoneFindResult> {
+    const fullName = options.fullName?.trim();
+    const domain = options.domain?.trim();
+    const email = options.email?.trim();
+    const linkedinUrl = options.linkedinUrl?.trim();
+
+    if (!linkedinUrl && !email && !(domain && fullName)) {
+      throw new Error("Provide either a linkedinUrl, email, OR domain with fullName to find a phone number.");
+    }
+
+    const endpoint = "treg.people.phone.find";
+    const maxSpendUsd = options.maxSpendUsd ?? config.tregPerCallSoftCapUsd;
+    const body: JsonObject = {
+      ...(fullName ? { full_name: fullName } : {}),
+      ...(domain ? { domain } : {}),
+      ...(email ? { email } : {}),
+      ...(linkedinUrl ? { linkedin_url: linkedinUrl } : {}),
+    };
+
+    const response = await this.call({
+      userId: options.userId,
+      endpointId: endpoint,
+      method: "POST",
+      body,
+      routeVerify: options.verify !== false,
+      missionId: options.missionId,
+      organizationId: options.organizationId,
+      estimateUsd: maxSpendUsd,
+      routeMaxCostUsd: maxSpendUsd,
+    });
+
+    const route = routeMetadata(response.result);
+    const payload = providerPayload(response.result);
+    const row = isObject(payload) ? payload : {};
+    const phone = typeof (row.phone ?? row.phone_number ?? row.number) === "string" ? String(row.phone ?? row.phone_number ?? row.number).trim() : undefined;
+    const pending = response.receipt.pending === true;
+
+    const tregBlock = isObject(response.result) && isObject((response.result as JsonObject)._treg) ? (response.result as JsonObject)._treg as JsonObject : {};
+    const verificationBlock = isObject(tregBlock.verification) ? tregBlock.verification as JsonObject : {};
+    const verificationVerdict = typeof verificationBlock.verdict === "string" ? verificationBlock.verdict : undefined;
+    const domainMatch = typeof tregBlock.domain_match === "boolean" ? tregBlock.domain_match : undefined;
+    const advice = typeof tregBlock.advice === "string" ? tregBlock.advice : undefined;
+
+    const verified = verificationVerdict === "valid" || verificationVerdict === "verified" || row.verified === true;
+
+    const warnings: string[] = [
+      ...(pending ? ["Treg is still processing this phone search. Do not retry; inspect the existing Treg call first."] : []),
+      ...(!phone && !pending ? ["No phone number found for the given identity."] : []),
+      ...(phone && advice ? [advice] : []),
+      ...(response.receipt.costIsEstimate ? ["Displayed cost is the locally reserved estimate."] : []),
+    ];
+
+    return {
+      phone,
+      fullName: typeof (row.full_name ?? row.name) === "string" ? String(row.full_name ?? row.name) : fullName,
+      domain: typeof row.domain === "string" ? String(row.domain) : domain,
+      ...(domainMatch !== undefined ? { domainMatch } : {}),
+      ...(typeof (row.country ?? row.country_code) === "string" ? { country: String(row.country ?? row.country_code) } : {}),
+      ...(typeof (row.type ?? row.phone_type) === "string" ? { phoneType: String(row.type ?? row.phone_type) } : {}),
+      ...(verified !== undefined ? { verified } : {}),
+      ...(verificationVerdict ? { verificationVerdict } : {}),
+      ...(advice ? { advice } : {}),
+      ...(providerScore(row) !== undefined ? { providerScore: providerScore(row) } : {}),
+      ...(route.servedBy || response.receipt.servedBy ? { servedBy: route.servedBy ?? response.receipt.servedBy } : {}),
+      ...((route.tried ?? response.receipt.routeTried)?.length ? { tried: route.tried ?? response.receipt.routeTried } : {}),
+      callId: response.receipt.callId,
+      totalCostUsd: response.receipt.costUsd,
+      pending,
+      warnings,
+    };
+  }
+
+  async similarCompanies(options: {
+    userId: number;
+    domain: string;
+    limit?: number;
+    missionId?: string;
+    maxSpendUsd?: number;
+    organizationId?: string;
+  }): Promise<TregSimilarCompaniesResult> {
+    const rawDomain = options.domain.trim();
+    const cleanDomain = canonicalCompanyDomain(rawDomain) ?? rawDomain;
+    if (!cleanDomain) throw new Error("Provide a valid company domain to find similar companies.");
+
+    const endpoint = "treg.companies.similar";
+    const maxSpendUsd = options.maxSpendUsd ?? config.tregPerCallSoftCapUsd;
+
+    const response = await this.call({
+      userId: options.userId,
+      endpointId: endpoint,
+      method: "POST",
+      body: { domain: cleanDomain },
+      missionId: options.missionId,
+      organizationId: options.organizationId,
+      estimateUsd: maxSpendUsd,
+      routeMaxCostUsd: maxSpendUsd,
+    });
+
+    const route = routeMetadata(response.result);
+    const rows = resultRows(response.result, ["companies", "similar", "results", "items"]);
+    const companies: TregSimilarCompanyItem[] = rows.map((row) => {
+      const d = String(row.domain ?? row.website ?? "").trim();
+      const n = typeof (row.name ?? row.company ?? row.company_name) === "string" ? String(row.name ?? row.company ?? row.company_name) : undefined;
+      const count = numberOrUndefined(row.employee_count ?? row.employees ?? row.employeeCount);
+      const sim = numberOrUndefined(row.similarity ?? row.score ?? row.similarity_score);
+      return {
+        domain: canonicalCompanyDomain(d) ?? d,
+        ...(n ? { name: n } : {}),
+        ...(sim !== undefined ? { similarityScore: sim } : {}),
+        ...(typeof row.industry === "string" ? { industry: row.industry } : {}),
+        ...(count !== undefined ? { employeeCount: count } : {}),
+        ...(typeof (row.location ?? row.country) === "string" ? { location: String(row.location ?? row.country) } : {}),
+      };
+    }).filter((c) => Boolean(c.domain)).slice(0, options.limit ?? 25);
+
+    const pending = response.receipt.pending === true;
+    const warnings: string[] = [
+      ...(pending ? ["Treg is still processing this lookalike search. Inspect the existing call before retrying."] : []),
+      ...(!companies.length && !pending ? ["No similar companies found for this domain."] : []),
+      ...(response.receipt.costIsEstimate ? ["Displayed cost is the locally reserved estimate."] : []),
+    ];
+
+    return {
+      seedDomain: cleanDomain,
+      companies,
+      endpoint,
+      callId: response.receipt.callId,
+      ...(route.servedBy || response.receipt.servedBy ? { servedBy: route.servedBy ?? response.receipt.servedBy } : {}),
+      ...((route.tried ?? response.receipt.routeTried)?.length ? { tried: route.tried ?? response.receipt.routeTried } : {}),
+      totalCostUsd: response.receipt.costUsd,
+      pending,
+      warnings,
+      generatedAt: new Date().toISOString(),
+    };
   }
 
   async verifyEmail(options: { userId: number; email: string; missionId?: string; maxSpendUsd?: number; organizationId?: string }): Promise<{ email: string; endpoint: string; callId: string; status: string; valid: boolean | null; catchAll?: boolean; disposable?: boolean; roleAccount?: boolean; servedBy?: string; totalCostUsd: number; pending: boolean; warnings: string[] }> {

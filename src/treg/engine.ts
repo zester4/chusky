@@ -40,7 +40,7 @@ const PLAYBOOKS: Record<TregPlaybookId, TregPlaybook> = {
       "company enrichment for the requested firmographic and technology fields",
       "company news, funding, workforce, or hiring events only when those signals answer the decision",
     ],
-    tools: ["CHUCK_TREG_COMPANY_SEARCH", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_COMPANY_JOBS_SEARCH", "CHUCK_TREG_RESOLVE", "CHUCK_TREG_CALL_STATUS"],
+    tools: ["CHUCK_TREG_COMPANY_SEARCH", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_COMPANIES_SIMILAR", "CHUCK_TREG_COMPANY_JOBS_SEARCH", "CHUCK_TREG_RESOLVE", "CHUCK_TREG_CALL_STATUS"],
     workflow: [
       "For a known company, enrich by its domain or exact name; use company search only when discovering candidates or resolving an ambiguous identity.",
       "Ask for only the fields needed to answer the decision. Add a separate signal lookup only when a dated event would materially change the recommendation.",
@@ -71,7 +71,7 @@ const PLAYBOOKS: Record<TregPlaybookId, TregPlaybook> = {
       "person enrichment for a selected, identity-matched person",
       "work-email verification for an already returned address whose status is unknown",
     ],
-    tools: ["CHUCK_TREG_PEOPLE_SEARCH", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_EMAIL_VERIFY", "CHUCK_TREG_CALL_STATUS"],
+    tools: ["CHUCK_TREG_PEOPLE_SEARCH", "CHUCK_TREG_EMAIL_FIND", "CHUCK_TREG_PHONE_FIND", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_EMAIL_VERIFY", "CHUCK_TREG_CALL_STATUS"],
     workflow: [
       "Search a small, specific set using the known domain and target role; deduplicate by profile URL or name plus company.",
       "Check that each person still matches the requested company and role before enriching selected people.",
@@ -102,7 +102,7 @@ const PLAYBOOKS: Record<TregPlaybookId, TregPlaybook> = {
       "routed company enrichment from its domain or exact name",
       "verification of a returned work email only when its deliverability status is unknown",
     ],
-    tools: ["CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_EMAIL_VERIFY", "CHUCK_TREG_CALL_STATUS"],
+    tools: ["CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_EMAIL_FIND", "CHUCK_TREG_PHONE_FIND", "CHUCK_TREG_EMAIL_VERIFY", "CHUCK_TREG_CALL_STATUS"],
     workflow: [
       "In a lead campaign, enrich only a persisted qualified candidate by candidateId; the server must bind the call to its saved identity and remaining campaign budget.",
       "For one known person or company outside a campaign, use its stable profile URL or domain and request only the fields needed for the decision.",

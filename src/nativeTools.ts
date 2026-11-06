@@ -425,7 +425,7 @@ function leadCampaignTools(runtime: NativeToolRuntime): string[] {
     "CHUCK_LEAD_CAMPAIGN", "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE",
     "CHUCK_TINYFISH_SEARCH", "CHUCK_TINYFISH_FETCH", "COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT",
     ...connectedReadTools,
-    "CHUCK_TREG_SEARCH", "CHUCK_TREG_PEOPLE_SEARCH", "CHUCK_TREG_COMPANY_SEARCH", "CHUCK_TREG_COMPANY_JOBS_SEARCH", "CHUCK_TREG_EMAIL_VERIFY", "CHUCK_TREG_CALL_STATUS", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE",
+    "CHUCK_TREG_SEARCH", "CHUCK_TREG_PEOPLE_SEARCH", "CHUCK_TREG_COMPANY_SEARCH", "CHUCK_TREG_COMPANY_JOBS_SEARCH", "CHUCK_TREG_EMAIL_VERIFY", "CHUCK_TREG_EMAIL_FIND", "CHUCK_TREG_PHONE_FIND", "CHUCK_TREG_COMPANIES_SIMILAR", "CHUCK_TREG_CALL_STATUS", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE",
     "CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT",
   ])];
 }
@@ -601,9 +601,14 @@ async function leadCampaignEnrichmentInput(
     if (candidateIdValue !== undefined) throw new Error("candidateId is valid only for a lead-campaign mission.");
     return undefined;
   }
-  if (missionStepId !== "shortlist-enrichment") throw new Error("Lead-campaign enrichment is allowed only in the qualified shortlist step.");
   if (campaign.finalizedAt) throw new Error("This lead campaign is finalized; enrichment is closed.");
-  if (typeof candidateIdValue !== "string" || !candidateIdValue.trim()) throw new Error("candidateId is required for lead-campaign enrichment.");
+  if (missionStepId === "shortlist-enrichment") {
+    if (typeof candidateIdValue !== "string" || !candidateIdValue.trim()) {
+      throw new Error("candidateId is required for lead-campaign enrichment.");
+    }
+  } else if (candidateIdValue === undefined || (typeof candidateIdValue === "string" && !candidateIdValue.trim())) {
+    return undefined;
+  }
   const candidateId = missionText(candidateIdValue, "candidateId", 160);
   const candidate = await getLeadCampaignCandidate(userId, campaign.id, candidateId);
   if (!candidate) throw new Error("Lead candidate not found in this campaign.");
@@ -2064,6 +2069,49 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
         limit: args.limit === undefined ? 10 : Number(args.limit),
         missionId,
         maxSpendUsd: reservedUsd ?? maxSpendUsd,
+        organizationId: runtime.organizationId,
+      }));
+    }
+    case "CHUCK_TREG_EMAIL_FIND": {
+      const missionId = effectiveTregMissionId(args, runtime);
+      const requestedSpend = args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd);
+      return withLeadCampaignTregBudget(userId, missionId, requestedSpend, runtime, (reservedUsd) => tregGateway().findEmail({
+        userId,
+        fullName: args.fullName ? text(args.fullName, 240) : undefined,
+        firstName: args.firstName ? text(args.firstName, 120) : undefined,
+        lastName: args.lastName ? text(args.lastName, 120) : undefined,
+        domain: args.domain ? text(args.domain, 240) : undefined,
+        linkedinUrl: args.linkedinUrl ? text(args.linkedinUrl, 1000) : undefined,
+        verify: args.verify === undefined ? true : Boolean(args.verify),
+        missionId,
+        maxSpendUsd: reservedUsd ?? effectiveTregSpendLimit(requestedSpend, runtime),
+        organizationId: runtime.organizationId,
+      }));
+    }
+    case "CHUCK_TREG_PHONE_FIND": {
+      const missionId = effectiveTregMissionId(args, runtime);
+      const requestedSpend = args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd);
+      return withLeadCampaignTregBudget(userId, missionId, requestedSpend, runtime, (reservedUsd) => tregGateway().findPhone({
+        userId,
+        fullName: args.fullName ? text(args.fullName, 240) : undefined,
+        domain: args.domain ? text(args.domain, 240) : undefined,
+        email: args.email ? text(args.email, 320) : undefined,
+        linkedinUrl: args.linkedinUrl ? text(args.linkedinUrl, 1000) : undefined,
+        verify: args.verify === undefined ? true : Boolean(args.verify),
+        missionId,
+        maxSpendUsd: reservedUsd ?? effectiveTregSpendLimit(requestedSpend, runtime),
+        organizationId: runtime.organizationId,
+      }));
+    }
+    case "CHUCK_TREG_COMPANIES_SIMILAR": {
+      const missionId = effectiveTregMissionId(args, runtime);
+      const requestedSpend = args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd);
+      return withLeadCampaignTregBudget(userId, missionId, requestedSpend, runtime, (reservedUsd) => tregGateway().similarCompanies({
+        userId,
+        domain: text(args.domain, 240),
+        limit: args.limit === undefined ? 20 : Number(args.limit),
+        missionId,
+        maxSpendUsd: reservedUsd ?? effectiveTregSpendLimit(requestedSpend, runtime),
         organizationId: runtime.organizationId,
       }));
     }

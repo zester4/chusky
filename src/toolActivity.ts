@@ -151,6 +151,9 @@ export function nativeActivityActionLabel(toolSlug: string, args?: ActivityCallA
   if (upper === "CHUCK_TREG_COMPANY_SEARCH") return `Searching for companies${subject}`;
   if (upper === "CHUCK_TREG_PEOPLE_SEARCH") return `Searching for people${subject}`;
   if (upper === "CHUCK_TREG_COMPANY_JOBS_SEARCH") return `Searching for company jobs${subject}`;
+  if (upper === "CHUCK_TREG_EMAIL_FIND") return `Finding work email${subject}`;
+  if (upper === "CHUCK_TREG_PHONE_FIND") return `Finding phone number${subject}`;
+  if (upper === "CHUCK_TREG_COMPANIES_SIMILAR") return `Finding similar companies${subject}`;
   if (upper === "CHUCK_TREG_ENRICH_COMPANY") return "Enriching the selected company";
   if (upper === "CHUCK_TREG_ENRICH_PERSON") return "Enriching the selected person";
   if (upper === "CHUCK_TREG_RESOLVE") return "Resolving the requested data";

@@ -137,6 +137,7 @@ const APPROVAL_NATIVE_TOOLS = new Set([
 const TREG_AUTONOMOUS_TOOLS = new Set([
   "CHUCK_TREG_PLAN", "CHUCK_TREG_SEARCH", "CHUCK_TREG_PEOPLE_SEARCH", "CHUCK_TREG_COMPANY_SEARCH", "CHUCK_TREG_COMPANY_JOBS_SEARCH", "CHUCK_TREG_EMAIL_VERIFY", "CHUCK_TREG_CALL_STATUS", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_MY_TOOLS",
   "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE",
+  "CHUCK_TREG_EMAIL_FIND", "CHUCK_TREG_PHONE_FIND", "CHUCK_TREG_COMPANIES_SIMILAR",
   "CHUCK_TREG_BALANCE", "CHUCK_TREG_USAGE", "CHUCK_TREG_OAUTH_STATUS", "CHUCK_TREG_OAUTH_CONNECTIONS",
 ]);
 
@@ -179,11 +180,15 @@ function isAutonomousTregCatalogCall(args: Record<string, unknown>): boolean {
   const endpointId = String(args.endpointId ?? "").trim();
   // Match TregGateway's boundary: catalog IDs are opaque IDs without a path;
   // slash targets and absolute URLs are registered organization tools.
-  const method = String(args.method ?? "POST").trim().toUpperCase();
-  return Boolean(endpointId)
-    && !/^https:\/\//i.test(endpointId)
-    && !endpointId.includes("/")
-    && ["GET", "HEAD", "OPTIONS"].includes(method);
+  const isCatalogEndpoint = Boolean(endpointId) && !/^https:\/\//i.test(endpointId) && !endpointId.includes("/");
+  if (!isCatalogEndpoint) return false;
+  const method = String(args.method ?? "").trim().toUpperCase();
+  const isSafeQueryCatalogEndpoint = /^(treg\.|[a-z0-9_-]+\.[a-z0-9_-]+\.(search|find|enrich|similar|verify|lookup|preview|posts|get|retrieve|collect|profile|extract))/i.test(endpointId)
+    && !/(\.create|\.update|\.delete|\.pause|\.launch|\.mutate|\.start)$/i.test(endpointId);
+
+  if (["GET", "HEAD", "OPTIONS"].includes(method)) return true;
+  if (method === "POST" && isSafeQueryCatalogEndpoint) return true;
+  return false;
 }
 
 function composioActionPolicy(slug: string): ToolApprovalPolicy {

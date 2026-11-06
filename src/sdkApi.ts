@@ -20,7 +20,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, appendSdkAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createCliDevice, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, deleteSdkThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkIdempotency, getSdkRun, getSdkThread, listSdkAuditEvents, listSdkRuns, listSdkThreads, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, getVoiceInboundRoute, getTwilioSubaccountByUserId, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, deletePhoneCallTranscript, deleteVoiceInboundRoute, listVoiceInboundRoutes, saveVoiceInboundRoute, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listTasksSince, listOpenTasks, listTasksForMission, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, saveSdkIdempotency, saveSdkRun, saveSdkThread, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type TriggerEventRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord, mergeLinkedTelegramSession } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, appendSdkAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, completeTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createCliDevice, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, deleteSdkThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getAttentionRecord, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getSessionWithSdkTables, getSdkIdempotency, getSdkRun, getSdkThread, listSdkAuditEvents, listSdkRuns, listSdkThreads, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, getVoiceInboundRoute, getTwilioSubaccountByUserId, isAgentRunCancellationRequested, isDurableStore, listApprovals, listAgentRuns, listAttentionRecords, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, deletePhoneCallTranscript, deleteVoiceInboundRoute, listVoiceInboundRoutes, saveVoiceInboundRoute, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listTasksSince, listOpenTasks, listTasksForMission, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, requestAgentRunCancellation, saveProviderProof, saveSdkIdempotency, saveSdkRun, saveSdkThread, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, updateAttentionRecord, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, clearSession, clearPersonalMemories, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type AttentionCandidateRecord, type TriggerEventRecord, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord, mergeLinkedTelegramSession } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
@@ -5376,7 +5376,76 @@ export function registerSdkApi(app: Hono): void {
             .catch((error) => logger.warn({ userId: owner.userId, approvalId: approval.id, taskId: task!.id, errorType: error instanceof Error ? error.name : "ApprovalContinuationEnqueueError" }, "Approved continuation publication deferred to durable recovery"));
           return c.json({ id: approval.id, status: "approved", taskId: task.id, run: runView(thread.id, run) }, 202);
         }
-        const workflowRunId = await enqueueTaskWithClaim(owner.userId, task.id, task.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer);
+        let workflowRunId: string | undefined;
+        try {
+          workflowRunId = await enqueueTaskWithClaim(owner.userId, task.id, task.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer);
+        } catch (enqueueError) {
+          // If queueing the task fails because QStash or Webhook URL is not configured
+          // (common in dev, tests, or local deploys), execute the approved action in-process
+          // immediately rather than stranding the run for 5 minutes.
+          if (!config.qstashToken || !config.webhookUrl) {
+            try {
+              const turnPrompt = approval.request || run.input || `Execute the approved ${approval.toolSlug} action.`;
+              const agentResult = await runAgent(
+                owner.userId,
+                turnPrompt,
+                approval.history ?? thread.history ?? [],
+                run.model ?? session.model,
+                undefined,
+                undefined,
+                undefined,
+                approval.id,
+                undefined,
+                {
+                  toolAllow: run.tools?.allow,
+                  toolDeny: run.tools?.deny,
+                  toolRequireApproval: run.tools?.requireApproval,
+                  instructions: run.agentInstructions,
+                  forceApprovedAction: true,
+                  runId: run.id,
+                  parentRunId: thread.id,
+                  taskId: task.id,
+                  ownerPrivateRun: run.ownerPrivateRun === true,
+                  organizationId: run.organizationId,
+                },
+              );
+              await setApprovalStatus(owner.userId, approval.id, "consumed").catch(() => false);
+              if (approvedActivity) {
+                approvedActivity.status = "completed";
+                approvedActivity.message = "Approved action completed.";
+              }
+              run.status = "completed";
+              run.approvalId = undefined;
+              run.output = agentResult.text;
+              run.artifacts = sdkRunArtifacts(agentResult.generatedFiles);
+              run.images = sdkRunImages(agentResult.generatedImages);
+              run.cost = agentResult.cost;
+              appendSdkRunProgress(run, terminalSdkRunProgress("completed", { previous: run.progress, artifacts: run.artifacts }));
+              run.events.push(event("run.completed"));
+              run.updatedAt = Date.now();
+              thread.updatedAt = run.updatedAt;
+              await persistSdkRunSnapshot(owner.userId, thread.id, run, [
+                { role: "user", content: turnPrompt, createdAt: run.createdAt },
+                { role: "assistant", content: run.output, createdAt: run.updatedAt },
+              ], run.cost ?? 0);
+              await completeTask(owner.userId, task.id, run.output).catch(() => undefined);
+              return c.json(runView(thread.id, run), 200);
+            } catch (execError) {
+              if (execError instanceof ApprovalRequiredError) {
+                run.status = "requires_approval";
+                run.approvalId = execError.approvalId;
+                appendSdkRunProgress(run, { phase: "waiting", title: "Approval needed to continue", detail: "Review the requested action and approve it before Chusky continues.", provider: run.progress?.provider, requiresApproval: true, evidence: run.progress?.evidence });
+                run.events.push(event("run.approval_required"));
+                run.updatedAt = Date.now();
+                thread.updatedAt = run.updatedAt;
+                await persistSdkRunSnapshot(owner.userId, thread.id, run);
+                return c.json(runView(thread.id, run), 200);
+              }
+              throw execError;
+            }
+          }
+          throw enqueueError;
+        }
         if (!workflowRunId) throw new Error("The approved continuation is already being queued.");
         const latestSession = await getSessionWithSdkRuns(owner.userId, thread.id);
         const latestThread = latestSession.sdkThreads?.find((item) => item.id === thread.id);
