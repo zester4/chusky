@@ -2734,6 +2734,9 @@ class RedisBackend implements Backend {
   private migratedTaskOwners = new Set<number>();
   private missionk = (id: number) => `chuck:missions:${id}`;
   private missionEventsKey = (userId: number, missionId: string) => `chuck:mission-events:${userId}:${createHash("sha256").update(missionId).digest("hex")}`;
+  private sessionOwnersKey = "chuck:sessions:owners";
+  private taskOwnersKey = "chuck:tasks:owners";
+  private jobOwnersKey = "chuck:jobs:owners";
   private missionOwnersKey = "chuck:missions:owners";
   private missionRecoveryOwnerCursorKey = "chuck:missions:recovery:owner-cursor";
   private missionRecoveryMissionCursorKey = (userId: number) => `chuck:missions:recovery:mission-cursor:${userId}`;
@@ -3262,7 +3265,7 @@ class RedisBackend implements Backend {
     this.durableStorageMetrics.redisSessionCommands += 1;
     this.durableStorageMetrics.redisSessionBytesWritten += Buffer.byteLength(encoded, "utf8");
     this.durableStorageMetrics.redisSessionCoreBytes = Buffer.byteLength(encoded, "utf8");
-    await this.r.setex(this.sk(userId), config.sessionTtl, encoded);
+    await this.r.multi().setex(this.sk(userId), config.sessionTtl, encoded).sadd(this.sessionOwnersKey, String(userId)).exec();
   }
 
   private sessionDomainsForRead(includeSdkTables: boolean, requested?: readonly DurableSessionDomain[]): DurableSessionDomain[] {
@@ -3968,6 +3971,8 @@ class RedisBackend implements Backend {
   }
   async claimVoiceCallReconciliations(nowMs: number, limit: number, leaseMs: number, leaseToken: string): Promise<VoiceCallReconciliationRecord[]> {
     if (this.durableState) return this.durableState.claimVoiceCallReconciliations(nowMs, limit, leaseMs, leaseToken);
+    const count = await this.r.zcount(this.voiceReconciliationIndexKey(), 0, nowMs);
+    if (!count) return [];
     const ids = await this.r.zrangebyscore(this.voiceReconciliationIndexKey(), 0, nowMs, "LIMIT", 0, limit);
     const claimed: VoiceCallReconciliationRecord[] = [];
     for (const id of ids) {
@@ -4300,7 +4305,12 @@ class RedisBackend implements Backend {
   async incrRate(userId: number): Promise<number> {
     const k = this.rk(userId);
     const n = await this.r.incr(k);
-    if (n === 1) await this.r.expire(k, config.rateWindowSeconds);
+    if (n === 1) {
+      await this.r.expire(k, config.rateWindowSeconds);
+    } else {
+      const ttl = await this.r.ttl(k);
+      if (ttl < 0) await this.r.expire(k, config.rateWindowSeconds);
+    }
     return n;
   }
 
@@ -4501,6 +4511,10 @@ class RedisBackend implements Backend {
     await this.r.del(this.dk(userId));
   }
   async listSessionOwnerIds(limit = 1000): Promise<number[]> {
+    const values = await this.r.smembers(this.sessionOwnersKey);
+    if (values.length) {
+      return values.map(Number).filter((id) => Number.isSafeInteger(id) && id >= 0).sort((a, b) => a - b).slice(0, limit);
+    }
     const owners = new Set<number>();
     let cursor = "0";
     do {
@@ -4512,9 +4526,16 @@ class RedisBackend implements Backend {
         if (owners.size >= limit) break;
       }
     } while (cursor !== "0" && owners.size < limit);
+    if (owners.size) {
+      void this.r.sadd(this.sessionOwnersKey, ...[...owners].map(String)).catch(() => undefined);
+    }
     return [...owners].sort((a, b) => a - b).slice(0, limit);
   }
   async listTaskOwnerIds(limit = 1000): Promise<number[]> {
+    const values = await this.r.smembers(this.taskOwnersKey);
+    if (values.length) {
+      return values.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0).sort((a, b) => a - b).slice(0, limit);
+    }
     const owners = new Set<number>();
     let cursor = "0";
     do {
@@ -4527,9 +4548,16 @@ class RedisBackend implements Backend {
         if (owners.size >= limit) break;
       }
     } while (cursor !== "0" && owners.size < limit);
+    if (owners.size) {
+      void this.r.sadd(this.taskOwnersKey, ...[...owners].map(String)).catch(() => undefined);
+    }
     return [...owners].sort((a, b) => a - b).slice(0, limit);
   }
   async listJobOwnerIds(limit = 1000): Promise<number[]> {
+    const values = await this.r.smembers(this.jobOwnersKey);
+    if (values.length) {
+      return values.map(Number).filter((id) => Number.isSafeInteger(id) && id >= 0).sort((a, b) => a - b).slice(0, limit);
+    }
     const owners = new Set<number>(await this.listSessionOwnerIds(limit));
     let cursor = "0";
     do {
@@ -4541,6 +4569,9 @@ class RedisBackend implements Backend {
         if (owners.size >= limit) break;
       }
     } while (cursor !== "0" && owners.size < limit);
+    if (owners.size) {
+      void this.r.sadd(this.jobOwnersKey, ...[...owners].map(String)).catch(() => undefined);
+    }
     return [...owners].sort((a, b) => a - b).slice(0, limit);
   }
   private async ensureTaskMigration(userId: number): Promise<void> {
@@ -4695,6 +4726,7 @@ class RedisBackend implements Backend {
       if (!["completed", "cancelled"].includes(task.status)) tx.zadd(this.openTaskIndexKey(userId), task.updatedAt, task.id);
       if (task.status === "queued" && task.runAt !== undefined) tx.zadd(this.dueTaskIndexKey(userId), task.runAt, task.id);
       if (task.missionId) tx.zadd(this.taskMissionIndexKey(userId, task.missionId), task.updatedAt, task.id);
+      tx.sadd(this.taskOwnersKey, String(userId));
       const result = await tx.exec();
       if (result) return task;
     }
@@ -4973,7 +5005,9 @@ class RedisBackend implements Backend {
   async saveJobs(userId: number, jobs: JobRecord[]): Promise<void> {
     // Scheduling state must outlive the conversational session TTL.
     const bounded = jobs.slice(-100);
-    await this.r.multi().set(this.jobk(userId), JSON.stringify(bounded)).set(this.jobSummaryKey(userId), JSON.stringify(bounded.map(jobSummary))).exec();
+    const tx = this.r.multi().set(this.jobk(userId), JSON.stringify(bounded)).set(this.jobSummaryKey(userId), JSON.stringify(bounded.map(jobSummary)));
+    if (bounded.length) tx.sadd(this.jobOwnersKey, String(userId));
+    await tx.exec();
   }
   async addJob(userId: number, job: JobRecord, maxActive: number): Promise<void> {
     const key = this.jobk(userId);
@@ -4989,7 +5023,7 @@ class RedisBackend implements Backend {
         throw new Error(`You have reached the limit of ${maxActive} active recurring jobs. Cancel one before adding another.`);
       }
        const next = [...jobs.filter((item) => item.id !== job.id), job].slice(-100);
-       const result = await this.r.multi().set(key, JSON.stringify(next)).set(this.jobSummaryKey(userId), JSON.stringify(next.map(jobSummary))).exec();
+       const result = await this.r.multi().set(key, JSON.stringify(next)).set(this.jobSummaryKey(userId), JSON.stringify(next.map(jobSummary))).sadd(this.jobOwnersKey, String(userId)).exec();
       if (result) return;
     }
     throw new Error("Recurring-job list changed concurrently; retry creating the job");
