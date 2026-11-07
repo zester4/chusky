@@ -45,10 +45,17 @@ test("voice fast lane only applies to ordinary conversation", () => {
   assert.equal(voiceFastLaneEligible("Find the ticket in Freshdesk."), false);
   assert.equal(voiceFastLaneEligible("How are you doing today?"), true);
   assert.equal(voiceFastLaneEligible("Why are you calling me?"), true);
+  assert.equal(voiceFastLaneEligible("What does photosynthesis mean?"), true);
+  assert.equal(voiceFastLaneEligible("Can you explain why leaves change color in autumn?"), true);
   assert.equal(voiceFastLaneEligible("The external contact answering the outbound call said: Hello!"), true);
   assert.equal(voiceFastLaneEligible("The external contact answering the outbound call said: Hello!", "Please check the calendar."), false);
   assert.equal(voiceFastLaneEligible("Please book an appointment for tomorrow."), false);
   assert.equal(voiceFastLaneEligible("Can you check my calendar?"), false);
+  assert.equal(voiceFastLaneEligible("Can you check this for me?"), false);
+  assert.equal(voiceFastLaneEligible("What is the latest weather in Accra?"), false);
+  assert.equal(voiceFastLaneEligible("What did I say about the appointment earlier?"), false);
+  assert.equal(voiceFastLaneEligible("Tell me about my daughter."), false);
+  assert.equal(voiceFastLaneEligible("Could you explain this? ".repeat(20)), false);
   assert.equal(voiceFastLaneEligible("Follow up with the client about tomorrow's meeting."), false);
 });
 

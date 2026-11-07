@@ -36,6 +36,12 @@ test("outbound Twilio turns receive the owner-authorized objective and private c
   assert.match(prompt, /never say that you are not calling them/i);
 });
 
+test("Twilio tool instructions use a brief acknowledgment without claiming success", () => {
+  const prompt = twilioVoiceInstructions({ ...base, direction: "inbound" });
+  assert.match(prompt, /briefly acknowledge the caller before invoking it/i);
+  assert.match(prompt, /never imply the tool succeeded until its result confirms that/i);
+});
+
 test("Twilio opening reflects outbound caller role and objective", () => {
   const opening = twilioVoiceOpening({
     ...base,

@@ -348,6 +348,7 @@ class TwilioVoiceCall:
         self.turn_first_audio_at: float | None = None
         self.tts_speak_started_at: float | None = None
         self.tool_progress_task: asyncio.Task[None] | None = None
+        self.tool_acknowledgement_index = 0
         self.stt_resample_state: object | None = None
         self.tts_resample_state: object | None = None
         self.twilio_send_lock = asyncio.Lock()
@@ -997,9 +998,19 @@ class TwilioVoiceCall:
             await self._send_persistent_tts(normalize_voice_text(message), flush=True)
             self.tool_progress_spoken = True
 
-    async def _speak_tool_start(self, text: str) -> None:
+    async def _speak_tool_start(self, text: str, *, allow_acknowledgement: bool = True) -> None:
         await self._cancel_tool_progress()
         speech = normalize_voice_text(text)
+        if not speech and allow_acknowledgement:
+            acknowledgements = (
+                "Sure, give me a second to check that.",
+                "Okay, let me take a quick look.",
+                "Um, give me a second to pull that up.",
+                "Give me a moment to work on that.",
+                "All right, I’m checking that now.",
+            )
+            speech = acknowledgements[self.tool_acknowledgement_index % len(acknowledgements)]
+            self.tool_acknowledgement_index += 1
         if speech:
             await self._send_persistent_tts(speech, flush=True)
         self.tool_progress_task = asyncio.create_task(
@@ -1093,10 +1104,14 @@ class TwilioVoiceCall:
                     if event.get("type") == "tool_start":
                         self.agent_tool_started = True
                         await self._cancel_tool_progress()
+                        had_model_preface = bool(full_text.strip())
                         if buffer.strip():
                             await self._send_persistent_tts(normalize_voice_chunk(buffer), flush=True)
                             buffer = ""
-                        await self._speak_tool_start(str(event.get("text") or ""))
+                        await self._speak_tool_start(
+                            str(event.get("text") or ""),
+                            allow_acknowledgement=not had_model_preface,
+                        )
                     elif event.get("type") == "tool_end":
                         await self._cancel_tool_progress()
                     elif event.get("type") == "delta":

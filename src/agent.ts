@@ -332,10 +332,11 @@ export function voiceComposioToolSlugs(value: string): string[] {
 }
 
 // Ordinary call turns should not pay the cost of initializing connected-app
-// sessions or broad capability routing. Keep this conservative: only an
-// explicit action-oriented term leaves the fast lane, so questions such as
-// "why are you calling me?" remain normal conversation.
-const VOICE_NATIVE_ACTION_REQUEST_PATTERN = /\b(?:remind(?:er)?|task|email|e-mail|gmail|message|text|sms|telegram|slack|imessage|send|reply|create|update|delete)\b/i;
+// sessions or broad capability routing. Eager drafts stay tool-free; requests
+// needing an action, private recall, or live information wait for final speech.
+const VOICE_NATIVE_ACTION_REQUEST_PATTERN = /\b(?:remind(?:er)?|task|email|e-mail|gmail|message|text|sms|telegram|slack|imessage|send|reply|create|update|delete|check|look up|lookup|search|find|open|book|schedule|cancel|purchase|buy|order)\b/i;
+const VOICE_PRIVATE_LOOKUP_REQUEST_PATTERN = /\b(?:my|mine|our|ours|remember|earlier|previous|last time|what did i|what was i|do you know me)\b/i;
+const VOICE_LIVE_LOOKUP_REQUEST_PATTERN = /\b(?:weather|news|latest|current|currently|right now|stock|exchange rate|score|traffic|nearby|near me|open now|business hours|what time is it|time in)\b/i;
 
 /** True when a private phone turn is safe to handle without external tools. */
 export function voiceFastLaneEligible(value: string, trustedContext = ""): boolean {
@@ -344,8 +345,12 @@ export function voiceFastLaneEligible(value: string, trustedContext = ""): boole
     "",
   );
   const text = `${request}\n${trustedContext}`.trim();
-  return voiceComposioToolSlugs(text).length === 0 && !VOICE_NATIVE_ACTION_REQUEST_PATTERN.test(text)
-    && /^(?:hi|hello|hey|thanks|thank you|goodbye|bye|yes|no|okay|ok|how are you(?: doing)?(?: today)?|why are you calling(?: me)?)[.!?\s]*$/i.test(request);
+  const wordCount = request ? request.split(/\s+/).length : 0;
+  return wordCount > 0 && wordCount <= 40 && request.length <= 280
+    && voiceComposioToolSlugs(text).length === 0
+    && !VOICE_NATIVE_ACTION_REQUEST_PATTERN.test(text)
+    && !VOICE_PRIVATE_LOOKUP_REQUEST_PATTERN.test(text)
+    && !VOICE_LIVE_LOOKUP_REQUEST_PATTERN.test(text);
 }
 
 export const VOICE_TURN_NATIVE_TOOLS = [

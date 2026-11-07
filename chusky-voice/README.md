@@ -216,10 +216,13 @@ During a Twilio voice turn, the model can stream a natural setup sentence
 before requesting a tool. Once the request passes the normal allowlist,
 argument-validation, and approval gates, Chusky emits an authenticated
 `tool_start` event to the bridge immediately before dispatch. The bridge
-speaks that activity and schedules at most one bounded waiting update while the
-tool is still running; any new model text, completion, error, barge-in, or call
-shutdown cancels it. The waiting text is a configurable recovery fallback, not
-the model's normal dialogue and is never committed to voice history.
+speaks a short varied acknowledgment at that boundary when Chusky has not
+already started speaking, then schedules at most one bounded waiting update
+while the tool is still running. These acknowledgments are generic and never
+claim the action succeeded. Any new model text, completion, error, barge-in, or
+call shutdown cancels the waiting update. The waiting text is a configurable
+recovery fallback, not the model's normal dialogue and is never committed to
+voice history.
 
 The bridge uses Deepgram Flux conversational STT (`/v2/listen`) and streaming
 Flux TTS (`/v2/speak`) in Twilio's native raw 8 kHz μ-law format by default.
@@ -251,15 +254,18 @@ rollback to the legacy 48 kHz linear16 STT / 24 kHz linear16 TTS route; it is
 not a normal deployment setting. Recall meeting audio remains an independent
 48 kHz linear PCM input / 24 kHz linear PCM output path.
 
-On `EagerEndOfTurn`, the bridge starts the actual streaming Chusky response and
-feeds its first complete phrase to Flux TTS immediately. If the caller resumes,
-`TurnResumed` cancels that speculative stream, interrupts Deepgram, and clears
-Twilio's playback queue. When the final `EndOfTurn` transcript matches, the
-bridge reuses the same response and commits it once; it does not cancel the
-draft and pay for a second model generation. If no eager event arrived or the
-final transcript differs, it starts a fresh final-turn stream. Only the exact
-final transcript and completed response are committed to Chusky history and
-usage. Provider audio is carried across arbitrary provider chunk boundaries,
+On `EagerEndOfTurn`, the bridge starts a streaming Chusky response for short,
+ordinary conversation and feeds its first complete phrase to Flux TTS
+immediately. The speculative request is tool-free and ephemeral; requests
+involving app actions, personal recall, live information, or longer speech wait
+for the confirmed turn. If the caller resumes, `TurnResumed` cancels the draft,
+interrupts Deepgram, and clears Twilio's playback queue. When the final
+`EndOfTurn` transcript matches, the bridge reuses the same response and commits
+it once; it does not cancel the draft and pay for a second model generation. If
+no eager event arrived, the request was not eligible, or the final transcript
+differs, it starts a fresh final-turn stream. Only the exact final transcript
+and completed response are committed to Chusky history and usage. Provider
+audio is carried across arbitrary provider chunk boundaries,
 re-sliced into 160-byte/20 ms μ-law frames, and paced at telephone playback
 speed. An ordered Twilio `mark` follows each completed TTS response; the
 bridge records the echoed mark latency and clears both provider and Twilio

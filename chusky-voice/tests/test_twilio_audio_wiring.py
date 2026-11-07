@@ -811,6 +811,37 @@ class TwilioAudioWiringTests(unittest.IsolatedAsyncioTestCase):
         speaks = [event["text"] for event in tts_socket.sent if event.get("type") == "Speak"]
         self.assertEqual(speaks, ["Let me quickly check that for you.", "I’m still working on that, thanks for your patience."])
 
+    async def test_tool_start_uses_varied_generic_acknowledgement_before_waiting_update(self):
+        self.call.settings.tool_progress_delay_ms = 500
+        self.call._send_persistent_tts = AsyncMock()
+
+        await self.call._speak_tool_start("")
+        first_acknowledgement = self.call._send_persistent_tts.await_args_list[0].args[0]
+        await self.call._cancel_tool_progress()
+
+        await self.call._speak_tool_start("")
+        second_acknowledgement = self.call._send_persistent_tts.await_args_list[1].args[0]
+        await self.call._cancel_tool_progress()
+
+        self.assertNotEqual(first_acknowledgement, second_acknowledgement)
+        self.assertIn(first_acknowledgement, {
+            "Sure, give me a second to check that.",
+            "Okay, let me take a quick look.",
+            "Um, give me a second to pull that up.",
+            "Give me a moment to work on that.",
+            "All right, I’m checking that now.",
+        })
+        self.assertEqual(self.call.tool_acknowledgement_index, 2)
+
+    async def test_tool_start_skips_acknowledgement_if_agent_already_spoke(self):
+        self.call._send_persistent_tts = AsyncMock()
+
+        await self.call._speak_tool_start("", allow_acknowledgement=False)
+        await self.call._cancel_tool_progress()
+
+        self.call._send_persistent_tts.assert_not_awaited()
+        self.assertEqual(self.call.tool_acknowledgement_index, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
