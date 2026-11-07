@@ -283,6 +283,12 @@
       "skillPath": "better-auth/organization/SKILL.md",
       "computedHash": "f8ea75816a22992c1601c21c0ee3ff8209798065072d76aec3e31eea8295af57"
     },
+    "polar-integration": {
+      "source": "polarsource/agent-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/polar-integration/SKILL.md",
+      "computedHash": "badd658f36717b99183f55c8a4d8d91db9d5c8e8cb99965a0c10900d0d3da22b"
+    },
     "pptx": {
       "source": "anthropics/skills",
       "sourceType": "github",
