@@ -43,9 +43,7 @@ export function getCamofoxUserId(auth: CamofoxAuth): string {
   return `thinky_${digest}`;
 }
 
-export function validateCamofoxTargetUrl(value: string): string {
-  let url: URL;
-  try {
+export function validateCamofoxTargetUrl(value: string):
     url = new URL(value);
   } catch {
     throw new Error("Camofox requires a valid HTTPS URL.");

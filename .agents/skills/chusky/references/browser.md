@@ -1,6 +1,6 @@
 # Retired Browser, Vault, and Cloudflare Broker
 
-> Status: the legacy E2B/Kernel agent browser, saved website identity, and shopping workflows remain retired. The isolated `CHUCK_CAMOFOX_*` tool family is available when `CAMOFOX_BASE_URL` and `CAMOFOX_ACCESS_KEY` are configured. It is owner-private and does not restore the retired vault or shopping flows. Daytona remains for local computer, code, files, and artifact work; it is not a website-browser substitute.
+> Status: the legacy E2B/Kernel agent browser, saved website identity, and shopping workflows remain retired. The isolated `CHUCK_CAMOFOX_*` browser family and separate `CHUCK_AGENTCARD_*` commerce family are available when `CAMOFOX_BASE_URL` and `CAMOFOX_ACCESS_KEY` are configured. Both are owner-private; AgentCard tools are routed as shopping capabilities, while Camofox remains browser-scoped. This does not restore the retired vault or shopping workflows. Daytona remains for local computer, code, files, and artifact work; it is not a website-browser substitute.
 
 This reference documents the retired browser and website-identity path and the
 current Camofox tool boundary. It is the source of truth for agents changing the
@@ -14,10 +14,22 @@ typing, clicking, waiting, downloads, extraction, overlays, live viewing, and
 human handoff. These tools are only callable in a private owner conversation.
 `CHUCK_CAMOFOX_OPEN` issues a signed viewer link that expires after 10 minutes
 when available. The dashboard renders the read-only viewer directly in chat
-and keeps human handoff links separate. Chusky strips the bearer URL from model
-context and saved history.
+as soon as the link is issued, and keeps human handoff links separate. Chusky
+strips the bearer URL from model context and saved history.
 The server hashes the authenticated Chusky owner ID before passing it to Camofox;
 never accept a Camofox user ID, service URL, or access key from model arguments.
+
+The separate `CHUCK_AGENTCARD_*` family uses the Camofox service adapter but is
+classified as shopping for tool discovery. It includes AgentCard card enrollment, card and
+merchant reads, commerce search/checkout, payment interception/status, and
+spending presets. Card enrollment, payment arming, confirmed purchases, starting
+a new order, and spending-rule changes require Chusky approval; any intercepted
+payment also requires the user's approval on their own device. AgentCard is
+unavailable to shared conversations and autonomous/background work. Secure
+enrollment, merchant, checkout, and payment-approval links are delivered only to
+the owner and removed from model context and saved history. Never request or
+return full card details, and never retry a payment reported as approved or
+submitted.
 
 Configure `CAMOFOX_BASE_URL` as a clean HTTPS origin and `CAMOFOX_ACCESS_KEY`
 only in the server environment. Local HTTP is allowed only for a local service

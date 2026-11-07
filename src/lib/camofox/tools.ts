@@ -65,6 +65,28 @@ const ExtractSchemaInput = z.object({
   }
 });
 
+const AgentCardIdentifierSchema = z.string().trim().min(1).max(256);
+const AgentCardObjectSchema = z.record(z.string(), z.unknown());
+const AgentCardRulesSchema = z.object({
+  perDayCents: z.number().int().positive().max(1_000_000_000).optional(),
+  perWeekCents: z.number().int().positive().max(1_000_000_000).optional(),
+  perMonthCents: z.number().int().positive().max(1_000_000_000).optional(),
+  totalCents: z.number().int().positive().max(1_000_000_000).optional(),
+  onlyMerchants: z.array(z.string().trim().min(1).max(120)).min(1).max(20).optional(),
+  categories: z.array(z.enum(["meals", "groceries", "travel", "software", "ai", "wellness", "retail"])).min(1).max(20).optional(),
+  currencies: z.array(z.string().regex(/^[a-z]{3}$/)).min(1).max(20).optional(),
+  onlyDays: z.string().max(64).optional(),
+  onlyHours: z.string().regex(/^\d{1,2}-\d{1,2}$/).optional(),
+  timezone: z.string().trim().min(1).max(64).optional(),
+  mode: z.enum(["strict", "watch"]).optional(),
+}).strict().refine((value) => Object.keys(value).length > 0);
+
+function parseAgentCardObject(value: unknown, operation: string): Record<string, unknown> {
+  const parsed = AgentCardObjectSchema.safeParse(value);
+  if (!parsed.success) throw new Error(`Camofox ${operation} returned an invalid JSON object.`);
+  return parsed.data;
+}
+
 function input<T>(schema: z.ZodType<T>, value: unknown, tool: string): T {
   const parsed = schema.safeParse(value);
   if (!parsed.success) throw new Error(`Invalid arguments for ${tool}.`);
@@ -397,6 +419,191 @@ export async function executeCamofoxTool(
       }), "wait");
       if (!result.ok) throw new Error(result.error || "Camofox could not wait for the page.");
       return { ok: true, ready: result.ready };
+    }
+    case "CHUCK_AGENTCARD_PAY_ARM": {
+      const { tabId, merchant, amount, currency, checkoutOrigin, cardId } = input(z.object({
+        tabId: CamofoxTabIdSchema,
+        merchant: z.string().trim().min(1).max(120),
+        amount: z.number().int().positive().max(1_000_000_000),
+        currency: z.string().regex(/^[a-z]{3}$/),
+        checkoutOrigin: z.string().trim().min(1).max(512).url().refine((value) => {
+          try {
+            const url = new URL(value);
+            validateCamofoxTargetUrl(value);
+            return url.pathname === "/" && !url.search && !url.hash;
+          } catch {
+            return false;
+          }
+        }).optional(),
+        cardId: AgentCardIdentifierSchema.optional(),
+      }).strict(), args, slug);
+      const response = await camofoxRequest(
+        `/agentcard/tabs/${encodeURIComponent(tabId)}/payment`,
+        userId,
+        signal,
+        "payment arm",
+        {
+          method: "POST",
+          body: camofoxPostBody(userId, { merchant, amount, currency, checkoutOrigin, cardId }),
+        },
+      );
+      const result = parseCamofoxResponse(z.object({
+        attachmentId: AgentCardIdentifierSchema,
+        tabId: CamofoxTabIdSchema,
+      }), await readCamofoxJson(response, "payment arm"), "payment arm");
+      if (result.tabId !== tabId) throw new Error("Camofox returned a payment attachment for a different tab.");
+      return { ok: true, attachmentId: result.attachmentId, tabId };
+    }
+    case "CHUCK_AGENTCARD_PAY_STATUS": {
+      const { tabId, attachmentId } = input(z.object({
+        tabId: CamofoxTabIdSchema,
+        attachmentId: AgentCardIdentifierSchema,
+      }).strict(), args, slug);
+      const response = await camofoxRequest(
+        `/agentcard/tabs/${encodeURIComponent(tabId)}/payment/${encodeURIComponent(attachmentId)}`,
+        userId,
+        signal,
+        "payment status",
+      );
+      return parseCamofoxResponse(z.object({
+        attachmentId: AgentCardIdentifierSchema,
+        phase: z.enum(["idle", "pending", "completed"]),
+        approvalUrl: z.string().url().nullable(),
+        purchaseId: z.string().nullable(),
+        results: z.array(z.record(z.string(), z.unknown())).max(100),
+      }), await readCamofoxJson(response, "payment status"), "payment status");
+    }
+    case "CHUCK_AGENTCARD_PAY_DISARM": {
+      const { tabId, attachmentId } = input(z.object({
+        tabId: CamofoxTabIdSchema,
+        attachmentId: AgentCardIdentifierSchema,
+      }).strict(), args, slug);
+      const response = await camofoxRequest(
+        `/agentcard/tabs/${encodeURIComponent(tabId)}/payment/${encodeURIComponent(attachmentId)}`,
+        userId,
+        signal,
+        "payment disarm",
+        { method: "DELETE" },
+      );
+      const value = await readCamofoxJson(response, "payment disarm");
+      if (value !== undefined) {
+        const result = parseCamofoxResponse(z.object({
+          ok: z.literal(true),
+          disarmed: z.boolean(),
+        }), value, "payment disarm");
+        if (!result.disarmed) throw new Error("Camofox did not disarm the payment request.");
+      }
+      return { ok: true, disarmed: true };
+    }
+    case "CHUCK_AGENTCARD_ENROL": {
+      const { addAnother } = input(z.object({ addAnother: z.boolean().optional() }).strict(), args, slug);
+      const response = await camofoxRequest(
+        "/agentcard/vault/enrol",
+        userId,
+        signal,
+        "AgentCard enrol",
+        { method: "POST", body: camofoxPostBody(userId, { addAnother: addAnother === true }) },
+      );
+      return parseAgentCardObject(await readCamofoxJson(response, "AgentCard enrol"), "AgentCard enrol");
+    }
+    case "CHUCK_AGENTCARD_CARDS": {
+      input(z.object({}).strict(), args, slug);
+      const response = await camofoxRequest("/agentcard/vault/cards", userId, signal, "AgentCard cards");
+      return parseAgentCardObject(await readCamofoxJson(response, "AgentCard cards"), "AgentCard cards");
+    }
+    case "CHUCK_AGENTCARD_BUY": {
+      const { ask, threadId, confirm, new_order, product_id, store_id } = input(z.object({
+        ask: z.string().trim().min(1).max(2_000),
+        threadId: z.string().max(128).optional(),
+        confirm: z.boolean().optional(),
+        new_order: z.boolean().optional(),
+        product_id: z.string().max(256).nullable().optional(),
+        store_id: z.string().max(256).nullable().optional(),
+      }).strict(), args, slug);
+      const response = await camofoxRequest(
+        "/agentcard/commerce/buy",
+        userId,
+        signal,
+        "AgentCard purchase",
+        {
+          method: "POST",
+          body: camofoxPostBody(userId, {
+            ask,
+            threadId,
+            confirm: confirm === true,
+            new_order: new_order === true,
+            product_id: product_id ?? null,
+            store_id: store_id ?? null,
+          }),
+        },
+      );
+      return parseAgentCardObject(await readCamofoxJson(response, "AgentCard purchase"), "AgentCard purchase");
+    }
+    case "CHUCK_AGENTCARD_MERCHANTS": {
+      const { kind, q, limit, cursor } = input(z.object({
+        kind: z.string().regex(/^[a-z_]{1,32}$/).optional(),
+        q: z.string().max(100).optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+        cursor: z.string().max(2_048).optional(),
+      }).strict(), args, slug);
+      const query = new URLSearchParams();
+      if (kind) query.set("kind", kind);
+      if (q) query.set("q", q);
+      if (limit !== undefined) query.set("limit", String(limit));
+      if (cursor) query.set("cursor", cursor);
+      const queryString = query.toString();
+      const response = await camofoxRequest(
+        `/agentcard/merchants${queryString ? `?${queryString}` : ""}`,
+        userId,
+        signal,
+        "AgentCard merchants",
+      );
+      return parseAgentCardObject(await readCamofoxJson(response, "AgentCard merchants"), "AgentCard merchants");
+    }
+    case "CHUCK_AGENTCARD_PRESETS": {
+      const { action, label, rules, cardId } = input(z.object({
+        action: z.enum(["list", "set", "attach"]),
+        label: z.string().regex(/^[a-z0-9][a-z0-9-]{0,39}$/).optional(),
+        rules: AgentCardRulesSchema.optional(),
+        cardId: AgentCardIdentifierSchema.optional(),
+      }).strict().superRefine((value, context) => {
+        if (value.action !== "list" && !value.label) {
+          context.addIssue({ code: "custom", path: ["label"], message: "label is required for set and attach." });
+        }
+        if (value.action === "set" && !value.rules) {
+          context.addIssue({ code: "custom", path: ["rules"], message: "rules are required for set." });
+        }
+        if (value.action !== "set" && value.rules) {
+          context.addIssue({ code: "custom", path: ["rules"], message: "rules are only accepted for set." });
+        }
+        if (value.action === "list" && value.label) {
+          context.addIssue({ code: "custom", path: ["label"], message: "label is not accepted for list." });
+        }
+      }), args, slug);
+      if (action === "list") {
+        const response = await camofoxRequest("/agentcard/presets", userId, signal, "AgentCard presets");
+        return parseAgentCardObject(await readCamofoxJson(response, "AgentCard presets"), "AgentCard presets");
+      }
+      if (action === "set") {
+        if (!label || !rules) throw new Error("A label and at least one spending rule are required to set a preset.");
+        const response = await camofoxRequest(
+          `/agentcard/presets/${encodeURIComponent(label)}`,
+          userId,
+          signal,
+          "AgentCard preset set",
+          { method: "PUT", body: camofoxPostBody(userId, { rules }) },
+        );
+        return parseAgentCardObject(await readCamofoxJson(response, "AgentCard preset set"), "AgentCard preset set");
+      }
+      if (!label) throw new Error("A label is required to attach a spending preset.");
+      const response = await camofoxRequest(
+        `/agentcard/presets/${encodeURIComponent(label)}/attach`,
+        userId,
+        signal,
+        "AgentCard preset attach",
+        { method: "POST", body: camofoxPostBody(userId, { cardId }) },
+      );
+      return parseAgentCardObject(await readCamofoxJson(response, "AgentCard preset attach"), "AgentCard preset attach");
     }
     default:
       throw new Error(`Unsupported Camofox tool: ${slug}`);

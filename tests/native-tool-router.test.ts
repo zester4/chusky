@@ -243,7 +243,14 @@ test("connected-app discovery is not pushed out by native keyword matches", () =
 test("explicit browser, meeting, artifact, and reminder families exclude unrelated tool classes", () => {
   const browser = searchNativeToolManifest("fill a web form in the browser");
   assert.ok(browser.length > 0);
-  assert.ok(browser.every((item) => /^(CHUCK_BROWSER(?:_|$)|CHUCK_VAULT_)/.test(item.slug)));
+  assert.ok(browser.every((item) => /^(CHUCK_BROWSER(?:_|$)|CHUCK_CAMOFOX_|CHUCK_VAULT_)/.test(item.slug)));
+
+  const agentCard = searchNativeToolManifest("AgentCard", "shopping");
+  assert.ok(agentCard.length > 0);
+  assert.ok(agentCard.every((item) => item.bundle === "shopping"));
+  for (const slug of ["CHUCK_AGENTCARD_PAY_ARM", "CHUCK_AGENTCARD_ENROL", "CHUCK_AGENTCARD_BUY", "CHUCK_AGENTCARD_PRESETS"]) {
+    assert.ok(agentCard.some((item) => item.slug === slug), `${slug} should be discoverable as shopping`);
+  }
 
   const meetings = searchNativeToolManifest("prepare for a Zoom meeting");
   assert.ok(meetings.length > 0);

@@ -110,6 +110,7 @@ function inferBundle(slug: string, description: string): NativeToolBundle {
   if (/^CHUCK_TINYFISH_/.test(name)) return "tinyfish";
   if (/^CHUCK_(?:SAVE_MEMORY|UPDATE_MEMORY|SEARCH_MEMORY|FORGET_MEMORY|MEMORY_BRIEF|CONTEXT_SEARCH|SCRATCHPAD_)/.test(name)) return "memory";
   if (/^CHUCK_.*REMINDER/.test(name)) return "reminders";
+  if (/^CHUCK_AGENTCARD_/.test(name)) return "shopping";
   if (/^CHUCK_(?:BROWSER(?:_|$)|CAMOFOX_|VAULT_)/.test(name)) return "browser";
   if (/^CHUCK_MEETING_/.test(name) || /^CHUCK_(?:START_PHONE_CALL|LIST_PHONE_CALLS)$/.test(name)) return "meetings";
   if (/^CHUCK_(?:CREATE_(?:PDF|DOCUMENT|SPREADSHEET|PRESENTATION)|GENERATE_(?:IMAGE|VIDEO)|ARTIFACT(?:_|$)|IMAGE_ASSET_|DAYTONA_IMAGE$|EMAIL_ARTIFACT$|FILE_BRIDGE$|VIDEO_(?:STATUS|CANCEL)$)/.test(name)) return "artifacts";

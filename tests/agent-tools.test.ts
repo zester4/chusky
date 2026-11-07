@@ -14,7 +14,7 @@ test("native catalog includes core agent capabilities", () => {
   }
 });
 
-test("Camofox exposes every attached operation as an owner-private native tool", () => {
+test("Camofox and AgentCard expose every attached operation as owner-private native tools", () => {
   const expected = [
     "CHUCK_CAMOFOX_CLICK", "CHUCK_CAMOFOX_CLOSE", "CHUCK_CAMOFOX_DISMISS_OVERLAYS",
     "CHUCK_CAMOFOX_DOWNLOADS", "CHUCK_CAMOFOX_EXTRACT", "CHUCK_CAMOFOX_HANDOFF",
@@ -22,6 +22,10 @@ test("Camofox exposes every attached operation as an owner-private native tool",
     "CHUCK_CAMOFOX_LIVE_VIEWER", "CHUCK_CAMOFOX_NAVIGATE", "CHUCK_CAMOFOX_OPEN",
     "CHUCK_CAMOFOX_PAGE_STATE", "CHUCK_CAMOFOX_SCREENSHOT", "CHUCK_CAMOFOX_SCROLL",
     "CHUCK_CAMOFOX_SNAPSHOT", "CHUCK_CAMOFOX_TYPE", "CHUCK_CAMOFOX_WAIT",
+    "CHUCK_AGENTCARD_PAY_ARM", "CHUCK_AGENTCARD_PAY_STATUS", "CHUCK_AGENTCARD_PAY_DISARM",
+    "CHUCK_AGENTCARD_ENROL", "CHUCK_AGENTCARD_CARDS",
+    "CHUCK_AGENTCARD_BUY", "CHUCK_AGENTCARD_MERCHANTS",
+    "CHUCK_AGENTCARD_PRESETS",
   ];
   const names = new Set(chuckTools.map((tool) => tool.function.name));
   for (const name of expected) {
@@ -30,6 +34,34 @@ test("Camofox exposes every attached operation as an owner-private native tool",
     assert.equal(schema.additionalProperties, false, `${name} rejects unknown arguments`);
     assert.equal(modelFacingChuckTools.some((tool) => tool.function.name === name), true, `${name} reaches discovery`);
   }
+});
+
+test("AgentCard input contracts validate required fields and reject unknown keys", () => {
+  validateNativeToolArguments("CHUCK_AGENTCARD_PAY_ARM", {
+    tabId: "tab-1",
+    merchant: "Store",
+    amount: 2306,
+    currency: "usd",
+    checkoutOrigin: "https://shop.example.com",
+  });
+  validateNativeToolArguments("CHUCK_AGENTCARD_BUY", { ask: "Find a book", confirm: false });
+  validateNativeToolArguments("CHUCK_AGENTCARD_PRESETS", {
+    action: "set",
+    label: "weekly-limit",
+    rules: { perWeekCents: 5000 },
+  });
+  assert.throws(() => validateNativeToolArguments("CHUCK_AGENTCARD_PAY_ARM", {
+    tabId: "tab-1",
+    merchant: "Store",
+    amount: 2306,
+    currency: "USD",
+    extra: true,
+  }), /not allowed|currency/);
+  assert.throws(() => validateNativeToolArguments("CHUCK_AGENTCARD_PRESETS", {
+    action: "set",
+    label: "weekly-limit",
+    rules: {},
+  }), /at least 1 properties/);
 });
 
 test("mission doctor requires one bounded mission id", () => {

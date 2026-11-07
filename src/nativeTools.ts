@@ -185,6 +185,8 @@ export interface NativeToolRuntime {
   sharedConversation?: boolean;
   /** Authenticated owner-private interactive run; broadens context/tools while preserving high-impact approval checks. */
   ownerPrivateRun?: boolean;
+  /** Present only for tools executing inside a verified trigger workflow. */
+  triggerEventId?: string;
   /** The exact live call this voice turn is serving. Native call controls are
    * fenced to this ID so a caller/model cannot control another call. */
   voiceCallId?: string;
@@ -1810,9 +1812,13 @@ async function nativeToolInternal(userId: number, slug: string, args: Record<str
     throw new Error("Only Chusky can review specialist actions.");
   }
   validateNativeToolArguments(slug, args);
-  if (slug.startsWith("CHUCK_CAMOFOX_")) {
+  if (slug.startsWith("CHUCK_CAMOFOX_") || slug.startsWith("CHUCK_AGENTCARD_")) {
     if (!runtime.ownerPrivateRun || runtime.sharedConversation) {
       throw new Error("Camofox is available only in a private owner conversation.");
+    }
+    if (slug.startsWith("CHUCK_AGENTCARD_")
+      && (runtime.taskId || runtime.missionId || runtime.meetingId || runtime.voiceCallId || runtime.worker || runtime.triggerEventId)) {
+      throw new Error("AgentCard is available only in a direct private owner conversation, not shared or autonomous work.");
     }
     return abortableToolCall(runtime, () =>
       executeCamofoxTool(userId, slug, args, runtime.signal ?? new AbortController().signal));

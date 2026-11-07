@@ -1,11 +1,11 @@
 {
-  "id": "release-4.63.0",
-  "version": "4.63.0",
+  "id": "release-4.64.0",
+  "version": "4.64.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added Treg playbooks for bulk enrichment, SEO, social, competitor ad research, and guarded ad operations alongside company, people, and lead workflows.",
-    "Generic Treg calls verify endpoint methods before dispatch; catalog writes require owner approval, and pending jobs remain inspectable without duplicate runs.",
-    "Research preserves identity, source, async status, and spend limits; owner-connected account actions remain separately authorized."
+    "Added owner-scoped AgentCard tools for card enrollment, merchant discovery, commerce requests, payment interception/status, and spending presets alongside private Camofox tabs.",
+    "Card enrollment, payment arming, confirmed purchases, starting a new order, and spending-rule changes require exact Chusky approval; intercepted charges also require the owner's approval on their own device.",
+    "AgentCard links are delivered only to the owner and removed from model context; shared conversations and autonomous/background work cannot invoke these tools."
   ],
-  "createdAt": "2026-10-17T16:21:34.465Z"
+  "createdAt": "2026-11-07T01:34:39.508Z"
 }

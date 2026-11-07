@@ -217,6 +217,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Durable sessions restore the bounded open-tab frontier and active tab after reconnects; regional pools pin existing sessions, fail over only during initial availability failures, and expose warm readiness without leaking CDP endpoints.",
     "The read-only benchmark exercises twenty public sites with screenshot evidence, navigation/scroll actions, challenge classification, and p50/p95 latency; payment, login, CAPTCHA, and consequential work remains gated.",
   ],
+  agentcardCommerce: [
+    "Added owner-scoped AgentCard tools for card enrollment, merchant discovery, commerce requests, payment interception/status, and spending presets alongside private Camofox tabs.",
+    "Card enrollment, payment arming, confirmed purchases, starting a new order, and spending-rule changes require exact Chusky approval; intercepted charges also require the owner's approval on their own device.",
+    "AgentCard links are delivered only to the owner and removed from model context; shared conversations and autonomous/background work cannot invoke these tools.",
+  ],
   browserDomainWorkflows: [
     "Added owner-scoped browser planning for flights, stays, telecom services, and streaming accounts with structured route, date, guest, plan, title, and profile constraints.",
     "Public search, comparison, itinerary or plan review, cart preparation, and watchlist work remain autonomous; bookings, plan changes, cancellations, purchases, payments, and final confirmations retain approval gates.",

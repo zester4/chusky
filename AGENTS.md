@@ -52,9 +52,11 @@ change.
 - `src/skills/` and `.chusky/skills/` are distinct: the former loads trusted
   runtime skills; the latter contains the project's installed skill content.
 - `src/vault/`, `src/shopping/`, and `cloudflare/vault-worker/` contain legacy
-  website identity and shopping code; these capabilities are not exposed to the
-  agent while automated browsing is retired. Daytona owns computer, file, and
-  code execution workflows.
+  website identity and shopping code. `src/lib/camofox/` owns the current
+  owner-scoped website browser adapter; `CHUCK_AGENTCARD_*` is a separate
+  shopping-routed tool family dispatched through that adapter. Daytona owns
+  computer, file, and code execution workflows; user-facing dashboard labels
+  call this capability Computer.
 - `chusky-web/` is an authenticated Next.js product dashboard using the
   first-party `/v1` API. Never put provider credentials or server secrets in
   browser code.

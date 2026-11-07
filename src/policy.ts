@@ -211,6 +211,12 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
   if (slug === "CHUCK_MISSION_COMPENSATE" && String(args.action ?? "") === "inspect") return "private";
   if (slug === "CHUCK_TREG_CALL") return isAutonomousTregCatalogCall(args) ? "private" : "approval_required";
   if (APPROVAL_NATIVE_TOOLS.has(slug)) return "approval_required";
+  if (slug.startsWith("CHUCK_AGENTCARD_")) {
+    if (slug === "CHUCK_AGENTCARD_PAY_ARM" || slug === "CHUCK_AGENTCARD_ENROL") return "approval_required";
+    if (slug === "CHUCK_AGENTCARD_BUY" && (args.confirm === true || args.new_order === true)) return "approval_required";
+    if (slug === "CHUCK_AGENTCARD_PRESETS" && String(args.action ?? "") !== "list") return "approval_required";
+    return "private";
+  }
   if (slug === "CHUCK_CAMOFOX_CLICK" || slug === "CHUCK_CAMOFOX_TYPE") return "approval_required";
   if (slug.startsWith("CHUCK_CAMOFOX_")) return "private";
   if (TREG_AUTONOMOUS_TOOLS.has(slug)) return "private";
@@ -252,6 +258,14 @@ const STATUSES: Record<string, string> = {
   CHUCK_START_PHONE_CALL: "📞 I’m preparing that phone call…",
   CHUCK_LIST_PHONE_CALLS: "📞 I’m checking my phone-call history…",
   CHUCK_CONTROL_PHONE_CALL: "📞 I’m updating that active phone call…",
+  CHUCK_AGENTCARD_PAY_ARM: "💳 I’m preparing the approved AgentCard checkout…",
+  CHUCK_AGENTCARD_PAY_STATUS: "💳 I’m checking the AgentCard payment status…",
+  CHUCK_AGENTCARD_PAY_DISARM: "💳 I’m cancelling the pending AgentCard payment…",
+  CHUCK_AGENTCARD_ENROL: "🔐 I’m preparing the secure AgentCard card setup…",
+  CHUCK_AGENTCARD_CARDS: "💳 I’m checking your saved AgentCard cards…",
+  CHUCK_AGENTCARD_BUY: "🛍️ I’m checking the AgentCard request…",
+  CHUCK_AGENTCARD_MERCHANTS: "🏬 I’m checking AgentCard merchants…",
+  CHUCK_AGENTCARD_PRESETS: "🛡️ I’m checking AgentCard spending rules…",
   CHUCK_LIST_CONNECTED_ACCOUNTS: "🔌 I’m checking your connected apps…",
   CHUCK_MEETING_JOIN: "🎥 I’m joining the meeting...",
   CHUCK_MEETING_PREPARATION_LIST: "🗓️ I’m checking the prepared calendar meetings…",

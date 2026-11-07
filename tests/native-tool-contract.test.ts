@@ -21,16 +21,22 @@ const agentLoopNativeTools = new Set([
 ]);
 
 test("every native tool has exactly one documented execution route and a policy classification", async () => {
-  const [nativeSource, agentSource] = await Promise.all([
+  const [nativeSource, agentSource, camofoxSource] = await Promise.all([
     readFile(new URL("../src/nativeTools.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/agent.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/lib/camofox/tools.ts", import.meta.url), "utf8"),
   ]);
   const dispatcher = new Set([...nativeSource.matchAll(/case\s+"(CHUCK_[A-Z0-9_]+)"/g)].map((match) => match[1]!));
   const catalog = new Set(chuckTools.map((tool) => tool.function.name));
 
   for (const slug of catalog) {
     const hasAgentRoute = agentLoopNativeTools.has(slug) && agentSource.includes(slug);
-    assert.equal(dispatcher.has(slug) || hasAgentRoute, true, `${slug} must have a dispatcher or explicit agent-loop handler`);
+    const hasCamofoxRoute = (
+      (slug.startsWith("CHUCK_CAMOFOX_") && nativeSource.includes('slug.startsWith("CHUCK_CAMOFOX_")'))
+      || (slug.startsWith("CHUCK_AGENTCARD_") && nativeSource.includes('slug.startsWith("CHUCK_AGENTCARD_")'))
+    )
+      && camofoxSource.includes(`case "${slug}"`);
+    assert.equal(dispatcher.has(slug) || hasAgentRoute || hasCamofoxRoute, true, `${slug} must have a dispatcher or explicit agent-loop handler`);
     assert.equal(toolApprovalPolicy(slug) === "private" || toolApprovalPolicy(slug) === "approval_required", true, `${slug} must have an approval classification`);
   }
   for (const slug of dispatcher) {

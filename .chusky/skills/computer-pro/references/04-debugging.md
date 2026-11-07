@@ -1,6 +1,6 @@
 # Debugging Specialist Mode
 
-Systematic debugging when code or desktop-application flows fail on the private computer. Automated website browsing is unavailable.
+Systematic debugging when code or desktop-application flows fail on the private computer. Use Browser Pro for website issues and preserve the separate browser boundary.
 
 The Jev route selects the execution boundary; it does not select the root
 cause. Keep the failing objective, environment, and workspace scope fixed while

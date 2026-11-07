@@ -1090,7 +1090,7 @@ function approvalView(approval: { id: string; status: string; toolSlug: string; 
 }
 
 function threadView(thread: SdkThreadRecord) { return { id: thread.id, externalId: thread.externalId, metadata: thread.metadata, createdAt: new Date(thread.createdAt).toISOString(), updatedAt: new Date(thread.updatedAt).toISOString() }; }
-type PrivateRunLink = { url: string; expiresAt?: number; label: string; kind?: "browser_handoff" | "browser_live_view" };
+type PrivateRunLink = { url: string; expiresAt?: number; label: string; kind?: "browser_handoff" | "browser_live_view" | "agentcard_action" };
 
 function runView(threadId: string, run: SdkRunRecord, privateLinks?: PrivateRunLink[]) {
   const { agentInstructions: _privateInstructions, companyProjectId: _privateCompanyProjectId, organizationId: _organizationId, ownerPrivateRun: _privateOwnerRun, durableVersion: _durableVersion, durablePayloadHash: _durablePayloadHash, ...visible } = run;
@@ -4164,6 +4164,11 @@ export function registerSdkApi(app: Hono): void {
               .then(() => publishProgress(progressFromSdkSubagentActivity(activity, run.progress), false))
               .then(() => send({ runId: run.id, ...activityEvent }));
           },
+          ...(dashboardRequest(c) ? {
+            onPrivateLink: (link: PrivateRunLink) => {
+              send({ type: "run.private_link", runId: run.id, link });
+            },
+          } : {}),
         });
         opening?.close();
         await snapshotWrites;

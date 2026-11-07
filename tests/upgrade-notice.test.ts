@@ -20,6 +20,17 @@ test("Kernel upgrade describes provider limits and activation honestly", () => {
   assert.match(bullets[2], /rebuilt browser template/);
 });
 
+test("AgentCard upgrade documents its tools, payment approvals, and private-link boundary", () => {
+  const bullets = getAgentUpgradePreset("agentcardCommerce");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.agentcardCommerce]);
+  assert.match(bullets[0], /owner-scoped AgentCard tools/);
+  assert.match(bullets[1], /confirmed purchases.*exact Chusky approval/);
+  assert.match(bullets[1], /owner's approval on their own device/);
+  assert.match(bullets[2], /removed from model context/);
+  assert.match(bullets[2], /autonomous\/background work cannot invoke/);
+});
+
 test("mission timing release distinguishes active time, deadline, and bounded owner authority", () => {
   const bullets = getAgentUpgradePreset("missionTiming");
   assert.equal(bullets.length, 3);
@@ -294,11 +305,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the expanded Treg intelligence workflows", async () => {
+test("current upgrade manifest announces the AgentCard commerce workflows", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.63.0");
-  assert.equal(notice?.version, "4.63.0");
-  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("tregIntelligence"));
+  assert.equal(notice?.id, "release-4.64.0");
+  assert.equal(notice?.version, "4.64.0");
+  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("agentcardCommerce"));
 });
 
 test("lead campaign preset describes durable, discovery-first work and bounded enrichment", () => {

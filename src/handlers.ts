@@ -834,6 +834,8 @@ async function sendPrivateBrowserLinks(ctx: Context, links: Awaited<ReturnType<t
     if (delivered.has(link.url)) continue;
     const description = link.kind === "browser_live_view"
       ? "This private live view lets you watch the open browser tab. The link expires soon."
+      : link.kind === "agentcard_action"
+        ? "This secure link is shared privately with you."
       : "This private link expires soon. Complete the website step there, then return here and say continue.";
     await ctx.reply(`${link.label}\n\n${description}`, {
       link_preview_options: { is_disabled: true },
@@ -850,7 +852,7 @@ function telegramAgentOptions(ctx: Context, receivedAt: number, deliveredPrivate
   return {
     ...(!shared ? { ownerPrivateRun: true } : {}),
     ...(shared ? { instructions: sharedGroupInstructions("Telegram"), toolDeny: [...SHARED_GROUP_TOOL_DENY] } : {}),
-    ...(!shared ? { onPrivateLink: async (link: { url: string; expiresAt?: number; label: string; kind?: "browser_handoff" | "browser_live_view" }) => { await sendPrivateBrowserLinks(ctx, [link], deliveredPrivateLinks); } } : {}),
+    ...(!shared ? { onPrivateLink: async (link: { url: string; expiresAt?: number; label: string; kind?: "browser_handoff" | "browser_live_view" | "agentcard_action" }) => { await sendPrivateBrowserLinks(ctx, [link], deliveredPrivateLinks); } } : {}),
     temporalContext: { messageReceivedAt: receivedAt, timezone: config.timezone },
   };
 }

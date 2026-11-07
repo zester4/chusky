@@ -657,6 +657,150 @@ test("SDK run streams the same human-readable tool progress used by Telegram", a
   }
 });
 
+test("dashboard streams a Camofox viewer link immediately without persisting the bearer URL", { timeout: 15000 }, async () => {
+  const originalFetch = globalThis.fetch;
+  const originalBetterAuthEnabled = config.betterAuthEnabled;
+  const originalTurnOpeningEnabled = config.turnOpeningEnabled;
+  const originalCamofoxBaseUrl = process.env.CAMOFOX_BASE_URL;
+  const originalCamofoxAccessKey = process.env.CAMOFOX_ACCESS_KEY;
+  const viewerUrl = "https://viewer.example.test/?t=signed-viewer-token";
+  let chatCalls = 0;
+  let releaseFinalModel!: () => void;
+  let signalSecondModelStarted!: () => void;
+  const finalModelGate = new Promise<void>((resolve) => { releaseFinalModel = resolve; });
+  const secondModelStarted = new Promise<void>((resolve) => { signalSecondModelStarted = resolve; });
+
+  config.betterAuthEnabled = true;
+  config.turnOpeningEnabled = false;
+  process.env.CAMOFOX_BASE_URL = "https://camofox.example.test";
+  process.env.CAMOFOX_ACCESS_KEY = "test-camofox-key";
+  setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user")
+    ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } }
+    : null);
+  setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "camofox-stream-session", tools: async () => [] }) } });
+
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(String(input));
+    if (url.hostname === "camofox.example.test") {
+      if (url.pathname === "/tabs") {
+        return new Response(JSON.stringify({ tabId: "tab-stream", url: "https://example.com/", title: "Example" }), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.pathname === "/live-viewer/links") {
+        return new Response(JSON.stringify({ url: viewerUrl }), { headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`Unexpected Camofox request: ${url.pathname}`);
+    }
+
+    if (url.pathname.includes("/models/")) {
+      return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    }
+    chatCalls += 1;
+    if (chatCalls === 1) {
+      const chunk = { choices: [{ delta: { role: "assistant", tool_calls: [{
+        index: 0,
+        id: "call_camofox_open",
+        type: "function",
+        function: { name: "CHUCK_CAMOFOX_OPEN", arguments: JSON.stringify({ url: "https://example.com/" }) },
+      }] }, finish_reason: "tool_calls" }] };
+      return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }
+
+    signalSecondModelStarted();
+    await finalModelGate;
+    const chunk = { choices: [{ delta: { role: "assistant", content: "The page is open." }, finish_reason: "stop" }] };
+    return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const api = app();
+    const headers = { "X-Test-Web-User": "camofox-stream-owner", "Content-Type": "application/json" };
+    const created = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers, body: "{}" }));
+    assert.equal(created.status, 201);
+    const thread = await created.json() as { id: string };
+    const response = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/stream`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ input: "Open example.com in the Camofox browser.", tools: { allow: ["CHUCK_CAMOFOX_OPEN"] } }),
+    }));
+    assert.equal(response.status, 200);
+
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const events: Array<{ type: string; link?: { url: string; expiresAt?: number; label: string; kind?: string }; run?: { output?: string } }> = [];
+    let linkReceived = false;
+    const releaseTimer = setTimeout(releaseFinalModel, 5000);
+    try {
+      while (!linkReceived) {
+        const { done, value } = await reader.read();
+        assert.equal(done, false, "the viewer link should be streamed before the run finishes");
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line) as typeof events[number];
+          events.push(event);
+          if (event.type === "run.private_link") {
+            assert.equal(event.link?.url, viewerUrl);
+            assert.equal(typeof event.link?.expiresAt, "number");
+            assert.equal(event.link?.label, "Open live browser view");
+            assert.equal(event.link?.kind, "browser_live_view");
+            linkReceived = true;
+            break;
+          }
+        }
+      }
+
+      await secondModelStarted;
+      assert.equal(events.some((event) => event.type === "run.completed"), false);
+      releaseFinalModel();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) if (line.trim()) events.push(JSON.parse(line) as typeof events[number]);
+      }
+    } finally {
+      clearTimeout(releaseTimer);
+      releaseFinalModel();
+      reader.releaseLock();
+    }
+
+    const linkIndex = events.findIndex((event) => event.type === "run.private_link");
+    const completionIndex = events.findIndex((event) => event.type === "run.completed");
+    assert.ok(linkIndex >= 0);
+    assert.ok(completionIndex > linkIndex, "the viewer link must arrive before run completion");
+    assert.match(events[completionIndex]?.run?.output ?? "", /The page is open\.$/);
+
+    const storedResponse = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs`, { headers }));
+    const stored = await storedResponse.json() as { data: Array<{ events: Array<{ type: string }> }> };
+    assert.equal(stored.data[0]?.events.some((event) => event.type === "run.private_link"), false);
+    assert.equal(JSON.stringify(stored.data).includes("signed-viewer-token"), false, "the bearer URL must not be persisted");
+  } finally {
+    releaseFinalModel();
+    globalThis.fetch = originalFetch;
+    config.betterAuthEnabled = originalBetterAuthEnabled;
+    config.turnOpeningEnabled = originalTurnOpeningEnabled;
+    setWebAuthSessionResolverForTests();
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+    if (originalCamofoxBaseUrl === undefined) delete process.env.CAMOFOX_BASE_URL;
+    else process.env.CAMOFOX_BASE_URL = originalCamofoxBaseUrl;
+    if (originalCamofoxAccessKey === undefined) delete process.env.CAMOFOX_ACCESS_KEY;
+    else process.env.CAMOFOX_ACCESS_KEY = originalCamofoxAccessKey;
+  }
+});
+
 test("first-party dashboard chat uses owner-private tools without elevating SDK-key runs", async () => {
   const originalVectorUrl = config.upstashVectorRestUrl;
   const originalVectorToken = config.upstashVectorRestToken;

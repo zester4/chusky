@@ -45,6 +45,7 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto
 import { buildTemporalContext, type TemporalContext } from "./temporal.js";
 import { daytonaEngine, safeDaytonaPath, DaytonaInputError } from "./lib/daytona/index.js";
 import { prepareVaultSetupDelivery } from "./vault/setupLink.js";
+import { validateCamofoxTargetUrl } from "./lib/camofox/engine.js";
 import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestination } from "./video.js";
 import { listVideoModels, resolveVideoRequest } from "./videoModels.js";
 import { imageModelAcceptsExactSize, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
@@ -2373,7 +2374,7 @@ export type AgentPrivateLink = {
   url: string;
   expiresAt?: number;
   label: string;
-  kind?: "browser_handoff" | "browser_live_view";
+  kind?: "browser_handoff" | "browser_live_view" | "agentcard_action";
 };
 
 export function prepareCamofoxLiveViewDelivery(result: unknown, now = Date.now()): {
@@ -2402,6 +2403,81 @@ export function prepareCamofoxLiveViewDelivery(result: unknown, now = Date.now()
   };
 }
 
+export function prepareAgentCardLinkDelivery(result: unknown, slug: string): {
+  modelResult: Record<string, unknown>;
+  privateLinks: AgentPrivateLink[];
+} {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    throw new Error("AgentCard returned an invalid result.");
+  }
+
+  const privateLinks: AgentPrivateLink[] = [];
+  const knownUrls = new Set<string>();
+  let nodeCount = 0;
+  let withheldCount = 0;
+  let sensitiveFieldCount = 0;
+  const labelFor = (field: string): string => {
+    if (slug.endsWith("_PAY_STATUS") || /approval/i.test(field)) return "Review AgentCard payment";
+    if (slug.endsWith("_ENROL") || /enrol|vault/i.test(field)) return "Set up AgentCard card";
+    if (/auth|login|sign.?in/i.test(field)) return "Connect merchant";
+    if (slug === "CHUCK_AGENTCARD_BUY") return "Continue with AgentCard";
+    return "Open AgentCard";
+  };
+  const replaceLinks = (value: string, field: string): string => value.replace(
+    /https?:\/\/[^\s"'<>]+/gi,
+    (matched) => {
+      const urlText = matched.replace(/[)\]},.!?;:]+$/, "");
+      try {
+        if (urlText !== matched && !urlText) throw new Error("empty link");
+        validateCamofoxTargetUrl(urlText);
+      } catch {
+        withheldCount += 1;
+        return "[unsafe private link withheld]";
+      }
+
+      const label = labelFor(field);
+      if (!knownUrls.has(urlText)) {
+        knownUrls.add(urlText);
+        if (privateLinks.length < 50) {
+          privateLinks.push({ url: urlText, label, kind: "agentcard_action" });
+        } else {
+          withheldCount += 1;
+        }
+      }
+      return `[${label} shared privately]`;
+    },
+  );
+  const redact = (value: unknown, field: string, depth: number): unknown => {
+    nodeCount += 1;
+    if (nodeCount > 25_000 || depth > 24) {
+      throw new Error("AgentCard returned a result that exceeds the safe processing limits.");
+    }
+    if (typeof value === "string") return replaceLinks(value, field);
+    if (Array.isArray(value)) return value.map((item) => redact(item, field, depth + 1));
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(([key, child]) => {
+        const normalizedKey = key.replace(/[^a-z]/gi, "").toLowerCase();
+        const cardRecord = /^(?:cards?|paymentcards|paymentmethods)$/i.test(field);
+        if (/^(?:cardnumber|fullpan|pan|primaryaccountnumber|cvv|cvc|securitycode|cardtoken|paymenttoken|accesstoken|refreshtoken|secret|authorization)$/.test(normalizedKey)
+          || cardRecord && normalizedKey === "number") {
+          sensitiveFieldCount += 1;
+          return [key, "[sensitive payment data withheld]"];
+        }
+        return [key, redact(child, key, depth + 1)];
+      }));
+    }
+    return value;
+  };
+  const modelResult = redact(result, slug, 0) as Record<string, unknown>;
+  if (withheldCount > 0) {
+    modelResult.privateLinkDeliveryWarning = `${withheldCount} link(s) could not be safely delivered and were withheld. Do not claim they were delivered.`;
+  }
+  if (sensitiveFieldCount > 0) {
+    modelResult.sensitivePaymentDataWithheld = sensitiveFieldCount;
+  }
+  return { modelResult, privateLinks };
+}
+
 export interface AgentResult {
   text: string;
   toolsUsed: string[];
@@ -2414,7 +2490,7 @@ export interface AgentResult {
   retrievedImages?: { data: Buffer; mediaType: string; name?: string }[];
   generatedFiles?: { data: Buffer; name: string; contentType: string; artifactId: string; type: string }[];
   speech?: { data: Buffer; mediaType: string };
-  /** Short-lived bearer links are delivered separately and excluded from history. */
+  /** Owner-private bearer links are delivered separately and excluded from history. */
   privateLinks?: AgentPrivateLink[];
   /** Internal durable continuation request; never delivered as a user reminder. */
   taskWait?: TaskWaitRequest;
@@ -4166,7 +4242,7 @@ async function executeAgent(
     try {
       await options?.onPrivateLink?.(link);
     } catch (error) {
-      logger.debug({ err: error }, "Could not deliver browser link during the active run");
+      logger.warn({ err: error, kind: link.kind }, "Could not deliver private action link during the active run");
     }
   };
   let modelTextStreamed = false;
@@ -5207,7 +5283,46 @@ async function executeAgent(
             if (!receipt || receipt.status !== "succeeded" || receipt.receiptVerification !== "provider_read") throw new Error("Verified provider state could not be attached to a durable external-action receipt.");
             return { receiptId: receipt.id, ...(receipt.providerId ? { providerReceiptId: receipt.providerId } : {}), verificationId: verification.id, summary: `${input.toolSlug} recovery state verified using ${verifySlug}.` };
           } : undefined;
-        execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, onSubagentActivity: reportSubagentActivity, getComposioToolPresentation: (toolSlug) => composioToolPresentations.get(toolSlug), parentToolCallId: call.id, approvedApprovalId: approvedForTool ? approvedApprovalId : undefined, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, conversationId: channelContext?.conversationId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, ownerPrivateRun, voiceCallId: voiceTurn ? options?.voiceSessionId?.replace(/^[^:]+:/, "") : undefined, voiceProvider: voiceTurn ? (options?.voiceSessionId?.startsWith("bland:") ? "bland" : "twilio") : undefined, voiceAllowHumanHandoff: voiceTurn ? options?.voiceAllowHumanHandoff : undefined, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, missionStepId: options?.missionStepId, missionTimerResumed: options?.missionTimerResumed, missionWakeCheckpoint: options?.missionWakeCheckpoint, missionWakeNextAction: options?.missionWakeNextAction, tregMaxCalls: options?.tregMaxCalls, tregMaxSpendUsd: options?.tregMaxSpendUsd, organizationId: options?.organizationId, currentRunId: durableRunId, toolCatalog: modelAvailableTools, availableToolCatalog: availableTools, connectedAccounts: connectedAccountSnapshot, ...(options?.enqueueMissionTask ? { enqueueMissionTask: options.enqueueMissionTask } : {}), ...(slug === "CHUCK_MISSION_VERIFY" ? { outcomeReadAdapter: createSessionOutcomeReadAdapter(userId, sessionObj, availableTools, allow, deny, signal) } : {}), ...(executeMissionCompensation ? { executeMissionCompensation } : {}), requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
+        execResult = await nativeTool(userId, slug, executionArgs, {
+          ...imageRuntime,
+          generatedImages: generatedReferenceImages,
+          model: requestModel,
+          historySummary: durable.summaries.slice(-2).join("\n"),
+          onStatus,
+          onSubagentActivity: reportSubagentActivity,
+          getComposioToolPresentation: (toolSlug) => composioToolPresentations.get(toolSlug),
+          parentToolCallId: call.id,
+          approvedApprovalId: approvedForTool ? approvedApprovalId : undefined,
+          signal,
+          deliveryTarget: channelContext?.deliveryTarget,
+          meetingId: options?.meetingId,
+          conversationId: channelContext?.conversationId,
+          sharedConversation: channelContext?.scope === "shared" && !options?.meetingId,
+          ownerPrivateRun,
+          triggerEventId: channelContext?.triggerEventId,
+          voiceCallId: voiceTurn ? options?.voiceSessionId?.replace(/^[^:]+:/, "") : undefined,
+          voiceProvider: voiceTurn ? (options?.voiceSessionId?.startsWith("bland:") ? "bland" : "twilio") : undefined,
+          voiceAllowHumanHandoff: voiceTurn ? options?.voiceAllowHumanHandoff : undefined,
+          userRequest: typeof userMessage === "string" ? userMessage : undefined,
+          taskId: options?.taskId,
+          missionId: options?.missionId,
+          missionStepId: options?.missionStepId,
+          missionTimerResumed: options?.missionTimerResumed,
+          missionWakeCheckpoint: options?.missionWakeCheckpoint,
+          missionWakeNextAction: options?.missionWakeNextAction,
+          tregMaxCalls: options?.tregMaxCalls,
+          tregMaxSpendUsd: options?.tregMaxSpendUsd,
+          organizationId: options?.organizationId,
+          currentRunId: durableRunId,
+          toolCatalog: modelAvailableTools,
+          availableToolCatalog: availableTools,
+          connectedAccounts: connectedAccountSnapshot,
+          ...(options?.enqueueMissionTask ? { enqueueMissionTask: options.enqueueMissionTask } : {}),
+          ...(slug === "CHUCK_MISSION_VERIFY" ? { outcomeReadAdapter: createSessionOutcomeReadAdapter(userId, sessionObj, availableTools, allow, deny, signal) } : {}),
+          ...(executeMissionCompensation ? { executeMissionCompensation } : {}),
+          requestTaskWait: (request) => { taskWaitRequest = request; },
+          requestMissionWait: (request) => { missionWaitRequest = request; },
+        });
           if ((slug === "CHUCK_DELEGATE_SUBAGENT" || slug === "CHUCK_HANDOFF_SUBAGENT") && execResult && typeof execResult === "object") {
             const delegation = execResult as { status?: unknown; approvalId?: unknown; proposal?: { actionName?: unknown; payload?: unknown } };
             if (delegation.status === "requires_approval" && typeof delegation.approvalId === "string" && typeof delegation.proposal?.actionName === "string") {
@@ -5235,6 +5350,14 @@ async function executeAgent(
               if (!ownerPrivateRun) throw new Error("Camofox live-view links can only be delivered in a private owner run.");
               await reportPrivateLink(delivery.privateLink);
             }
+            execResult = delivery.modelResult;
+          }
+          if (slug.startsWith("CHUCK_AGENTCARD_")) {
+            if (!ownerPrivateRun || sharedScope || options?.taskId || options?.missionId || options?.meetingId || voiceTurn || channelContext?.triggerEventId) {
+              throw new Error("AgentCard is available only in a direct private owner conversation, not shared or autonomous work.");
+            }
+            const delivery = prepareAgentCardLinkDelivery(execResult, slug);
+            for (const link of delivery.privateLinks) await reportPrivateLink(link);
             execResult = delivery.modelResult;
           }
           if ((slug === "CHUCK_BROWSER_HANDOFF" || slug === "CHUCK_VAULT_LOGIN" || slug === "CHUCK_BROWSER") && execResult && typeof execResult === "object") {
